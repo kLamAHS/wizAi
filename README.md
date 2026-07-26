@@ -176,6 +176,12 @@ balance vs Krokopatra (960)             3.45   97%/ 9.0     98%/ 4.3       96%/ 
 ice [prism] vs Krokopatra (960)         4.31*  99%/ 5.5     97%/ 4.7       97%/ 5.0     97%/ 5.9
 ```
 
+*(Table shows the first live run; `results_live.json` + `plots/` are
+regenerated per data drop and are canonical. Under exact roll tables the
+notable shift: damage variance costs the scarcity-blind DP transfer ~10
+points on the fire matchups — 82% -> 70-74% — while heuristic/search/RL
+barely move.)*
+
 The storm row is the headline: with two Krakens and an X-pip Tempest
 against 6,000 HP, **no scripted policy wins at all** — the blade-stack
 heuristic can't sequence it, and the determinized search inherits that
