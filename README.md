@@ -147,6 +147,19 @@ edge is draw-distribution knowledge, not mechanics. Search also trades
 mean speed for reliability on the prism line, which is what a
 risk-sensitive objective would ask for.
 
+## Charts
+
+Regenerate with `python plots.py` (reads the results JSONs, writes
+`plots/*.png`).
+
+![Live-data baseline ladder](plots/live_ladder.png)
+
+![Classic bound vs learned play](plots/classic_gap.png)
+
+![Survival trade-off](plots/survival.png)
+
+![Storm learning curve](plots/storm_curve.png)
+
 ## Live-data results (`w101-pve-live-scrape`)
 
 Real scraped spells vs real scraped bosses (`results_live.json`; paired

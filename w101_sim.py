@@ -75,6 +75,8 @@ class Rules:
                                          # swap per era instead of editing code
     stun_blocks: int = 4                 # blocks granted when a stun lands
     dot_ticks_use_cast_snapshot: bool = True   # modifiers locked at cast
+    damage_ranges: bool = False          # sample ops carrying 'spread'
+                                         # uniformly instead of using avg
 
 
 # ---------------------------------------------------------------- card model
@@ -952,6 +954,8 @@ class Sim:
                     group_state[g] = (cm, crm)
                 charm_mult, crit_mult = group_state[g]
                 amount = o.get("amount", o.get("total", 0.0))
+                if o.get("spread") and self.rules.damage_ranges:
+                    amount = self.rng.uniform(*o["spread"])   # one roll/cast
                 if o.get("per_pip"):
                     amount *= pips_spent
                 for t in targets:

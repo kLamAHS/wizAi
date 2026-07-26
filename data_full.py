@@ -48,7 +48,8 @@ import json
 from w101_sim import (Boss, Rules, load_cards, Card, _kind_from_ops,
                       assign_subkeys)
 
-LIVE_RULES = Rules(ruleset_id="w101-pve-live-scrape", era="live")
+LIVE_RULES = Rules(ruleset_id="w101-pve-live-scrape", era="live",
+                   damage_ranges=True)
 
 VARIANT_SOURCE = {"core": "deck", "treasure": "tc", "wand": "item",
                   "amulet": "item", "pet": "pet"}
@@ -211,6 +212,19 @@ def load_spells_full(path="spells_full.json",
     provenance suffixes/sources (@tc, @item, @pet) and stack accordingly."""
     raw = json.load(open(path))
     classic = load_cards(cards_clean_path) if cards_clean_path else {}
+    # damage RANGES parsed from the classic descriptions ("deal 80 - 120")
+    # — the dump stores random-range params as -1 with no range fields
+    import re
+    ranges = {}
+    if cards_clean_path:
+        pat = re.compile(r"(\d[\d,]*)\s*(?:-|to)\s*(\d[\d,]*)")
+        for r in json.load(open(cards_clean_path)):
+            if r.get("type") in ("damage", "steal") and r.get("description"):
+                m = pat.search(r["description"])
+                if m:
+                    lo, hi = (int(x.replace(",", "")) for x in m.groups())
+                    if 0 < lo < hi:
+                        ranges[r["name"]] = (float(lo), float(hi))
     cards, skipped = {}, []
     for s in raw:
         variant = s.get("variant")
@@ -240,6 +254,9 @@ def load_spells_full(path="spells_full.json",
                 break
             if note:
                 notes.add(note)
+                if name in ranges:            # backfilled hit gets its range
+                    op["spread"] = ranges[name]
+                    notes.add("range")
             ops.append(op)
         if why:
             skipped.append((key, why))

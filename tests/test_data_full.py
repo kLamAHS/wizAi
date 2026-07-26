@@ -96,8 +96,9 @@ def test_tri_blade_places_three_stacking_charms():
     s.hand.append(cat)
     hp0 = s.boss_hp
     sim.cast(s, cat)
-    # backfilled classic avg (80-120 -> 100), boosted by the fire charm only
-    assert s.boss_hp == pytest.approx(hp0 - 100 * 1.35)
+    # LIVE_RULES samples the 80-120 range; the rigged rng (random()==0)
+    # lands on the bottom: 80, boosted by the fire charm only
+    assert s.boss_hp == pytest.approx(hp0 - 80 * 1.35)
     assert len(s.player.charms) == 2
 
 
@@ -165,6 +166,40 @@ def test_dp_transfer_survives_drain_only_hands():
               rules=LIVE_RULES, rng=random.Random(0))
     w, m = evaluate(sim, dp_policy(V, pol, meta, "death"), n=300)
     assert w > 0.5
+
+
+def test_damage_ranges_sampled_under_live_rules():
+    cat = CARDS["Fire Cat"]
+    hit = cat.ops[0]
+    assert hit.get("spread") == (80.0, 120.0)
+    boss = Boss("Dummy", 10**6, "life", 0)
+    sim = Sim(dict(CARDS), ["Fireblade"], "fire", boss,
+              rng=random.Random(4), rules=LIVE_RULES)
+    s = sim.new_state()
+    vals = set()
+    for _ in range(30):
+        s.player.pow_pips = 7
+        s.hand.append(cat)
+        hp0 = s.boss_hp
+        if sim.cast(s, cat) > 0:
+            d = hp0 - s.boss_hp
+            assert 80 - 1e-6 <= d <= 120 + 1e-6
+            vals.add(round(d, 3))
+    assert len(vals) > 5                       # actually varying
+
+
+def test_damage_ranges_off_under_classic_rules():
+    from w101_sim import Rules
+    cat = CARDS["Fire Cat"]
+    boss = Boss("Dummy", 10**6, "life", 0)
+    sim = Sim(dict(CARDS), ["Fireblade"], "fire", boss, rng=R0(),
+              rules=Rules())                   # classic: averages only
+    s = sim.new_state()
+    s.player.pow_pips = 7
+    s.hand.append(cat)
+    hp0 = s.boss_hp
+    sim.cast(s, cat)
+    assert hp0 - s.boss_hp == pytest.approx(100.0)
 
 
 def test_live_fight_end_to_end():
