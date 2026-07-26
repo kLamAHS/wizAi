@@ -109,6 +109,18 @@ def parse_effects(raw_effects):
         ed = e if isinstance(e, dict) else obj_to_plain(e)
         if not isinstance(ed, dict):
             continue
+        # Wrapper effects (Random/Variable SpellEffect: m_effectType == 0 /
+        # kInvalidSpellEffect) carry their real payload in m_effectList —
+        # recurse so range hits and per-pip tiers emit as typed sub-effects
+        # instead of being dropped with the list members.
+        sub = ed.get("m_effectList")
+        if isinstance(sub, list) and sub:
+            inner = parse_effects(sub)
+            for s_e in inner:
+                s_e["_wrapped"] = True
+            out.extend(inner)
+            if not ed.get("m_effectType"):
+                continue                 # pure wrapper: sub-effects suffice
         friendly = {
             "effect_type_id": ed.get("m_effectType"),
             "param": ed.get("m_effectParam"),
