@@ -11,6 +11,7 @@ effect provenance as a first-class citizen.
 | file | role |
 |---|---|
 | `scrape_central_wiki.py` | (run locally) refresh `cards_clean.json` from the wiki |
+| `scrape_creatures.py` | (run locally) creature pages → `creatures_clean.json` via the MediaWiki API: descriptive UA, ≥1 s throttle, `maxlag`, resumable, `cloudscraper` fallback, and a `--from-xml` mode for browser-downloaded `Special:Export` dumps when Cloudflare blocks scripts. 403 = block, never retried |
 | `content.py` | curated effect primitives (the `spell_effects` layer): DoT splits, multi-hit components, drains, prisms, absorbs, per-pip spells, dispels, summons — each entry confidence-tagged (`community`/`approx`/`inferred`), unsupported cards excluded instead of mis-modeled |
 | `w101_sim.py` | v0.3 engine: structured hanging effects with **(name, source) stack keys**, FIFO ward pass with prism school conversion, shields/weaknesses/mantles/dispels/absorbs, scheduled DoTs/HoTs (snapshot at cast), drains, X-pip spells, multi-hit link groups, AoE with per-target resolution, stuns + stun blocks, threat-driven enemy targeting, minions, boss **cheat-script hooks**, treasure-card sideboard, crit/block/pierce machinery, version-tagged `Rules` |
 | `bosses.py` | preset enemy registry + illustrative cheat scripts + candidate decks for **all seven schools** |
