@@ -293,6 +293,8 @@ def load_spells_full(path="spells_full.json",
             confidence="scrape-full" if not notes else
             "scrape-full+" + ",".join(sorted(notes)),
         )
+        card.level = int(s["level_restriction"]) \
+            if s.get("level_restriction") else 1   # null = no gate
         cards[key] = card
     if report is not None:
         report["skipped"] = skipped

@@ -278,6 +278,9 @@ loader report.
 
 ## Boundary
 
-Fully offline simulator and research benchmark, built from public wiki
-data and community documentation. No live-client control, memory reading,
-traffic interception, or gameplay automation — see `docs/RESEARCH.md`.
+Fully offline simulator and research benchmark. The classic ruleset is
+built from community wiki data; the live ruleset from user-extracted
+local game data files. Strictly offline research: no live-client
+control, no traffic interception, no gameplay automation, and no
+further wiki scraping (the scraper is retained for reference only) —
+see `docs/RESEARCH.md`.
