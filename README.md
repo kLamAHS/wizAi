@@ -49,30 +49,74 @@ effect provenance as a first-class citizen.
 
 ## Headline results (v0.3 rules)
 
-RESULTS_TABLE_PLACEHOLDER
+Speed objective (immortal player = pure TTK; RL kill% in parens; heuristic
+column is the best "stack k buffs → nuke" that clears 95% kill):
 
-Ordering everywhere: **DP-LB < RL ≲ DP-transfer / heuristic**. The agent
-learns draw-aware play (dig timing, partial-stack fires, nuke conservation,
-fizzle-risk management) that the perfect-information abstraction can't
-represent.
+```
+matchup                      DP-LB       RL (kill%)   best heuristic
+fire  vs Rattlebones          2.57     3.86 ( 99%)      2.78
+fire  vs Krokopatra           5.33     6.74 ( 98%)      6.75
+fire  vs Jade Oni             7.33     9.03 ( 94%)        —
+fire  vs Ervin Flamerender   11.00    12.77 ( 84%)        —
+fire  vs Malistaire          11.00    12.70 ( 84%)        —
+ice   vs Ervin Flamerender    7.50    11.48 ( 88%)     11.36
+ice   vs Prince Gobblestone  10.50*    7.64 ( 94%)      7.01
+myth  vs Krokopatra           5.25*   12.55 ( 88%)        —
+storm vs Jade Oni             7.03    10.89 ( 81%)        —
+death vs Jade Oni             8.35    10.48 ( 93%)        —
+balance vs Krokopatra         5.19     6.29 ( 97%)      8.75
+life  vs Lord Nightshade      4.17     5.91 (100%)      5.05
+```
 
-Structure the v0.3 pipeline surfaced:
+`*` = the DP abstraction doesn't cover the deck's key mechanic, and it
+shows — in both directions:
 
-- **Fizzle-discard changes deck building.** With cards lost on fizzle,
-  thin 3-nuke decks stop being free wins: kill% now prices in accuracy.
-  The RL agent learns to hold buffs until the nuke is actually in hand.
-- **Prisms crack the same-school wall.** Ice vs Prince Gobblestone (40%
-  ice resist): the prism deck converts ice → fire and picks up the +25%
-  boost instead. The FIFO ward order (traps *then* prism) is learnable
-  structure, not a hand-coded rule.
-- **Drains turn damage into sustain.** Death's kit reads as mid-power on a
-  TTK table but dominates survival matchups — exactly the school-identity
-  prior the research doc predicts.
-- **Multi-hit spells price shields correctly.** Minotaur under-performs on
-  clean boards but is the cheapest answer to shield-cycling cheats.
+- **Ice vs Gobblestone: RL beats the "lower bound".** The bound only holds
+  inside the blade/trap/nuke abstraction; the prism deck escapes it
+  (ice → fire conversion turns 40% resist into a +25% boost). The bandit
+  put 29k of its 36k pulls on the prism deck, whose *DP transfer* scores
+  0% kills — the learner exploits exactly the mechanic the abstraction
+  can't see.
+- **Myth vs Krokopatra: the bound is now very loose.** The DP still treats
+  Minotaur as one buffed 495 hit; the engine makes its 50-point first hit
+  consume all blades and traps (real behavior — the shield-breaker play).
+  Myth's classic decks are genuinely weak under the true rule, and v0.2's
+  5.52 was an artifact of aggregating multi-hits.
+
+Kill rates below 100% on 70–80%-accuracy schools are the new
+**fizzle-discards-card** rule pricing accuracy for real: thin 3-nuke decks
+stop being free wins (v0.2 let you retry a fizzled nuke forever).
+
+Survival objective (real boss damage, era-appropriate player HP):
+
+```
+matchup (deck)                 HP vs dmg/rd   plain heur   +triage wrap        RL
+death vs Jade Oni (oneshot)    3100 vs 300    94% / 11.4    94% / 11.4    93% /  9.6
+life  vs Krokopatra (sustain)  3200 vs 220    43% / 11.3    65% / 13.7    63% / 14.8
+fire  vs Malistaire (oneshot)  2900 vs 400     0% /   —      0% /   —      0% /   —
+```
+
+- **Drains are free sustain**: death's survival kill% matches its immortal
+  kill% and the RL agent is *faster* than the immortal-player heuristic
+  line because Wraith heals while it nukes.
+- **Life buys kill% with tempo**: shield/heal triage lifts 43% → 65% at
+  +2.4 turns.
+- **Fire vs Malistaire is a lost race without heals** (400/rd kills in ~8
+  rounds; the kill needs ~13): the right fix is Fairy treasure cards, and
+  the sideboard mechanic is implemented — wiring it into the action space
+  is the next experiment.
+
+Other structure the v0.3 pipeline surfaced:
+
+- **The FIFO ward order is learnable structure.** Traps must be laid
+  *before* the prism to count pre-conversion; the stack heuristic and the
+  RL agent both handle it, and the `prism-before-trap strands the trap`
+  case is a regression test.
 - **Deck choice is learnable context.** The UCB bandit converges to the
-  right loadout per boss, including switching ice → prism only into
-  same-school walls.
+  right loadout on hard bosses (prism into the same-school wall, oneshot
+  into big HP pools). On trivial bosses (Rattlebones) arm rewards are
+  within noise of each other and the pick wobbles — a known limitation,
+  reported as-is.
 
 ## RL details that mattered
 

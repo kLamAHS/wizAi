@@ -1,306 +1,600 @@
-[
- {
-  "school": "fire",
-  "boss": "Rattlebones",
-  "pick": "stack",
-  "pulls": {
-   "speed": 8473,
-   "stack": 24527,
-   "oneshot": 3000
-  },
-  "dp_lb": 2.5679502874613878,
-  "rl": [
-   0.99975,
-   2.7490622655663914
-  ],
-  "transfer": {
-   "speed": [
+{
+ "speed_immortal": [
+  {
+   "school": "fire",
+   "boss": "Rattlebones",
+   "pick": "stack",
+   "pulls": {
+    "speed": 17877,
+    "stack": 15123,
+    "oneshot": 3000
+   },
+   "dp_lb": 2.5679502874613878,
+   "rl": [
+    0.993,
+    3.856621349446123
+   ],
+   "transfer": {
+    "speed": [
+     0.9985,
+     2.79043565348022
+    ],
+    "stack": [
+     0.99,
+     2.739141414141414
+    ],
+    "oneshot": [
+     0.94775,
+     3.2748615141123714
+    ]
+   },
+   "heuristic_best": [
     1.0,
-    2.74925
+    2.7832
    ],
-   "stack": [
-    1.0,
-    2.7255
+   "lb": {
+    "speed": 2.5785714285041834,
+    "stack": 2.5679502874613878,
+    "oneshot": 3.3558333332504846
+   },
+   "lb_partial": {
+    "speed": false,
+    "stack": false,
+    "oneshot": false
+   }
+  },
+  {
+   "school": "fire",
+   "boss": "Krokopatra",
+   "pick": "oneshot",
+   "pulls": {
+    "speed": 3000,
+    "stack": 3000,
+    "oneshot": 30000
+   },
+   "dp_lb": 5.333333333313931,
+   "rl": [
+    0.98025,
+    6.7401173170109665
    ],
-   "oneshot": [
-    1.0,
-    3.37475
+   "transfer": {
+    "speed": [
+     0.517,
+     10.333655705996131
+    ],
+    "stack": [
+     0.8605,
+     7.622603137710633
+    ],
+    "oneshot": [
+     0.941,
+     6.140541976620616
+    ]
+   },
+   "heuristic_best": [
+    0.9852,
+    6.750304506699147
+   ],
+   "lb": {
+    "speed": 9.617103294126174,
+    "stack": 6.7430737653491315,
+    "oneshot": 5.333333333313931
+   },
+   "lb_partial": {
+    "speed": false,
+    "stack": false,
+    "oneshot": false
+   }
+  },
+  {
+   "school": "fire",
+   "boss": "Jade Oni",
+   "pick": "oneshot",
+   "pulls": {
+    "speed": 3000,
+    "stack": 3000,
+    "oneshot": 30000
+   },
+   "dp_lb": 7.333333333328483,
+   "rl": [
+    0.93575,
+    9.028586695164307
+   ],
+   "transfer": {
+    "speed": [
+     0.0,
+     NaN
+    ],
+    "stack": [
+     0.30425,
+     12.343467543138866
+    ],
+    "oneshot": [
+     0.89625,
+     8.314644351464436
+    ]
+   },
+   "heuristic_best": [
+    0,
+    NaN
+   ],
+   "lb": {
+    "speed": 16.52036177458922,
+    "stack": 11.247634574722262,
+    "oneshot": 7.333333333328483
+   },
+   "lb_partial": {
+    "speed": false,
+    "stack": false,
+    "oneshot": false
+   }
+  },
+  {
+   "school": "fire",
+   "boss": "Ervin Flamerender",
+   "pick": "oneshot",
+   "pulls": {
+    "speed": 3000,
+    "stack": 3000,
+    "oneshot": 30000
+   },
+   "dp_lb": 11.000342693499732,
+   "rl": [
+    0.841125,
+    12.767127359191559
+   ],
+   "transfer": {
+    "speed": [
+     0.0,
+     NaN
+    ],
+    "stack": [
+     0.0,
+     NaN
+    ],
+    "oneshot": [
+     0.47,
+     12.136170212765958
+    ]
+   },
+   "heuristic_best": [
+    0,
+    NaN
+   ],
+   "lb": {
+    "speed": 23.722548519637762,
+    "stack": 16.618302412940068,
+    "oneshot": 11.000342693499732
+   },
+   "lb_partial": {
+    "speed": false,
+    "stack": false,
+    "oneshot": false
+   }
+  },
+  {
+   "school": "fire",
+   "boss": "Malistaire",
+   "pick": "oneshot",
+   "pulls": {
+    "speed": 3000,
+    "stack": 3000,
+    "oneshot": 30000
+   },
+   "dp_lb": 11.000342693499732,
+   "rl": [
+    0.83875,
+    12.703129657228018
+   ],
+   "transfer": {
+    "speed": [
+     0.0,
+     NaN
+    ],
+    "stack": [
+     0.0,
+     NaN
+    ],
+    "oneshot": [
+     0.4575,
+     12.137158469945355
+    ]
+   },
+   "heuristic_best": [
+    0,
+    NaN
+   ],
+   "lb": {
+    "speed": 24.181356639035855,
+    "stack": 16.261973793790688,
+    "oneshot": 11.000342693499732
+   },
+   "lb_partial": {
+    "speed": false,
+    "stack": false,
+    "oneshot": false
+   }
+  },
+  {
+   "school": "ice",
+   "boss": "Ervin Flamerender",
+   "pick": "oneshot",
+   "pulls": {
+    "speed": 2250,
+    "stack": 3996,
+    "oneshot": 27504,
+    "prism": 2250
+   },
+   "dp_lb": 7.504775082714468,
+   "rl": [
+    0.878375,
+    11.482994165362175
+   ],
+   "transfer": {
+    "speed": [
+     0.0,
+     NaN
+    ],
+    "stack": [
+     0.85125,
+     10.938032305433186
+    ],
+    "oneshot": [
+     0.88325,
+     9.931219926408152
+    ],
+    "prism": [
+     0.66675,
+     8.742782152230971
+    ]
+   },
+   "heuristic_best": [
+    0.9692,
+    11.364424267437062
+   ],
+   "lb": {
+    "speed": 15.124137367705027,
+    "stack": 9.441582065815474,
+    "oneshot": 7.504775082714468,
+    "prism": 7.680758203477096
+   },
+   "lb_partial": {
+    "speed": false,
+    "stack": false,
+    "oneshot": false,
+    "prism": true
+   }
+  },
+  {
+   "school": "ice",
+   "boss": "Prince Gobblestone",
+   "pick": "prism",
+   "pulls": {
+    "speed": 2250,
+    "stack": 2250,
+    "oneshot": 2250,
+    "prism": 29250
+   },
+   "dp_lb": 10.500000030730439,
+   "rl": [
+    0.942625,
+    7.642620342129691
+   ],
+   "transfer": {
+    "speed": [
+     0.0,
+     NaN
+    ],
+    "stack": [
+     0.0,
+     NaN
+    ],
+    "oneshot": [
+     0.5505,
+     11.415531335149863
+    ],
+    "prism": [
+     0.0,
+     NaN
+    ]
+   },
+   "heuristic_best": [
+    0.9524,
+    7.014279714405712
+   ],
+   "lb": {
+    "speed": 23.899118612644447,
+    "stack": 13.264038390929858,
+    "oneshot": 10.500000030730439,
+    "prism": 10.500506951695156
+   },
+   "lb_partial": {
+    "speed": false,
+    "stack": false,
+    "oneshot": false,
+    "prism": true
+   }
+  },
+  {
+   "school": "myth",
+   "boss": "Krokopatra",
+   "pick": "stack",
+   "pulls": {
+    "speed": 3000,
+    "stack": 30000,
+    "oneshot": 3000
+   },
+   "dp_lb": 5.249999999991807,
+   "rl": [
+    0.883875,
+    12.547730165464573
+   ],
+   "transfer": {
+    "speed": [
+     0.0,
+     NaN
+    ],
+    "stack": [
+     0.59425,
+     13.99411022297013
+    ],
+    "oneshot": [
+     0.0,
+     NaN
+    ]
+   },
+   "heuristic_best": [
+    0,
+    NaN
+   ],
+   "lb": {
+    "speed": 9.672977701967078,
+    "stack": 6.630723877976759,
+    "oneshot": 5.249999999991807
+   },
+   "lb_partial": {
+    "speed": false,
+    "stack": false,
+    "oneshot": false
+   }
+  },
+  {
+   "school": "storm",
+   "boss": "Jade Oni",
+   "pick": "oneshot",
+   "pulls": {
+    "speed": 3000,
+    "stack": 3000,
+    "oneshot": 30000
+   },
+   "dp_lb": 7.033438267388164,
+   "rl": [
+    0.8075,
+    10.889164086687307
+   ],
+   "transfer": {
+    "speed": [
+     0.0,
+     NaN
+    ],
+    "stack": [
+     0.0,
+     NaN
+    ],
+    "oneshot": [
+     0.7005,
+     9.03140613847252
+    ]
+   },
+   "heuristic_best": [
+    0,
+    NaN
+   ],
+   "lb": {
+    "speed": 20.626645147494767,
+    "stack": 13.145659754327614,
+    "oneshot": 7.033438267388164
+   },
+   "lb_partial": {
+    "speed": false,
+    "stack": false,
+    "oneshot": false
+   }
+  },
+  {
+   "school": "death",
+   "boss": "Jade Oni",
+   "pick": "oneshot",
+   "pulls": {
+    "speed": 3000,
+    "stack": 3000,
+    "oneshot": 30000
+   },
+   "dp_lb": 8.35300048733895,
+   "rl": [
+    0.932625,
+    10.477817986865032
+   ],
+   "transfer": {
+    "speed": [
+     0.0,
+     NaN
+    ],
+    "stack": [
+     0.3335,
+     13.833583208395803
+    ],
+    "oneshot": [
+     0.86725,
+     9.255693283366965
+    ]
+   },
+   "heuristic_best": [
+    0,
+    NaN
+   ],
+   "lb": {
+    "speed": 17.108030602866542,
+    "stack": 10.830588270319678,
+    "oneshot": 8.35300048733895
+   },
+   "lb_partial": {
+    "speed": false,
+    "stack": false,
+    "oneshot": false
+   }
+  },
+  {
+   "school": "balance",
+   "boss": "Krokopatra",
+   "pick": "oneshot",
+   "pulls": {
+    "speed": 3000,
+    "stack": 3000,
+    "oneshot": 30000
+   },
+   "dp_lb": 5.1884518382108435,
+   "rl": [
+    0.972875,
+    6.286650391879738
+   ],
+   "transfer": {
+    "speed": [
+     0.0,
+     NaN
+    ],
+    "stack": [
+     0.0,
+     NaN
+    ],
+    "oneshot": [
+     0.96925,
+     5.995357234975496
+    ]
+   },
+   "heuristic_best": [
+    0.976,
+    8.747540983606557
+   ],
+   "lb": {
+    "speed": 12.682676473255196,
+    "stack": 8.361170439601752,
+    "oneshot": 5.1884518382108435
+   },
+   "lb_partial": {
+    "speed": false,
+    "stack": false,
+    "oneshot": false
+   }
+  },
+  {
+   "school": "life",
+   "boss": "Lord Nightshade",
+   "pick": "oneshot",
+   "pulls": {
+    "speed": 2250,
+    "stack": 6410,
+    "oneshot": 25090,
+    "sustain": 2250
+   },
+   "dp_lb": 4.172367361093419,
+   "rl": [
+    0.997125,
+    5.905102168735113
+   ],
+   "transfer": {
+    "speed": [
+     0.97525,
+     7.260189694950013
+    ],
+    "stack": [
+     0.98575,
+     4.765914278468172
+    ],
+    "oneshot": [
+     0.98675,
+     4.448695211553078
+    ],
+    "sustain": [
+     0.96025,
+     6.72324915386618
+    ]
+   },
+   "heuristic_best": [
+    0.9988,
+    5.052462955546656
+   ],
+   "lb": {
+    "speed": 6.881433395082234,
+    "stack": 4.172367361093419,
+    "oneshot": 4.172367361093419,
+    "sustain": 5.622421638421569
+   },
+   "lb_partial": {
+    "speed": false,
+    "stack": false,
+    "oneshot": false,
+    "sustain": true
+   }
+  }
+ ],
+ "survival": [
+  {
+   "school": "death",
+   "boss": "Jade Oni",
+   "deck": "oneshot",
+   "player_hp": 3100,
+   "boss_dmg": 300,
+   "heuristic": [
+    0.9405,
+    11.39952153110048
+   ],
+   "survival_heuristic": [
+    0.941,
+    11.388947927736451
+   ],
+   "rl": [
+    0.929875,
+    9.643634897163597
    ]
   },
-  "heuristic_best": [
-   1.0,
-   2.774
-  ],
-  "lb": {
-   "speed": 2.5785714285041834,
-   "stack": 2.5679502874613878,
-   "oneshot": 3.3558333332504846
-  }
- },
- {
-  "school": "fire",
-  "boss": "Krokopatra",
-  "pick": "oneshot",
-  "pulls": {
-   "speed": 3000,
-   "stack": 3000,
-   "oneshot": 30000
-  },
-  "dp_lb": 5.333333333313931,
-  "rl": [
-   0.99975,
-   5.566391597899475
-  ],
-  "transfer": {
-   "speed": [
-    1.0,
-    11.452
+  {
+   "school": "life",
+   "boss": "Krokopatra",
+   "deck": "sustain",
+   "player_hp": 3200,
+   "boss_dmg": 220,
+   "heuristic": [
+    0.433,
+    11.267321016166282
    ],
-   "stack": [
-    0.9985,
-    7.883575363044566
+   "survival_heuristic": [
+    0.6505,
+    13.665257494235204
    ],
-   "oneshot": [
-    0.96275,
-    6.210854323552324
+   "rl": [
+    0.6335,
+    14.776440410418312
    ]
   },
-  "heuristic_best": [
-   1.0,
-   6.8852
-  ],
-  "lb": {
-   "speed": 9.617103294126174,
-   "stack": 6.7430737653491315,
-   "oneshot": 5.333333333313931
-  }
- },
- {
-  "school": "fire",
-  "boss": "Jade Oni",
-  "pick": "oneshot",
-  "pulls": {
-   "speed": 3000,
-   "stack": 3000,
-   "oneshot": 30000
-  },
-  "dp_lb": 7.333333333328483,
-  "rl": [
-   1.0,
-   7.731875
-  ],
-  "transfer": {
-   "speed": [
+  {
+   "school": "fire",
+   "boss": "Malistaire",
+   "deck": "oneshot",
+   "player_hp": 2900,
+   "boss_dmg": 400,
+   "heuristic": [
     0.0,
     NaN
    ],
-   "stack": [
-    0.67275,
-    13.139725009290226
+   "survival_heuristic": [
+    0.0,
+    NaN
    ],
-   "oneshot": [
-    0.97725,
-    8.504988488104374
+   "rl": [
+    0.0,
+    NaN
    ]
-  },
-  "heuristic_best": [
-   1.0,
-   10.0196
-  ],
-  "lb": {
-   "speed": 16.52036177458922,
-   "stack": 11.247634574722262,
-   "oneshot": 7.333333333328483
   }
- },
- {
-  "school": "fire",
-  "boss": "Ervin Flamerender",
-  "pick": "oneshot",
-  "pulls": {
-   "speed": 3000,
-   "stack": 3000,
-   "oneshot": 30000
-  },
-  "dp_lb": 11.000342693499732,
-  "rl": [
-   1.0,
-   12.19725
-  ],
-  "transfer": {
-   "speed": [
-    0.0,
-    NaN
-   ],
-   "stack": [
-    0.0,
-    NaN
-   ],
-   "oneshot": [
-    0.7245,
-    12.868184955141476
-   ]
-  },
-  "heuristic_best": [
-   1.0,
-   13.3488
-  ],
-  "lb": {
-   "speed": 23.722548519637762,
-   "stack": 16.618302412940068,
-   "oneshot": 11.000342693499732
-  }
- },
- {
-  "school": "fire",
-  "boss": "Malistaire",
-  "pick": "oneshot",
-  "pulls": {
-   "speed": 3000,
-   "stack": 3000,
-   "oneshot": 30000
-  },
-  "dp_lb": 11.000342693499732,
-  "rl": [
-   0.998875,
-   11.98172944562633
-  ],
-  "transfer": {
-   "speed": [
-    0.0,
-    NaN
-   ],
-   "stack": [
-    0.0,
-    NaN
-   ],
-   "oneshot": [
-    0.71525,
-    12.859489688919957
-   ]
-  },
-  "heuristic_best": [
-   1.0,
-   13.384
-  ],
-  "lb": {
-   "speed": 24.181356639035855,
-   "stack": 16.261973793790688,
-   "oneshot": 11.000342693499732
-  }
- },
- {
-  "school": "ice",
-  "boss": "Ervin Flamerender",
-  "pick": "oneshot",
-  "pulls": {
-   "speed": 3000,
-   "stack": 3569,
-   "oneshot": 29431
-  },
-  "dp_lb": 7.504775082714468,
-  "rl": [
-   0.99875,
-   9.506007509386734
-  ],
-  "transfer": {
-   "speed": [
-    0.0,
-    NaN
-   ],
-   "stack": [
-    0.97125,
-    10.399227799227798
-   ],
-   "oneshot": [
-    1.0,
-    9.5775
-   ]
-  },
-  "heuristic_best": [
-   1.0,
-   10.8276
-  ],
-  "lb": {
-   "speed": 15.124137367705027,
-   "stack": 9.441582065815474,
-   "oneshot": 7.504775082714468
-  }
- },
- {
-  "school": "ice",
-  "boss": "Prince Gobblestone",
-  "pick": "oneshot",
-  "pulls": {
-   "speed": 3000,
-   "stack": 3000,
-   "oneshot": 30000
-  },
-  "dp_lb": 10.500000030730439,
-  "rl": [
-   0.999625,
-   11.465674627985495
-  ],
-  "transfer": {
-   "speed": [
-    0.0,
-    NaN
-   ],
-   "stack": [
-    0.0,
-    NaN
-   ],
-   "oneshot": [
-    0.6095,
-    11.574241181296145
-   ]
-  },
-  "heuristic_best": [
-   1.0,
-   11.5784
-  ],
-  "lb": {
-   "speed": 23.899118612644447,
-   "stack": 13.264038390929858,
-   "oneshot": 10.500000030730439
-  }
- },
- {
-  "school": "myth",
-  "boss": "Krokopatra",
-  "pick": "oneshot",
-  "pulls": {
-   "speed": 3000,
-   "stack": 3000,
-   "oneshot": 30000
-  },
-  "dp_lb": 5.249999999991807,
-  "rl": [
-   1.0,
-   5.518
-  ],
-  "transfer": {
-   "speed": [
-    0.0,
-    NaN
-   ],
-   "stack": [
-    0.99875,
-    8.236795994993741
-   ],
-   "oneshot": [
-    1.0,
-    5.7505
-   ]
-  },
-  "heuristic_best": [
-   1.0,
-   5.7864
-  ],
-  "lb": {
-   "speed": 9.672977701967078,
-   "stack": 6.630723877976759,
-   "oneshot": 5.249999999991807
-  }
- }
-]
+ ]
+}
