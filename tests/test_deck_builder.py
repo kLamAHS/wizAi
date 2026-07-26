@@ -62,6 +62,21 @@ def test_screen_is_deterministic_and_ranks_sanely():
     assert a[0][2] == good                        # ranked first
 
 
+def test_pool_excludes_boss_only_and_internal_spells():
+    """Regression for the reward hack the first search found: the dump
+    labels encounter-scripted spells as core; none may be deck-buildable."""
+    for school in ("death", "fire", "ice"):
+        pool = legal_pool(CARDS, school)
+        assert not any(" - " in n or n.startswith("NA ") for n in pool)
+        for n, c in pool.items():
+            if c.kind in ("damage", "drain"):
+                per_pip = c.damage if c.x_pips else c.damage / max(c.pips, 1)
+                assert per_pip <= 200, n
+    dpool = legal_pool(CARDS, "death")
+    assert "Wraith" in dpool and "Feint" in dpool
+    assert "Scald - KRBoss Death" not in dpool
+
+
 def test_random_boss_shape():
     rng = random.Random(3)
     b = random_boss(rng)

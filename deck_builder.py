@@ -23,6 +23,7 @@ deck-conditioned policy. Level-gated card pools need level data the
 current dumps don't carry reliably (level_restriction is mostly null).
 """
 import random
+import re
 
 from w101_sim import Sim, evaluate, make_blade_stack, Boss, OPPOSING
 from rl_agent import QAgent
@@ -31,13 +32,36 @@ from rl_agent import QAgent
 UNIVERSAL_BUFFS = {"Tri Blade", "Tri Trap", "Spirit Blade", "Spirit Trap",
                    "Hex", "Curse", "Feint", "Balanceblade", "Bladestorm"}
 
+# the dump tags boss-only / encounter-scripted spells as variant='core'
+# too ("Scald - KRBoss Death", "NA PL-Bear-Tweedle-B"): the first deck
+# search promptly reward-hacked them into one-turn kills. Player-trainable
+# spells carry none of these markers and obey era damage efficiency.
+_INTERNAL = re.compile(
+    r"( - |_|\bNA\b|BOSS|Tutorial|Mutate|Mashup|FUSE|Loremaster|Token|"
+    r"Polymorph|Test|\d)", re.IGNORECASE)
+
+
+def _player_plausible(name, c):
+    if _INTERNAL.search(name):
+        return False
+    if c.kind in ("damage", "drain"):
+        per_pip = c.damage if c.x_pips else c.damage / max(c.pips, 1)
+        if per_pip > 200:
+            return False
+    if c.kind == "blade" and c.percent > 0.45:
+        return False
+    if c.kind in ("trap", "weakness") and abs(c.percent) > 0.75:
+        return False
+    return True
+
 
 def legal_pool(cards, school):
     """Unlocked, deck-buildable cards for a school: own-school trained
-    spells plus the cross-trained universal buffs."""
+    spells plus the cross-trained universal buffs, with boss-only and
+    internal spells screened out."""
     pool = {}
     for name, c in cards.items():
-        if c.source != "deck":
+        if c.source != "deck" or not _player_plausible(name, c):
             continue
         if c.school == school or name in UNIVERSAL_BUFFS:
             if c.kind in ("damage", "drain", "blade", "trap", "prism",
