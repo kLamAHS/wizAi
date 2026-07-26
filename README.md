@@ -160,6 +160,8 @@ Regenerate with `python plots.py` (reads the results JSONs, writes
 
 ![Storm learning curve](plots/storm_curve.png)
 
+![Progression sweep](plots/progression.png)
+
 ## Live-data results (`w101-pve-live-scrape`)
 
 Real scraped spells vs real scraped bosses (`results_live.json`; paired

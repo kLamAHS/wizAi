@@ -124,15 +124,18 @@ def check_legal(deck, capacity, copy_limit):
         all(v <= copy_limit for v in Counter(deck).values())
 
 
-def screen(cards, decks, school, boss, rules=None, n=250, base_seed=7000):
+def screen(cards, decks, school, boss, rules=None, n=250, base_seed=7000,
+           progress=None):
     """Cheap proxy scores: scripted policy on paired seeds."""
     out = []
-    for dl in decks:
+    for i, dl in enumerate(decks):
+        if progress and i and i % 20 == 0:
+            progress(f"screened {i}/{len(decks)} candidates...")
         sim = Sim(dict(cards), dl, school, boss, player_hp=10**9,
                   rules=rules)
         wins, ttk = 0, []
-        for i in range(n):
-            sim.rng = random.Random(base_seed + i)
+        for j in range(n):
+            sim.rng = random.Random(base_seed + j)
             t, won, _ = sim.run(make_blade_stack(3))
             if won:
                 wins += 1
@@ -174,7 +177,7 @@ def build_deck(cards, school, boss, rules=None, n_candidates=150,
     if log:
         log(f"screening {len(cands)} legal candidates "
             f"(capacity {capacity}, copy limit {copy_limit})")
-    table = screen(cards, cands, school, boss, rules)
+    table = screen(cards, cands, school, boss, rules, progress=log)
     best = None
     for w0, m0, dl in table[:top_k]:
         w, m, _ = fine_tune(cards, dl, school, boss, rules, seed=seed)

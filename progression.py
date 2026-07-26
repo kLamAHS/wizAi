@@ -20,10 +20,12 @@ for lvl in LEVELS:
     boss.resist_map = {"death": 0.5}
     boss.boost_map = {}
     cap = min(10 + (lvl // 10) * 2, 16)
-    dl, w, m, table = build_deck(cards, "fire", boss, LIVE_RULES,
-                                 n_candidates=60, top_k=3, capacity=cap,
-                                 copy_limit=3, seed=lvl, log=None,
-                                 level=lvl)
+    print(f"[lvl {lvl}] boss {boss.hp} HP, capacity {cap} — "
+          f"searching...", flush=True)
+    dl, w, m, table = build_deck(
+        cards, "fire", boss, LIVE_RULES, n_candidates=60, top_k=3,
+        capacity=cap, copy_limit=3, seed=lvl, level=lvl,
+        log=lambda msg: print("   ", msg, flush=True))
     from deck_builder import legal_pool
     pool = legal_pool(cards, "fire", level=lvl)
     row = dict(level=lvl, boss_hp=boss.hp, pool=len(pool), capacity=cap,
