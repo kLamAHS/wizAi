@@ -93,6 +93,27 @@ def _map_effect(e, spell, avg_backfill):
     if i in (1, 3, 5, 23, 28, 29, 38, 40, 76, 77) and p is None:
         return None, f"effect {i} missing param", None
 
+    # name-first dispatch (names stamped from the wiztype enum are ground
+    # truth); these have no id in the numeric table but map onto existing
+    # engine ops
+    nm = e.get("effect_type")
+    self_tgt = e["target"] in (9, 11)
+    if nm == "kStunBlock":
+        return {"op": "stun_block", "n": max(int(p or 1), 1),
+                "tgt": "self" if self_tgt else
+                _tgt(e, spell, False)}, None, None
+    if nm == "kRemoveOverTime":
+        return {"op": "remove", "what": "dot",
+                "tgt": "self" if self_tgt else "ally"}, None, None
+    if nm == "kRemoveWard":
+        return {"op": "remove",
+                "what": "ward_pos" if e["target"] == 8 else "ward_neg",
+                "tgt": "enemy" if e["target"] == 8 else "self"}, None, None
+    if nm == "kRemoveCharm":
+        return {"op": "remove",
+                "what": "charm_pos" if e["target"] == 8 else "charm_neg",
+                "tgt": "enemy" if e["target"] == 8 else "self"}, None, None
+
     if i in (0, 1):
         amount = p
         if i == 0 and (p is None or p < 0):
@@ -100,7 +121,8 @@ def _map_effect(e, spell, avg_backfill):
                 return None, "x-pip spell with no per-pip param", None
             amount = avg_backfill
             if amount is None:
-                return None, "random damage range not in dump", None
+                return None, ("wrapper effect (kInvalidSpellEffect): "
+                              "sub-effects not extracted"), None
             note = "backfilled-avg"
         op = {"op": "hit", "amount": float(amount),
               "tgt": _tgt(e, spell, True), "group": 0}
@@ -177,7 +199,7 @@ def _map_effect(e, spell, avg_backfill):
         return {"op": "gain_pips", "n": int(p),
                 "tgt": "self" if e["target"] in (9, 11) else "ally"}, \
             None, None
-    return None, f"undecoded effect id {i}", None
+    return None, f"undecoded effect {nm or i}", None
 
 
 def _merge_ward_charges(ops):

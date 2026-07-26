@@ -89,7 +89,19 @@ def main():
     out = args.out or args.infile
 
     import glob
-    tl_path = sorted(glob.glob(args.types))[-1]
+    matches = sorted(glob.glob(args.types))
+    if not matches:
+        sys.exit(
+            f"No file matches --types {args.types!r} from this directory.\n"
+            "The wiztype dump is wherever wiztype wrote it (usually next to "
+            "the wiztype exe or its working directory), not necessarily "
+            "here. Either copy it into this folder or pass the full path, "
+            "quoted:\n"
+            '  python add_effect_names.py --types '
+            '"C:\\path\\to\\r803238_Wizard_1_610.json"\n'
+            "(A glob like r*_Wizard_*.json also works; the newest match "
+            "is used.)")
+    tl_path = matches[-1]
     print(f"Reading type list: {tl_path}")
     type_list = json.loads(Path(tl_path).read_text(encoding="utf-8"))
 
