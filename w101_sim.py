@@ -176,7 +176,7 @@ def load_cards(path, report=None):
     """Build the card table: base fields from the scrape, mechanics from
     content.CARD_OPS where curated, generic ops otherwise. Cards that can't
     be expressed are collected in `report['skipped']` instead of loaded."""
-    raw = json.load(open(path)) + content.EXTRA_CARDS
+    raw = json.load(open(path, encoding="utf-8")) + content.EXTRA_CARDS
     cards, skipped = {}, []
     for r in raw:
         name = r["name"]

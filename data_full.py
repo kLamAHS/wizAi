@@ -210,7 +210,7 @@ def load_spells_full(path="spells_full.json",
                      cards_clean_path="cards_clean.json", report=None):
     """Build a Card table from the full dump. Non-core variants get
     provenance suffixes/sources (@tc, @item, @pet) and stack accordingly."""
-    raw = json.load(open(path))
+    raw = json.load(open(path, encoding="utf-8"))
     classic = load_cards(cards_clean_path) if cards_clean_path else {}
     # damage RANGES parsed from the classic descriptions ("deal 80 - 120")
     # — the dump stores random-range params as -1 with no range fields
@@ -218,7 +218,7 @@ def load_spells_full(path="spells_full.json",
     ranges = {}
     if cards_clean_path:
         pat = re.compile(r"(\d[\d,]*)\s*(?:-|to)\s*(\d[\d,]*)")
-        for r in json.load(open(cards_clean_path)):
+        for r in json.load(open(cards_clean_path, encoding="utf-8")):
             if r.get("type") in ("damage", "steal") and r.get("description"):
                 m = pat.search(r["description"])
                 if m:
@@ -368,7 +368,7 @@ def load_bosses_full(path="bosses_clean.json", report=None):
     """Registry of real bosses. Returns (bosses, registry): `bosses` maps
     name -> Boss ready for Sim; `registry` keeps every scraped field raw
     (ratings, cheats text, locations) for encounter metadata."""
-    raw = json.load(open(path))
+    raw = json.load(open(path, encoding="utf-8"))
     bosses, registry, skipped = {}, {}, []
     for r in raw:
         name, school, hp = r.get("name"), r.get("school"), r.get("health")

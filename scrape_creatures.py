@@ -237,11 +237,11 @@ def main():
 
     done = set()
     if RAW.exists():
-        for line in RAW.open():
+        for line in RAW.open(encoding="utf-8"):
             done.add(json.loads(line)["name"])
         print(f"resuming: {len(done)} pages already fetched")
 
-    out = RAW.open("a")
+    out = RAW.open("a", encoding="utf-8")
 
     def record(title, wikitext):
         fields = split_template_fields(wikitext)
@@ -272,10 +272,10 @@ def main():
     print(f"fetched {n_new} new pages -> {RAW}")
 
     # rebuild the clean file from the full raw log
-    clean = [json.loads(line) for line in RAW.open()]
+    clean = [json.loads(line) for line in RAW.open(encoding="utf-8")]
     for rec in clean:
         rec.pop("wikitext_chars", None)
-    json.dump(clean, CLEAN.open("w"), indent=1)
+    json.dump(clean, CLEAN.open("w", encoding="utf-8"), indent=1)
     print(f"wrote {len(clean)} creatures -> {CLEAN}")
 
 
