@@ -759,16 +759,21 @@ class Sim:
             return 1 + b.percent
         return 1.0
 
-    def _strike(self, s, caster, target, school, base, charm_mult, crit_mult):
-        """One damage component against one target. Returns damage dealt."""
-        pierce = caster.pierce
+    def _strike(self, s, caster, target, school, base, charm_mult, crit_mult,
+                ward=None):
+        """One damage component against one target. Returns damage dealt.
+        `ward` carries a precomputed _ward_pass result so ops in the same
+        link group share ONE ward consumption (Fire Elf's hit + DoT are a
+        single strike; a shield reduces both)."""
         dmg = base * charm_mult
         dmg *= self._damage_bonus(caster, school)
         dmg *= self._bubble_damage(s, school)
         dmg *= crit_mult
-        wmult, school, pierce = self._ward_pass(target, school, pierce)
+        if ward is None:
+            ward = self._ward_pass(target, school, caster.pierce)
+        wmult, fschool, pierce = ward
         dmg *= wmult
-        dmg *= self._resist_mult(target, school, pierce)
+        dmg *= self._resist_mult(target, fschool, pierce)
         dmg = max(dmg, 0.0)
         dmg = self._absorb_pass(target, dmg)
         target.hp -= dmg
@@ -844,6 +849,14 @@ class Sim:
         hit). Returns total damage dealt to enemies."""
         total = 0.0
         group_state = {}        # group id -> (charm_mult, crit_mult)
+        ward_state = {}         # (group id, target id) -> ward pass result
+
+        def wards_for(g, t, school):
+            k = (g, id(t))
+            if k not in ward_state:
+                ward_state[k] = self._ward_pass(t, school, caster.pierce)
+            return ward_state[k]
+
         for op in ops:
             o = dict(op)
             kind = o["op"]
@@ -866,25 +879,26 @@ class Sim:
                 if o.get("per_pip"):
                     amount *= pips_spent
                 for t in targets:
+                    ward = wards_for(g, t, spec_school)
                     if kind == "hit":
                         total += self._strike(s, caster, t, spec_school,
-                                              amount, charm_mult, crit_mult)
+                                              amount, charm_mult, crit_mult,
+                                              ward)
                     elif kind == "drain":
                         dealt = self._strike(s, caster, t, spec_school,
-                                             amount, charm_mult, crit_mult)
+                                             amount, charm_mult, crit_mult,
+                                             ward)
                         total += dealt
                         # drains ignore heal modifiers (community-confirmed)
                         healed = min(dealt * o.get("fraction", 0.5),
                                      caster.max_hp - caster.hp)
                         caster.hp += healed
                     else:                     # dot: snapshot at cast
-                        pierce = caster.pierce
+                        wmult, fs, pierce = ward
                         dmg = amount * charm_mult
                         dmg *= self._damage_bonus(caster, spec_school)
                         dmg *= self._bubble_damage(s, spec_school)
                         dmg *= crit_mult
-                        wmult, fs, pierce = self._ward_pass(t, spec_school,
-                                                            pierce)
                         dmg *= wmult
                         dmg *= self._resist_mult(t, fs, pierce)
                         dmg = max(dmg, 0.0)
@@ -959,11 +973,16 @@ class Sim:
 
             elif kind == "summon":
                 blk = content.MINIONS[o["minion"]]
-                s.allies.append(Actor(
+                m = Actor(
                     name=o["minion"], school=blk["school"], hp=float(blk["hp"]),
                     max_hp=float(blk["hp"]), team=caster.team, is_minion=True,
                     minion_role=blk["role"], minion_power=float(blk["power"]),
-                    stunable=True))
+                    stunable=True)
+                if caster.team == 0:
+                    s.allies.append(m)
+                else:                          # enemy summon joins their side
+                    m.flat_hit = m.minion_power
+                    s.enemies.append(m)
 
             elif kind == "stun_block":
                 for t in targets:

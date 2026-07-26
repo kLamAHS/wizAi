@@ -1,71 +1,150 @@
 # W101 combat lab: heuristics → exact DP → RL
 
-Turns-to-kill (TTK) study of Wizard101 PvE combat: how much of the blade-stack
-meta falls out of the raw card math, and what a learner adds on top.
+Turns-to-kill (TTK) and survival study of Wizard101 PvE combat: how much of
+the blade-stack meta falls out of the raw card math, and what a learner adds
+on top. The v0.3 simulator follows the design notes in
+`docs/RESEARCH.md`: a **rules engine plus structured symbolic state**, with
+effect provenance as a first-class citizen.
 
 ## Pipeline
 
 | file | role |
 |---|---|
 | `scrape_central_wiki.py` | (run locally) refresh `cards_clean.json` from the wiki |
-| `w101_sim.py` | v0.2 simulator: no-replacement draw, real normal/power pips, **same-name buffs don't stack**, Fuel charges, Feint backlash, self-damage, boss resist/boost |
-| `bosses.py` | preset enemy registry (all W101 enemies are scripted → boss stats are known context) + candidate decks per school |
-| `dp_solver.py` | value iteration on the deck-free abstraction (distinct-buff configs, ward charge states) = perfect-information lower bound; + policy transfer into the deck sim |
-| `rl_agent.py` | tabular Q-learning (backward MC returns, DP warm-start, scarcity-aware state) + UCB deck-selection bandit per boss |
-| `experiment.py` | the headline table (`results.json`) |
+| `content.py` | curated effect primitives (the `spell_effects` layer): DoT splits, multi-hit components, drains, prisms, absorbs, per-pip spells, dispels, summons — each entry confidence-tagged (`community`/`approx`/`inferred`), unsupported cards excluded instead of mis-modeled |
+| `w101_sim.py` | v0.3 engine: structured hanging effects with **(name, source) stack keys**, FIFO ward pass with prism school conversion, shields/weaknesses/mantles/dispels/absorbs, scheduled DoTs/HoTs (snapshot at cast), drains, X-pip spells, multi-hit link groups, AoE with per-target resolution, stuns + stun blocks, threat-driven enemy targeting, minions, boss **cheat-script hooks**, treasure-card sideboard, crit/block/pierce machinery, version-tagged `Rules` |
+| `bosses.py` | preset enemy registry + illustrative cheat scripts + candidate decks for **all seven schools** |
+| `dp_solver.py` | value iteration on the deck-free abstraction (distinct-buff configs, ward charge states, X-pip actions) = perfect-information lower bound; decks that lean on unmodeled mechanics (prisms/heals/shields) are flagged via `meta['unmodeled']` |
+| `rl_agent.py` | tabular Q-learning (backward MC returns, DP warm-start, scarcity-aware state incl. drains and prisms) + UCB deck-selection bandit per boss |
+| `experiment.py` | the headline tables (`results.json`): speed (immortal player) + survival (real boss damage) |
+| `tests/test_sim.py` | 70 mechanics tests, one per documented combat rule |
 
-## Headline results (immortal player = pure speed objective)
+## Engine rules worth knowing (v0.3)
+
+- **Provenance stacking.** A deck Fireblade, a treasure-card `Fireblade@tc`
+  and a `Sharpened Fireblade` all stack with each other; a second copy of
+  the *same* one is an illegal cast, like the in-game X. This is the
+  research doc's "if you only run one ablation, run no-effect-provenance"
+  representation, implemented at the engine level.
+- **FIFO ward processing with a running school.** Traps placed *before* a
+  prism boost the hit, then the prism converts it and the *converted*
+  school meets resist; traps placed after the prism strand. One strike
+  consumes **all** matching charms and wards at once.
+- **Link groups.** Fire Elf's 50 + DoT is one strike (a single Tower Shield
+  halves both portions); Minotaur's 50-then-445 are separate groups, so the
+  50-hit strips shields and blades before the payload lands — the classic
+  shield-breaker play.
+- **DoTs/HoTs snapshot at cast**; drains ignore heal modifiers; absorbs
+  soak ticks; fizzles now **discard the card** but keep pips
+  (community-confirmed; the v0.2 retry-forever rule inflated kill rates and
+  is available as `Rules(fizzle_discards_card=False)`).
+- **Cheats** are per-boss scripted interrupts (`after_player_cast` /
+  `round_start` / `hp_below`) executing free effect ops — the "rules engine
+  plus cheat scripts" pattern. The bundled scripts are illustrative shapes,
+  not scraped encounters.
+- **Out of scope, declared:** criticals default off (classic era; the
+  machinery exists and is tested), no archmastery/shadow/school pips, no
+  gear/pet stat layer (fields exist, default 0), enemy decks are flat
+  scripted hits + cheats. Beguile is the one card excluded as unsupported.
+
+## Headline results (v0.3 rules)
+
+Speed objective (immortal player = pure TTK; RL kill% in parens; heuristic
+column is the best "stack k buffs → nuke" that clears 95% kill):
 
 ```
 matchup                      DP-LB       RL (kill%)   best heuristic
-fire vs Rattlebones           2.57     2.75 (100%)      2.77
-fire vs Krokopatra            5.33     5.57 (100%)      6.89
-fire vs Jade Oni              7.33     7.73 (100%)     10.02
-fire vs Ervin Flamerender    11.00    12.20 (100%)     13.35
-fire vs Malistaire           11.00    11.98 (100%)     13.38
-ice  vs Ervin Flamerender     7.50     9.51 (100%)     10.83
-ice  vs Prince Gobblestone   10.50    11.47 (100%)     11.58
-myth vs Krokopatra            5.25     5.52 (100%)      5.79
+fire  vs Rattlebones          2.57     3.86 ( 99%)      2.78
+fire  vs Krokopatra           5.33     6.74 ( 98%)      6.75
+fire  vs Jade Oni             7.33     9.03 ( 94%)        —
+fire  vs Ervin Flamerender   11.00    12.77 ( 84%)        —
+fire  vs Malistaire          11.00    12.70 ( 84%)        —
+ice   vs Ervin Flamerender    7.50    11.48 ( 88%)     11.36
+ice   vs Prince Gobblestone  10.50*    7.64 ( 94%)      7.01
+myth  vs Krokopatra           5.25*   12.55 ( 88%)        —
+storm vs Jade Oni             7.03    10.89 ( 81%)        —
+death vs Jade Oni             8.35    10.48 ( 93%)        —
+balance vs Krokopatra         5.19     6.29 ( 97%)      8.75
+life  vs Lord Nightshade      4.17     5.91 (100%)      5.05
 ```
 
-Ordering everywhere: **DP-LB < RL < DP-transfer / heuristic**, i.e. the agent
-learns draw-aware play (dig timing, partial-stack fires, nuke conservation)
-that the perfect-information abstraction can't represent — on Jade Oni it
-recovers ~75% of the 8.5→7.33 randomness gap.
+`*` = the DP abstraction doesn't cover the deck's key mechanic, and it
+shows — in both directions:
 
-Notable structure the pipeline surfaced:
-- **Non-stacking changes everything.** Buff depth now comes from *diversity*
-  (Fireblade + Elemental Blade + Fire Trap + Elemental Trap + Fuel + Feint),
-  which is exactly the real one-shot meta. Duplicate copies are only draw
-  redundancy.
-- **The DP transfer's blind spot is scarcity.** With infinite abstract copies
-  it happily wastes buffed hits; on tight decks it kills only 60–70% of runs
-  before the deck runs dry. The RL state carries a `nukes_left` feature and
-  fixes this to ~100% while also being faster.
-- **School matchup is effective HP.** Ervin (3600 fire, 40% self-resist) is
-  exactly as hard for a fire wizard as 6000-HP Malistaire (3600/0.6 = 6000);
-  the DP bound comes out 11.00 for both.
-- **Same-school walls are real.** At Gobblestone's original 3200 HP, no ice
-  deck here can kill him at all (total buffed damage < HP through 40% resist)
-  — the in-game answer is prisms, which are the next mechanic to model.
-- **Deck choice is learnable context.** The UCB bandit (round-robin warmup +
-  EMA rewards, because arms improve as they train) converges to the right
-  loadout per boss, including switching ice→oneshot only when boosted.
+- **Ice vs Gobblestone: RL beats the "lower bound".** The bound only holds
+  inside the blade/trap/nuke abstraction; the prism deck escapes it
+  (ice → fire conversion turns 40% resist into a +25% boost). The bandit
+  put 29k of its 36k pulls on the prism deck, whose *DP transfer* scores
+  0% kills — the learner exploits exactly the mechanic the abstraction
+  can't see.
+- **Myth vs Krokopatra: the bound is now very loose.** The DP still treats
+  Minotaur as one buffed 495 hit; the engine makes its 50-point first hit
+  consume all blades and traps (real behavior — the shield-breaker play).
+  Myth's classic decks are genuinely weak under the true rule, and v0.2's
+  5.52 was an artifact of aggregating multi-hits.
+
+Kill rates below 100% on 70–80%-accuracy schools are the new
+**fizzle-discards-card** rule pricing accuracy for real: thin 3-nuke decks
+stop being free wins (v0.2 let you retry a fizzled nuke forever).
+
+Survival objective (real boss damage, era-appropriate player HP):
+
+```
+matchup (deck)                 HP vs dmg/rd   plain heur   +triage wrap        RL
+death vs Jade Oni (oneshot)    3100 vs 300    94% / 11.4    94% / 11.4    93% /  9.6
+life  vs Krokopatra (sustain)  3200 vs 220    43% / 11.3    65% / 13.7    63% / 14.8
+fire  vs Malistaire (oneshot)  2900 vs 400     0% /   —      0% /   —      0% /   —
+```
+
+- **Drains are free sustain**: death's survival kill% matches its immortal
+  kill% and the RL agent is *faster* than the immortal-player heuristic
+  line because Wraith heals while it nukes.
+- **Life buys kill% with tempo**: shield/heal triage lifts 43% → 65% at
+  +2.4 turns.
+- **Fire vs Malistaire is a lost race without heals** (400/rd kills in ~8
+  rounds; the kill needs ~13): the right fix is Fairy treasure cards, and
+  the sideboard mechanic is implemented — wiring it into the action space
+  is the next experiment.
+
+Other structure the v0.3 pipeline surfaced:
+
+- **The FIFO ward order is learnable structure.** Traps must be laid
+  *before* the prism to count pre-conversion; the stack heuristic and the
+  RL agent both handle it, and the `prism-before-trap strands the trap`
+  case is a regression test.
+- **Deck choice is learnable context.** The UCB bandit converges to the
+  right loadout on hard bosses (prism into the same-school wall, oneshot
+  into big HP pools). On trivial bosses (Rattlebones) arm rewards are
+  within noise of each other and the pick wobbles — a known limitation,
+  reported as-is.
 
 ## RL details that mattered
 
 - One-step Q-learning failed outright (2% kill): ~13-step horizon, sparse
   tabular visits. Backward Monte-Carlo returns fixed it in one change.
-- Optimistic-init exploration only works after shrinking the state: hand bits
-  are kept for damage cards only (buff availability is already encoded in the
-  legal-action set).
+- Optimistic-init exploration only works after shrinking the state: hand
+  bits are kept for damage cards only (buff availability is already encoded
+  in the legal-action set).
 - α-decay + best-checkpoint selection prevents late-training drift.
+- The DP warm-start still transfers cleanly to v0.3 because the abstraction
+  (blades/traps/nukes, now + X-pip) is a strict subspace of the engine.
+
+## Data honesty
+
+Per the research notes: unknowns are never silently zeroed. Every curated
+mechanic in `content.py` is confidence-tagged; minion stat blocks are
+`inferred` placeholders; `stunable=None` means *unspecified*, not false;
+cards the engine can't express are excluded at load and listed in the
+loader report.
 
 ## Next
 
-- Fresh wiki scrape → storm/death decks (their mid-tier nukes are missing),
-  real boss stats from creature pages, prisms + shields + X-pip spells.
-- Survival objective: set `player_hp`/`boss.dmg` real values — Feint's +30%
-  backlash and Immolate's self-damage are already modeled and become live
-  trade-offs.
-- Mob fights: `aoe` flag is preserved in the data.
+- Scrape real creature pages (stats, stunable flags, actual cheat scripts)
+  to replace the ballpark boss registry.
+- Sideboard policy learning: the treasure-card mechanic (random draw,
+  no same-round discard) is implemented but the RL action space doesn't
+  use it yet.
+- Mob fights: the engine is multi-enemy (AoE, per-target wards, threat)
+  but the experiment table is still 1v1.
+- Post-classic layers behind `Rules`: criticals-on eras, mastery amulets,
+  school pips.

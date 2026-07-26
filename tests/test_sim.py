@@ -344,6 +344,52 @@ def test_dot_snapshots_modifiers_at_cast():
     assert not s.enemies[0].over_time
 
 
+def test_shield_reduces_hit_and_dot_of_linked_spell():
+    """Fire Elf's 50 + DoT is ONE strike (same link group): a single Tower
+    Shield halves both portions and is consumed once."""
+    sim, s = fresh()
+    boss = s.enemies[0]
+    boss.wards.append(Hanging("Tower Shield", "ward", "damage",
+                              percent=-0.50, schools=None))
+    elf = give(sim, s, "Fire Elf")
+    hp0 = s.boss_hp
+    cast(sim, s, elf)
+    assert s.boss_hp == pytest.approx(hp0 - 25)       # 50 * 0.5
+    for _ in range(3):
+        sim.end_round(s)
+    assert s.boss_hp == pytest.approx(hp0 - (50 + 210) * 0.50)
+    assert not boss.wards                             # consumed exactly once
+
+
+def test_minotaur_first_hit_eats_all_matching_shields():
+    """One strike consumes ALL wards that match it: Minotaur's 50-hit
+    strips both universal shields at once and the 445 lands clean — the
+    classic shield-breaker play."""
+    sim, s = fresh(school="myth")
+    boss = s.enemies[0]
+    boss.wards.append(Hanging("Tower Shield", "ward", "damage",
+                              percent=-0.50, schools=None))
+    boss.wards.append(Hanging("Tower Shield@tc", "ward", "damage",
+                              percent=-0.50, schools=None, source="tc"))
+    mino = give(sim, s, "Minotaur")
+    hp0 = s.boss_hp
+    cast(sim, s, mino)
+    assert s.boss_hp == pytest.approx(hp0 - (50 * 0.5 * 0.5 + 445))
+    assert not boss.wards
+
+
+def test_enemy_summon_joins_enemy_side():
+    boss = Boss("Summoner", 10000, "myth", 0, cheat=CheatScript([
+        CheatRule(event="round_start", once=True,
+                  ops=[{"op": "summon", "minion": "troll"}])]))
+    sim, s = fresh(boss=boss)
+    sim.end_round(s)
+    assert len(s.enemies) == 2 and not s.allies
+    assert s.enemies[1].team == 1
+    sim.end_round(s)                                  # troll attacks player
+    assert s.player.hp < 3000
+
+
 def test_shield_consumed_at_cast_reduces_whole_dot():
     sim, s = fresh()
     boss = s.enemies[0]
