@@ -147,6 +147,33 @@ edge is draw-distribution knowledge, not mechanics. Search also trades
 mean speed for reliability on the prism line, which is what a
 risk-sensitive objective would ask for.
 
+## Live-data results (`w101-pve-live-scrape`)
+
+Real scraped spells vs real scraped bosses (`results_live.json`; paired
+seeds n=400 for the scripted policies, RL at 20k episodes; not comparable
+to the classic tables — different rules, values, and boss stats):
+
+```
+matchup                                DP-LB   heuristic   dp-transfer   search(k=5)    RL(20k)
+fire vs Lord Nightshade (690)           3.36   98%/ 5.5     82%/ 3.4      100%/ 4.1     98%/ 5.5
+fire vs Krokopatra (960, 70% storm-res) 3.36   98%/ 5.5     82%/ 3.4      100%/ 4.2     98%/ 5.2
+death vs Jade Oni (6000, 80% life-res)  8.35   77%/11.1     83%/ 9.2       89%/10.4     94%/10.4
+storm vs Jade Oni (6000)                8.73    0%/  —      43%/10.0        0%/  —      59%/12.5
+balance vs Krokopatra (960)             3.45   97%/ 9.0     98%/ 4.3       96%/ 5.2     99%/ 6.3
+ice [prism] vs Krokopatra (960)         4.31*  99%/ 5.5     97%/ 4.7       97%/ 5.0     97%/ 5.9
+```
+
+The storm row is the headline: with two Krakens and an X-pip Tempest
+against 6,000 HP, **no scripted policy wins at all** — the blade-stack
+heuristic can't sequence it, and the determinized search inherits that
+blindness because its rollouts use the heuristic as the base policy (all
+candidates look equally lost). The DP transfer wins 43% because the
+abstraction actually knows the Tempest pip math, and the RL agent reaches
+59% by learning X-pip patience on top of draw adaptation. Debugging this
+table also caught two real defects (a drain-only-hand stall in the DP
+transfer and multi-school buffs invisible to the abstraction) — the
+baseline ladder keeps earning its keep.
+
 ## Scope of the current claims
 
 This is an **Arc-1-style, single-enemy PvE optimization laboratory**, not

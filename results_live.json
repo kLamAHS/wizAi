@@ -1,0 +1,251 @@
+{
+ "ruleset_id": "w101-pve-live-scrape",
+ "matches": [
+  {
+   "school": "fire",
+   "deck": "oneshot",
+   "boss": "Lord Nightshade",
+   "boss_hp": 690,
+   "dp_lb": 3.3558333332504846,
+   "dp_lb_partial": false,
+   "paired": {
+    "heuristic": {
+     "win_rate": 0.985,
+     "mean_ttk": 5.5152284263959395,
+     "median_ttk": 5,
+     "p90_ttk": 7,
+     "p99_ttk": 8,
+     "mean_hp_left": 1000000000.0,
+     "ruleset": "w101-pve-live-scrape"
+    },
+    "dp-transfer": {
+     "win_rate": 0.825,
+     "mean_ttk": 3.375757575757576,
+     "median_ttk": 3,
+     "p90_ttk": 6,
+     "p99_ttk": 7,
+     "mean_hp_left": 1000000000.0,
+     "ruleset": "w101-pve-live-scrape"
+    },
+    "search(k=5)": {
+     "win_rate": 0.9975,
+     "mean_ttk": 4.1002506265664165,
+     "median_ttk": 4,
+     "p90_ttk": 6,
+     "p99_ttk": 9,
+     "mean_hp_left": 1000000000.0,
+     "ruleset": "w101-pve-live-scrape"
+    }
+   },
+   "rl": [
+    0.98175,
+    5.544690603514133
+   ]
+  },
+  {
+   "school": "fire",
+   "deck": "oneshot",
+   "boss": "Krokopatra",
+   "boss_hp": 960,
+   "dp_lb": 3.3558333332504846,
+   "dp_lb_partial": false,
+   "paired": {
+    "heuristic": {
+     "win_rate": 0.985,
+     "mean_ttk": 5.5152284263959395,
+     "median_ttk": 5,
+     "p90_ttk": 7,
+     "p99_ttk": 8,
+     "mean_hp_left": 1000000000.0,
+     "ruleset": "w101-pve-live-scrape"
+    },
+    "dp-transfer": {
+     "win_rate": 0.825,
+     "mean_ttk": 3.375757575757576,
+     "median_ttk": 3,
+     "p90_ttk": 6,
+     "p99_ttk": 7,
+     "mean_hp_left": 1000000000.0,
+     "ruleset": "w101-pve-live-scrape"
+    },
+    "search(k=5)": {
+     "win_rate": 0.9975,
+     "mean_ttk": 4.145363408521304,
+     "median_ttk": 4,
+     "p90_ttk": 6,
+     "p99_ttk": 9,
+     "mean_hp_left": 1000000000.0,
+     "ruleset": "w101-pve-live-scrape"
+    }
+   },
+   "rl": [
+    0.98,
+    5.22219387755102
+   ]
+  },
+  {
+   "school": "death",
+   "deck": "oneshot",
+   "boss": "Jade Oni",
+   "boss_hp": 6000,
+   "dp_lb": 8.35300048733895,
+   "dp_lb_partial": false,
+   "paired": {
+    "heuristic": {
+     "win_rate": 0.7675,
+     "mean_ttk": 11.074918566775244,
+     "median_ttk": 11,
+     "p90_ttk": 12,
+     "p99_ttk": 13,
+     "mean_hp_left": 1000000000.0,
+     "ruleset": "w101-pve-live-scrape"
+    },
+    "dp-transfer": {
+     "win_rate": 0.83,
+     "mean_ttk": 9.225903614457831,
+     "median_ttk": 9,
+     "p90_ttk": 11,
+     "p99_ttk": 11,
+     "mean_hp_left": 1000000000.0,
+     "ruleset": "w101-pve-live-scrape"
+    },
+    "search(k=5)": {
+     "win_rate": 0.89,
+     "mean_ttk": 10.42134831460674,
+     "median_ttk": 10,
+     "p90_ttk": 13,
+     "p99_ttk": 16,
+     "mean_hp_left": 1000000000.0,
+     "ruleset": "w101-pve-live-scrape"
+    }
+   },
+   "rl": [
+    0.943,
+    10.436373276776246
+   ]
+  },
+  {
+   "school": "storm",
+   "deck": "oneshot",
+   "boss": "Jade Oni",
+   "boss_hp": 6000,
+   "dp_lb": 8.73398258100866,
+   "dp_lb_partial": false,
+   "paired": {
+    "heuristic": {
+     "win_rate": 0.0,
+     "mean_ttk": NaN,
+     "median_ttk": NaN,
+     "p90_ttk": NaN,
+     "p99_ttk": NaN,
+     "mean_hp_left": 0.0,
+     "ruleset": "w101-pve-live-scrape"
+    },
+    "dp-transfer": {
+     "win_rate": 0.4275,
+     "mean_ttk": 10.0,
+     "median_ttk": 10,
+     "p90_ttk": 10,
+     "p99_ttk": 10,
+     "mean_hp_left": 1000000000.0,
+     "ruleset": "w101-pve-live-scrape"
+    },
+    "search(k=5)": {
+     "win_rate": 0.0,
+     "mean_ttk": NaN,
+     "median_ttk": NaN,
+     "p90_ttk": NaN,
+     "p99_ttk": NaN,
+     "mean_hp_left": 0.0,
+     "ruleset": "w101-pve-live-scrape"
+    }
+   },
+   "rl": [
+    0.59,
+    12.540677966101695
+   ]
+  },
+  {
+   "school": "balance",
+   "deck": "oneshot",
+   "boss": "Krokopatra",
+   "boss_hp": 960,
+   "dp_lb": 3.453970588176393,
+   "dp_lb_partial": false,
+   "paired": {
+    "heuristic": {
+     "win_rate": 0.9725,
+     "mean_ttk": 9.002570694087403,
+     "median_ttk": 10,
+     "p90_ttk": 10,
+     "p99_ttk": 11,
+     "mean_hp_left": 1000000000.0,
+     "ruleset": "w101-pve-live-scrape"
+    },
+    "dp-transfer": {
+     "win_rate": 0.98,
+     "mean_ttk": 4.247448979591836,
+     "median_ttk": 4,
+     "p90_ttk": 5,
+     "p99_ttk": 6,
+     "mean_hp_left": 1000000000.0,
+     "ruleset": "w101-pve-live-scrape"
+    },
+    "search(k=5)": {
+     "win_rate": 0.9625,
+     "mean_ttk": 5.166233766233766,
+     "median_ttk": 5,
+     "p90_ttk": 7,
+     "p99_ttk": 10,
+     "mean_hp_left": 1000000000.0,
+     "ruleset": "w101-pve-live-scrape"
+    }
+   },
+   "rl": [
+    0.98525,
+    6.311088556204009
+   ]
+  },
+  {
+   "school": "ice",
+   "deck": "prism",
+   "boss": "Krokopatra",
+   "boss_hp": 960,
+   "dp_lb": 4.310749999949087,
+   "dp_lb_partial": true,
+   "paired": {
+    "heuristic": {
+     "win_rate": 0.9875,
+     "mean_ttk": 5.508860759493671,
+     "median_ttk": 5,
+     "p90_ttk": 6,
+     "p99_ttk": 8,
+     "mean_hp_left": 1000000000.0,
+     "ruleset": "w101-pve-live-scrape"
+    },
+    "dp-transfer": {
+     "win_rate": 0.97,
+     "mean_ttk": 4.654639175257732,
+     "median_ttk": 5,
+     "p90_ttk": 6,
+     "p99_ttk": 7,
+     "mean_hp_left": 1000000000.0,
+     "ruleset": "w101-pve-live-scrape"
+    },
+    "search(k=5)": {
+     "win_rate": 0.97,
+     "mean_ttk": 5.033505154639175,
+     "median_ttk": 5,
+     "p90_ttk": 7,
+     "p99_ttk": 10,
+     "mean_hp_left": 1000000000.0,
+     "ruleset": "w101-pve-live-scrape"
+    }
+   },
+   "rl": [
+    0.974,
+    5.853952772073922
+   ]
+  }
+ ]
+}
