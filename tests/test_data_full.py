@@ -64,13 +64,13 @@ def test_effect_mapping_spot_checks():
     assert resh.ops[0]["op"] == "reshuffle"
 
 
-def test_backfill_uses_hit_avg_not_headline():
-    elf = CARDS["Fire Elf"]
-    hit = next(o for o in elf.ops if o["op"] == "hit")
-    assert hit["amount"] == 50                # not the 260 aggregate
-    assert "backfilled-avg" in elf.confidence
+def test_exact_roll_tables_replaced_backfill():
     kraken = CARDS["Kraken"]
-    assert kraken.ops[0]["amount"] == 550
+    assert kraken.ops[0]["outcomes"] == [520.0, 535.0, 550.0, 565.0, 580.0]
+    assert kraken.ops[0]["amount"] == 550     # mean drives DP/heuristics
+    # backfill is essentially retired now that wrappers carry sub-effects
+    assert sum(1 for c in CARDS.values()
+               if "backfilled" in c.confidence) <= 3
 
 
 def test_provenance_suffixes_and_sources():
@@ -203,7 +203,7 @@ def test_name_dispatch_decodes_new_ops():
 def test_damage_ranges_sampled_under_live_rules():
     cat = CARDS["Fire Cat"]
     hit = cat.ops[0]
-    assert hit.get("spread") == (80.0, 120.0)
+    assert hit.get("outcomes") == [80.0, 90.0, 100.0, 110.0, 120.0]
     boss = Boss("Dummy", 10**6, "life", 0)
     sim = Sim(dict(CARDS), ["Fireblade"], "fire", boss,
               rng=random.Random(4), rules=LIVE_RULES)
@@ -215,9 +215,9 @@ def test_damage_ranges_sampled_under_live_rules():
         hp0 = s.boss_hp
         if sim.cast(s, cat) > 0:
             d = hp0 - s.boss_hp
-            assert 80 - 1e-6 <= d <= 120 + 1e-6
+            assert round(d, 3) in (80.0, 90.0, 100.0, 110.0, 120.0)
             vals.add(round(d, 3))
-    assert len(vals) > 5                       # actually varying
+    assert len(vals) >= 3                      # the roll table is rolling
 
 
 def test_damage_ranges_off_under_classic_rules():

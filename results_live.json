@@ -15,31 +15,31 @@
      "median_ttk": 5,
      "p90_ttk": 7,
      "p99_ttk": 8,
-     "mean_hp_left": 1000000000.0,
+     "mean_hp_left": 999998923.5942947,
      "ruleset": "w101-pve-live-scrape"
     },
     "dp-transfer": {
-     "win_rate": 0.825,
-     "mean_ttk": 3.375757575757576,
-     "median_ttk": 3,
-     "p90_ttk": 6,
-     "p99_ttk": 7,
-     "mean_hp_left": 1000000000.0,
+     "win_rate": 0.735,
+     "mean_ttk": 5.901360544217687,
+     "median_ttk": 6,
+     "p90_ttk": 7,
+     "p99_ttk": 8,
+     "mean_hp_left": 999999485.7142857,
      "ruleset": "w101-pve-live-scrape"
     },
     "search(k=5)": {
      "win_rate": 0.9975,
-     "mean_ttk": 4.1002506265664165,
+     "mean_ttk": 4.273182957393484,
      "median_ttk": 4,
      "p90_ttk": 6,
      "p99_ttk": 9,
-     "mean_hp_left": 1000000000.0,
+     "mean_hp_left": 999999473.3375945,
      "ruleset": "w101-pve-live-scrape"
     }
    },
    "rl": [
-    0.98175,
-    5.544690603514133
+    0.9785,
+    5.628257537046499
    ]
   },
   {
@@ -56,31 +56,31 @@
      "median_ttk": 5,
      "p90_ttk": 7,
      "p99_ttk": 8,
-     "mean_hp_left": 1000000000.0,
+     "mean_hp_left": 999998923.5942947,
      "ruleset": "w101-pve-live-scrape"
     },
     "dp-transfer": {
-     "win_rate": 0.825,
-     "mean_ttk": 3.375757575757576,
-     "median_ttk": 3,
-     "p90_ttk": 6,
-     "p99_ttk": 7,
-     "mean_hp_left": 1000000000.0,
+     "win_rate": 0.705,
+     "mean_ttk": 5.99645390070922,
+     "median_ttk": 6,
+     "p90_ttk": 7,
+     "p99_ttk": 8,
+     "mean_hp_left": 999999463.8297873,
      "ruleset": "w101-pve-live-scrape"
     },
     "search(k=5)": {
-     "win_rate": 0.9975,
-     "mean_ttk": 4.145363408521304,
+     "win_rate": 0.985,
+     "mean_ttk": 4.730964467005077,
      "median_ttk": 4,
      "p90_ttk": 6,
-     "p99_ttk": 9,
-     "mean_hp_left": 1000000000.0,
+     "p99_ttk": 10,
+     "mean_hp_left": 999999362.6861691,
      "ruleset": "w101-pve-live-scrape"
     }
    },
    "rl": [
-    0.98,
-    5.22219387755102
+    0.98175,
+    5.529921059332824
    ]
   },
   {
@@ -120,8 +120,8 @@
     }
    },
    "rl": [
-    0.943,
-    10.436373276776246
+    0.93,
+    9.99005376344086
    ]
   },
   {
@@ -161,8 +161,8 @@
     }
    },
    "rl": [
-    0.59,
-    12.540677966101695
+    0.577,
+    12.550259965337954
    ]
   },
   {
@@ -174,9 +174,9 @@
    "dp_lb_partial": false,
    "paired": {
     "heuristic": {
-     "win_rate": 0.9725,
-     "mean_ttk": 9.002570694087403,
-     "median_ttk": 10,
+     "win_rate": 0.9825,
+     "mean_ttk": 7.608142493638677,
+     "median_ttk": 9,
      "p90_ttk": 10,
      "p99_ttk": 11,
      "mean_hp_left": 1000000000.0,
@@ -193,7 +193,7 @@
     },
     "search(k=5)": {
      "win_rate": 0.9625,
-     "mean_ttk": 5.166233766233766,
+     "mean_ttk": 5.246753246753247,
      "median_ttk": 5,
      "p90_ttk": 7,
      "p99_ttk": 10,
@@ -202,8 +202,8 @@
     }
    },
    "rl": [
-    0.98525,
-    6.311088556204009
+    0.98875,
+    4.946144121365361
    ]
   },
   {
@@ -224,8 +224,8 @@
      "ruleset": "w101-pve-live-scrape"
     },
     "dp-transfer": {
-     "win_rate": 0.97,
-     "mean_ttk": 4.654639175257732,
+     "win_rate": 0.9475,
+     "mean_ttk": 4.907651715039578,
      "median_ttk": 5,
      "p90_ttk": 6,
      "p99_ttk": 7,
@@ -233,18 +233,18 @@
      "ruleset": "w101-pve-live-scrape"
     },
     "search(k=5)": {
-     "win_rate": 0.97,
-     "mean_ttk": 5.033505154639175,
+     "win_rate": 0.985,
+     "mean_ttk": 5.2055837563451774,
      "median_ttk": 5,
      "p90_ttk": 7,
-     "p99_ttk": 10,
+     "p99_ttk": 11,
      "mean_hp_left": 1000000000.0,
      "ruleset": "w101-pve-live-scrape"
     }
    },
    "rl": [
-    0.974,
-    5.853952772073922
+    0.98325,
+    5.505212306127638
    ]
   }
  ]

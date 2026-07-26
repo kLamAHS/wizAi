@@ -44,25 +44,42 @@ for school, bname, dname in MATCHES:
     print(f"\n=== {school} [{dname}] vs {bname} "
           f"({boss.hp} HP, {boss.school}, resist {boss.resist_map}) ===")
     t0 = time.time()
+    hp_buckets = -(-speed_boss.hp // 25)
+    print(f"  [1/4] DP value iteration ({hp_buckets} hp buckets"
+          f"{', X-pip actions — the slow one' if any(cards[n].x_pips for n in dl) else ''})...",
+          flush=True)
     V, pol, meta = solve(dict(cards), dl, speed_boss, school)
     lb = V[meta["H"], 1, 0]
     star = "*" if meta["unmodeled"] else ""
+    print(f"        DP-LB {lb:.2f}{star}  ({time.time()-t0:.0f}s)"
+          + (f"  unmodeled: {meta['unmodeled']}" if star else ""), flush=True)
     sim = Sim(dict(cards), dl, school, speed_boss, player_hp=10**9,
               rules=LIVE_RULES)
-    stats = evaluate_paired(sim, {
-        "heuristic": max((make_blade_stack(k) for k in (1, 2, 3, 4)),
-                         key=lambda p: evaluate(sim, p, n=800)[0]),
-        "dp-transfer": dp_policy(V, pol, meta, school),
-        "search(k=5)": make_search_policy(k=5),
-    }, n=400)
+    print("  [2/4] picking best blade-stack heuristic (4 x 800 fights)...",
+          flush=True)
+    heur = max((make_blade_stack(k) for k in (1, 2, 3, 4)),
+               key=lambda p: evaluate(sim, p, n=800)[0])
+    policies = {"heuristic": heur,
+                "dp-transfer": dp_policy(V, pol, meta, school),
+                "search(k=5)": make_search_policy(k=5)}
+    stats = {}
+    print("  [3/4] paired evaluation, 400 seeded fights per policy:",
+          flush=True)
+    for name, p in policies.items():
+        tp = time.time()
+        stats[name] = evaluate_paired(sim, {name: p}, n=400)[name]
+        st = stats[name]
+        print(f"        {name:<12} win {st['win_rate']*100:5.1f}%  "
+              f"mean {st['mean_ttk']:6.2f}  p90 {st['p90_ttk']:3.0f}  "
+              f"({time.time()-tp:.0f}s)", flush=True)
+    print("  [4/4] RL: 20k training episodes (snapshot every 4k):",
+          flush=True)
     agent, rsim = train_agent(dict(cards), dl, school, speed_boss,
-                              episodes=20000, warm=True, seed=0)
+                              episodes=20000, warm=True, seed=0,
+                              log=4000, snap_every=4000)
     w_rl, m_rl = evaluate(rsim, agent.policy(), n=4000)
-    print(f"  DP-LB {lb:6.2f}{star}   ({time.time()-t0:.0f}s)")
-    for name, st in stats.items():
-        print(f"  {name:<12} win {st['win_rate']*100:5.1f}%  "
-              f"mean {st['mean_ttk']:6.2f}  p90 {st['p90_ttk']:3.0f}")
-    print(f"  RL(20k)      win {w_rl*100:5.1f}%  mean {m_rl:6.2f}")
+    print(f"        RL(20k)      win {w_rl*100:5.1f}%  mean {m_rl:6.2f}  "
+          f"(match total {time.time()-t0:.0f}s)", flush=True)
     results.append(dict(school=school, deck=dname, boss=bname,
                         boss_hp=boss.hp, dp_lb=lb, dp_lb_partial=bool(star),
                         paired=stats, rl=[w_rl, m_rl]))

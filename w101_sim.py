@@ -954,7 +954,9 @@ class Sim:
                     group_state[g] = (cm, crm)
                 charm_mult, crit_mult = group_state[g]
                 amount = o.get("amount", o.get("total", 0.0))
-                if o.get("spread") and self.rules.damage_ranges:
+                if o.get("outcomes") and self.rules.damage_ranges:
+                    amount = self.rng.choice(o["outcomes"])   # game roll table
+                elif o.get("spread") and self.rules.damage_ranges:
                     amount = self.rng.uniform(*o["spread"])   # one roll/cast
                 if o.get("per_pip"):
                     amount *= pips_spent

@@ -202,6 +202,44 @@ def _map_effect(e, spell, avg_backfill):
     return None, f"undecoded effect {nm or i}", None
 
 
+def _merge_wrapped(ops):
+    """Random-outcome wrappers arrive as N sibling sub-effects (Fire Cat:
+    kDamage 80/90/100/110/120, tagged _wrapped). Merge consecutive matching
+    siblings into ONE op carrying the roll table in 'outcomes'; amount
+    becomes the mean (used by DP/heuristics and when damage_ranges is off)."""
+    MERGE = ("hit", "dot", "drain", "heal", "hot")
+    out = []
+    for op in ops:
+        w = op.pop("_wrapped", False)
+        key = "amount" if "amount" in op else "total"
+        same = (w and out and out[-1].get("outcomes") is not None and
+                out[-1]["op"] == op["op"] and
+                out[-1].get("tgt") == op.get("tgt") and
+                out[-1].get("school") == op.get("school") and
+                out[-1].get("rounds") == op.get("rounds") and
+                op["op"] in MERGE)
+        if same:
+            prev = out[-1]
+            pkey = "amount" if "amount" in prev else "total"
+            prev["outcomes"].append(op[key])
+            prev[pkey] = sum(prev["outcomes"]) / len(prev["outcomes"])
+        elif w and op["op"] in MERGE:
+            op["outcomes"] = [op[key]]
+            out.append(op)
+        else:
+            out.append(op)
+    for o in out:
+        if o.get("outcomes") is not None and o.get("per_pip"):
+            # X-pip wrappers list PIP TIERS (80/160/.../1120 = base*pips),
+            # not a roll table: keep the per-pip base, never rng.choice it
+            key = "amount" if "amount" in o else "total"
+            o[key] = o["outcomes"][0]
+            o.pop("outcomes")
+        elif o.get("outcomes") is not None and len(o["outcomes"]) == 1:
+            o.pop("outcomes")
+    return out
+
+
 def _merge_ward_charges(ops):
     """Fuel-style repeats: N identical ward ops -> one op with N charges."""
     out = []
@@ -279,11 +317,14 @@ def load_spells_full(path="spells_full.json",
                 if name in ranges:            # backfilled hit gets its range
                     op["spread"] = ranges[name]
                     notes.add("range")
+            if e.get("_wrapped"):
+                op["_wrapped"] = True
             ops.append(op)
         if why:
             skipped.append((key, why))
             continue
-        ops = assign_subkeys(_regroup(_merge_ward_charges(ops)))
+        ops = assign_subkeys(_regroup(_merge_ward_charges(
+            _merge_wrapped(ops))))
         try:
             pips = int(s.get("pips") or 0)
         except (TypeError, ValueError):
@@ -349,7 +390,7 @@ LIVE_DECKS = {
                     ["Feint"] * 2),
     },
     "storm": {
-        "oneshot": (["Kraken"] * 2 + ["Tempest"] +
+        "oneshot": (["Triton"] * 2 + ["Tempest"] +
                     ["Stormblade"] * 2 + ["Tri Blade"] * 2 +
                     ["Storm Trap"] + ["Tri Trap"] + ["Feint"] * 2),
     },
