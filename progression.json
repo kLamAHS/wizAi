@@ -4,150 +4,144 @@
  "levels": [
   {
    "level": 1,
-   "boss_hp": 495,
-   "pool": 22,
+   "boss_hp": 100,
+   "pool": 1,
    "capacity": 10,
-   "deck_size": 5,
-   "win": 0.9985,
-   "ttk": 3.672508763144717,
+   "deck_size": 3,
+   "win": 0.925,
+   "ttk": 3.0605405405405404,
    "deck": [
-    "Fireblade",
-    "Firezilla",
-    "Skeletal Dragon Fire"
+    "Fire Cat"
    ]
   },
   {
    "level": 5,
-   "boss_hp": 875,
-   "pool": 22,
+   "boss_hp": 320,
+   "pool": 3,
    "capacity": 10,
-   "deck_size": 5,
-   "win": 0.9975,
-   "ttk": 3.1593984962406014,
+   "deck_size": 4,
+   "win": 0.9535,
+   "ttk": 3.384373361300472,
    "deck": [
-    "Fireblade",
-    "Firezilla",
-    "Skeletal Dragon Fire"
+    "Fire Cat",
+    "Fire Elf"
    ]
   },
   {
    "level": 10,
-   "boss_hp": 1350,
-   "pool": 22,
+   "boss_hp": 595,
+   "pool": 6,
    "capacity": 12,
-   "deck_size": 6,
-   "win": 0.9915,
-   "ttk": 7.015632879475542,
+   "deck_size": 5,
+   "win": 0.9465,
+   "ttk": 4.45377707342842,
    "deck": [
-    "Evil Snowman Fire",
-    "Fireblade",
-    "Firezilla",
-    "Skeletal Dragon Fire"
+    "Fire Cat",
+    "Fire Elf",
+    "Sunbird"
    ]
   },
   {
    "level": 15,
-   "boss_hp": 1825,
-   "pool": 22,
+   "boss_hp": 870,
+   "pool": 6,
    "capacity": 12,
-   "deck_size": 7,
-   "win": 0.98,
-   "ttk": 8.994897959183673,
+   "deck_size": 5,
+   "win": 0.74,
+   "ttk": 6.426351351351351,
    "deck": [
-    "Fireblade",
-    "Firezilla",
-    "Salamander Fire",
-    "Skeletal Dragon Fire"
+    "Fire Elf",
+    "Sprite",
+    "Sunbird"
    ]
   },
   {
    "level": 20,
-   "boss_hp": 2300,
-   "pool": 30,
+   "boss_hp": 1145,
+   "pool": 15,
    "capacity": 14,
-   "deck_size": 11,
-   "win": 0.9765,
-   "ttk": 10.071172555043523,
+   "deck_size": 10,
+   "win": 0.9275,
+   "ttk": 7.632345013477089,
    "deck": [
     "Balanceblade",
-    "Evil Snowman Fire",
+    "Curse",
+    "Fire Cat",
     "Fireblade",
-    "Firezilla",
-    "Skeletal Dragon Fire",
-    "Spirit Trap",
-    "Tri Trap"
+    "Heck Hound",
+    "Sunbird"
    ]
   },
   {
    "level": 25,
-   "boss_hp": 2775,
-   "pool": 31,
+   "boss_hp": 1420,
+   "pool": 15,
    "capacity": 14,
    "deck_size": 12,
-   "win": 0.952,
-   "ttk": 8.118697478991596,
+   "win": 0.9015,
+   "ttk": 7.128119800332779,
    "deck": [
     "Balanceblade",
-    "Evil Snowman Fire",
+    "Curse",
     "Fire Trap",
     "Fireblade",
     "Heck Hound",
     "Hex",
-    "Skeletal Dragon Fire",
-    "Tri Trap"
+    "Sunbird"
    ]
   },
   {
    "level": 30,
-   "boss_hp": 3250,
-   "pool": 37,
+   "boss_hp": 1695,
+   "pool": 23,
    "capacity": 16,
-   "deck_size": 10,
-   "win": 0.975,
-   "ttk": 10.11897435897436,
+   "deck_size": 13,
+   "win": 0.981,
+   "ttk": 7.8751274209989806,
    "deck": [
     "Balanceblade",
     "Feint",
     "Fireblade",
-    "Firezilla",
-    "Skeletal Dragon Fire",
+    "Heck Hound",
+    "Hex",
+    "Scald",
+    "Spirit Blade",
     "Spirit Trap"
    ]
   },
   {
    "level": 40,
-   "boss_hp": 4200,
-   "pool": 41,
+   "boss_hp": 2245,
+   "pool": 25,
    "capacity": 16,
-   "deck_size": 11,
-   "win": 0.9855,
-   "ttk": 9.91121258244546,
+   "deck_size": 10,
+   "win": 0.9865,
+   "ttk": 7.975671566142929,
    "deck": [
-    "Balanceblade",
     "Feint",
-    "Heck Hound",
-    "Hex",
-    "Skeletal Dragon Fire",
-    "Spirit Blade",
+    "Fire Trap",
+    "Fuel",
+    "Phoenix",
+    "Scald",
     "Tri Blade"
    ]
   },
   {
    "level": 50,
-   "boss_hp": 5150,
-   "pool": 44,
+   "boss_hp": 2795,
+   "pool": 27,
    "capacity": 16,
-   "deck_size": 10,
-   "win": 0.9835,
-   "ttk": 9.460599898322318,
+   "deck_size": 12,
+   "win": 0.9755,
+   "ttk": 10.673500768836494,
    "deck": [
-    "Fire Trap",
-    "Fireblade",
+    "Balanceblade",
+    "Feint",
+    "Fire Dragon",
     "Fuel",
-    "Hex",
-    "Salamander Fire",
-    "Skeletal Dragon Fire",
-    "Tri Blade"
+    "Heck Hound",
+    "Pixie",
+    "Scald"
    ]
   }
  ]
