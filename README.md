@@ -251,7 +251,16 @@ loader report.
 6. Search-generated expert data → filtered behavior cloning → conservative
    offline RL (CQL/IQL) → sequence models, benchmarked against each other
    on held-out bosses/cards/rulesets.
-7. Deck × policy bilevel optimization (the bandit is the placeholder).
+7. Deck × policy bilevel optimization. Status: `deck_builder.py`
+   implements rungs 1–2 (legal deck space with capacity/copy limits,
+   template-sampled candidate search, two-stage screen → RL fine-tune,
+   size-aware scoring so extra cards must buy reliability) plus
+   `random_boss()` and a held-out generalization harness. Rungs 3–4
+   remain: a learned deck scorer replacing the simulation screen, and a
+   single deck-conditioned combat policy trained jointly across decks
+   (today each fine-tune trains per-deck). Level-gated progression needs
+   level data the dumps don't carry reliably (`level_restriction` is
+   mostly null).
 8. Post-classic rulesets behind `Rules`: criticals-on eras, mastery
    amulets, school pips/archmastery — each as a frozen named ruleset.
 
