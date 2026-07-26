@@ -390,7 +390,7 @@ LIVE_DECKS = {
                     ["Feint"] * 2),
     },
     "storm": {
-        "oneshot": (["Kraken"] * 2 + ["Tempest"] +
+        "oneshot": (["Triton"] * 2 + ["Tempest"] +
                     ["Stormblade"] * 2 + ["Tri Blade"] * 2 +
                     ["Storm Trap"] + ["Tri Trap"] + ["Feint"] * 2),
     },
