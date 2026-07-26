@@ -1,91 +1,277 @@
 """
-Wizard101 PvE combat simulator — v0.2
-Objective: expected turns-to-kill (TTK) a boss; substrate for DP + RL.
+Wizard101 PvE combat simulator — v0.3
+Objective: turns-to-kill / survival substrate for DP + RL.
 
-Changes from v0.1:
-  - SAME-NAME CHARMS/WARDS DO NOT STACK (game rule). A second identical
-    pending Fireblade is uncastable; buff diversity (Fireblade + Elemental
-    Blade + Fuel + Fire Trap + Feint...) is how real one-shots are built.
-  - Real pip model: 7 pip slots, each normal (worth 1) or power (worth 2 for
-    same-school spells, 1 for off-school). Off-school utility (Elemental
-    Blade/Trap, Feint...) now costs what it really costs.
-  - Multi-charge wards (Fuel = +25% to next 3 fire hits) and Feint's +30%
-    incoming backlash on the caster.
-  - Self-damage spells (Immolate = 600 out / 250 to self).
-  - Bosses have school, resist, and boost; damage is adjusted by the
-    defender's resist/boost table (bosses resist own school, take extra
-    from the opposing school).
+v0.3 rebuilds the engine around the offline-ML design notes ("factored
+simulator, symbolic state, effect provenance"). Changes from v0.2:
 
-Still simplified: no criticals, no shields/heals for the player, 1v1,
-no minions, X-pip spells skipped.
+  - HANGING EFFECTS ARE STRUCTURED OBJECTS with provenance. Every charm/
+    ward carries (name, source) as its stack key: a deck Fireblade, a
+    treasure-card Fireblade ("Fireblade@tc") and a Sharpened Fireblade all
+    stack with each other, while two copies of the same one stay illegal.
+    Wards process FIFO in placement order with a running damage school, so
+    trap -> prism -> shield ordering resolves exactly like the game.
+  - FULL EFFECT TAXONOMY: shields (single/dual/universal), prisms (school
+    conversion; the answer to same-school walls), weaknesses, mantles &
+    accuracy charms, heal charms, dispels, absorbs, DoTs/HoTs as scheduled
+    multi-round effects (modifiers locked at cast), drains (heal-modifier
+    immune), X-pip spells, multi-hit components (Minotaur's 50-hit eats
+    shields/blades before the 445-hit), AoE with per-target resolution,
+    stuns + stun blocks, pip gifts, threat modifiers, minion summons.
+  - MULTI-ACTOR: 1 player + ally minions vs N enemies. Enemies pick
+    targets by a simple threat model. Boss attacks go through the player's
+    ward/resist pipeline, so shields and Feint backlash resolve properly.
+  - CHEAT HOOKS: per-enemy scripted interrupt rules (after_player_cast /
+    round_start / hp_below) casting free effect ops, per the "rules engine
+    plus cheat scripts" design.
+  - TREASURE CARDS: per-fight sideboard; draws are random; a TC drawn this
+    round cannot be discarded this round.
+  - RULES/VERSION OBJECT: era tag + toggles for version-sensitive rules
+    (fizzle now discards the card — community-confirmed; v0.2 kept it),
+    pluggable crit/block model (off in the classic era), pierce.
+
+Card mechanics the flat scrape can't express live in content.py as ordered
+effect primitives with confidence tags. Unsupported cards are excluded at
+load, never silently mis-modeled.
+
+Still simplified: no gear/pet stat layer (fields exist, default 0), no
+archmastery/shadow/school pips (post-classic era), enemy decks are flat
+scripted hits + cheats, no player-side team play (allies are minions only).
 """
-import json, random
+import copy, json, random
 from dataclasses import dataclass, field
 
+import content
+
+SCHOOLS = ("fire", "ice", "storm", "myth", "life", "death", "balance")
 OPPOSING = {"fire": "ice", "ice": "fire", "storm": "myth", "myth": "storm",
             "life": "death", "death": "life", "balance": None}
 
-# corrections / enrichments the flat scrape can't express
+# corrections / enrichments kept from v0.2 (numbers embedded in flavor text)
 OVERRIDES = {
     "Immolate": {"damage": 600.0, "self_damage": 250.0},
     "Fuel":     {"charges": 3},
     "Feint":    {"backlash": 0.30},
 }
-# which schools a multi-school buff applies to (from card descriptions)
-BUFF_SCHOOLS = {
-    "Elemental Blade": {"fire", "ice", "storm"},
-    "Elemental Trap":  {"fire", "ice", "storm"},
-    "Spirit Blade":    {"life", "myth", "death"},
-    "Spirit Trap":     {"life", "myth", "death"},
-    "Hex": None, "Feint": None, "Curse": None,          # None = any school
-    "Balanceblade": None, "Bladestorm": None, "Dark Pact": None,
-}
+BUFF_SCHOOLS = content.BUFF_SCHOOLS
+
+
+# ---------------------------------------------------------------- rules
+
+@dataclass
+class Rules:
+    """Version-sensitive knobs, tagged by era. The classic era (Wizard City
+    -> Dragonspyre, pre-Celestia) has no criticals and no off-school power
+    pip mastery."""
+    era: str = "classic"
+    hand_size: int = 7
+    max_pip_slots: int = 7
+    fizzle_discards_card: bool = True    # community-confirmed; v0.2 kept it
+    crit_multiplier: float = 2.0         # used only when crit chances > 0
+    stun_blocks: int = 4                 # blocks granted when a stun lands
+    dot_ticks_use_cast_snapshot: bool = True   # modifiers locked at cast
+
 
 # ---------------------------------------------------------------- card model
 
-@dataclass
+@dataclass(eq=False)                    # identity semantics for hand/deck ops
 class Card:
     name: str
     school: str
     pips: int
     accuracy: float            # 0..1
-    kind: str                  # 'damage' | 'blade' | 'trap'
-    damage: float = 0.0
+    kind: str                  # primary kind, see load_cards
+    damage: float = 0.0        # headline number (DP/heuristics); ops drive sim
     percent: float = 0.0
-    charges: int = 1           # ward charges (Fuel = 3)
+    charges: int = 1
     self_damage: float = 0.0
-    backlash: float = 0.0      # Feint: +incoming on caster
+    backlash: float = 0.0
     applies_to: object = "own" # 'own' | set of schools | None (any)
+    ops: list = field(default_factory=list)
+    aoe: bool = False
+    x_pips: bool = False
+    source: str = "deck"       # provenance tier: deck|tc|item|pet|enchant-*
+    confidence: str = "community"
 
-def load_cards(path):
-    raw = json.load(open(path))
-    cards = {}
+    @property
+    def stack_key(self):
+        return (self.name, self.source)
+
+
+def _kind_from_ops(ops):
+    """Primary kind of a curated card, by scanning its ops in priority
+    order (drives DP/RL feature spaces & the scripted heuristics)."""
+    kinds = [o["op"] for o in ops]
+    if "hit" in kinds or "dot" in kinds:
+        return "damage"
+    if "drain" in kinds:
+        return "drain"
+    if "heal" in kinds or "hot" in kinds:
+        return "heal"
+    for o in ops:
+        if o["op"] == "charm":
+            ck = o.get("kind", "damage")
+            if ck == "accuracy":
+                return "mantle" if o["percent"] < 0 else "acc_charm"
+            if ck == "heal":
+                return "heal_charm"
+            if o.get("tgt", "self") in ("self", "ally", "allies"):
+                return "blade" if o["percent"] > 0 else "shield"
+            return "weakness" if o["percent"] < 0 else "blade"
+        if o["op"] == "ward":
+            if o.get("tgt", "self") in ("enemy", "enemies"):
+                return "trap" if o["percent"] > 0 else "shield"
+            return "shield" if o["percent"] < 0 else "trap"
+    first = {"prism": "prism", "absorb": "shield", "global": "global",
+             "dispel": "dispel", "summon": "summon"}
+    for o in ops:
+        if o["op"] in first:
+            return first[o["op"]]
+    return "util"
+
+
+def _default_ops(r, kind, aoe):
+    """Generic ops for cards the curated table doesn't cover."""
+    tgt_e = "enemies" if aoe else "enemy"
+    name = r["name"]
+    # buff coverage: BUFF_SCHOOLS overrides (None = any school), else own
+    buff_schools = "own"
+    if name in BUFF_SCHOOLS:
+        cov = BUFF_SCHOOLS[name]
+        buff_schools = None if cov is None else sorted(cov)
+    if kind == "damage":
+        return [{"op": "hit", "amount": r["avg_damage"], "tgt": tgt_e,
+                 "group": 0}]
+    if kind == "drain":
+        return [{"op": "drain", "amount": r["avg_damage"], "fraction": 0.5,
+                 "tgt": tgt_e}]
+    if kind == "blade":
+        tgt = "allies" if aoe else "self"
+        return [{"op": "charm", "percent": (r["percent"] or 0) / 100,
+                 "schools": buff_schools, "tgt": tgt}]
+    if kind == "weakness":
+        return [{"op": "charm", "percent": (r["percent"] or 0) / 100,
+                 "schools": None, "tgt": tgt_e}]
+    if kind == "trap":
+        return [{"op": "ward", "percent": (r["percent"] or 0) / 100,
+                 "schools": buff_schools, "tgt": tgt_e}]
+    if kind == "shield":
+        schools = content.SHIELD_SCHOOLS.get(name, "own")
+        return [{"op": "ward", "percent": (r["percent"] or 0) / 100,
+                 "schools": schools, "tgt": "self"}]
+    if kind == "global":
+        return [{"op": "global", "field": "damage", "schools": "own",
+                 "percent": (r["percent"] or 0) / 100}]
+    return []
+
+
+def load_cards(path, report=None):
+    """Build the card table: base fields from the scrape, mechanics from
+    content.CARD_OPS where curated, generic ops otherwise. Cards that can't
+    be expressed are collected in `report['skipped']` instead of loaded."""
+    raw = json.load(open(path)) + content.EXTRA_CARDS
+    cards, skipped = {}, []
     for r in raw:
-        kind = None
-        if r["type"] == "damage" and r["avg_damage"]:
-            kind = "damage"
-        elif r["type"] == "charm" and (r["percent"] or 0) > 0:
-            kind = "blade"
-        elif r["type"] == "ward" and (r["percent"] or 0) > 0:
-            kind = "trap"
-        if not kind:
+        name = r["name"]
+        if name in content.UNSUPPORTED:
+            skipped.append((name, "unsupported mechanic"))
             continue
+        pct = r["percent"] or 0
+        curated = content.CARD_OPS.get(name)
+        # ---- primary kind (drives DP/RL feature spaces & heuristics)
+        if curated:
+            kind = _kind_from_ops(curated)
+        elif r["type"] == "damage" and r["avg_damage"]:
+            kind = "damage"
+        elif r["type"] == "steal" and r["avg_damage"]:
+            kind = "drain"
+        elif r["type"] == "charm" and pct > 0:
+            kind = "blade"
+        elif r["type"] == "charm" and pct < 0:
+            kind = "weakness"
+        elif r["type"] == "ward" and pct > 0:
+            kind = "trap"
+        elif r["type"] == "ward" and pct < 0:
+            kind = "shield"
+        elif r["type"] == "global" and pct:
+            kind = "global"
+        else:
+            kind = None
+        if kind is None:
+            skipped.append((name, f"no curated ops for {r['type']}"))
+            continue
+        # ---- pip cost
+        x_pips = str(r["pips"]).upper() == "X"
         try:
-            pip_cost = int(r["pips"])
+            pip_cost = 0 if x_pips else int(r["pips"])
         except (TypeError, ValueError):
-            continue                                   # X-pip spells skipped
-        ov = OVERRIDES.get(r["name"], {})
-        cards[r["name"]] = Card(
-            name=r["name"], school=r["school"], pips=pip_cost,
+            skipped.append((name, "bad pip cost"))
+            continue
+        ov = OVERRIDES.get(name, {})
+        headline = content.DAMAGE_TOTALS.get(name, r["avg_damage"] or 0.0)
+        card = Card(
+            name=name, school=r["school"], pips=pip_cost,
             accuracy=(r["accuracy"] or 100) / 100, kind=kind,
-            damage=ov.get("damage", r["avg_damage"] or 0.0),
-            percent=(r["percent"] or 0) / 100,
+            damage=ov.get("damage", headline),
+            percent=pct / 100,
             charges=ov.get("charges", 1),
             self_damage=ov.get("self_damage", 0.0),
             backlash=ov.get("backlash", 0.0),
-            applies_to=BUFF_SCHOOLS.get(r["name"], "own"),
+            applies_to=BUFF_SCHOOLS.get(name, "own"),
+            aoe=bool(r["aoe"]) or any(o.get("tgt") in ("enemies", "allies")
+                                      for o in (curated or [])),
+            x_pips=x_pips,
+            confidence=content.CONFIDENCE.get(name, "community"),
         )
+        card.ops = [dict(o) for o in (curated or
+                                      _default_ops(r, kind, card.aoe))]
+        if not card.ops:
+            skipped.append((name, "no ops"))
+            continue
+        cards[name] = card
+    if report is not None:
+        report["skipped"] = skipped
     return cards
+
+
+def expand_variants(cards, decklist):
+    """Materialize provenance variants named in a decklist: "Fireblade@tc"
+    becomes a clone with source='tc' and its own stack key."""
+    for entry in decklist:
+        if entry in cards or "@" not in entry:
+            continue
+        base_name, src = entry.rsplit("@", 1)
+        base = cards[base_name]
+        clone = Card(**{f: getattr(base, f) for f in
+                        ("school", "pips", "accuracy", "kind", "damage",
+                         "percent", "charges", "self_damage", "backlash",
+                         "applies_to", "aoe", "x_pips", "confidence")},
+                     name=entry, ops=[dict(o) for o in base.ops])
+        clone.source = src
+        cards[entry] = clone
+    return cards
+
+
+def sharpened(cards, name, bonus=0.10):
+    """Enchanted variant with its own stack key (Sharpened Blade / Potent
+    Trap semantics — post-classic, provided for provenance experiments)."""
+    base = cards[name]
+    vname = f"Sharpened {name}" if base.kind == "blade" else f"Potent {name}"
+    if vname in cards:
+        return cards[vname]
+    clone = Card(**{f: getattr(base, f) for f in
+                    ("school", "pips", "accuracy", "kind", "damage",
+                     "percent", "charges", "self_damage", "backlash",
+                     "applies_to", "aoe", "x_pips")},
+                 name=vname, ops=[dict(o) for o in base.ops],
+                 source="enchant", confidence="community")
+    clone.percent = base.percent + bonus
+    for o in clone.ops:
+        if o["op"] in ("charm", "ward") and o.get("kind", "damage") == "damage":
+            o["percent"] = o["percent"] + bonus
+    cards[vname] = clone
+    return clone
+
 
 def buff_applies(card, damage_school):
     if card.applies_to == "own":
@@ -94,6 +280,136 @@ def buff_applies(card, damage_school):
         return True
     return damage_school in card.applies_to
 
+
+# ---------------------------------------------------------------- effects
+
+@dataclass(eq=False)                    # identity semantics for removal
+class Hanging:
+    """One hanging effect on an actor. slot 'charm' = outgoing (blades,
+    weaknesses, mantles, heal charms, dispels), slot 'ward' = incoming
+    (traps, shields, prisms, absorbs, Feint backlash)."""
+    name: str
+    slot: str                  # 'charm' | 'ward'
+    kind: str                  # 'damage'|'accuracy'|'heal'|'dispel'|'prism'|'absorb'
+    percent: float = 0.0
+    schools: object = None     # None = any, else set of damage schools
+    charges: int = 1
+    source: str = "deck"
+    protected: bool = False    # Aegis/Indemnity semantics: immune to removal
+    convert_to: str = None     # prisms
+    amount: float = 0.0        # absorb pool
+    caster: str = ""
+
+    @property
+    def stack_key(self):
+        return (self.name, self.source)
+
+    def matches(self, school):
+        return self.schools is None or school in self.schools
+
+
+@dataclass
+class OverTime:
+    name: str
+    kind: str                  # 'dot' | 'hot'
+    school: str
+    per_tick: float            # snapshot at cast: modifiers already applied
+    rounds_left: int
+    caster: str = ""
+
+
+@dataclass
+class Bubble:
+    name: str
+    fld: str                   # 'damage' | 'heal' | 'pip_chance'
+    schools: object            # None = any
+    percent: float = 0.0
+
+
+# ---------------------------------------------------------------- cheats
+
+@dataclass
+class CheatRule:
+    """Scripted interrupt: when `event` fires and `when` matches, the enemy
+    executes `ops` for free (out of turn), like the game's boss cheats.
+    events: 'after_player_cast' (when: card_kind / card_kinds), 'round_start'
+    (when: {} or {'every': n}), 'hp_below' (when: {'frac': x}, fires once)."""
+    event: str
+    ops: list
+    when: dict = field(default_factory=dict)
+    message: str = ""
+    once: bool = False
+    fired: int = 0
+
+    def matches_cast(self, card):
+        kinds = self.when.get("card_kinds") or \
+            ([self.when["card_kind"]] if "card_kind" in self.when else None)
+        return kinds is None or card.kind in kinds
+
+
+@dataclass
+class CheatScript:
+    rules: list = field(default_factory=list)
+
+    def fresh(self):
+        return CheatScript([CheatRule(r.event, [dict(o) for o in r.ops],
+                                      dict(r.when), r.message, r.once)
+                            for r in self.rules])
+
+
+# ---------------------------------------------------------------- actors
+
+@dataclass
+class Actor:
+    name: str
+    school: str
+    hp: float
+    max_hp: float
+    team: int                   # 0 = player side, 1 = enemy side
+    norm_pips: int = 0
+    pow_pips: int = 0
+    power_pip_chance: float = 0.0
+    accuracy_bonus: float = 0.0
+    pierce: float = 0.0
+    crit_chance: float = 0.0
+    block_chance: float = 0.0
+    damage_bonus: dict = field(default_factory=dict)   # school|'*' -> frac
+    resist: dict = field(default_factory=dict)         # school|'*' -> frac
+    boost: dict = field(default_factory=dict)          # school -> frac
+    heal_out: float = 0.0
+    heal_in: float = 0.0
+    charms: list = field(default_factory=list)         # outgoing Hangings
+    wards: list = field(default_factory=list)          # incoming Hangings
+    over_time: list = field(default_factory=list)
+    stunned: int = 0
+    stun_blocks: int = 0
+    stunable: object = None      # None = unspecified (treated as True)
+    threat: float = 0.0
+    flat_hit: float = 0.0        # scripted enemy auto-attack
+    cheat: object = None
+    is_minion: bool = False
+    minion_role: str = "attack"
+    minion_power: float = 0.0
+    hand: list = field(default_factory=list)
+    deck: list = field(default_factory=list)
+    sideboard: list = field(default_factory=list)
+    graveyard: list = field(default_factory=list)
+    fresh_tc: list = field(default_factory=list)   # TCs drawn this round
+
+    @property
+    def alive(self):
+        return self.hp > 0
+
+    @property
+    def pip_slots(self):
+        return self.norm_pips + self.pow_pips
+
+    def has_stack(self, key, slot=None):
+        pools = {"charm": self.charms, "ward": self.wards}
+        pool = pools.get(slot, self.charms + self.wards)
+        return any(h.stack_key == key for h in pool)
+
+
 # ---------------------------------------------------------------- bosses
 
 @dataclass
@@ -101,9 +417,14 @@ class Boss:
     name: str
     hp: int
     school: str
-    dmg: int                    # flat hit per round
+    dmg: int                    # flat hit per round (0 = immortal-player view)
     resist_own: float = 0.40    # damage reduction vs own school
     boost_opp: float = 0.25     # extra damage from opposing school
+    cheat: object = None        # CheatScript
+    stunable: object = None     # None = unspecified (research-doc convention)
+    pierce: float = 0.0
+    crit_chance: float = 0.0
+    block_chance: float = 0.0
 
     def incoming_mult(self, spell_school):
         if spell_school == self.school:
@@ -112,138 +433,796 @@ class Boss:
             return 1 + self.boost_opp
         return 1.0
 
+    def to_actor(self):
+        resist = {self.school: self.resist_own}
+        boost = {}
+        opp = OPPOSING.get(self.school)
+        if opp:
+            boost[opp] = self.boost_opp
+        return Actor(name=self.name, school=self.school, hp=float(self.hp),
+                     max_hp=float(self.hp), team=1, resist=resist,
+                     boost=boost, flat_hit=float(self.dmg),
+                     cheat=self.cheat.fresh() if self.cheat else None,
+                     stunable=self.stunable, pierce=self.pierce,
+                     crit_chance=self.crit_chance,
+                     block_chance=self.block_chance)
+
+
 # ---------------------------------------------------------------- game state
 
-@dataclass
 class State:
-    boss_hp: float
-    player_hp: float
-    norm_pips: int = 0
-    pow_pips: int = 0
-    blades: dict = field(default_factory=dict)   # name -> Card (pending)
-    traps: dict = field(default_factory=dict)    # name -> [Card, charges_left]
-    self_vuln: float = 0.0                       # Feint backlash on player
-    hand: list = field(default_factory=list)
-    deck: list = field(default_factory=list)
-    turn: int = 0
+    """Multi-actor combat state with v0.2-compatible views (boss_hp,
+    player_hp, pips, blades, traps, hand, deck) so the DP transfer and the
+    tabular RL featurizer keep working unchanged in 1v1."""
+
+    def __init__(self, player, enemies, allies=None):
+        self.player = player
+        self.enemies = enemies
+        self.allies = allies or []
+        self.bubble = None
+        self.turn = 0
+
+    # ---- compat views ------------------------------------------------
+    @property
+    def boss_hp(self):
+        return self.enemies[0].hp
+
+    @boss_hp.setter
+    def boss_hp(self, v):
+        self.enemies[0].hp = v
+
+    @property
+    def player_hp(self):
+        return self.player.hp
+
+    @player_hp.setter
+    def player_hp(self, v):
+        self.player.hp = v
+
+    @property
+    def norm_pips(self):
+        return self.player.norm_pips
+
+    @norm_pips.setter
+    def norm_pips(self, v):
+        self.player.norm_pips = v
+
+    @property
+    def pow_pips(self):
+        return self.player.pow_pips
+
+    @pow_pips.setter
+    def pow_pips(self, v):
+        self.player.pow_pips = v
 
     @property
     def pip_slots(self):
-        return self.norm_pips + self.pow_pips
+        return self.player.pip_slots
+
+    @property
+    def hand(self):
+        return self.player.hand
+
+    @property
+    def deck(self):
+        return self.player.deck
+
+    @property
+    def blades(self):
+        """Positive damage charms on the player, keyed like v0.2 (deck-
+        provenance cards keep their bare name)."""
+        return {h.name: h for h in self.player.charms
+                if h.kind == "damage" and h.percent > 0}
+
+    @property
+    def traps(self):
+        """Wards sitting on the primary enemy (positive + prisms), keyed by
+        name -> [hanging, charges_left]."""
+        out = {}
+        for h in self.enemies[0].wards:
+            if h.kind == "prism" or (h.kind == "damage" and h.percent > 0):
+                out[h.name] = [h, h.charges]
+        return out
+
+    @property
+    def self_vuln(self):
+        """v0.2 view of Feint backlash: total +incoming on the player."""
+        mult = 1.0
+        for h in self.player.wards:
+            if h.kind == "damage" and h.percent > 0:
+                mult *= 1 + h.percent
+        return mult - 1.0
+
+    def living_enemies(self):
+        return [e for e in self.enemies if e.alive]
+
+
+@dataclass
+class Action:
+    """Rich action: optional pre-cast hand edits, then an optional cast.
+    Plain policies may still return a Card (cast at enemy 0) or None."""
+    card: object = None
+    target: int = 0            # index into state.enemies for enemy-targeted
+    ally: int = -1             # index into allies; -1 = self/player
+    discards: tuple = ()
+    draw_tc: int = 0
+
+
+# ---------------------------------------------------------------- simulator
 
 class Sim:
     def __init__(self, cards, decklist, school, boss, power_pip=0.85,
-                 player_hp=3000, rng=None):
+                 player_hp=3000, rng=None, enemies=None, sideboard=None,
+                 rules=None, player_stats=None):
         self.cards, self.school, self.pp = cards, school, power_pip
+        expand_variants(self.cards, decklist)
+        if sideboard:
+            expand_variants(self.cards, sideboard)
         self.decklist, self.boss = decklist, boss
+        self.extra_bosses = enemies or []
+        self.sideboard_list = sideboard or []
         self.player_hp0 = player_hp
+        self.player_stats = player_stats or {}
+        self.rules = rules or Rules()
         self.rng = rng or random.Random()
 
     # ---- pips ------------------------------------------------------------
+    def _pip_value(self, actor, card):
+        return 2 if card.school == actor.school else 1
+
     def afford(self, s, card):
+        a = s.player
+        if card.x_pips:
+            return a.pip_slots >= 1
         if card.school == self.school:
-            return s.norm_pips + 2 * s.pow_pips >= card.pips
-        return s.norm_pips + s.pow_pips >= card.pips
+            return a.norm_pips + 2 * a.pow_pips >= card.pips
+        return a.norm_pips + a.pow_pips >= card.pips
 
     def spend(self, s, card):
+        """Returns effective pips spent (drives X-pip spells)."""
+        a = s.player
+        if card.x_pips:
+            eff = a.norm_pips + a.pow_pips * self._pip_value(a, card)
+            a.norm_pips = a.pow_pips = 0
+            return eff
         c = card.pips
-        if card.school == self.school:
-            use_pow = min(s.pow_pips, c // 2)
+        if card.school == a.school:
+            use_pow = min(a.pow_pips, c // 2)
             c -= 2 * use_pow
-            s.pow_pips -= use_pow
+            a.pow_pips -= use_pow
             if c > 0:
-                if s.norm_pips >= c:
-                    s.norm_pips -= c
+                if a.norm_pips >= c:
+                    a.norm_pips -= c
                 else:                       # odd remainder, only power left
-                    s.pow_pips -= 1
+                    a.pow_pips -= 1
         else:                               # power pips worth 1 off-school
-            use_norm = min(s.norm_pips, c)
-            s.norm_pips -= use_norm
-            s.pow_pips -= (c - use_norm)
+            use_norm = min(a.norm_pips, c)
+            a.norm_pips -= use_norm
+            a.pow_pips -= (c - use_norm)
+        return card.pips
 
     def gain_pip(self, s):
-        if s.pip_slots >= 7:
+        a = s.player
+        if a.pip_slots >= self.rules.max_pip_slots:
             return
-        if self.rng.random() < self.pp:
-            s.pow_pips += 1
+        chance = a.power_pip_chance
+        if s.bubble and s.bubble.fld == "pip_chance":
+            chance = min(1.0, chance + s.bubble.percent)
+        if self.rng.random() < chance:
+            a.pow_pips += 1
         else:
-            s.norm_pips += 1
+            a.norm_pips += 1
 
-    # ---- casting ---------------------------------------------------------
-    def can_cast(self, s, card):
+    # ---- legality ----------------------------------------------------------
+    def can_cast(self, s, card, target=0):
         if card not in s.hand or not self.afford(s, card):
             return False
-        if card.kind == "blade" and card.name in s.blades:
-            return False                    # same-name charms don't stack
-        if card.kind == "trap" and card.name in s.traps:
+        enemies = s.living_enemies()
+        if not enemies:
             return False
+        tgt_enemy = s.enemies[target] if target < len(s.enemies) else None
+        if tgt_enemy is not None and not tgt_enemy.alive:
+            tgt_enemy = enemies[0]
+        if any(op["op"] == "sacrifice_minion" for op in card.ops) and \
+                not any(m.alive for m in s.allies):
+            return False
+        # duplicate-placement rule: a PURE hanging-effect card is uncastable
+        # while its primary effect is still pending on the chosen target
+        # (the in-game "you may not place the same effect twice" X). Cards
+        # with damage/heal components always cast; dup riders just skip.
+        HANGING = ("charm", "ward", "prism", "absorb", "dispel")
+        if all(op["op"] in HANGING + ("self_damage",) for op in card.ops):
+            op = next(op for op in card.ops if op["op"] in HANGING)
+            key = (card.name, card.source)
+            slot = "charm" if op["op"] in ("charm", "dispel") else "ward"
+            tgt = op.get("tgt", "self")
+            if tgt in ("self", "allies", "ally"):
+                if s.player.has_stack(key, slot):
+                    return False
+            elif tgt == "enemy":
+                if tgt_enemy is not None and tgt_enemy.has_stack(key, slot):
+                    return False
+            elif tgt == "enemies":
+                if all(e.has_stack(key, slot) for e in enemies):
+                    return False
         return True
 
-    def cast(self, s, card):
-        """Returns damage dealt. Fizzle keeps card and pips (game rule)."""
-        if self.rng.random() > card.accuracy:
+    # ---- resolution core ---------------------------------------------------
+    def _consume_damage_charms(self, caster, school):
+        """All matching damage charms (blades AND weaknesses) apply to one
+        strike and are consumed together, like the game."""
+        mult = 1.0
+        keep = []
+        for h in caster.charms:
+            if h.kind == "damage" and h.matches(school):
+                mult *= 1 + h.percent
+            else:
+                keep.append(h)
+        caster.charms[:] = keep
+        return mult
+
+    def _consume_accuracy_charms(self, caster, school):
+        delta = 0.0
+        keep = []
+        for h in caster.charms:
+            if h.kind == "accuracy" and h.matches(school):
+                delta += h.percent
+            else:
+                keep.append(h)
+        caster.charms[:] = keep
+        return delta
+
+    def _consume_heal_charms(self, caster):
+        mult = 1.0
+        keep = []
+        for h in caster.charms:
+            if h.kind == "heal":
+                mult *= 1 + h.percent
+            else:
+                keep.append(h)
+        caster.charms[:] = keep
+        return mult
+
+    def _take_dispel(self, caster, school):
+        for h in caster.charms:
+            if h.kind == "dispel" and h.matches(school):
+                caster.charms.remove(h)
+                return True
+        return False
+
+    def _ward_pass(self, target, school, pierce):
+        """FIFO over the target's wards with a running damage school:
+        traps/shields consume if they match the CURRENT school, prisms
+        convert it. Pierce eats resist first (handled by caller), remainder
+        shaves shield magnitude. Returns (multiplier, final_school)."""
+        mult = 1.0
+        keep = []
+        for h in target.wards:
+            if h.kind == "prism":
+                if h.schools is None or school in h.schools:
+                    school = h.convert_to
+                    continue                     # consumed
+                keep.append(h)
+            elif h.kind == "damage":
+                if h.matches(school):
+                    pct = h.percent
+                    if pct < 0 and pierce > 0:
+                        shaved = min(pierce, -pct)
+                        pct += shaved
+                        pierce -= shaved
+                    mult *= 1 + pct
+                    if h.charges > 1:
+                        h.charges -= 1
+                        keep.append(h)
+                else:
+                    keep.append(h)
+            else:
+                keep.append(h)
+        target.wards[:] = keep
+        return mult, school, pierce
+
+    def _absorb_pass(self, target, dmg):
+        keep = []
+        for h in target.wards:
+            if h.kind == "absorb" and dmg > 0:
+                soak = min(h.amount, dmg)
+                dmg -= soak
+                h.amount -= soak
+                if h.amount > 0:
+                    keep.append(h)
+            else:
+                keep.append(h)
+        target.wards[:] = keep
+        return dmg
+
+    def _resist_mult(self, target, school, pierce):
+        res = target.resist.get(school, 0.0) + target.resist.get("*", 0.0)
+        res = max(res - pierce, 0.0) if res > 0 else res
+        mult = 1 - res
+        mult *= 1 + target.boost.get(school, 0.0)
+        return mult
+
+    def _crit_mult(self, caster, target):
+        if caster.crit_chance <= 0 or self.rng.random() >= caster.crit_chance:
+            return 1.0
+        if target.block_chance > 0 and self.rng.random() < target.block_chance:
+            return 1.0
+        return self.rules.crit_multiplier
+
+    def _damage_bonus(self, caster, school):
+        return 1 + caster.damage_bonus.get(school, 0.0) + \
+            caster.damage_bonus.get("*", 0.0)
+
+    def _bubble_damage(self, s, school):
+        b = s.bubble
+        if b and b.fld == "damage" and (b.schools is None or school in b.schools):
+            return 1 + b.percent
+        return 1.0
+
+    def _strike(self, s, caster, target, school, base, charm_mult, crit_mult):
+        """One damage component against one target. Returns damage dealt."""
+        pierce = caster.pierce
+        dmg = base * charm_mult
+        dmg *= self._damage_bonus(caster, school)
+        dmg *= self._bubble_damage(s, school)
+        dmg *= crit_mult
+        wmult, school, pierce = self._ward_pass(target, school, pierce)
+        dmg *= wmult
+        dmg *= self._resist_mult(target, school, pierce)
+        dmg = max(dmg, 0.0)
+        dmg = self._absorb_pass(target, dmg)
+        target.hp -= dmg
+        caster.threat += dmg
+        return dmg
+
+    def _heal(self, s, caster, target, amount, charm_mult=1.0):
+        amt = amount * (1 + caster.heal_out) * charm_mult
+        if s.bubble and s.bubble.fld == "heal":
+            amt *= 1 + s.bubble.percent
+        amt *= 1 + target.heal_in
+        amt = max(amt, 0.0)
+        healed = min(amt, target.max_hp - target.hp)
+        target.hp += healed
+        caster.threat += 0.5 * healed
+        return healed
+
+    def _resolve_targets(self, s, caster, spec, target_idx, ally_idx):
+        """Map an op target spec to actor lists, from `caster`'s side."""
+        if caster.team == 0:
+            foes = s.living_enemies()
+            friends = [s.player] + [m for m in s.allies if m.alive]
+            me = caster
+            tgt_foe = None
+            if foes:
+                want = s.enemies[target_idx] if target_idx < len(s.enemies) else None
+                tgt_foe = want if want in foes else foes[0]
+            tgt_friend = me if ally_idx < 0 else \
+                (s.allies[ally_idx] if ally_idx < len(s.allies) and
+                 s.allies[ally_idx].alive else me)
+        else:
+            friends = [e for e in s.enemies if e.alive]
+            pool = [s.player] + [m for m in s.allies if m.alive]
+            tgt_foe = max(pool, key=lambda a: a.threat) if pool else None
+            foes = pool
+            me, tgt_friend = caster, caster
+        minions = [m for m in (s.allies if caster.team == 0 else [])
+                   if m.alive]
+        return {"self": [me], "ally": [tgt_friend], "allies": friends,
+                "enemy": [tgt_foe] if tgt_foe else [],
+                "enemies": foes,
+                "minion": minions[:1]}.get(spec, [me])
+
+    def _hanging_from_op(self, op, card_name, source, caster_name):
+        o = op["op"]
+        if o == "charm":
+            return Hanging(card_name, "charm", op.get("kind", "damage"),
+                           percent=op["percent"], schools=op.get("_schools"),
+                           source=source, caster=caster_name)
+        if o == "ward":
+            return Hanging(card_name, "ward", "damage",
+                           percent=op["percent"], schools=op.get("_schools"),
+                           charges=op.get("charges", 1), source=source,
+                           caster=caster_name)
+        if o == "prism":
+            return Hanging(card_name, "ward", "prism",
+                           schools={op["from"]}, convert_to=op["to"],
+                           source=source, caster=caster_name)
+        if o == "absorb":
+            return Hanging(card_name, "ward", "absorb", amount=op["amount"],
+                           source=source, caster=caster_name)
+        if o == "dispel":
+            return Hanging(card_name, "charm", "dispel",
+                           schools={op["school"]}, source=source,
+                           caster=caster_name)
+        raise ValueError(o)
+
+    def execute_ops(self, s, caster, card_name, source, ops, school,
+                    pips_spent=0, accuracy_school=None, target_idx=0,
+                    ally_idx=-1, crit_roll=True):
+        """Run a card's op list. Damage/dot ops in the same `group` share one
+        charm/ward consumption; separate groups consume separately (multi-
+        hit). Returns total damage dealt to enemies."""
+        total = 0.0
+        group_state = {}        # group id -> (charm_mult, crit_mult)
+        for op in ops:
+            o = dict(op)
+            kind = o["op"]
+            spec_school = o.get("school") or school
+            tgt_spec = o.get("tgt", "enemy" if kind in
+                             ("hit", "dot", "drain", "stun", "dispel")
+                             else "self")
+            targets = self._resolve_targets(s, caster, tgt_spec, target_idx,
+                                            ally_idx)
+
+            if kind in ("hit", "dot", "drain"):
+                g = o.get("group", 0)
+                if g not in group_state:
+                    cm = self._consume_damage_charms(caster, spec_school)
+                    crm = self._crit_mult(caster, targets[0]) \
+                        if (crit_roll and targets) else 1.0
+                    group_state[g] = (cm, crm)
+                charm_mult, crit_mult = group_state[g]
+                amount = o.get("amount", o.get("total", 0.0))
+                if o.get("per_pip"):
+                    amount *= pips_spent
+                for t in targets:
+                    if kind == "hit":
+                        total += self._strike(s, caster, t, spec_school,
+                                              amount, charm_mult, crit_mult)
+                    elif kind == "drain":
+                        dealt = self._strike(s, caster, t, spec_school,
+                                             amount, charm_mult, crit_mult)
+                        total += dealt
+                        # drains ignore heal modifiers (community-confirmed)
+                        healed = min(dealt * o.get("fraction", 0.5),
+                                     caster.max_hp - caster.hp)
+                        caster.hp += healed
+                    else:                     # dot: snapshot at cast
+                        pierce = caster.pierce
+                        dmg = amount * charm_mult
+                        dmg *= self._damage_bonus(caster, spec_school)
+                        dmg *= self._bubble_damage(s, spec_school)
+                        dmg *= crit_mult
+                        wmult, fs, pierce = self._ward_pass(t, spec_school,
+                                                            pierce)
+                        dmg *= wmult
+                        dmg *= self._resist_mult(t, fs, pierce)
+                        dmg = max(dmg, 0.0)
+                        rounds = o.get("rounds", 3)
+                        t.over_time.append(OverTime(card_name, "dot", fs,
+                                                    dmg / rounds, rounds,
+                                                    caster.name))
+
+            elif kind == "heal":
+                amount = o["amount"] * (pips_spent if o.get("per_pip") else 1)
+                cm = self._consume_heal_charms(caster)
+                for t in targets:
+                    self._heal(s, caster, t, amount, cm)
+
+            elif kind == "hot":
+                cm = self._consume_heal_charms(caster)
+                rounds = o.get("rounds", 3)
+                amt = o["total"] * (1 + caster.heal_out) * cm
+                if s.bubble and s.bubble.fld == "heal":
+                    amt *= 1 + s.bubble.percent
+                for t in targets:
+                    t.over_time.append(OverTime(card_name, "hot", school,
+                                                amt / rounds, rounds,
+                                                caster.name))
+
+            elif kind in ("charm", "ward", "prism", "absorb", "dispel"):
+                o["_schools"] = _op_schools_resolved(o, school)
+                h = self._hanging_from_op(o, card_name, source, caster.name)
+                for t in targets:
+                    if t.has_stack(h.stack_key, h.slot):
+                        continue              # same stack key never doubles
+                    (t.charms if h.slot == "charm" else t.wards).append(
+                        copy.copy(h))
+
+            elif kind == "self_damage":
+                caster.hp -= o["amount"]      # unavoidable by design
+
+            elif kind == "gain_pips":
+                for t in targets:
+                    room = self.rules.max_pip_slots - t.pip_slots
+                    t.norm_pips += max(0, min(o["n"], room))
+
+            elif kind == "stun":
+                for t in targets:
+                    if t.stunable is False:
+                        continue
+                    if t.stun_blocks > 0:
+                        t.stun_blocks -= 1
+                        continue
+                    t.stunned = max(t.stunned, o.get("rounds", 1))
+                    t.stun_blocks += self.rules.stun_blocks
+
+            elif kind in ("remove", "steal"):
+                what = o["what"]
+                for t in targets:
+                    h = _pick_removable(t, what)
+                    if h is None:
+                        continue
+                    if what == "dot":
+                        t.over_time.remove(h)
+                        continue
+                    lst = t.charms if h.slot == "charm" else t.wards
+                    lst.remove(h)
+                    if kind == "steal" and not caster.has_stack(h.stack_key):
+                        (caster.charms if h.slot == "charm"
+                         else caster.wards).append(h)
+
+            elif kind == "global":
+                s.bubble = Bubble(card_name, o["field"],
+                                  _op_schools_resolved(o, school),
+                                  o["percent"])
+
+            elif kind == "summon":
+                blk = content.MINIONS[o["minion"]]
+                s.allies.append(Actor(
+                    name=o["minion"], school=blk["school"], hp=float(blk["hp"]),
+                    max_hp=float(blk["hp"]), team=caster.team, is_minion=True,
+                    minion_role=blk["role"], minion_power=float(blk["power"]),
+                    stunable=True))
+
+            elif kind == "stun_block":
+                for t in targets:
+                    t.stun_blocks += o.get("n", 1)
+
+            elif kind == "sacrifice_minion":
+                minions = [m for m in s.allies if m.alive] \
+                    if caster.team == 0 else []
+                if minions:
+                    minions[0].hp = 0
+                    if o.get("pips"):
+                        room = self.rules.max_pip_slots - caster.pip_slots
+                        caster.norm_pips += max(0, min(o["pips"], room))
+                    if o.get("heal"):
+                        self._heal(s, caster, caster, o["heal"],
+                                   self._consume_heal_charms(caster))
+
+            elif kind == "threat":
+                for t in targets:
+                    if "add" in o:
+                        t.threat += o["add"]
+                    else:
+                        t.threat *= o.get("mult", 0.5)
+        return total
+
+    # ---- casting -----------------------------------------------------------
+    def cast(self, s, card, target=0, ally=-1):
+        """Player casts a card. Returns damage dealt (0.0 on fizzle/dispel/
+        non-damage). Fizzle keeps pips; the card is discarded (Rules)."""
+        caster = s.player
+        # dispel check: consumes the dispel, the pips AND the card
+        if self._take_dispel(caster, card.school):
+            s.hand.remove(card)
+            caster.graveyard.append(card)
+            self.spend(s, card)
+            return 0.0
+        acc = card.accuracy + caster.accuracy_bonus
+        acc += self._consume_accuracy_charms(caster, card.school)
+        if self.rng.random() > min(max(acc, 0.0), 1.0):
+            if self.rules.fizzle_discards_card:
+                s.hand.remove(card)
+                caster.graveyard.append(card)
             return 0.0
         s.hand.remove(card)
-        self.spend(s, card)
-        if card.kind == "blade":
-            s.blades[card.name] = card
-        elif card.kind == "trap":
-            s.traps[card.name] = [card, card.charges]
-            if card.backlash:
-                s.self_vuln = card.backlash
-        elif card.kind == "damage":
-            mult = 1.0
-            for b in list(s.blades.values()):
-                if buff_applies(b, card.school):
-                    mult *= 1 + b.percent
-                    del s.blades[b.name]
-            for name, (t, ch) in list(s.traps.items()):
-                if buff_applies(t, card.school):
-                    mult *= 1 + t.percent
-                    if ch <= 1:
-                        del s.traps[name]
-                    else:
-                        s.traps[name][1] = ch - 1
-            dmg = card.damage * mult * self.boss.incoming_mult(card.school)
-            s.boss_hp -= dmg
-            if card.self_damage:
-                s.player_hp -= card.self_damage
-            return dmg
-        return 0.0
+        caster.graveyard.append(card)
+        pips_spent = self.spend(s, card)
+        dealt = self.execute_ops(s, caster, card.name, card.source, card.ops,
+                                 card.school, pips_spent=pips_spent,
+                                 target_idx=target, ally_idx=ally)
+        self._fire_cheats(s, "after_player_cast", card=card)
+        return dealt
+
+    # ---- hand / deck / sideboard -------------------------------------------
+    def draw(self, s):
+        while len(s.hand) < self.rules.hand_size and s.player.deck:
+            s.hand.append(s.player.deck.pop())
+
+    def discard(self, s, card):
+        """Voluntary discard. A TC drawn this round can't be discarded (game
+        rule)."""
+        if card in s.player.fresh_tc:
+            return False
+        if card in s.hand:
+            s.hand.remove(card)
+            s.player.graveyard.append(card)
+            return True
+        return False
+
+    def draw_tc(self, s, n=1):
+        """Draw up to n random treasure cards into open hand slots."""
+        drawn = 0
+        while drawn < n and s.player.sideboard and \
+                len(s.hand) < self.rules.hand_size:
+            i = self.rng.randrange(len(s.player.sideboard))
+            tc = s.player.sideboard.pop(i)
+            s.hand.append(tc)
+            s.player.fresh_tc.append(tc)
+            drawn += 1
+        return drawn
+
+    # ---- cheats --------------------------------------------------------
+    def _fire_cheats(self, s, event, card=None):
+        for enemy in s.enemies:
+            if not enemy.alive or not enemy.cheat:
+                continue
+            for rule in enemy.cheat.rules:
+                if rule.event != event or (rule.once and rule.fired):
+                    continue
+                if event == "after_player_cast" and not rule.matches_cast(card):
+                    continue
+                if event == "hp_below" and \
+                        enemy.hp > rule.when.get("frac", 0.5) * enemy.max_hp:
+                    continue
+                if event == "round_start" and rule.when.get("every", 1) > 1 \
+                        and s.turn % rule.when["every"] != 0:
+                    continue
+                rule.fired += 1
+                self.execute_ops(s, enemy, f"cheat:{rule.message or event}",
+                                 "cheat", rule.ops, enemy.school)
 
     # ---- round loop ------------------------------------------------------
-    def new_state(self):
+    def _build_player(self):
         deck = [self.cards[n] for n in self.decklist]
         self.rng.shuffle(deck)
-        s = State(float(self.boss.hp), float(self.player_hp0), deck=deck)
+        stats = self.player_stats
+        return Actor(name="player", school=self.school,
+                     hp=float(self.player_hp0), max_hp=float(self.player_hp0),
+                     team=0, power_pip_chance=self.pp,
+                     accuracy_bonus=stats.get("accuracy", 0.0),
+                     pierce=stats.get("pierce", 0.0),
+                     crit_chance=stats.get("crit", 0.0),
+                     block_chance=stats.get("block", 0.0),
+                     damage_bonus=dict(stats.get("damage", {})),
+                     resist=dict(stats.get("resist", {})),
+                     heal_out=stats.get("heal_out", 0.0),
+                     heal_in=stats.get("heal_in", 0.0),
+                     deck=deck,
+                     sideboard=[self.cards[n] for n in self.sideboard_list])
+
+    def new_state(self):
+        player = self._build_player()
+        enemies = [self.boss.to_actor()] + [b.to_actor()
+                                            for b in self.extra_bosses]
+        s = State(player, enemies)
         self.gain_pip(s)
         self.draw(s)
         return s
 
-    def draw(self, s):
-        while len(s.hand) < 7 and s.deck:
-            s.hand.append(s.deck.pop())
+    def _tick_over_time(self, s, actor):
+        for e in list(actor.over_time):
+            if e.kind == "dot":
+                dmg = self._absorb_pass(actor, e.per_tick)
+                actor.hp -= dmg
+            else:
+                healed = min(e.per_tick * (1 + actor.heal_in),
+                             actor.max_hp - actor.hp)
+                actor.hp += healed
+            e.rounds_left -= 1
+            if e.rounds_left <= 0:
+                actor.over_time.remove(e)
+
+    def _enemy_turn(self, s, enemy):
+        self._tick_over_time(s, enemy)
+        if not enemy.alive:
+            return
+        if enemy.stunned > 0:
+            enemy.stunned -= 1
+            return
+        if enemy.flat_hit:
+            pool = [s.player] + [m for m in s.allies if m.alive]
+            tgt = max(pool, key=lambda a: a.threat)
+            self._strike(s, enemy, tgt, enemy.school, enemy.flat_hit,
+                         charm_mult=self._consume_damage_charms(
+                             enemy, enemy.school),
+                         crit_mult=self._crit_mult(enemy, tgt))
+
+    def _minion_turn(self, s, minion):
+        self._tick_over_time(s, minion)
+        if not minion.alive:
+            return
+        if minion.stunned > 0:
+            minion.stunned -= 1
+            return
+        if minion.minion_role == "heal":
+            self._heal(s, minion, s.player, minion.minion_power)
+        else:
+            foes = s.living_enemies()
+            if foes:
+                self._strike(s, minion, foes[0], minion.school,
+                             minion.minion_power, charm_mult=1.0,
+                             crit_mult=1.0)
 
     def end_round(self, s):
         s.turn += 1
         self.gain_pip(s)
-        if s.boss_hp > 0 and self.boss.dmg:
-            s.player_hp -= self.boss.dmg * (1 + s.self_vuln)
-            s.self_vuln = 0.0
+        self._fire_cheats(s, "round_start")
+        self._fire_cheats(s, "hp_below")
+        for m in s.allies:
+            if m.alive:
+                self._minion_turn(s, m)
+        for enemy in s.enemies:
+            if enemy.alive or enemy.over_time:
+                self._enemy_turn(s, enemy)
+        s.allies[:] = [m for m in s.allies if m.alive]
+        s.player.fresh_tc.clear()
         self.draw(s)
 
+    def _normalize_action(self, res):
+        if res is None:
+            return Action()
+        if isinstance(res, Action):
+            return res
+        if isinstance(res, tuple):
+            return Action(card=res[0], target=res[1])
+        return Action(card=res)
+
     def run(self, policy, max_turns=40):
+        """Play one duel. Returns (turns, won, player_hp_left)."""
         s = self.new_state()
         while s.turn < max_turns:
-            card = policy(self, s)
-            if card is not None and self.can_cast(s, card):
-                self.cast(s, card)
-            if s.boss_hp <= 0:
-                return s.turn + 1, True, s.player_hp
-            self.end_round(s)
-            if s.player_hp <= 0:
+            self._tick_over_time(s, s.player)
+            if s.player.hp <= 0:
                 return s.turn, False, 0
+            if not any(e.alive for e in s.enemies):
+                return s.turn + 1, True, s.player.hp
+            if s.player.stunned > 0:
+                s.player.stunned -= 1
+            else:
+                act = self._normalize_action(policy(self, s))
+                for c in act.discards:
+                    self.discard(s, c)
+                if act.draw_tc:
+                    self.draw_tc(s, act.draw_tc)
+                if act.card is not None and \
+                        self.can_cast(s, act.card, act.target):
+                    self.cast(s, act.card, act.target, act.ally)
+            if not any(e.alive for e in s.enemies):
+                return s.turn + 1, True, s.player.hp
+            self.end_round(s)
+            if s.player.hp <= 0:
+                return s.turn, False, 0
+            if not any(e.alive for e in s.enemies):
+                return s.turn, True, s.player.hp
         return max_turns, False, s.player_hp
+
+
+def _op_schools_resolved(op, card_school):
+    spec = op.get("schools", "own")
+    if spec == "own":
+        return {card_school}
+    if spec is None:
+        return None
+    return set(spec)
+
+
+def _pick_removable(actor, what):
+    """Most recent unprotected effect matching a remove/steal spec.
+    'ward_pos' = beneficial to the owner (shields, absorbs); 'ward_neg' =
+    harmful to the owner (traps, Feint backlash)."""
+    if what == "dot":
+        pool = [e for e in actor.over_time if e.kind == "dot"]
+        return pool[-1] if pool else None
+    if what == "charm_pos":
+        pool = [h for h in actor.charms if not h.protected and
+                h.kind == "damage" and h.percent > 0]
+    elif what == "charm_neg":
+        pool = [h for h in actor.charms if not h.protected and h.percent < 0]
+    elif what == "ward_pos":
+        pool = [h for h in actor.wards if not h.protected and
+                (h.kind == "absorb" or
+                 (h.kind == "damage" and h.percent < 0))]
+    elif what == "ward_neg":
+        pool = [h for h in actor.wards if not h.protected and
+                h.kind in ("damage", "prism") and
+                (h.kind == "prism" or h.percent > 0)]
+    else:
+        pool = []
+    return pool[-1] if pool else None
+
 
 # ---------------------------------------------------------------- strategies
 
@@ -254,25 +1233,55 @@ def castable(sim, s, kind):
     return [c for c in s.hand if c.kind == kind and sim.can_cast(s, c)]
 
 def strat_nuke_asap(sim, s):
-    opts = castable(sim, s, "damage")
+    opts = castable(sim, s, "damage") + castable(sim, s, "drain")
     return max(opts, key=lambda c: c.damage, default=None)
 
 def make_blade_stack(n_buffs):
-    """Stack n distinct buffs, then fire the biggest nuke once affordable."""
+    """Stack n distinct buffs, then fire the biggest nuke once affordable.
+    Traps are laid before prisms so the FIFO ward pass counts them
+    pre-conversion."""
+    def buffs(sim, s):
+        return (castable(sim, s, "blade") or castable(sim, s, "trap") or
+                castable(sim, s, "prism"))
     def strat(sim, s):
         pend = len(s.blades) + len(s.traps)
         if pend < n_buffs:
-            b = castable(sim, s, "blade") or castable(sim, s, "trap")
+            b = buffs(sim, s)
             if b:
                 return max(b, key=lambda c: c.percent)
-        nukes = [c for c in s.hand if c.kind == "damage"]
+        nukes = [c for c in s.hand if c.kind in ("damage", "drain")]
         if nukes:
             big = max(nukes, key=lambda c: c.damage)
-            if sim.afford(s, big):
+            if sim.afford(s, big) and not big.x_pips:
                 return big
-            b = castable(sim, s, "blade") or castable(sim, s, "trap")
+            if big.x_pips and effective_pips(sim, s, big) >= 7:
+                return big
+            b = buffs(sim, s)
             return max(b, key=lambda c: c.percent) if b else None
         return None
+    return strat
+
+def make_survival(inner, heal_below=0.45, shield_when_open=True):
+    """Wrap a strategy with defensive triage: heal when low, keep a shield
+    up, otherwise defer to the inner strategy."""
+    def strat(sim, s):
+        p = s.player
+        if p.hp < heal_below * p.max_hp:
+            heals = castable(sim, s, "heal")
+            if heals:
+                return max(heals, key=lambda c: c.damage or 400)
+        if shield_when_open and not any(h.percent < 0 for h in p.wards):
+            shields = castable(sim, s, "shield")
+            if shields:
+                boss = s.enemies[0]
+                best = [c for c in shields
+                        if any(h.get("op") == "ward" and
+                               (_op_schools_resolved(h, c.school) is None or
+                                boss.school in _op_schools_resolved(h, c.school))
+                               for h in c.ops)]
+                if best:
+                    return best[0]
+        return inner(sim, s)
     return strat
 
 def evaluate(sim, policy, n=20000, max_turns=40):
@@ -284,12 +1293,14 @@ def evaluate(sim, policy, n=20000, max_turns=40):
             ttk.append(t)
     return wins / n, (sum(ttk) / len(ttk) if ttk else float("nan"))
 
+
 if __name__ == "__main__":
     cards = load_cards("cards_clean.json")
     from bosses import BOSSES, DECKS
     boss = BOSSES["Jade Oni"]
     deck = DECKS["fire"]["oneshot"]
-    sim = Sim(cards, deck, school="fire", boss=Boss(boss.name, boss.hp, boss.school, 0),
+    sim = Sim(cards, deck, school="fire",
+              boss=Boss(boss.name, boss.hp, boss.school, 0),
               player_hp=10**9)
     print(f"{'strategy':<22}{'kill%':>8}{'mean TTK':>10}")
     strats = [("nuke ASAP", strat_nuke_asap)] + \
@@ -297,3 +1308,14 @@ if __name__ == "__main__":
     for name, pol in strats:
         w, m = evaluate(sim, pol, n=10000)
         print(f"{name:<22}{w*100:>7.1f}%{m:>10.2f}")
+
+    # the v0.3 headline: prisms crack the same-school wall
+    print("\n-- prism demo: ice vs Prince Gobblestone (ice, 40% self-resist)")
+    gb = BOSSES["Prince Gobblestone"]
+    for dname in ("oneshot", "prism"):
+        dl = DECKS["ice"][dname]
+        sim = Sim(cards, dl, "ice", Boss(gb.name, gb.hp, gb.school, 0),
+                  player_hp=10**9)
+        w, m = max(((evaluate(sim, make_blade_stack(k), n=4000), k)
+                    for k in range(6)), key=lambda r: (r[0][0], -r[0][1]))[0]
+        print(f"   {dname:<9} kill {w*100:5.1f}%  TTK {m:6.2f}")

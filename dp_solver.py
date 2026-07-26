@@ -37,9 +37,19 @@ def solve(cards, decklist, boss, school, hp=None):
     boss_hp = hp if hp is not None else boss.hp
     H = int(np.ceil(boss_hp / BUCKET))
     blades, traps = distinct_buffs(cards, decklist)
-    nukes = sorted({n for n in decklist if cards[n].kind == "damage"},
+    # X-pip damage is only modeled same-school (the pip axis is effective
+    # own-school pips)
+    nukes = sorted({n for n in decklist
+                    if cards[n].kind in ("damage", "drain") and
+                    not (cards[n].x_pips and cards[n].school != school)},
                    key=lambda n: cards[n].damage)
     nukes = [cards[n] for n in nukes]
+    # cards outside the blade/trap/nuke abstraction (prisms, shields,
+    # heals...): the DP simply doesn't see them — flagged so callers know
+    # the LB claim is weakened for decks that rely on them
+    unmodeled = sorted({n for n in decklist
+                        if cards[n].kind not in
+                        ("damage", "drain", "blade", "trap")})
 
     # buff configuration space: tuple(blade bits) + tuple(trap charge levels)
     blade_space = list(product(*[(0, 1)] * len(blades)))
@@ -104,8 +114,18 @@ def solve(cards, decklist, boss, school, hp=None):
                     Q[a, :, c:, ci] = q[:, c:]
                 else:
                     card = nukes[x]
-                    c = cost_eff(card)
                     mult, ni = hit(cfg, card)
+                    if card.x_pips:
+                        # damage scales with effective pips; cast empties them
+                        dh = np.round(card.damage * mult * p_idx
+                                      / BUCKET).astype(int)
+                        h_new = np.maximum(h_idx[:, None] - dh[None, :], 0)
+                        succ = E[h_new, 0, ni]
+                        q = 1 + card.accuracy * succ + \
+                            (1 - card.accuracy) * E[:, :, ci]
+                        Q[a, :, 1:, ci] = q[:, 1:]      # needs >= 1 pip
+                        continue
+                    c = cost_eff(card)
                     dh = max(1, round(card.damage * mult / BUCKET))
                     h_new = np.maximum(h_idx - dh, 0)
                     succ = E[h_new][:, np.maximum(p_idx - c, 0), ni]
@@ -119,7 +139,7 @@ def solve(cards, decklist, boss, school, hp=None):
         V = Vn
     pol = np.argmin(Q, axis=0)
     meta = dict(acts=acts, blades=blades, traps=traps, nukes=nukes,
-                cfgs=cfgs, idx=idx, H=H)
+                cfgs=cfgs, idx=idx, H=H, unmodeled=unmodeled)
     return V, pol, meta
 
 

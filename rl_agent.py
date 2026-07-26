@@ -25,12 +25,16 @@ PASS = "__pass__"
 
 # ---------------------------------------------------------------- state feats
 
+DMG_KINDS = ("damage", "drain")
+
+
 class Featurizer:
     def __init__(self, cards, decklist):
         self.names = list(dict.fromkeys(decklist))
         self.blades = [n for n in self.names if cards[n].kind == "blade"]
-        self.traps = [n for n in self.names if cards[n].kind == "trap"]
-        self.dmg = [n for n in self.names if cards[n].kind == "damage"]
+        self.traps = [n for n in self.names
+                      if cards[n].kind in ("trap", "prism")]
+        self.dmg = [n for n in self.names if cards[n].kind in DMG_KINDS]
 
     def key(self, sim, s):
         """Compact state. Hand bits only for damage cards: buff availability
@@ -43,8 +47,8 @@ class Featurizer:
         tsig = tuple(s.traps[n][1] if n in s.traps else 0 for n in self.traps)
         dmask = sum(1 << i for i, n in enumerate(self.dmg)
                     if any(c.name == n for c in s.hand))
-        nukes_left = min(sum(1 for c in s.hand if c.kind == "damage") +
-                         sum(1 for c in s.deck if c.kind == "damage"), 8)
+        nukes_left = min(sum(1 for c in s.hand if c.kind in DMG_KINDS) +
+                         sum(1 for c in s.deck if c.kind in DMG_KINDS), 8)
         return (hb, p, bmask, tsig, dmask, nukes_left)
 
     def legal(self, sim, s):
@@ -68,18 +72,31 @@ def apply_action(sim, s, act, dig_keep=None):
             return
 
 
+def _card_value(cd):
+    """Heuristic keep-value for dig ranking (higher = keep longer)."""
+    if cd.kind in DMG_KINDS:
+        return cd.damage
+    if cd.kind == "prism":
+        return 0.35
+    if cd.kind == "heal":
+        return 0.40
+    if cd.kind == "shield":
+        return abs(cd.percent)
+    return cd.percent
+
+
 def _dig(s, keep=None):
     if not s.deck or len(s.hand) < 7:
         return
     seen = set()
     def rank(cd):
         pend = (cd.kind == "blade" and cd.name in s.blades) or \
-               (cd.kind == "trap" and cd.name in s.traps)
+               (cd.kind in ("trap", "prism") and cd.name in s.traps)
         dup = cd.name in seen
         seen.add(cd.name)
-        if pend: return (0, cd.percent)
-        if dup:  return (1, cd.percent if cd.kind != "damage" else cd.damage)
-        if cd.kind != "damage": return (2, cd.percent)
+        if pend: return (0, _card_value(cd))
+        if dup:  return (1, _card_value(cd))
+        if cd.kind not in DMG_KINDS: return (2, _card_value(cd))
         return (3, cd.damage)
     junk = [cd for cd in s.hand if cd.name != keep]
     if junk:
