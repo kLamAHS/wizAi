@@ -11,13 +11,19 @@ effect provenance as a first-class citizen.
 | file | role |
 |---|---|
 | `scrape_central_wiki.py` | (run locally) refresh `cards_clean.json` from the wiki |
+| `scrape_creatures.py` | (run locally) creature pages → `creatures_clean.json` via the MediaWiki API: descriptive UA, ≥1 s throttle, `maxlag`, resumable, `cloudscraper` fallback, and a `--from-xml` mode for browser-downloaded `Special:Export` dumps when Cloudflare blocks scripts. 403 = block, never retried |
+| `spells_full.json` / `bosses_clean.json` | full scraped datasets: 18k spell records with game-data effect primitives (typed effects, params, targets, provenance variants) and 1.9k bosses with real stats (health, school, resist/boost, stunable, cheat notes) |
+| `data_full.py` | loaders for the full datasets under the **`w101-pve-live-scrape`** ruleset: effect-id map derived by cross-referencing documented spells, provenance from the variant field (`core`/`treasure`/`wand`/`amulet`/`pet` → stack sources), classic-average backfill for range-damage spells the dump doesn't carry (tagged `backfilled-avg`), undecoded effects skipped with reasons — 4.6k usable cards, `LIVE_DECKS` built from game names (the wiki scrape's "Fire Shark"/"Ice Snake" turn out not to exist; "Elemental Blade" is game-named **Tri Blade**) |
+| `experiment_full.py` | the live-data table (`results_live.json`): DP-LB, heuristics, DP-transfer, search, RL on real boss stats |
 | `content.py` | curated effect primitives (the `spell_effects` layer): DoT splits, multi-hit components, drains, prisms, absorbs, per-pip spells, dispels, summons — each entry confidence-tagged (`community`/`approx`/`inferred`), unsupported cards excluded instead of mis-modeled |
 | `w101_sim.py` | v0.3 engine: structured hanging effects with **(name, source) stack keys**, FIFO ward pass with prism school conversion, shields/weaknesses/mantles/dispels/absorbs, scheduled DoTs/HoTs (snapshot at cast), drains, X-pip spells, multi-hit link groups, AoE with per-target resolution, stuns + stun blocks, threat-driven enemy targeting, minions, boss **cheat-script hooks**, treasure-card sideboard, crit/block/pierce machinery, version-tagged `Rules` |
 | `bosses.py` | preset enemy registry + illustrative cheat scripts + candidate decks for **all seven schools** |
 | `dp_solver.py` | value iteration on the deck-free abstraction (distinct-buff configs, ward charge states, X-pip actions) = perfect-information lower bound; decks that lean on unmodeled mechanics (prisms/heals/shields) are flagged via `meta['unmodeled']` |
 | `rl_agent.py` | tabular Q-learning (backward MC returns, DP warm-start, scarcity-aware state incl. drains and prisms) + UCB deck-selection bandit per boss |
+| `search_policy.py` | belief-state baseline: determinized rollout search over the hidden draw order (deck composition is known, order isn't — the POMDP move). No training, interpretable, sits between heuristics and RL |
 | `experiment.py` | the headline tables (`results.json`): speed (immortal player) + survival (real boss damage) |
 | `tests/test_sim.py` | 70 mechanics tests, one per documented combat rule |
+| `tests/test_properties.py` | invariants that guard the ML results: blade/pierce monotonicity, deck + ward-charge conservation, seed → identical event log, damage-bound dominance, no-impossible-kill |
 
 ## Engine rules worth knowing (v0.3)
 
@@ -43,9 +49,18 @@ effect provenance as a first-class citizen.
   plus cheat scripts" pattern. The bundled scripts are illustrative shapes,
   not scraped encounters.
 - **Out of scope, declared:** criticals default off (classic era; the
-  machinery exists and is tested), no archmastery/shadow/school pips, no
-  gear/pet stat layer (fields exist, default 0), enemy decks are flat
+  machinery exists, is tested, and is pluggable via `Rules.crit_resolver`),
+  no archmastery/shadow/school pips, no gear/pet stat layer (fields exist,
+  default 0, including flat damage/flat resist), enemy decks are flat
   scripted hits + cheats. Beguile is the one card excluded as unsupported.
+- **Auditable + versioned.** `Sim(log_events=True)` records a structured
+  event log per duel (`cast_declared`, `charm_consumed`, `ward_consumed`,
+  `prism_converted`, `damage_applied`, `dot_created`, `cheat_fired`, ...):
+  same seed ⇒ identical log, and every evaluation is stamped with
+  `Rules.ruleset_id` (`w101-pve-classic-0.3`) so numbers from different
+  rule versions never mix. `max_remaining_damage()` gives an optimistic
+  bound on what the remaining deck can still deliver — the scarcity
+  feature and the `provably_unwinnable()` classifier in one.
 
 ## Headline results (v0.3 rules)
 
@@ -118,6 +133,85 @@ Other structure the v0.3 pipeline surfaced:
   within noise of each other and the pick wobbles — a known limitation,
   reported as-is.
 
+Search baseline (determinized rollouts, paired seeds, n=400, no training):
+
+```
+                              blade-stack(3)      search(k=6)
+fire vs Jade Oni [oneshot]    87.2% / 9.72        91.2% / 9.30
+ice vs Gobblestone [prism]    73.0% / 9.01        87.0% / 9.68
+```
+
+Search closes most of the heuristic→RL gap without any training (RL:
+94.3% / 7.64 on the prism matchup after 36k episodes) — the remaining RL
+edge is draw-distribution knowledge, not mechanics. Search also trades
+mean speed for reliability on the prism line, which is what a
+risk-sensitive objective would ask for.
+
+## Charts
+
+Regenerate with `python plots.py` (reads the results JSONs, writes
+`plots/*.png`).
+
+![Live-data baseline ladder](plots/live_ladder.png)
+
+![Classic bound vs learned play](plots/classic_gap.png)
+
+![Survival trade-off](plots/survival.png)
+
+![Storm learning curve](plots/storm_curve.png)
+
+## Live-data results (`w101-pve-live-scrape`)
+
+Real scraped spells vs real scraped bosses (`results_live.json`; paired
+seeds n=400 for the scripted policies, RL at 20k episodes; not comparable
+to the classic tables — different rules, values, and boss stats):
+
+```
+matchup                                DP-LB   heuristic   dp-transfer   search(k=5)    RL(20k)
+fire vs Lord Nightshade (690)           3.36   98%/ 5.5     82%/ 3.4      100%/ 4.1     98%/ 5.5
+fire vs Krokopatra (960, 70% storm-res) 3.36   98%/ 5.5     82%/ 3.4      100%/ 4.2     98%/ 5.2
+death vs Jade Oni (6000, 80% life-res)  8.35   77%/11.1     83%/ 9.2       89%/10.4     94%/10.4
+storm vs Jade Oni (6000)                8.73    0%/  —      43%/10.0        0%/  —      59%/12.5
+balance vs Krokopatra (960)             3.45   97%/ 9.0     98%/ 4.3       96%/ 5.2     99%/ 6.3
+ice [prism] vs Krokopatra (960)         4.31*  99%/ 5.5     97%/ 4.7       97%/ 5.0     97%/ 5.9
+```
+
+The storm row is the headline: with two Krakens and an X-pip Tempest
+against 6,000 HP, **no scripted policy wins at all** — the blade-stack
+heuristic can't sequence it, and the determinized search inherits that
+blindness because its rollouts use the heuristic as the base policy (all
+candidates look equally lost). The DP transfer wins 43% because the
+abstraction actually knows the Tempest pip math, and the RL agent reaches
+59% by learning X-pip patience on top of draw adaptation. Debugging this
+table also caught two real defects (a drain-only-hand stall in the DP
+transfer and multi-school buffs invisible to the abstraction) — the
+baseline ladder keeps earning its keep.
+
+**Hybrid search — an honest negative result** (`hybrid_search.py`,
+`results_hybrid.json`, paired seeds n=250 on storm vs Jade Oni): swapping
+the search's rollout base from the heuristic to the trained RL policy
+restores the gradient exactly as predicted (0% → 56%), but the hybrid
+**does not beat plain RL** (67.2%). One-ply argmax over k=5 noisy rollouts
+adds enough variance on a ~13-turn horizon to override good learned
+decisions. The fix directions are classic: more rollouts per candidate,
+or search over the RL agent's value estimates instead of raw returns —
+logged in the roadmap rather than pretended away. Under live rules,
+damage RANGES are now sampled too (`Rules.damage_ranges`; parsed from the
+classic descriptions), so win rates price in damage variance, not just
+fizzle variance.
+
+## Scope of the current claims
+
+This is an **Arc-1-style, single-enemy PvE optimization laboratory**, not
+a general Wizard101 combat model. The supported conclusion from the tables
+is: *in this simulator and these candidate decks, a scarcity-aware
+Monte-Carlo learner improves over transferred perfect-information policies
+by adapting to realized draws and conserving finite damage lines* — with
+the prism matchup as a live demonstration that representation gaps
+(mechanics the abstraction can't see) dominate learner choice. Whatever
+"meta" is learned here is the strategy family induced by these decks,
+these bosses, the classic ruleset, and the immortal/survival objectives.
+
 ## RL details that mattered
 
 - One-step Q-learning failed outright (2% kill): ~13-step horizon, sparse
@@ -137,14 +231,32 @@ mechanic in `content.py` is confidence-tagged; minion stat blocks are
 cards the engine can't express are excluded at load and listed in the
 loader report.
 
-## Next
+## Roadmap (in dependency order)
 
-- Scrape real creature pages (stats, stunable flags, actual cheat scripts)
-  to replace the ballpark boss registry.
-- Sideboard policy learning: the treasure-card mechanic (random draw,
-  no same-round discard) is implemented but the RL action space doesn't
-  use it yet.
-- Mob fights: the engine is multi-enemy (AoE, per-target wards, threat)
-  but the experiment table is still 1v1.
-- Post-classic layers behind `Rules`: criticals-on eras, mastery amulets,
-  school pips.
+1. **Done in v0.3.x**: ruleset versioning, structured event log, exact
+   stacking identities, accuracy/shields/pierce/flat stats, ordered prisms,
+   DoT/multi-hit/drains/X-pip, cheat scripts with cooldowns and one-shot
+   thresholds, property-test suite, determinized search baseline.
+2. Scrape real creature pages (stats, stunable flags, actual cheat
+   scripts) to replace the ballpark boss registry; damage *ranges* instead
+   of averages.
+3. Sideboard/discard policy learning: the TC mechanic (random draw, no
+   same-round discard) is implemented; wire it into the action space —
+   fire vs Malistaire survival is winnable only through it.
+4. Mob fights: the engine is multi-enemy (AoE, per-target wards, threat)
+   but the experiment table is still 1v1.
+5. Risk-sensitive objectives (reliability / percentile-TTK scalarizations
+   — `evaluate_paired` already reports the distribution) and
+   `max_remaining_damage` as an RL feature.
+6. Search-generated expert data → filtered behavior cloning → conservative
+   offline RL (CQL/IQL) → sequence models, benchmarked against each other
+   on held-out bosses/cards/rulesets.
+7. Deck × policy bilevel optimization (the bandit is the placeholder).
+8. Post-classic rulesets behind `Rules`: criticals-on eras, mastery
+   amulets, school pips/archmastery — each as a frozen named ruleset.
+
+## Boundary
+
+Fully offline simulator and research benchmark, built from public wiki
+data and community documentation. No live-client control, memory reading,
+traffic interception, or gameplay automation — see `docs/RESEARCH.md`.
