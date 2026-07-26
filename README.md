@@ -251,7 +251,28 @@ loader report.
 6. Search-generated expert data → filtered behavior cloning → conservative
    offline RL (CQL/IQL) → sequence models, benchmarked against each other
    on held-out bosses/cards/rulesets.
-7. Deck × policy bilevel optimization (the bandit is the placeholder).
+7. Deck × policy bilevel optimization. First results (death vs live
+   Jade Oni): the searched 9-card deck reaches **100% win / TTK 6.45**
+   vs the hand-built 12-card oneshot's 92.8% / 9.95 — smaller AND
+   stronger, exactly the redundancy-vs-consistency trade the objective
+   prices. Against randomized held-out bosses, deck size scales with
+   fight length (5 cards vs 800 HP, 8–11 vs 1.9–7.4k) and prisms appear
+   only when the hit school is resisted. Caveat: the pool still admits
+   lore/pack variants ("Mass Feint Rattlebones"); the magnitude caps
+   keep them fair, but a curated trainable-spell whitelist (with unlock
+   levels) is the top data ask. Note the search's FIRST run found a
+   genuine reward hack — boss-only spells mislabeled `core` in the dump
+   gave 1-turn kills — now screened + regression-tested.
+   Status: `deck_builder.py`
+   implements rungs 1–2 (legal deck space with capacity/copy limits,
+   template-sampled candidate search, two-stage screen → RL fine-tune,
+   size-aware scoring so extra cards must buy reliability) plus
+   `random_boss()` and a held-out generalization harness. Rungs 3–4
+   remain: a learned deck scorer replacing the simulation screen, and a
+   single deck-conditioned combat policy trained jointly across decks
+   (today each fine-tune trains per-deck). Level-gated progression needs
+   level data the dumps don't carry reliably (`level_restriction` is
+   mostly null).
 8. Post-classic rulesets behind `Rules`: criticals-on eras, mastery
    amulets, school pips/archmastery — each as a frozen named ruleset.
 

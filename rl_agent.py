@@ -109,11 +109,13 @@ def _dig(s, keep=None):
 
 class QAgent:
     def __init__(self, cards, decklist, school, dp_pol=None,
-                 alpha=0.25, gamma=1.0):
+                 alpha=0.25, gamma=1.0, rng=None):
         self.feat = Featurizer(cards, decklist)
         self.Q = defaultdict(float)
         self.school, self.alpha, self.gamma = school, alpha, gamma
         self.dp_pol = dp_pol                    # warm-start advisor
+        self.rng = rng or random.Random()       # seeded => reproducible
+                                                # exploration, not just eval
 
     def greedy(self, sim, s, legal):
         k = self.feat.key(sim, s)
@@ -121,14 +123,14 @@ class QAgent:
 
     def act(self, sim, s, eps, dp_w):
         legal = self.feat.legal(sim, s)
-        if self.dp_pol and random.random() < dp_w:
+        if self.dp_pol and self.rng.random() < dp_w:
             card = self.dp_pol(sim, s)          # advisor digs internally on pass
             if card is None:
                 return PASS, legal, False       # ...so don't dig again
             if card.name in legal:
                 return card.name, legal, True
-        if random.random() < eps:
-            return random.choice(legal), legal, True
+        if self.rng.random() < eps:
+            return self.rng.choice(legal), legal, True
         return self.greedy(sim, s, legal), legal, True
 
     def train_episode(self, sim, eps, dp_w):
@@ -181,7 +183,8 @@ def train_agent(cards, decklist, school, boss, episodes=60000,
     if warm:
         V, pol, meta = solve(cards, decklist, boss, school)
         dp_pol = dp_policy(V, pol, meta, school)
-    agent = QAgent(cards, decklist, school, dp_pol=dp_pol)
+    agent = QAgent(cards, decklist, school, dp_pol=dp_pol,
+                   rng=random.Random(seed + 1))
     best = (-1.0, float("inf"), None)               # (kill%, ttk, Q snapshot)
     for ep in range(episodes):
         frac = ep / episodes
