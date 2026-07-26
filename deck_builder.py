@@ -19,8 +19,10 @@ by fizzle risk"), not a memorized answer per boss.
 
 Still roadmap (bilevel steps 3-4): a learned deck scorer replacing the
 simulation screen, and joint deck+combat training with a single
-deck-conditioned policy. Level gating comes straight from the game
-data's level_restriction (null = no gate).
+deck-conditioned policy. The buildable pool is the curated TRAINED
+whitelist below (the dump carries no trainability marker — see the
+comment on TRAINED); level gating is max(curated unlock floor, game
+data's level_restriction).
 """
 import random
 import re
@@ -29,13 +31,92 @@ from w101_sim import Sim, evaluate, make_blade_stack, Boss, OPPOSING
 from rl_agent import QAgent
 
 
-UNIVERSAL_BUFFS = {"Tri Blade", "Tri Trap", "Spirit Blade", "Spirit Trap",
-                   "Hex", "Curse", "Feint", "Balanceblade", "Bladestorm"}
+# ------------------------------------------------------------- trainable set
+# The dump has NO reliable trainability marker: boss/encounter spells,
+# pet cards (Firezilla), mutations (Ice Cat) and cross-school reskins
+# (Skeletal Dragon Fire) are all variant='core', and every candidate
+# field fails somewhere — training_cost is 0 for school quest spells
+# (Fireblade) AND for pet cards; pve_flag marks PvE-only restrictions,
+# not trainability; level_restriction is null below ~30. After three
+# rounds of heuristic whack-a-mole the honest fix is explicit: the
+# trained-spell quest lines, curated by name against the dump's dev
+# names, with approximate unlock levels (floors — the data's own
+# level_restriction still applies on top via max()). Utility spells the
+# loader skips (Steal Charm, spears, Scions) are omitted.
+TRAINED = {
+    "fire": {
+        "Fire Cat": 1, "Fire Elf": 5, "Sunbird": 10, "Fire Shield": 10,
+        "Fire Trap": 15, "Fireblade": 20, "Fire Prism": 20, "Link": 20,
+        "Heck Hound": 20, "Meteor Strike": 25, "Smoke Screen": 25,
+        "Scald": 30, "Immolate": 30, "Helephant": 30, "Wyldfire": 30,
+        "Power Link": 35, "Phoenix": 40, "Fuel": 40, "Backdraft": 45,
+        "Fire Dragon": 50, "Efreet": 60, "Rain of Fire": 70,
+        "Fire from Above": 100,
+    },
+    "storm": {
+        "Thunder Snake": 1, "Lightning Bats": 5, "Storm Shark": 10,
+        "Storm Shield": 10, "Disarm": 15, "Storm Trap": 15,
+        "Lightning Strike": 15, "Stormblade": 20, "Storm Prism": 20,
+        "Cleanse Charm": 20, "Kraken": 25, "Windstorm": 30, "Tempest": 30,
+        "Darkwind": 35, "Stormzilla": 35, "Supercharge": 40,
+        "Wild Bolt": 40, "Storm Lord": 45, "Triton": 50, "Leviathan": 60,
+        "Insane Bolt": 60, "Sirens": 70, "Storm Owl": 90,
+    },
+    "ice": {
+        "Frost Beetle": 1, "Snow Serpent": 5, "Evil Snowman": 10,
+        "Snow Shield": 10, "Stun Block": 10, "Ice Trap": 15, "Freeze": 15,
+        "Iceblade": 20, "Ice Prism": 20, "Tower Shield": 20,
+        "Ice Wyvern": 25, "Ice Armor": 30, "Frostbite": 35,
+        "Colossus": 35, "Blizzard": 40, "Legion Shield": 40,
+        "Frost Giant": 55, "Frozen Armor": 55, "Snow Angel": 60,
+        "Snowball Barrage": 75, "Lord of Winter": 90,
+    },
+    "myth": {
+        "Bloodbat": 1, "Troll": 5, "Cyclops": 10, "Myth Shield": 10,
+        "Myth Trap": 15, "Pierce": 20, "Mythblade": 20, "Myth Prism": 20,
+        "Humongofrog": 25, "Blinding Light": 25, "Minotaur": 30,
+        "Shatter": 40, "Earthquake": 40, "Orthrus": 50, "Medusa": 60,
+        "Basilisk": 70,
+    },
+    "life": {
+        "Imp": 1, "Minor Blessing": 1, "Sprite": 5, "Leprechaun": 10,
+        "Life Shield": 10, "Pixie": 10, "Life Trap": 15, "Unicorn": 15,
+        "Lifeblade": 20, "Life Prism": 20, "Nature's Wrath": 25,
+        "Seraph": 30, "Regenerate": 30, "Satyr": 35, "Centaur": 40,
+        "Dryad": 40, "Sanctuary": 50, "Forest Lord": 50, "Rebirth": 60,
+        "Gnomes": 70, "Spinysaur": 90,
+    },
+    "death": {
+        "Dark Sprite": 1, "Ghoul": 5, "Banshee": 10, "Death Shield": 10,
+        "Death Trap": 15, "Sacrifice": 15, "Infection": 20,
+        "Deathblade": 20, "Death Prism": 20, "Poison": 25, "Plague": 25,
+        "Vampire": 25, "Skeletal Pirate": 35, "Doom and Gloom": 40,
+        "Wraith": 50, "Scarecrow": 50, "Skeletal Dragon": 60,
+        "Virulent Plague": 60, "Avenging Fossil": 90,
+        "Call of Khrulhu": 100,
+    },
+    "balance": {
+        "Scarab": 1, "Scorpion": 5, "Weakness": 10, "Locust Swarm": 10,
+        "Sandstorm": 15, "Tri Shield": 15, "Spirit Shield": 15,
+        "Helping Hands": 20, "Reshuffle": 20, "Hex": 20,
+        "Balanceblade": 20, "Tri Trap": 20, "Spirit Trap": 20,
+        "Spectral Blast": 25, "Judgement": 30, "Bladestorm": 30,
+        "Tri Blade": 30, "Spirit Blade": 30, "Hydra": 35,
+        "Power Play": 35, "Power Nova": 45, "Ra": 60,
+        "Availing Hands": 60, "Chimera": 70, "Gaze of Fate": 100,
+    },
+}
 
-# the dump tags boss-only / encounter-scripted spells as variant='core'
-# too ("Scald - KRBoss Death", "NA PL-Bear-Tweedle-B"): the first deck
-# search promptly reward-hacked them into one-turn kills. Player-trainable
-# spells carry none of these markers and obey era damage efficiency.
+# cross-trained staples any school picks up from other schools' trainers
+UNIVERSAL_BUFFS = {
+    "Tower Shield": 20, "Sprite": 5, "Pixie": 10, "Reshuffle": 20,
+    "Tri Blade": 30, "Tri Trap": 30, "Spirit Blade": 30, "Spirit Trap": 30,
+    "Hex": 20, "Curse": 20, "Feint": 30, "Balanceblade": 20,
+    "Bladestorm": 30,
+}
+
+# defense in depth behind the whitelist: catches a whitelisted name being
+# re-dumped with boss-scale values or an internal-marker rename.
 _INTERNAL = re.compile(
     r"(-|_|\bNA\b|BOSS|Tutorial|Mutate|Mashup|FUSE|Loremaster|Token|"
     r"Polymorph|Test|\d|\bAdv\b|\bMass\b|"
@@ -57,16 +138,23 @@ def _player_plausible(name, c):
 
 
 def legal_pool(cards, school, level=None):
-    """Unlocked, deck-buildable cards for a school: own-school trained
-    spells plus the cross-trained universal buffs, with boss-only and
-    internal spells screened out. `level` gates by the game data's
-    level_restriction (null = available from level 1) — the progression
-    knob: legal_pool(cards, 'fire', level=12) is a level-12 wizard."""
+    """Unlocked, deck-buildable cards for a school: the curated TRAINED
+    quest line plus the cross-trained universal staples — nothing else,
+    so pet cards (Firezilla), mutations and cross-school reskins
+    (Skeletal Dragon Fire) can never leak in. `level` gates by
+    max(curated unlock floor, game data's level_restriction) — the
+    progression knob: legal_pool(cards, 'fire', level=12) is a level-12
+    wizard."""
+    trained = TRAINED.get(school, {})
     pool = {}
     for name, c in cards.items():
+        floor = trained.get(name, UNIVERSAL_BUFFS.get(name))
+        if floor is None:                     # not on the trainable list
+            continue
         if c.source != "deck" or not _player_plausible(name, c):
             continue
-        if level is not None and getattr(c, "level", 1) > level:
+        unlock = max(floor, getattr(c, "level", 1))
+        if level is not None and unlock > level:
             continue
         if c.school == school or name in UNIVERSAL_BUFFS:
             if c.kind in ("damage", "drain", "blade", "trap", "prism",
@@ -165,7 +253,9 @@ def build_deck(cards, school, boss, rules=None, n_candidates=150,
     rng = random.Random(seed)
     pool = legal_pool(cards, school, level=level)
     seen, cands = set(), []
-    while len(cands) < n_candidates:
+    tries = 0                       # a level-1 pool may only support a
+    while len(cands) < n_candidates and tries < n_candidates * 40:
+        tries += 1                  # handful of distinct decks — cap it
         dl = sample_deck(pool, school, boss, rng, capacity, copy_limit)
         if dl is None:
             break

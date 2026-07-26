@@ -170,10 +170,10 @@ def progression_chart():
     xs = [r["level"] for r in rows]
     fig, axes = plt.subplots(3, 1, figsize=(7.5, 6.4), sharex=True)
     a0, a1, a2 = axes
-    a0.plot(xs, [r["win"] * 100 for r in rows], color=C["RL"], lw=2,
-            marker="o", ms=5)
+    wins = [r["win"] * 100 for r in rows]
+    a0.plot(xs, wins, color=C["RL"], lw=2, marker="o", ms=5)
     a0.set_ylabel("win rate (%)")
-    a0.set_ylim(90, 100.5)
+    a0.set_ylim(min(90, min(wins) - 3), 100.5)
     a1.plot(xs, [r["ttk"] for r in rows], color=C["heuristic"], lw=2,
             marker="o", ms=5)
     a1.set_ylabel("mean TTK")

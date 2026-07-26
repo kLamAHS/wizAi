@@ -4,6 +4,12 @@ the deck builder searches the level-gated pool against a level-scaled
 opponent; what should emerge is the strategy ladder (attacks -> blade+
 attack -> full stacks) and deck size tracking fight length. Writes
 progression.json for plotting.
+
+Boss HP tracks real early-game scale (Lost Soul ~100 HP at level 1,
+Wizard City bosses ~600 by 10, Mooshu ~1800 by 30): with the buildable
+pool now restricted to genuinely trained spells, a level-1 wizard tops
+out at 3x Fire Cat = 300 damage, so the old 495-HP level-1 dummy was
+only ever beatable with pet-card pollution.
 """
 import json
 import random
@@ -16,7 +22,7 @@ cards = load_spells_full()
 LEVELS = [1, 5, 10, 15, 20, 25, 30, 40, 50]
 rows = []
 for lvl in LEVELS:
-    boss = Boss(f"lvl{lvl}-training-dummy", 400 + 95 * lvl, "death", 0)
+    boss = Boss(f"lvl{lvl}-training-dummy", 45 + 55 * lvl, "death", 0)
     boss.resist_map = {"death": 0.5}
     boss.boost_map = {}
     cap = min(10 + (lvl // 10) * 2, 16)

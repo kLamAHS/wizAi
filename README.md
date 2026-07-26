@@ -265,12 +265,18 @@ loader report.
    stronger, exactly the redundancy-vs-consistency trade the objective
    prices. Against randomized held-out bosses, deck size scales with
    fight length (5 cards vs 800 HP, 8–11 vs 1.9–7.4k) and prisms appear
-   only when the hit school is resisted. Caveat: the pool still admits
-   lore/pack variants ("Mass Feint Rattlebones"); the magnitude caps
-   keep them fair, but a curated trainable-spell whitelist (with unlock
-   levels) is the top data ask. Note the search's FIRST run found a
-   genuine reward hack — boss-only spells mislabeled `core` in the dump
-   gave 1-turn kills — now screened + regression-tested.
+   only when the hit school is resisted. The buildable pool is now the
+   curated `TRAINED` whitelist in `deck_builder.py` (trained quest lines
+   under their dev names, with approximate unlock floors): the dump has
+   NO reliable trainability marker — pet cards (Firezilla), mutations
+   (Ice Cat) and cross-school reskins (Skeletal Dragon Fire) are all
+   `variant='core'` with null `level_restriction`, `training_cost` is 0
+   for school quest spells and pet cards alike, and `pve_flag` marks
+   PvE-only restrictions, not trainability — so after three rounds of
+   heuristic whack-a-mole the whitelist is the honest fix (validated
+   against the dump by a regression test). Note the search's FIRST run
+   found a genuine reward hack — boss-only spells mislabeled `core` in
+   the dump gave 1-turn kills — now screened + regression-tested.
    Status: `deck_builder.py`
    implements rungs 1–2 (legal deck space with capacity/copy limits,
    template-sampled candidate search, two-stage screen → RL fine-tune,
@@ -278,9 +284,9 @@ loader report.
    `random_boss()` and a held-out generalization harness. Rungs 3–4
    remain: a learned deck scorer replacing the simulation screen, and a
    single deck-conditioned combat policy trained jointly across decks
-   (today each fine-tune trains per-deck). Level-gated progression needs
-   level data the dumps don't carry reliably (`level_restriction` is
-   mostly null).
+   (today each fine-tune trains per-deck). Level gating is
+   max(curated unlock floor, the dump's `level_restriction`) — the
+   restriction field alone is null below ~30.
 8. Post-classic rulesets behind `Rules`: criticals-on eras, mastery
    amulets, school pips/archmastery — each as a frozen named ruleset.
 
