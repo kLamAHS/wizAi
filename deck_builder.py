@@ -154,11 +154,12 @@ def fine_tune(cards, dl, school, boss, rules=None, episodes=8000, seed=0):
 
 
 def build_deck(cards, school, boss, rules=None, n_candidates=150,
-               top_k=5, capacity=16, copy_limit=3, seed=0, log=print):
+               top_k=5, capacity=16, copy_limit=3, seed=0, log=print,
+               level=None):
     """Two-stage search over the legal deck space. Returns
-    (deck, win, ttk, screen_table)."""
+    (deck, win, ttk, screen_table). `level` gates the unlocked pool."""
     rng = random.Random(seed)
-    pool = legal_pool(cards, school)
+    pool = legal_pool(cards, school, level=level)
     seen, cands = set(), []
     while len(cands) < n_candidates:
         dl = sample_deck(pool, school, boss, rng, capacity, copy_limit)
