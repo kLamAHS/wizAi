@@ -17,11 +17,13 @@ against random opponents, evaluate on unseen seeds, so what transfers is
 the RULE ("compact prism deck into same-school walls, redundancy priced
 by fizzle risk"), not a memorized answer per boss.
 
-Still roadmap (bilevel steps 3-4): a learned deck scorer replacing the
-simulation screen, and joint deck+combat training with a single
-deck-conditioned policy. The buildable pool is the curated TRAINED
-whitelist below (the dump carries no trainability marker — see the
-comment on TRAINED); level gating is max(curated unlock floor, game
+Bilevel rung 3 lives in deck_scorer.py: a ridge surrogate of the
+screen, trained from screen_log JSONL rows; pass it as
+build_deck(scorer=...) to simulate only the predicted-best slice of
+candidates. Still roadmap (rung 4): joint deck+combat training with a
+single deck-conditioned policy. The buildable pool is the curated
+TRAINED whitelist below (the dump carries no trainability marker — see
+the comment on TRAINED); level gating is max(curated unlock floor, game
 data's level_restriction).
 """
 import random
@@ -247,9 +249,14 @@ def fine_tune(cards, dl, school, boss, rules=None, episodes=8000, seed=0):
 
 def build_deck(cards, school, boss, rules=None, n_candidates=150,
                top_k=5, capacity=16, copy_limit=3, seed=0, log=print,
-               level=None):
+               level=None, scorer=None, screen_frac=1 / 3,
+               screen_log=None):
     """Two-stage search over the legal deck space. Returns
-    (deck, win, ttk, screen_table). `level` gates the unlocked pool."""
+    (deck, win, ttk, screen_table). `level` gates the unlocked pool.
+    A fitted DeckScorer (`scorer`) pre-ranks candidates so only the top
+    `screen_frac` slice is simulated; `screen_log` appends the screen's
+    (deck, boss, result) rows to a JSONL file as surrogate training
+    data."""
     rng = random.Random(seed)
     pool = legal_pool(cards, school, level=level)
     seen, cands = set(), []
@@ -264,10 +271,26 @@ def build_deck(cards, school, boss, rules=None, n_candidates=150,
             continue
         seen.add(key)
         cands.append(dl)
+    if scorer is not None and len(cands) > top_k:
+        keep = max(top_k * 2, int(len(cands) * screen_frac))
+        cands.sort(key=lambda dl: scorer.rank_key(dl, cards, school,
+                                                  boss))
+        if log:
+            log(f"surrogate pruned {len(cands)} -> {keep} candidates "
+                f"(simulating the predicted-best slice only)")
+        cands = cands[:keep]
     if log:
         log(f"screening {len(cands)} legal candidates "
             f"(capacity {capacity}, copy limit {copy_limit})")
     table = screen(cards, cands, school, boss, rules, progress=log)
+    if screen_log:
+        import json
+        from deck_scorer import boss_to_dict
+        with open(screen_log, "a", encoding="utf-8") as f:
+            for w0, m0, dl in table:
+                f.write(json.dumps(dict(
+                    school=school, boss=boss_to_dict(boss), level=level,
+                    deck=dl, win=w0, ttk=m0)) + "\n")
     best = None
     for w0, m0, dl in table[:top_k]:
         w, m, _ = fine_tune(cards, dl, school, boss, rules, seed=seed)
