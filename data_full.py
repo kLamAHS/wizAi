@@ -252,6 +252,18 @@ def load_spells_full(path="spells_full.json",
             continue
         headline = sum(o.get("amount", o.get("total", 0.0)) for o in ops
                        if o["op"] in ("hit", "dot", "drain"))
+        # buff coverage for the DP abstraction / dig heuristics: union of
+        # the card's damage-modifier schools (None = any school)
+        applies = set()
+        any_school = False
+        for o in ops:
+            if o["op"] in ("charm", "ward") and \
+                    o.get("kind", "damage") == "damage":
+                if o.get("schools") is None:
+                    any_school = True
+                else:
+                    applies.update(o["schools"])
+        applies_to = None if any_school else (applies or "own")
         card = Card(
             name=key, school=s["school"], pips=pips,
             accuracy=(s.get("accuracy") or 100) / 100,
@@ -259,6 +271,7 @@ def load_spells_full(path="spells_full.json",
             percent=max((o.get("percent", 0.0) for o in ops), default=0.0),
             charges=max((o.get("charges", 1) for o in ops), default=1),
             ops=ops, x_pips=bool(s.get("x_pip_spell")), source=src,
+            applies_to=applies_to,
             aoe=any(o.get("tgt") in ("enemies", "allies") for o in ops),
             confidence="scrape-full" if not notes else
             "scrape-full+" + ",".join(sorted(notes)),

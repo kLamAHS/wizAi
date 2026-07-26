@@ -217,11 +217,14 @@ def dp_policy(V, pol, meta, school):
             dig(keep=want.name)
             return None
         # wanted card exhausted: substitute within kind, else best nuke
+        # (drains count as nukes — death decks otherwise stall on Vampire)
         subs = [cd for cd in s.hand if cd.kind == want.kind and sim.can_cast(s, cd)]
         if subs:
-            key = (lambda cd: cd.damage) if want.kind == "damage" else (lambda cd: cd.percent)
+            key = (lambda cd: cd.damage) if want.kind in ("damage", "drain") \
+                else (lambda cd: cd.percent)
             return max(subs, key=key)
-        subs = [cd for cd in s.hand if cd.kind == "damage" and sim.can_cast(s, cd)]
+        subs = [cd for cd in s.hand if cd.kind in ("damage", "drain")
+                and sim.can_cast(s, cd)]
         return max(subs, key=lambda cd: cd.damage, default=None)
     return policy
 

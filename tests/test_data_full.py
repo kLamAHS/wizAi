@@ -142,6 +142,31 @@ def test_reshuffle_refills_deck_but_not_itself():
     assert [c.name for c in s.player.graveyard] == ["Reshuffle"]
 
 
+def test_live_applies_to_covers_multischool_buffs():
+    from w101_sim import buff_applies
+    assert buff_applies(CARDS["Spirit Blade"], "death")
+    assert buff_applies(CARDS["Tri Blade"], "storm")
+    assert not buff_applies(CARDS["Tri Blade"], "death")
+    assert buff_applies(CARDS["Feint"], "myth")          # universal
+    assert buff_applies(CARDS["Deathblade"], "death")
+
+
+def test_dp_transfer_survives_drain_only_hands():
+    """Regression: dp_policy's fallback must treat drains as nukes — the
+    death deck used to stall forever once only Vampire remained."""
+    import copy
+    from dp_solver import solve, dp_policy
+    from w101_sim import evaluate
+    b = copy.copy(BOSSES["Jade Oni"])
+    b.dmg = 0
+    dl = LIVE_DECKS["death"]["oneshot"]
+    V, pol, meta = solve(dict(CARDS), dl, b, "death")
+    sim = Sim(dict(CARDS), dl, "death", b, player_hp=10**9,
+              rules=LIVE_RULES, rng=random.Random(0))
+    w, m = evaluate(sim, dp_policy(V, pol, meta, "death"), n=300)
+    assert w > 0.5
+
+
 def test_live_fight_end_to_end():
     boss = BOSSES["Lord Nightshade"]
     import copy
