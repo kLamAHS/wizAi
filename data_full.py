@@ -229,7 +229,13 @@ def _merge_wrapped(ops):
         else:
             out.append(op)
     for o in out:
-        if o.get("outcomes") is not None and len(o["outcomes"]) == 1:
+        if o.get("outcomes") is not None and o.get("per_pip"):
+            # X-pip wrappers list PIP TIERS (80/160/.../1120 = base*pips),
+            # not a roll table: keep the per-pip base, never rng.choice it
+            key = "amount" if "amount" in o else "total"
+            o[key] = o["outcomes"][0]
+            o.pop("outcomes")
+        elif o.get("outcomes") is not None and len(o["outcomes"]) == 1:
             o.pop("outcomes")
     return out
 
