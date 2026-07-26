@@ -187,6 +187,19 @@ table also caught two real defects (a drain-only-hand stall in the DP
 transfer and multi-school buffs invisible to the abstraction) — the
 baseline ladder keeps earning its keep.
 
+**Hybrid search — an honest negative result** (`hybrid_search.py`,
+`results_hybrid.json`, paired seeds n=250 on storm vs Jade Oni): swapping
+the search's rollout base from the heuristic to the trained RL policy
+restores the gradient exactly as predicted (0% → 56%), but the hybrid
+**does not beat plain RL** (67.2%). One-ply argmax over k=5 noisy rollouts
+adds enough variance on a ~13-turn horizon to override good learned
+decisions. The fix directions are classic: more rollouts per candidate,
+or search over the RL agent's value estimates instead of raw returns —
+logged in the roadmap rather than pretended away. Under live rules,
+damage RANGES are now sampled too (`Rules.damage_ranges`; parsed from the
+classic descriptions), so win rates price in damage variance, not just
+fizzle variance.
+
 ## Scope of the current claims
 
 This is an **Arc-1-style, single-enemy PvE optimization laboratory**, not
