@@ -35,7 +35,7 @@ def test_load_volume_and_honesty():
     assert REPORT["skipped"]                   # skips are reported, not hidden
     reasons = {w for _, w in REPORT["skipped"]}
     assert any("undecoded" in r for r in reasons)
-    assert any("random damage range" in r for r in reasons)
+    assert any("wrapper effect" in r for r in reasons)
 
 
 def test_effect_mapping_spot_checks():
@@ -166,6 +166,38 @@ def test_dp_transfer_survives_drain_only_hands():
               rules=LIVE_RULES, rng=random.Random(0))
     w, m = evaluate(sim, dp_policy(V, pol, meta, "death"), n=300)
     assert w > 0.5
+
+
+def test_effect_id_map_matches_stamped_enum():
+    """The wiztype enum names are ground truth: every id in the numeric
+    map must carry exactly the name we assumed when inferring it."""
+    import json
+    sp = json.load(open(ROOT / "spells_full.json", encoding="utf-8"))
+    want = {1: "kDamage", 3: "kHeal", 5: "kStealHealth",
+            23: "kModifyIncomingDamage", 26: "kModifyIncomingDamageType",
+            28: "kModifyOutgoingDamage", 29: "kModifyOutgoingHeal",
+            38: "kAbsorbDamage", 40: "kModifyAccuracy", 41: "kDispel",
+            68: "kStun", 70: "kReshuffle", 72: "kModifyPips",
+            76: "kDamageOverTime", 77: "kHealOverTime",
+            0: "kInvalidSpellEffect"}
+    seen = {}
+    for s in sp:
+        for e in s["effects"]:
+            if "effect_type" in e and e["effect_type_id"] in want:
+                seen.setdefault(e["effect_type_id"], set()).add(
+                    e["effect_type"])
+    for i, name in want.items():
+        assert seen.get(i, {name}) == {name}, (i, seen.get(i))
+
+
+def test_name_dispatch_decodes_new_ops():
+    for name, op in (("Stun Block", "stun_block"),
+                     ("Triage", "remove"), ("Shatter", "remove")):
+        c = CARDS.get(name)
+        if c is not None:
+            assert any(o["op"] == op for o in c.ops), (name, c.ops)
+    assert any(o["op"] == "remove" for c in CARDS.values()
+               for o in c.ops)
 
 
 def test_damage_ranges_sampled_under_live_rules():
