@@ -11,7 +11,8 @@ from collections import Counter
 
 from data_full import load_spells_full, LIVE_RULES
 from deck_builder import (legal_pool, sample_deck, check_legal, screen,
-                          random_boss, build_deck)
+                          random_boss, build_deck, TRAINED,
+                          UNIVERSAL_BUFFS)
 from w101_sim import Boss
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -85,6 +86,49 @@ def test_level_gated_pool_progression():
     assert "Feint" not in lo and "Feint" in mid       # unlocks at 30
     assert "Helephant" not in mid and "Helephant" in hi   # 50
     assert "Fire Cat" in lo                           # null = level 1
+
+
+def test_pool_is_whitelist_only():
+    """Regression for the pet-card / reskin leak: 'Firezilla' (pet) and
+    'Skeletal Dragon Fire' (cross-school reskin) are variant='core' with
+    null level_restriction, indistinguishable from trained spells by any
+    dump field — only the curated whitelist keeps them out."""
+    for school in TRAINED:
+        pool = legal_pool(CARDS, school)
+        allowed = set(TRAINED[school]) | set(UNIVERSAL_BUFFS)
+        assert set(pool) <= allowed, set(pool) - allowed
+    fire = legal_pool(CARDS, "fire")
+    for leak in ("Firezilla", "Skeletal Dragon Fire", "Salamander Fire",
+                 "Evil Snowman Fire", "Fire Elf Christmas", "Efreet Sun"):
+        assert leak not in fire, leak
+    assert "Ice Cat" not in legal_pool(CARDS, "ice")   # mutation
+
+
+def test_level1_pool_is_the_first_spell():
+    """A brand-new wizard owns exactly the level-1 quest spell."""
+    assert set(legal_pool(CARDS, "fire", level=1)) == {"Fire Cat"}
+    assert set(legal_pool(CARDS, "death", level=1)) == {"Dark Sprite"}
+
+
+def test_trained_whitelist_resolves_in_data():
+    """Every curated name must exist in the dump under that dev name —
+    catches silent pool shrinkage when spells_full.json is re-exported."""
+    missing = [n for names in TRAINED.values() for n in names
+               if n not in CARDS]
+    missing += [n for n in UNIVERSAL_BUFFS if n not in CARDS]
+    assert not missing, missing
+
+
+def test_build_deck_terminates_on_tiny_pool():
+    """A level-1 pool supports only a handful of distinct decks; the
+    candidate loop must cap attempts instead of spinning forever."""
+    boss = Boss("dummy", 100, "death", 0)   # Lost-Soul scale: the only
+    boss.resist_map = {"death": 0.5}        # fight 3x Fire Cat can win
+    dl, w, m, table = build_deck(CARDS, "fire", boss, LIVE_RULES,
+                                 n_candidates=60, top_k=1, capacity=10,
+                                 seed=1, level=1, log=None)
+    assert set(dl) == {"Fire Cat"}
+    assert w > 0.9
 
 
 def test_random_boss_shape():

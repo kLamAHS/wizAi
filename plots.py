@@ -163,9 +163,42 @@ def survival_tradeoff():
     plt.close(fig)
 
 
+def progression_chart():
+    """Small multiples: the strategy ladder as spells unlock."""
+    data = json.load(open("progression.json", encoding="utf-8"))
+    rows = data["levels"]
+    xs = [r["level"] for r in rows]
+    fig, axes = plt.subplots(3, 1, figsize=(7.5, 6.4), sharex=True)
+    a0, a1, a2 = axes
+    wins = [r["win"] * 100 for r in rows]
+    a0.plot(xs, wins, color=C["RL"], lw=2, marker="o", ms=5)
+    a0.set_ylabel("win rate (%)")
+    a0.set_ylim(min(90, min(wins) - 3), 100.5)
+    a1.plot(xs, [r["ttk"] for r in rows], color=C["heuristic"], lw=2,
+            marker="o", ms=5)
+    a1.set_ylabel("mean TTK")
+    a2.plot(xs, [r["deck_size"] for r in rows], color=C["heuristic"], lw=2,
+            marker="o", ms=5, label="deck size")
+    a2.plot(xs, [r["capacity"] for r in rows], color=INK2, lw=1.4,
+            ls="--", label="deck capacity")
+    a2.plot(xs, [r["pool"] / 4 for r in rows], color=C["search"], lw=2,
+            marker="o", ms=4, label="unlocked pool / 4")
+    a2.set_ylabel("cards")
+    a2.set_xlabel("wizard level")
+    a2.legend(frameon=False, fontsize=8.5, loc="upper left")
+    a0.set_title("Progression sweep (fire): the strategy ladder as "
+                 "spells unlock", fontsize=11, loc="left")
+    for a in axes:
+        a.set_axisbelow(True)
+    fig.tight_layout()
+    fig.savefig(OUT / "progression.png")
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     made = []
-    for fn in (live_ladder, classic_gap, survival_tradeoff, storm_curve):
+    for fn in (live_ladder, classic_gap, survival_tradeoff, storm_curve,
+               progression_chart):
         try:
             fn()
             made.append(fn.__name__)
