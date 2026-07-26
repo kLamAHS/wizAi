@@ -37,8 +37,9 @@ UNIVERSAL_BUFFS = {"Tri Blade", "Tri Trap", "Spirit Blade", "Spirit Trap",
 # search promptly reward-hacked them into one-turn kills. Player-trainable
 # spells carry none of these markers and obey era damage efficiency.
 _INTERNAL = re.compile(
-    r"( - |_|\bNA\b|BOSS|Tutorial|Mutate|Mashup|FUSE|Loremaster|Token|"
-    r"Polymorph|Test|\d)", re.IGNORECASE)
+    r"(-|_|\bNA\b|BOSS|Tutorial|Mutate|Mashup|FUSE|Loremaster|Token|"
+    r"Polymorph|Test|\d|\bAdv\b|\bMass\b|"
+    r"\s(Sun|Moon|Star|Shadow)$)", re.IGNORECASE)   # enchant variants
 
 
 def _player_plausible(name, c):
