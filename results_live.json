@@ -38,8 +38,8 @@
     }
    },
    "rl": [
-    0.9785,
-    5.628257537046499
+    0.97975,
+    5.62796631793825
    ]
   },
   {
@@ -79,8 +79,8 @@
     }
    },
    "rl": [
-    0.98175,
-    5.529921059332824
+    0.9715,
+    6.439269171384457
    ]
   },
   {
@@ -120,8 +120,8 @@
     }
    },
    "rl": [
-    0.93,
-    9.99005376344086
+    0.9295,
+    10.867132867132867
    ]
   },
   {
@@ -129,40 +129,40 @@
    "deck": "oneshot",
    "boss": "Jade Oni",
    "boss_hp": 6000,
-   "dp_lb": 8.73398258100866,
+   "dp_lb": 8.524229782736823,
    "dp_lb_partial": false,
    "paired": {
     "heuristic": {
-     "win_rate": 0.0,
-     "mean_ttk": NaN,
-     "median_ttk": NaN,
-     "p90_ttk": NaN,
-     "p99_ttk": NaN,
-     "mean_hp_left": 0.0,
+     "win_rate": 0.535,
+     "mean_ttk": 10.873831775700934,
+     "median_ttk": 10,
+     "p90_ttk": 14,
+     "p99_ttk": 15,
+     "mean_hp_left": 1000000000.0,
      "ruleset": "w101-pve-live-scrape"
     },
     "dp-transfer": {
-     "win_rate": 0.4275,
-     "mean_ttk": 10.0,
-     "median_ttk": 10,
-     "p90_ttk": 10,
-     "p99_ttk": 10,
+     "win_rate": 0.39,
+     "mean_ttk": 12.237179487179487,
+     "median_ttk": 13,
+     "p90_ttk": 14,
+     "p99_ttk": 14,
      "mean_hp_left": 1000000000.0,
      "ruleset": "w101-pve-live-scrape"
     },
     "search(k=5)": {
-     "win_rate": 0.0,
-     "mean_ttk": NaN,
-     "median_ttk": NaN,
-     "p90_ttk": NaN,
-     "p99_ttk": NaN,
-     "mean_hp_left": 0.0,
+     "win_rate": 0.72,
+     "mean_ttk": 12.0,
+     "median_ttk": 12,
+     "p90_ttk": 14,
+     "p99_ttk": 18,
+     "mean_hp_left": 1000000000.0,
      "ruleset": "w101-pve-live-scrape"
     }
    },
    "rl": [
-    0.577,
-    12.550259965337954
+    0.8105,
+    11.316162862430598
    ]
   },
   {
@@ -202,8 +202,8 @@
     }
    },
    "rl": [
-    0.98875,
-    4.946144121365361
+    0.9915,
+    4.827534039334342
    ]
   },
   {
@@ -244,7 +244,7 @@
    },
    "rl": [
     0.98325,
-    5.505212306127638
+    6.125349605898805
    ]
   }
  ]

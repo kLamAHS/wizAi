@@ -1,0 +1,161 @@
+{
+ "ruleset_id": "w101-pve-live-scrape",
+ "school": "fire",
+ "levels": [
+  {
+   "level": 1,
+   "boss_hp": 495,
+   "pool": 30,
+   "capacity": 10,
+   "deck_size": 5,
+   "win": 0.9965,
+   "ttk": 2.9247365780230807,
+   "deck": [
+    "Efreet Sun",
+    "Fireblade",
+    "HG-AKT-Krok-Cyber-A-Fire",
+    "Skeletal Dragon Fire",
+    "Sun Serpent Sun"
+   ]
+  },
+  {
+   "level": 5,
+   "boss_hp": 875,
+   "pool": 30,
+   "capacity": 10,
+   "deck_size": 6,
+   "win": 0.9955,
+   "ttk": 3.8689100954294324,
+   "deck": [
+    "Efreet Sun",
+    "Fireblade",
+    "HG-AKT-Krok-Cyber-A-Fire",
+    "Sun Serpent Sun"
+   ]
+  },
+  {
+   "level": 10,
+   "boss_hp": 1350,
+   "pool": 30,
+   "capacity": 12,
+   "deck_size": 7,
+   "win": 0.9955,
+   "ttk": 4.704168759417378,
+   "deck": [
+    "Efreet Sun",
+    "Fireblade",
+    "HG-AKT-Krok-Cyber-A-Fire",
+    "Mass Fire Trap",
+    "Sun Serpent Sun"
+   ]
+  },
+  {
+   "level": 15,
+   "boss_hp": 1825,
+   "pool": 30,
+   "capacity": 12,
+   "deck_size": 7,
+   "win": 0.9975,
+   "ttk": 4.821553884711779,
+   "deck": [
+    "Adv-Mythic Fire Refraction-Mass Fire Trap",
+    "Efreet Sun",
+    "Fireblade",
+    "Sun Serpent Sun"
+   ]
+  },
+  {
+   "level": 20,
+   "boss_hp": 2300,
+   "pool": 38,
+   "capacity": 14,
+   "deck_size": 12,
+   "win": 0.9795,
+   "ttk": 5.737110770801429,
+   "deck": [
+    "Adv-Mythic Fire Refraction-Mass Fire Trap",
+    "Balanceblade",
+    "Efreet Sun",
+    "Fire Trap",
+    "Fireblade",
+    "HG-AKT-Krok-Cyber-A-Fire",
+    "Hex",
+    "Sun Serpent Sun"
+   ]
+  },
+  {
+   "level": 25,
+   "boss_hp": 2775,
+   "pool": 39,
+   "capacity": 14,
+   "deck_size": 10,
+   "win": 0.9895,
+   "ttk": 6.532592218292066,
+   "deck": [
+    "Adv-Mythic Fire Refraction-Mass Fire Trap",
+    "Balanceblade",
+    "Efreet Sun",
+    "Fire Trap",
+    "Fuel Sun",
+    "Sun Serpent Sun"
+   ]
+  },
+  {
+   "level": 30,
+   "boss_hp": 3250,
+   "pool": 45,
+   "capacity": 16,
+   "deck_size": 12,
+   "win": 0.9905,
+   "ttk": 6.500757193336699,
+   "deck": [
+    "Adv-Mythic Fire Refraction-Mass Fire Trap",
+    "Balanceblade",
+    "Efreet Sun",
+    "Fireblade",
+    "Heck Hound",
+    "Skeletal Dragon Fire",
+    "Sun Serpent Sun",
+    "Tri Blade"
+   ]
+  },
+  {
+   "level": 40,
+   "boss_hp": 4200,
+   "pool": 49,
+   "capacity": 16,
+   "deck_size": 11,
+   "win": 0.992,
+   "ttk": 7.274193548387097,
+   "deck": [
+    "Adv-Mythic Fire Refraction-Mass Fire Trap",
+    "Balanceblade",
+    "Efreet Sun",
+    "Feint",
+    "Fire Trap",
+    "HG-AKT-Krok-Cyber-A-Fire",
+    "Spirit Blade",
+    "Sun Serpent Sun"
+   ]
+  },
+  {
+   "level": 50,
+   "boss_hp": 5150,
+   "pool": 52,
+   "capacity": 16,
+   "deck_size": 11,
+   "win": 0.993,
+   "ttk": 9.054380664652568,
+   "deck": [
+    "Balanceblade",
+    "Feint",
+    "Fire Trap",
+    "Fireblade",
+    "Fuel",
+    "Skeletal Dragon Fire",
+    "Spirit Blade",
+    "Sun Serpent Sun"
+   ]
+  }
+ ]
+}
