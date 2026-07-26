@@ -37,7 +37,7 @@ def _label(r):
 
 def live_ladder():
     """Grouped horizontal bars: win rate by policy per live matchup."""
-    data = json.load(open("results_live.json"))
+    data = json.load(open("results_live.json", encoding="utf-8"))
     rows = data["matches"]
     pols = [("heuristic", "heuristic"), ("dp-transfer", "dp-transfer"),
             ("search(k=5)", "search"), ("RL", "RL")]
@@ -74,7 +74,7 @@ def live_ladder():
 
 def classic_gap():
     """Dot plot: DP lower bound vs realized RL TTK, classic table."""
-    data = json.load(open("results.json"))
+    data = json.load(open("results.json", encoding="utf-8"))
     rows = data["speed_immortal"]
     fig, ax = plt.subplots(figsize=(8, 5.2))
     for i, r in enumerate(rows):
@@ -103,8 +103,8 @@ def classic_gap():
 
 def storm_curve():
     """RL learning curve on the matchup no scripted policy wins."""
-    curve = json.load(open("rl_curve_storm.json"))
-    hyb = json.load(open("results_hybrid.json"))["paired"]
+    curve = json.load(open("rl_curve_storm.json", encoding="utf-8"))
+    hyb = json.load(open("results_hybrid.json", encoding="utf-8"))["paired"]
     fig, ax = plt.subplots(figsize=(8, 4.2))
     xs = [c["episode"] for c in curve]
     ys = [c["win"] * 100 for c in curve]
@@ -130,7 +130,7 @@ def storm_curve():
 
 def survival_tradeoff():
     """Survival table: win rate vs speed trade-off per policy."""
-    data = json.load(open("results.json"))
+    data = json.load(open("results.json", encoding="utf-8"))
     rows = data["survival"]
     fig, ax = plt.subplots(figsize=(8, 3.6))
     pols = [("heuristic", "heuristic"), ("survival_heuristic", "search"),

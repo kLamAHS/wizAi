@@ -68,5 +68,5 @@ for school, bname, dname in MATCHES:
                         paired=stats, rl=[w_rl, m_rl]))
 
 json.dump({"ruleset_id": LIVE_RULES.ruleset_id, "matches": results},
-          open("results_live.json", "w"), indent=1)
+          open("results_live.json", "w", encoding="utf-8"), indent=1)
 print("\nwrote results_live.json")

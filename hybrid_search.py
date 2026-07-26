@@ -48,7 +48,7 @@ for ep in range(EPISODES):
 if best[2] is not None:
     from collections import defaultdict
     agent.Q = defaultdict(float, best[2])
-json.dump(curve, open("rl_curve_storm.json", "w"), indent=1)
+json.dump(curve, open("rl_curve_storm.json", "w", encoding="utf-8"), indent=1)
 
 rl_pol_agent = agent.policy()
 
@@ -69,5 +69,5 @@ for name, st in stats.items():
 
 json.dump({"ruleset_id": LIVE_RULES.ruleset_id,
            "matchup": "storm vs Jade Oni", "paired": stats},
-          open("results_hybrid.json", "w"), indent=1)
+          open("results_hybrid.json", "w", encoding="utf-8"), indent=1)
 print("wrote results_hybrid.json")

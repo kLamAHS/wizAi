@@ -131,7 +131,7 @@ for school, bname, dname in SURVIVAL:
 from w101_sim import Rules
 json.dump({"ruleset_id": Rules().ruleset_id,
            "speed_immortal": speed_results, "survival": survival_results},
-          open("results.json", "w"), indent=1)
+          open("results.json", "w", encoding="utf-8"), indent=1)
 print("\nwrote results.json")
 
 print(f"\n{'matchup':<28}{'DP-LB':>7}{'RL':>14}{'best heur':>12}")
