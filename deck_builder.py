@@ -19,8 +19,8 @@ by fizzle risk"), not a memorized answer per boss.
 
 Still roadmap (bilevel steps 3-4): a learned deck scorer replacing the
 simulation screen, and joint deck+combat training with a single
-deck-conditioned policy. Level-gated card pools need level data the
-current dumps don't carry reliably (level_restriction is mostly null).
+deck-conditioned policy. Level gating comes straight from the game
+data's level_restriction (null = no gate).
 """
 import random
 import re
@@ -55,13 +55,17 @@ def _player_plausible(name, c):
     return True
 
 
-def legal_pool(cards, school):
+def legal_pool(cards, school, level=None):
     """Unlocked, deck-buildable cards for a school: own-school trained
     spells plus the cross-trained universal buffs, with boss-only and
-    internal spells screened out."""
+    internal spells screened out. `level` gates by the game data's
+    level_restriction (null = available from level 1) — the progression
+    knob: legal_pool(cards, 'fire', level=12) is a level-12 wizard."""
     pool = {}
     for name, c in cards.items():
         if c.source != "deck" or not _player_plausible(name, c):
+            continue
+        if level is not None and getattr(c, "level", 1) > level:
             continue
         if c.school == school or name in UNIVERSAL_BUFFS:
             if c.kind in ("damage", "drain", "blade", "trap", "prism",

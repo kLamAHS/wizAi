@@ -77,6 +77,16 @@ def test_pool_excludes_boss_only_and_internal_spells():
     assert "Scald - KRBoss Death" not in dpool
 
 
+def test_level_gated_pool_progression():
+    lo = legal_pool(CARDS, "fire", level=5)
+    mid = legal_pool(CARDS, "fire", level=30)
+    hi = legal_pool(CARDS, "fire", level=50)
+    assert set(lo) <= set(mid) <= set(hi)
+    assert "Feint" not in lo and "Feint" in mid       # unlocks at 30
+    assert "Helephant" not in mid and "Helephant" in hi   # 50
+    assert "Fire Cat" in lo                           # null = level 1
+
+
 def test_random_boss_shape():
     rng = random.Random(3)
     b = random_boss(rng)
