@@ -230,6 +230,7 @@ def load_cards(path, report=None):
         )
         card.ops = [dict(o) for o in (curated or
                                       _default_ops(r, kind, card.aoe))]
+        assign_subkeys(card.ops)
         if not card.ops:
             skipped.append((name, "no ops"))
             continue
@@ -278,6 +279,16 @@ def sharpened(cards, name, bonus=0.10):
     return clone
 
 
+def assign_subkeys(ops):
+    """Give each hanging-effect op a distinct sub index so one card can
+    place several same-named effects (Tri Blade's three charms) that each
+    stack-check independently."""
+    for i, o in enumerate(ops):
+        if o["op"] in ("charm", "ward", "prism", "absorb", "dispel"):
+            o.setdefault("sub", i)
+    return ops
+
+
 def buff_applies(card, damage_school):
     if card.applies_to == "own":
         return card.school == damage_school
@@ -304,10 +315,12 @@ class Hanging:
     convert_to: str = None     # prisms
     amount: float = 0.0        # absorb pool
     caster: str = ""
+    sub: int = 0               # discriminates multiple hangings from one
+                               # card (Tri Blade = three same-named charms)
 
     @property
     def stack_key(self):
-        return (self.name, self.source)
+        return (self.name, self.source, self.sub)
 
     def matches(self, school):
         return self.schools is None or school in self.schools
@@ -435,8 +448,17 @@ class Boss:
     pierce: float = 0.0
     crit_chance: float = 0.0
     block_chance: float = 0.0
+    resist_map: object = None   # scraped per-school/universal resist table;
+                                # overrides the resist_own convention
+    boost_map: object = None    # scraped boost table; overrides boost_opp
+    outgoing_bonus: float = 0.0 # scraped outgoing damage % (gear-like)
 
     def incoming_mult(self, spell_school):
+        if self.resist_map is not None or self.boost_map is not None:
+            res = (self.resist_map or {}).get(spell_school, 0.0) + \
+                  (self.resist_map or {}).get("*", 0.0)
+            return (1 - res) * (1 + (self.boost_map or {})
+                                .get(spell_school, 0.0))
         if spell_school == self.school:
             return 1 - self.resist_own
         if OPPOSING.get(self.school) == spell_school:
@@ -444,14 +466,20 @@ class Boss:
         return 1.0
 
     def to_actor(self):
-        resist = {self.school: self.resist_own}
-        boost = {}
-        opp = OPPOSING.get(self.school)
-        if opp:
-            boost[opp] = self.boost_opp
+        if self.resist_map is not None or self.boost_map is not None:
+            resist = dict(self.resist_map or {})
+            boost = dict(self.boost_map or {})
+        else:
+            resist = {self.school: self.resist_own}
+            boost = {}
+            opp = OPPOSING.get(self.school)
+            if opp:
+                boost[opp] = self.boost_opp
         return Actor(name=self.name, school=self.school, hp=float(self.hp),
                      max_hp=float(self.hp), team=1, resist=resist,
                      boost=boost, flat_hit=float(self.dmg),
+                     damage_bonus={"*": self.outgoing_bonus}
+                     if self.outgoing_bonus else {},
                      cheat=self.cheat.fresh() if self.cheat else None,
                      stunable=self.stunable, pierce=self.pierce,
                      crit_chance=self.crit_chance,
@@ -652,7 +680,7 @@ class Sim:
         HANGING = ("charm", "ward", "prism", "absorb", "dispel")
         if all(op["op"] in HANGING + ("self_damage",) for op in card.ops):
             op = next(op for op in card.ops if op["op"] in HANGING)
-            key = (card.name, card.source)
+            key = (card.name, card.source, op.get("sub", 0))
             slot = "charm" if op["op"] in ("charm", "dispel") else "ward"
             tgt = op.get("tgt", "self")
             if tgt in ("self", "allies", "ally"):
@@ -866,26 +894,27 @@ class Sim:
 
     def _hanging_from_op(self, op, card_name, source, caster_name):
         o = op["op"]
+        sub = op.get("sub", 0)
         if o == "charm":
             return Hanging(card_name, "charm", op.get("kind", "damage"),
                            percent=op["percent"], schools=op.get("_schools"),
-                           source=source, caster=caster_name)
+                           source=source, caster=caster_name, sub=sub)
         if o == "ward":
             return Hanging(card_name, "ward", "damage",
                            percent=op["percent"], schools=op.get("_schools"),
                            charges=op.get("charges", 1), source=source,
-                           caster=caster_name)
+                           caster=caster_name, sub=sub)
         if o == "prism":
             return Hanging(card_name, "ward", "prism",
                            schools={op["from"]}, convert_to=op["to"],
-                           source=source, caster=caster_name)
+                           source=source, caster=caster_name, sub=sub)
         if o == "absorb":
             return Hanging(card_name, "ward", "absorb", amount=op["amount"],
-                           source=source, caster=caster_name)
+                           source=source, caster=caster_name, sub=sub)
         if o == "dispel":
             return Hanging(card_name, "charm", "dispel",
                            schools={op["school"]}, source=source,
-                           caster=caster_name)
+                           caster=caster_name, sub=sub)
         raise ValueError(o)
 
     def execute_ops(self, s, caster, card_name, source, ops, school,
@@ -1040,6 +1069,18 @@ class Sim:
             elif kind == "stun_block":
                 for t in targets:
                     t.stun_blocks += o.get("n", 1)
+
+            elif kind == "reshuffle":
+                # graveyard shuffles back into the draw pile — except the
+                # reshuffle card itself (game rule: it can't restore itself)
+                itself = next((c for c in reversed(caster.graveyard)
+                               if c.name == card_name), None)
+                back = [c for c in caster.graveyard if c is not itself]
+                self.rng.shuffle(back)
+                caster.deck[:0] = back
+                caster.graveyard[:] = [itself] if itself else []
+                self._ev(s, "reshuffled", actor=caster.name,
+                         deck=len(caster.deck))
 
             elif kind == "sacrifice_minion":
                 minions = [m for m in s.allies if m.alive] \
