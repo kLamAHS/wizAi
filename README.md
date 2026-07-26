@@ -284,3 +284,24 @@ local game data files. Strictly offline research: no live-client
 control, no traffic interception, no gameplay automation, and no
 further wiki scraping (the scraper is retained for reference only) —
 see `docs/RESEARCH.md`.
+
+## Extraction pipeline (game data)
+
+`extract_spells_phase1/2.py`, `add_variant.py`, `add_effect_names.py`
+(run locally against a wiztype type-list dump, e.g.
+`r803238_Wizard_1_610.json`). Three upstream improvements unlock the
+remaining data gaps — all in `parse_effects` / post-passes:
+
+1. **Effect names**: run `add_effect_names.py` and re-export — the
+   loader's inferred id map becomes verifiable ground truth, and the
+   ~3.5k cards skipped as "undecoded effect id" become decodable by
+   NAME (`kDamage`, `kHealOverTime`, ...).
+2. **Random damage ranges**: `parse_effects` drops list/dict members
+   from `_raw`, and range hits are wrapper effects (Random/Variable
+   SpellEffect) whose `m_effectList` holds the real sub-effects —
+   recurse into `m_effectList` instead of dropping it and param=-1
+   spells (Sunbird, Triton, Kraken...) get exact min/max, ending the
+   classic-average backfill.
+3. **Locale names**: resolve `display_name`/`description` keys against
+   the game's locale string table so dev names align with display
+   names.
