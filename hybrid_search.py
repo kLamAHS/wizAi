@@ -31,7 +31,7 @@ dl = LIVE_DECKS["storm"]["oneshot"]
 rng = random.Random(0)
 sim = Sim(dict(cards), dl, "storm", boss, player_hp=10**9,
           rules=LIVE_RULES, rng=rng)
-agent = QAgent(dict(cards), dl, "storm")
+agent = QAgent(dict(cards), dl, "storm", rng=random.Random(1))
 curve = []
 EPISODES, SNAP = 20000, 1000
 best = (-1.0, float("inf"), None)
