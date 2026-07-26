@@ -16,8 +16,10 @@ effect provenance as a first-class citizen.
 | `bosses.py` | preset enemy registry + illustrative cheat scripts + candidate decks for **all seven schools** |
 | `dp_solver.py` | value iteration on the deck-free abstraction (distinct-buff configs, ward charge states, X-pip actions) = perfect-information lower bound; decks that lean on unmodeled mechanics (prisms/heals/shields) are flagged via `meta['unmodeled']` |
 | `rl_agent.py` | tabular Q-learning (backward MC returns, DP warm-start, scarcity-aware state incl. drains and prisms) + UCB deck-selection bandit per boss |
+| `search_policy.py` | belief-state baseline: determinized rollout search over the hidden draw order (deck composition is known, order isn't — the POMDP move). No training, interpretable, sits between heuristics and RL |
 | `experiment.py` | the headline tables (`results.json`): speed (immortal player) + survival (real boss damage) |
 | `tests/test_sim.py` | 70 mechanics tests, one per documented combat rule |
+| `tests/test_properties.py` | invariants that guard the ML results: blade/pierce monotonicity, deck + ward-charge conservation, seed → identical event log, damage-bound dominance, no-impossible-kill |
 
 ## Engine rules worth knowing (v0.3)
 
@@ -43,9 +45,18 @@ effect provenance as a first-class citizen.
   plus cheat scripts" pattern. The bundled scripts are illustrative shapes,
   not scraped encounters.
 - **Out of scope, declared:** criticals default off (classic era; the
-  machinery exists and is tested), no archmastery/shadow/school pips, no
-  gear/pet stat layer (fields exist, default 0), enemy decks are flat
+  machinery exists, is tested, and is pluggable via `Rules.crit_resolver`),
+  no archmastery/shadow/school pips, no gear/pet stat layer (fields exist,
+  default 0, including flat damage/flat resist), enemy decks are flat
   scripted hits + cheats. Beguile is the one card excluded as unsupported.
+- **Auditable + versioned.** `Sim(log_events=True)` records a structured
+  event log per duel (`cast_declared`, `charm_consumed`, `ward_consumed`,
+  `prism_converted`, `damage_applied`, `dot_created`, `cheat_fired`, ...):
+  same seed ⇒ identical log, and every evaluation is stamped with
+  `Rules.ruleset_id` (`w101-pve-classic-0.3`) so numbers from different
+  rule versions never mix. `max_remaining_damage()` gives an optimistic
+  bound on what the remaining deck can still deliver — the scarcity
+  feature and the `provably_unwinnable()` classifier in one.
 
 ## Headline results (v0.3 rules)
 
@@ -118,6 +129,32 @@ Other structure the v0.3 pipeline surfaced:
   within noise of each other and the pick wobbles — a known limitation,
   reported as-is.
 
+Search baseline (determinized rollouts, paired seeds, n=400, no training):
+
+```
+                              blade-stack(3)      search(k=6)
+fire vs Jade Oni [oneshot]    87.2% / 9.72        91.2% / 9.30
+ice vs Gobblestone [prism]    73.0% / 9.01        87.0% / 9.68
+```
+
+Search closes most of the heuristic→RL gap without any training (RL:
+94.3% / 7.64 on the prism matchup after 36k episodes) — the remaining RL
+edge is draw-distribution knowledge, not mechanics. Search also trades
+mean speed for reliability on the prism line, which is what a
+risk-sensitive objective would ask for.
+
+## Scope of the current claims
+
+This is an **Arc-1-style, single-enemy PvE optimization laboratory**, not
+a general Wizard101 combat model. The supported conclusion from the tables
+is: *in this simulator and these candidate decks, a scarcity-aware
+Monte-Carlo learner improves over transferred perfect-information policies
+by adapting to realized draws and conserving finite damage lines* — with
+the prism matchup as a live demonstration that representation gaps
+(mechanics the abstraction can't see) dominate learner choice. Whatever
+"meta" is learned here is the strategy family induced by these decks,
+these bosses, the classic ruleset, and the immortal/survival objectives.
+
 ## RL details that mattered
 
 - One-step Q-learning failed outright (2% kill): ~13-step horizon, sparse
@@ -137,14 +174,32 @@ mechanic in `content.py` is confidence-tagged; minion stat blocks are
 cards the engine can't express are excluded at load and listed in the
 loader report.
 
-## Next
+## Roadmap (in dependency order)
 
-- Scrape real creature pages (stats, stunable flags, actual cheat scripts)
-  to replace the ballpark boss registry.
-- Sideboard policy learning: the treasure-card mechanic (random draw,
-  no same-round discard) is implemented but the RL action space doesn't
-  use it yet.
-- Mob fights: the engine is multi-enemy (AoE, per-target wards, threat)
-  but the experiment table is still 1v1.
-- Post-classic layers behind `Rules`: criticals-on eras, mastery amulets,
-  school pips.
+1. **Done in v0.3.x**: ruleset versioning, structured event log, exact
+   stacking identities, accuracy/shields/pierce/flat stats, ordered prisms,
+   DoT/multi-hit/drains/X-pip, cheat scripts with cooldowns and one-shot
+   thresholds, property-test suite, determinized search baseline.
+2. Scrape real creature pages (stats, stunable flags, actual cheat
+   scripts) to replace the ballpark boss registry; damage *ranges* instead
+   of averages.
+3. Sideboard/discard policy learning: the TC mechanic (random draw, no
+   same-round discard) is implemented; wire it into the action space —
+   fire vs Malistaire survival is winnable only through it.
+4. Mob fights: the engine is multi-enemy (AoE, per-target wards, threat)
+   but the experiment table is still 1v1.
+5. Risk-sensitive objectives (reliability / percentile-TTK scalarizations
+   — `evaluate_paired` already reports the distribution) and
+   `max_remaining_damage` as an RL feature.
+6. Search-generated expert data → filtered behavior cloning → conservative
+   offline RL (CQL/IQL) → sequence models, benchmarked against each other
+   on held-out bosses/cards/rulesets.
+7. Deck × policy bilevel optimization (the bandit is the placeholder).
+8. Post-classic rulesets behind `Rules`: criticals-on eras, mastery
+   amulets, school pips/archmastery — each as a frozen named ruleset.
+
+## Boundary
+
+Fully offline simulator and research benchmark, built from public wiki
+data and community documentation. No live-client control, memory reading,
+traffic interception, or gameplay automation — see `docs/RESEARCH.md`.

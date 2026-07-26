@@ -128,7 +128,9 @@ for school, bname, dname in SURVIVAL:
         heuristic=list(plain), survival_heuristic=list(wrapped),
         rl=[w_rl, m_rl]))
 
-json.dump({"speed_immortal": speed_results, "survival": survival_results},
+from w101_sim import Rules
+json.dump({"ruleset_id": Rules().ruleset_id,
+           "speed_immortal": speed_results, "survival": survival_results},
           open("results.json", "w"), indent=1)
 print("\nwrote results.json")
 

@@ -100,7 +100,9 @@ def _dig(s, keep=None):
         return (3, cd.damage)
     junk = [cd for cd in s.hand if cd.name != keep]
     if junk:
-        s.hand.remove(min(junk, key=rank))
+        pick = min(junk, key=rank)
+        s.hand.remove(pick)
+        s.player.graveyard.append(pick)      # keep deck conservation exact
 
 
 # ---------------------------------------------------------------- Q-learning

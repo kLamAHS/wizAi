@@ -60,14 +60,19 @@ BUFF_SCHOOLS = content.BUFF_SCHOOLS
 
 @dataclass
 class Rules:
-    """Version-sensitive knobs, tagged by era. The classic era (Wizard City
-    -> Dragonspyre, pre-Celestia) has no criticals and no off-school power
-    pip mastery."""
+    """Version-sensitive knobs, tagged by a named ruleset. The classic era
+    (Wizard City -> Dragonspyre, pre-Celestia) has no criticals and no
+    off-school power pip mastery. Every results/trajectory artifact should
+    carry `ruleset_id` so numbers from different rule versions never mix."""
+    ruleset_id: str = "w101-pve-classic-0.3"
     era: str = "classic"
     hand_size: int = 7
     max_pip_slots: int = 7
     fizzle_discards_card: bool = True    # community-confirmed; v0.2 kept it
     crit_multiplier: float = 2.0         # used only when crit chances > 0
+    crit_resolver: object = None         # optional callable(attacker,
+                                         #   defender, rng, rules) -> mult;
+                                         # swap per era instead of editing code
     stun_blocks: int = 4                 # blocks granted when a stun lands
     dot_ticks_use_cast_snapshot: bool = True   # modifiers locked at cast
 
@@ -339,7 +344,9 @@ class CheatRule:
     when: dict = field(default_factory=dict)
     message: str = ""
     once: bool = False
+    cooldown: int = 0            # min rounds between firings (0 = none)
     fired: int = 0
+    last_turn: int = -10**9
 
     def matches_cast(self, card):
         kinds = self.when.get("card_kinds") or \
@@ -353,7 +360,8 @@ class CheatScript:
 
     def fresh(self):
         return CheatScript([CheatRule(r.event, [dict(o) for o in r.ops],
-                                      dict(r.when), r.message, r.once)
+                                      dict(r.when), r.message, r.once,
+                                      r.cooldown)
                             for r in self.rules])
 
 
@@ -376,6 +384,8 @@ class Actor:
     damage_bonus: dict = field(default_factory=dict)   # school|'*' -> frac
     resist: dict = field(default_factory=dict)         # school|'*' -> frac
     boost: dict = field(default_factory=dict)          # school -> frac
+    flat_damage: float = 0.0     # added after % modifiers, before resist
+    flat_resist: float = 0.0     # subtracted last, floor at zero
     heal_out: float = 0.0
     heal_in: float = 0.0
     charms: list = field(default_factory=list)         # outgoing Hangings
@@ -461,6 +471,7 @@ class State:
         self.allies = allies or []
         self.bubble = None
         self.turn = 0
+        self.events = []           # structured audit log (Sim(log_events=True))
 
     # ---- compat views ------------------------------------------------
     @property
@@ -553,7 +564,7 @@ class Action:
 class Sim:
     def __init__(self, cards, decklist, school, boss, power_pip=0.85,
                  player_hp=3000, rng=None, enemies=None, sideboard=None,
-                 rules=None, player_stats=None):
+                 rules=None, player_stats=None, log_events=False):
         self.cards, self.school, self.pp = cards, school, power_pip
         expand_variants(self.cards, decklist)
         if sideboard:
@@ -565,6 +576,14 @@ class Sim:
         self.player_stats = player_stats or {}
         self.rules = rules or Rules()
         self.rng = rng or random.Random()
+        self.log_events = log_events
+
+    def _ev(self, s, type_, **kw):
+        """Append a structured event to the state's audit log (opt-in)."""
+        if self.log_events:
+            kw["type"] = type_
+            kw["turn"] = s.turn
+            s.events.append(kw)
 
     # ---- pips ------------------------------------------------------------
     def _pip_value(self, actor, card):
@@ -648,7 +667,7 @@ class Sim:
         return True
 
     # ---- resolution core ---------------------------------------------------
-    def _consume_damage_charms(self, caster, school):
+    def _consume_damage_charms(self, s, caster, school):
         """All matching damage charms (blades AND weaknesses) apply to one
         strike and are consumed together, like the game."""
         mult = 1.0
@@ -656,41 +675,49 @@ class Sim:
         for h in caster.charms:
             if h.kind == "damage" and h.matches(school):
                 mult *= 1 + h.percent
+                self._ev(s, "charm_consumed", actor=caster.name,
+                         effect=h.name, percent=h.percent)
             else:
                 keep.append(h)
         caster.charms[:] = keep
         return mult
 
-    def _consume_accuracy_charms(self, caster, school):
+    def _consume_accuracy_charms(self, s, caster, school):
         delta = 0.0
         keep = []
         for h in caster.charms:
             if h.kind == "accuracy" and h.matches(school):
                 delta += h.percent
+                self._ev(s, "accuracy_charm_consumed", actor=caster.name,
+                         effect=h.name, percent=h.percent)
             else:
                 keep.append(h)
         caster.charms[:] = keep
         return delta
 
-    def _consume_heal_charms(self, caster):
+    def _consume_heal_charms(self, s, caster):
         mult = 1.0
         keep = []
         for h in caster.charms:
             if h.kind == "heal":
                 mult *= 1 + h.percent
+                self._ev(s, "heal_charm_consumed", actor=caster.name,
+                         effect=h.name, percent=h.percent)
             else:
                 keep.append(h)
         caster.charms[:] = keep
         return mult
 
-    def _take_dispel(self, caster, school):
+    def _take_dispel(self, s, caster, school):
         for h in caster.charms:
             if h.kind == "dispel" and h.matches(school):
                 caster.charms.remove(h)
+                self._ev(s, "dispel_consumed", actor=caster.name,
+                         effect=h.name)
                 return True
         return False
 
-    def _ward_pass(self, target, school, pierce):
+    def _ward_pass(self, s, target, school, pierce):
         """FIFO over the target's wards with a running damage school:
         traps/shields consume if they match the CURRENT school, prisms
         convert it. Pierce eats resist first (handled by caller), remainder
@@ -700,6 +727,8 @@ class Sim:
         for h in target.wards:
             if h.kind == "prism":
                 if h.schools is None or school in h.schools:
+                    self._ev(s, "prism_converted", target=target.name,
+                             effect=h.name, to=h.convert_to)
                     school = h.convert_to
                     continue                     # consumed
                 keep.append(h)
@@ -714,6 +743,9 @@ class Sim:
                     if h.charges > 1:
                         h.charges -= 1
                         keep.append(h)
+                    self._ev(s, "ward_consumed", target=target.name,
+                             effect=h.name, percent=pct,
+                             charges_left=h.charges if h.charges > 1 else 0)
                 else:
                     keep.append(h)
             else:
@@ -721,13 +753,16 @@ class Sim:
         target.wards[:] = keep
         return mult, school, pierce
 
-    def _absorb_pass(self, target, dmg):
+    def _absorb_pass(self, s, target, dmg):
         keep = []
         for h in target.wards:
             if h.kind == "absorb" and dmg > 0:
                 soak = min(h.amount, dmg)
                 dmg -= soak
                 h.amount -= soak
+                self._ev(s, "absorb_soaked", target=target.name,
+                         effect=h.name, amount=soak,
+                         pool_left=max(h.amount, 0.0))
                 if h.amount > 0:
                     keep.append(h)
             else:
@@ -743,6 +778,9 @@ class Sim:
         return mult
 
     def _crit_mult(self, caster, target):
+        if self.rules.crit_resolver is not None:
+            return self.rules.crit_resolver(caster, target, self.rng,
+                                            self.rules)
         if caster.crit_chance <= 0 or self.rng.random() >= caster.crit_chance:
             return 1.0
         if target.block_chance > 0 and self.rng.random() < target.block_chance:
@@ -770,14 +808,21 @@ class Sim:
         dmg *= self._bubble_damage(s, school)
         dmg *= crit_mult
         if ward is None:
-            ward = self._ward_pass(target, school, caster.pierce)
+            ward = self._ward_pass(s, target, school, caster.pierce)
         wmult, fschool, pierce = ward
         dmg *= wmult
+        if dmg > 0 and caster.flat_damage:
+            dmg += caster.flat_damage           # post-%: community-described
         dmg *= self._resist_mult(target, fschool, pierce)
+        dmg -= target.flat_resist
         dmg = max(dmg, 0.0)
-        dmg = self._absorb_pass(target, dmg)
+        dmg = self._absorb_pass(s, target, dmg)
         target.hp -= dmg
         caster.threat += dmg
+        self._ev(s, "damage_applied", actor=caster.name, target=target.name,
+                 school=fschool, amount=round(dmg, 1))
+        if not target.alive:
+            self._ev(s, "defeated", target=target.name)
         return dmg
 
     def _heal(self, s, caster, target, amount, charm_mult=1.0):
@@ -789,6 +834,8 @@ class Sim:
         healed = min(amt, target.max_hp - target.hp)
         target.hp += healed
         caster.threat += 0.5 * healed
+        self._ev(s, "heal_applied", actor=caster.name, target=target.name,
+                 amount=round(healed, 1))
         return healed
 
     def _resolve_targets(self, s, caster, spec, target_idx, ally_idx):
@@ -854,7 +901,7 @@ class Sim:
         def wards_for(g, t, school):
             k = (g, id(t))
             if k not in ward_state:
-                ward_state[k] = self._ward_pass(t, school, caster.pierce)
+                ward_state[k] = self._ward_pass(s, t, school, caster.pierce)
             return ward_state[k]
 
         for op in ops:
@@ -870,7 +917,7 @@ class Sim:
             if kind in ("hit", "dot", "drain"):
                 g = o.get("group", 0)
                 if g not in group_state:
-                    cm = self._consume_damage_charms(caster, spec_school)
+                    cm = self._consume_damage_charms(s, caster, spec_school)
                     crm = self._crit_mult(caster, targets[0]) \
                         if (crit_roll and targets) else 1.0
                     group_state[g] = (cm, crm)
@@ -906,15 +953,18 @@ class Sim:
                         t.over_time.append(OverTime(card_name, "dot", fs,
                                                     dmg / rounds, rounds,
                                                     caster.name))
+                        self._ev(s, "dot_created", target=t.name,
+                                 effect=card_name, per_tick=round(
+                                     dmg / rounds, 1), rounds=rounds)
 
             elif kind == "heal":
                 amount = o["amount"] * (pips_spent if o.get("per_pip") else 1)
-                cm = self._consume_heal_charms(caster)
+                cm = self._consume_heal_charms(s, caster)
                 for t in targets:
                     self._heal(s, caster, t, amount, cm)
 
             elif kind == "hot":
-                cm = self._consume_heal_charms(caster)
+                cm = self._consume_heal_charms(s, caster)
                 rounds = o.get("rounds", 3)
                 amt = o["total"] * (1 + caster.heal_out) * cm
                 if s.bubble and s.bubble.fld == "heal":
@@ -923,6 +973,9 @@ class Sim:
                     t.over_time.append(OverTime(card_name, "hot", school,
                                                 amt / rounds, rounds,
                                                 caster.name))
+                    self._ev(s, "hot_created", target=t.name,
+                             effect=card_name, per_tick=round(amt / rounds, 1),
+                             rounds=rounds)
 
             elif kind in ("charm", "ward", "prism", "absorb", "dispel"):
                 o["_schools"] = _op_schools_resolved(o, school)
@@ -998,7 +1051,7 @@ class Sim:
                         caster.norm_pips += max(0, min(o["pips"], room))
                     if o.get("heal"):
                         self._heal(s, caster, caster, o["heal"],
-                                   self._consume_heal_charms(caster))
+                                   self._consume_heal_charms(s, caster))
 
             elif kind == "threat":
                 for t in targets:
@@ -1013,15 +1066,20 @@ class Sim:
         """Player casts a card. Returns damage dealt (0.0 on fizzle/dispel/
         non-damage). Fizzle keeps pips; the card is discarded (Rules)."""
         caster = s.player
+        self._ev(s, "cast_declared", actor=caster.name, card=card.name,
+                 target=s.enemies[target].name if target < len(s.enemies)
+                 else None)
         # dispel check: consumes the dispel, the pips AND the card
-        if self._take_dispel(caster, card.school):
+        if self._take_dispel(s, caster, card.school):
             s.hand.remove(card)
             caster.graveyard.append(card)
             self.spend(s, card)
             return 0.0
         acc = card.accuracy + caster.accuracy_bonus
-        acc += self._consume_accuracy_charms(caster, card.school)
+        acc += self._consume_accuracy_charms(s, caster, card.school)
         if self.rng.random() > min(max(acc, 0.0), 1.0):
+            self._ev(s, "fizzled", actor=caster.name, card=card.name,
+                     accuracy=round(min(max(acc, 0.0), 1.0), 2))
             if self.rules.fizzle_discards_card:
                 s.hand.remove(card)
                 caster.graveyard.append(card)
@@ -1029,6 +1087,7 @@ class Sim:
         s.hand.remove(card)
         caster.graveyard.append(card)
         pips_spent = self.spend(s, card)
+        self._ev(s, "pips_spent", actor=caster.name, effective=pips_spent)
         dealt = self.execute_ops(s, caster, card.name, card.source, card.ops,
                                  card.school, pips_spent=pips_spent,
                                  target_idx=target, ally_idx=ally)
@@ -1071,6 +1130,9 @@ class Sim:
             for rule in enemy.cheat.rules:
                 if rule.event != event or (rule.once and rule.fired):
                     continue
+                if rule.cooldown and rule.fired and \
+                        s.turn - rule.last_turn < rule.cooldown:
+                    continue
                 if event == "after_player_cast" and not rule.matches_cast(card):
                     continue
                 if event == "hp_below" and \
@@ -1080,6 +1142,9 @@ class Sim:
                         and s.turn % rule.when["every"] != 0:
                     continue
                 rule.fired += 1
+                rule.last_turn = s.turn
+                self._ev(s, "cheat_fired", actor=enemy.name, event=event,
+                         message=rule.message)
                 self.execute_ops(s, enemy, f"cheat:{rule.message or event}",
                                  "cheat", rule.ops, enemy.school)
 
@@ -1114,12 +1179,16 @@ class Sim:
     def _tick_over_time(self, s, actor):
         for e in list(actor.over_time):
             if e.kind == "dot":
-                dmg = self._absorb_pass(actor, e.per_tick)
+                dmg = self._absorb_pass(s, actor, e.per_tick)
                 actor.hp -= dmg
+                self._ev(s, "dot_tick", target=actor.name, effect=e.name,
+                         amount=round(dmg, 1))
             else:
                 healed = min(e.per_tick * (1 + actor.heal_in),
                              actor.max_hp - actor.hp)
                 actor.hp += healed
+                self._ev(s, "hot_tick", target=actor.name, effect=e.name,
+                         amount=round(healed, 1))
             e.rounds_left -= 1
             if e.rounds_left <= 0:
                 actor.over_time.remove(e)
@@ -1136,7 +1205,7 @@ class Sim:
             tgt = max(pool, key=lambda a: a.threat)
             self._strike(s, enemy, tgt, enemy.school, enemy.flat_hit,
                          charm_mult=self._consume_damage_charms(
-                             enemy, enemy.school),
+                             s, enemy, enemy.school),
                          crit_mult=self._crit_mult(enemy, tgt))
 
     def _minion_turn(self, s, minion):
@@ -1157,6 +1226,7 @@ class Sim:
 
     def end_round(self, s):
         s.turn += 1
+        self._ev(s, "round_start", round=s.turn)
         self.gain_pip(s)
         self._fire_cheats(s, "round_start")
         self._fire_cheats(s, "hp_below")
@@ -1311,6 +1381,108 @@ def evaluate(sim, policy, n=20000, max_turns=40):
             wins += 1
             ttk.append(t)
     return wins / n, (sum(ttk) / len(ttk) if ttk else float("nan"))
+
+
+def evaluate_paired(sim, policies, n=2000, max_turns=40, base_seed=10**6):
+    """Evaluate several policies on the SAME seed stream (same shuffles,
+    same RNG draws), with distribution stats — variance-reduced comparison.
+    `policies`: dict name -> policy. Returns dict name -> stats."""
+    out = {}
+    for name, pol in policies.items():
+        ttk, hp_left, wins = [], [], 0
+        for i in range(n):
+            sim.rng = random.Random(base_seed + i)
+            t, won, hp = sim.run(pol, max_turns=max_turns)
+            if won:
+                wins += 1
+                ttk.append(t)
+                hp_left.append(hp)
+        ttk.sort()
+        pct = lambda q: ttk[min(int(q * len(ttk)), len(ttk) - 1)] \
+            if ttk else float("nan")
+        out[name] = dict(
+            win_rate=wins / n,
+            mean_ttk=sum(ttk) / len(ttk) if ttk else float("nan"),
+            median_ttk=pct(0.5), p90_ttk=pct(0.9), p99_ttk=pct(0.99),
+            mean_hp_left=sum(hp_left) / len(hp_left) if hp_left else 0.0,
+            ruleset=sim.rules.ruleset_id)
+    return out
+
+
+# ---------------------------------------------------------------- analytics
+
+def max_remaining_damage(sim, s):
+    """Optimistic upper bound on the damage the player can still deliver:
+    every remaining nuke lands, every distinct buff (in hand, deck,
+    sideboard, or already hanging) multiplies every nuke, X-pip spells get
+    full pips, and each hit meets the most favorable school multiplier any
+    living enemy offers (prisms make schools fungible for bound purposes).
+    Useful as a scarcity feature and for the no-impossible-kill check."""
+    p = s.player
+    pool = list(s.hand) + list(p.deck) + list(p.sideboard)
+    max_eff = sim.rules.max_pip_slots * 2
+    base = sum(c.damage * (max_eff if c.x_pips else 1)
+               for c in pool if c.kind in ("damage", "drain"))
+    if base <= 0:
+        return 0.0
+    mult = 1.0
+    seen = set()
+    for c in pool:
+        if c.kind in ("blade", "trap") and c.stack_key not in seen:
+            seen.add(c.stack_key)
+            mult *= 1 + max(c.percent, 0.0)
+    for h in p.charms:
+        if h.kind == "damage" and h.percent > 0:
+            mult *= 1 + h.percent
+    # schools the remaining damage can actually arrive as: card schools,
+    # expanded through prism conversions available in the pool or already
+    # placed on an enemy
+    reachable = set()
+    for c in pool:
+        if c.kind in ("damage", "drain"):
+            reachable.add(c.school)
+            for o in c.ops:
+                if o["op"] in ("hit", "dot", "drain") and o.get("school"):
+                    reachable.add(o["school"])
+    prisms = [(o["from"], o["to"]) for c in pool if c.kind == "prism"
+              for o in c.ops if o["op"] == "prism"]
+    for e in s.living_enemies():
+        prisms += [(next(iter(h.schools)), h.convert_to)
+                   for h in e.wards if h.kind == "prism" and h.schools]
+    changed = True
+    while changed:
+        changed = False
+        for frm, to in prisms:
+            if frm in reachable and to not in reachable:
+                reachable.add(to)
+                changed = True
+    best_school = 0.0
+    for e in s.living_enemies():
+        for h in e.wards:
+            if h.kind == "damage" and h.percent > 0:
+                mult *= 1 + h.percent
+        for school in reachable:
+            res = e.resist.get(school, 0.0) + e.resist.get("*", 0.0)
+            m = (1 - max(res - p.pierce, 0.0)) * \
+                (1 + e.boost.get(school, 0.0))
+            best_school = max(best_school, m)
+    bubbles = [c.ops[0]["percent"] for c in pool
+               if c.kind == "global" and c.ops[0].get("field") == "damage"]
+    if s.bubble and s.bubble.fld == "damage":
+        bubbles.append(s.bubble.percent)
+    if bubbles:
+        mult *= 1 + max(max(bubbles), 0.0)
+    mult *= 1 + max(p.damage_bonus.values(), default=0.0)
+    if p.crit_chance > 0:
+        mult *= sim.rules.crit_multiplier
+    return base * mult * best_school
+
+
+def provably_unwinnable(sim, s):
+    """True when even the optimistic damage bound can't cover the living
+    enemies' combined health (assumes enemies take no self-damage)."""
+    total = sum(e.hp for e in s.living_enemies())
+    return max_remaining_damage(sim, s) < total
 
 
 if __name__ == "__main__":

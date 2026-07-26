@@ -201,7 +201,9 @@ def dp_policy(V, pol, meta, school):
                 return (3, cd.damage)
             junk = [cd for cd in s.hand if cd.name != keep]
             if junk:
-                s.hand.remove(min(junk, key=junk_rank))
+                pick = min(junk, key=junk_rank)
+                s.hand.remove(pick)
+                s.player.graveyard.append(pick)
 
         if kind == "pass":
             dig()
