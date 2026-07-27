@@ -230,26 +230,36 @@ def check_legal(deck, capacity, copy_limit):
 def screen(cards, decks, school, boss, rules=None, n=250, base_seed=7000,
            progress=None, player_hp=None):
     """Cheap proxy scores: scripted policy on paired seeds. A mortal
-    `player_hp` switches the proxy to the triage-wrapped survival
-    heuristic (heal low, shield when open)."""
+    `player_hp` screens each candidate under BOTH the race proxy and
+    the triage-wrapped survival proxy and keeps the better score —
+    burst bosses are raced, chip bosses are triaged, and the screen
+    must not presuppose which (a triage-only survival screen went
+    blind on a burst boss: every candidate scored 0-6% and the
+    ranking was noise)."""
     from w101_sim import make_survival
-    pol = make_blade_stack(3)
+    pols = [make_blade_stack(3)]
     if player_hp is not None:
-        pol = make_survival(pol)
+        pols.append(make_survival(make_blade_stack(3)))
     out = []
     for i, dl in enumerate(decks):
         if progress and i and i % 20 == 0:
             progress(f"screened {i}/{len(decks)} candidates...")
         sim = Sim(dict(cards), dl, school, boss,
                   player_hp=player_hp or 10**9, rules=rules)
-        wins, ttk = 0, []
-        for j in range(n):
-            sim.rng = random.Random(base_seed + j)
-            t, won, _ = sim.run(pol)
-            if won:
-                wins += 1
-                ttk.append(t)
-        out.append((wins / n, sum(ttk) / len(ttk) if ttk else 99.0, dl))
+        best = (0.0, 99.0)
+        for pol in pols:
+            wins, ttk = 0, []
+            for j in range(n):
+                sim.rng = random.Random(base_seed + j)
+                t, won, _ = sim.run(pol)
+                if won:
+                    wins += 1
+                    ttk.append(t)
+            cand = (wins / n, sum(ttk) / len(ttk) if ttk else 99.0)
+            if (round(cand[0], 2), -cand[1]) > (round(best[0], 2),
+                                                -best[1]):
+                best = cand
+        out.append((best[0], best[1], dl))
     return sorted(out, key=lambda r: (-round(r[0], 2), r[1], len(r[2])))
 
 

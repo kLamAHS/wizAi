@@ -261,10 +261,51 @@ def generalist_ladder():
     plt.close(fig)
 
 
+def survival_builds():
+    """Speed-built vs survival-built decks under fire, both regimes.
+    Build objective is the entity here: gray = built immortal,
+    green = built with death on the line (RL pilot for both)."""
+    data = json.load(open("results_survival_build.json",
+                          encoding="utf-8"))
+    ms = list(data["matchups"].items())
+    fig, ax = plt.subplots(figsize=(7, 3.6))
+    cols = {"speed": "#9aa0a6", "survival": "#1baf7a"}
+    h, gap = 0.3, 0.04
+    for j, build in enumerate(("speed", "survival")):
+        ys = [i + (j - 0.5) * (h + gap) for i in range(len(ms))]
+        xs = [m["picks"][build]["RL(8k)"]["win_rate"] * 100
+              for _, m in ms]
+        ax.barh(ys, xs, height=h, color=cols[build],
+                label=f"{build}-built deck")
+        for y, x, (_, m) in zip(ys, xs, ms):
+            dl = m["picks"][build]["deck"]
+            ax.text(x + 1, y, f"{x:.0f}%", va="center", fontsize=8.5,
+                    color=INK2)
+    ax.set_yticks(range(len(ms)))
+    ax.set_yticklabels([
+        f"{lab}: {m['boss_dmg']}/rd"
+        + (" +650 burst" if lab == "burst" else "")
+        + f"\n({m['player_hp']} player HP)" for lab, m in ms],
+        fontsize=9)
+    ax.invert_yaxis()
+    ax.set_xlabel("win rate (%) — RL(8k) pilot trained under fire")
+    ax.set_xlim(0, 106)
+    ax.set_axisbelow(True)
+    ax.grid(axis="y", visible=False)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.22), ncol=2,
+              frameon=False, fontsize=9)
+    ax.set_title("Build for the fight you're in (both damage regimes)",
+                 fontsize=11, loc="left")
+    fig.tight_layout()
+    fig.savefig(OUT / "survival_builds.png", bbox_inches="tight")
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     made = []
     for fn in (live_ladder, classic_gap, survival_tradeoff, storm_curve,
-               progression_chart, scorer_scatter, generalist_ladder):
+               progression_chart, scorer_scatter, generalist_ladder,
+               survival_builds):
         try:
             fn()
             made.append(fn.__name__)

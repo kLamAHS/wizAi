@@ -166,6 +166,8 @@ Regenerate with `python plots.py` (reads the results JSONs, writes
 
 ![Deck-conditioned generalist](plots/generalist.png)
 
+![Survival builds under fire](plots/survival_builds.png)
+
 ## Live-data results (`w101-pve-live-scrape`)
 
 Real scraped spells vs real scraped bosses (`results_live.json`; paired
@@ -263,14 +265,26 @@ loader report.
    `build_deck(player_hp=...)` is the SURVIVAL arm — boss damage
    counts, the screen proxy gains triage, and the template offers
    shields/heals only against a boss that hits back
-   (`survival_build.py`, `results_survival_build.json`). Headline
-   (death vs Jade Oni, 240 dmg/round, 9 rounds of player HP): the
-   survival-built deck beats the speed-built deck **98.6% vs 89.0%**
-   under fire and is FASTER (mean 8.28 vs 9.36) — one Pixie + an
-   extra blade keeps the kill line alive — and the deck itself
-   carries the reliability (scripted-triage pilot: 94.5% vs 50.1%).
-   At 6 rounds of HP nothing survives at all (best build 0.3%): the
-   cheatless damage model gives fights a hard HP floor. Honest
+   (`survival_build.py`, `results_survival_build.json`, chart below).
+   Two damage regimes vs live Jade Oni. CHIP (240/round, 9 rounds of
+   player HP): the survival-built deck beats the speed-built deck
+   **98.6% vs 89.0%** under fire and is FASTER (mean 8.28 vs 9.36) —
+   one Pixie + an extra blade keeps the kill line alive — and the
+   deck itself carries the reliability (scripted-triage pilot: 94.5%
+   vs 50.1%). BURST (+650 cheat hit every 4th round): burst pressure
+   makes the fight MORE of a race — the winner is the race chassis
+   plus exactly one Pixie flown aggressively (**83.4% vs 58.5%** for
+   the pure-speed build); shield-heavy candidates lose (1–35%), and
+   the winning deck under heal-when-low triage wins 0.6% — the heal
+   must be TIMED between bursts, which RL learns and the script
+   can't. Pipeline lesson from the first burst run: a triage-only
+   survival screen went blind (every candidate 0–6%, ranking =
+   noise) and mis-built at 37%; the screen now scores every
+   candidate under BOTH the race proxy and the triage proxy and
+   keeps the better — the screen must not presuppose the fighting
+   style. At 6 rounds of chip HP nothing survives at all (best build
+   0.3%): the cheatless damage model gives fights a hard HP floor.
+   Honest
    finding on the tail objective, twice now: mean and p90 pick the
    SAME deck (storm dummies, and this fight) — within the
    plausibility-capped pool the winning deck dominates the whole TTK

@@ -1,86 +1,110 @@
 """
-Survival deck building: what changes when the boss hits back.
+Survival deck building: what changes when the boss hits back — and
+when it hits back in BURSTS.
 
-The knife-edge matchup: death vs live Jade Oni (6000 HP, 80% life
-resist, 240 dmg/round rank-inferred) with player_hp = 9 rounds of
-boss damage. Survival play itself slows the kill (~9 turns vs the
-immortal ~6.5), so 9 rounds is the genuine edge — at 6 rounds NOTHING
-survives (first run: best build 0.3%), which is itself informative:
-under this cheatless damage model the fight has a hard HP floor.
-Three builds:
+Two damage regimes against live Jade Oni (6000 HP, 80% life resist,
+240 dmg/round rank-inferred):
 
-  speed     — built immortal (the old objective), then thrown into
-              the lethal fight it wasn't built for,
-  survival  — built with player_hp set: boss damage counts, the
-              screen proxy gains triage, the template offers
-              shields/heals,
-  surv-p90  — survival build ranked by the slow tail (win, p90, size)
-              — where the reliability objective should finally bite.
+  chip  — steady 240/round, player_hp = 9 rounds of it. Survival play
+          slows the kill (~9 turns vs the immortal ~6.5), so 9 rounds
+          is the genuine edge — at 6 rounds NOTHING survives (best
+          build 0.3%): under a chip-only model the fight has a hard
+          HP floor and the smart money is all offense.
+  burst — same boss plus a cheat: every 4th round an out-of-turn 650
+          hit ("Oni's Fury"). Finding: burst pressure makes the fight
+          MORE of a race, not less — the winning deck is the race
+          chassis plus exactly one Pixie, flown aggressively (83.4%);
+          shield-heavy builds lose (0.9-35%), and the same winning
+          deck under the heal-when-low triage script wins 0.6%. The
+          pipeline lesson: a triage-only survival screen went BLIND
+          here (every candidate 0-6%, ranking noise) and mis-built;
+          the screen now scores each candidate under BOTH the race
+          proxy and the triage proxy and keeps the better one.
 
-All three final decks get the same per-deck RL fine-tune UNDER the
-lethal sim (no strawman: the speed deck's pilot also trains with
-death on the line) and are cross-evaluated on one paired seed stream.
+Three builds per regime: speed (built immortal, then thrown into the
+lethal fight), survival (built with player_hp set), surv-p90 (ranked
+by the slow tail). All final decks get the same per-deck RL fine-tune
+UNDER the lethal sim (no strawman) plus a scripted-triage reference
+pilot, cross-evaluated on one paired seed stream.
 """
 import copy
 import json
 
 from data_full import load_spells_full, load_bosses_full, LIVE_RULES
 from deck_builder import build_deck, fine_tune
-from w101_sim import Sim, evaluate_paired
+from w101_sim import (Sim, evaluate_paired, make_blade_stack,
+                      make_survival, CheatScript, CheatRule)
 
 cards = load_spells_full()
 bosses, _ = load_bosses_full()
-boss = bosses["Jade Oni"]
-PLAYER_HP = 9 * boss.dmg
-print(f"matchup: death vs {boss.name} ({boss.hp} HP, resist "
-      f"{boss.resist_map}, {boss.dmg} dmg/round) at {PLAYER_HP} player HP",
-      flush=True)
+jade = bosses["Jade Oni"]
 
-builds = {}
-speed_boss = copy.copy(boss)
-speed_boss.dmg = 0
-ARMS = [("speed", speed_boss, None, "mean"),
-        ("survival", boss, PLAYER_HP, "mean"),
-        ("surv-p90", boss, PLAYER_HP, "p90")]
-for name, b, php, obj in ARMS:
-    print(f"\n== build: {name} (player_hp={php}, objective={obj}) ==",
-          flush=True)
-    dl, w, m, _ = build_deck(cards, "death", b, LIVE_RULES,
-                             n_candidates=60, top_k=4, seed=5,
-                             player_hp=php, objective=obj,
-                             log=lambda s: print("  ", s, flush=True))
-    builds[name] = dl
-    kinds = [cards[n].kind for n in dl]
-    print(f"   pick: size {len(dl)}  "
-          f"defense {sum(k in ('shield', 'heal') for k in kinds)}  "
-          f"{sorted(set(dl))}", flush=True)
+burst = copy.copy(jade)
+burst.name = "Jade Oni (burst)"
+burst.cheat = CheatScript([
+    CheatRule(event="round_start", when={"every": 4},
+              ops=[{"op": "hit", "amount": 650, "tgt": "enemy"}],
+              message="Oni's Fury"),
+])
 
-print(f"\n== cross-evaluation under fire: RL(8k) + scripted triage "
-      f"per deck at {PLAYER_HP} HP, paired seeds n=3000 ==", flush=True)
-from w101_sim import make_blade_stack, make_survival
-report = {}
-for name, dl in builds.items():
-    w, m, agent = fine_tune(cards, dl, "death", boss, LIVE_RULES,
-                            seed=5, player_hp=PLAYER_HP)
-    sim = Sim(dict(cards), dl, "death", boss, player_hp=PLAYER_HP,
-              rules=LIVE_RULES)
-    # the tabular agent cannot see its own HP, so also report the
-    # triage-wrapped scripted pilot — whichever flies the deck better
-    st2 = evaluate_paired(sim, {
-        "RL(8k)": agent.policy(),
-        "triage": make_survival(make_blade_stack(3))}, n=3000)
-    report[name] = dict(deck=dl, **{
-        pilot: {k: s[k] for k in ("win_rate", "mean_ttk", "median_ttk",
-                                  "p90_ttk", "p99_ttk", "mean_hp_left")}
-        for pilot, s in st2.items()})
-    for pilot, s in st2.items():
-        print(f"   {name:<9} [{pilot:<7}] win {s['win_rate']*100:5.1f}%  "
-              f"mean {s['mean_ttk']:5.2f}  p90 {s['p90_ttk']:3.0f}  "
-              f"hp left {s['mean_hp_left']:5.0f}", flush=True)
-    print(f"             {sorted(set(dl))}", flush=True)
+MATCHUPS = [("chip", jade, 9 * jade.dmg),
+            ("burst", burst, 2800)]
+ARMS = [("speed", None, "mean"),
+        ("survival", "php", "mean"),
+        ("surv-p90", "php", "p90")]
 
-json.dump({"boss": boss.name, "boss_hp": boss.hp, "boss_dmg": boss.dmg,
-           "player_hp": PLAYER_HP, "school": "death", "picks": report},
+results = {}
+for label, boss, PLAYER_HP in MATCHUPS:
+    print(f"\n#### {label}: death vs {boss.name} ({boss.hp} HP, "
+          f"{boss.dmg} dmg/round"
+          + (", +650 every 4th round" if boss.cheat else "")
+          + f") at {PLAYER_HP} player HP", flush=True)
+    speed_boss = copy.copy(boss)
+    speed_boss.dmg = 0
+    speed_boss.cheat = None
+    builds = {}
+    for name, php_flag, obj in ARMS:
+        php = PLAYER_HP if php_flag else None
+        b = boss if php_flag else speed_boss
+        print(f"== build: {name} (player_hp={php}, objective={obj}) ==",
+              flush=True)
+        dl, w, m, _ = build_deck(cards, "death", b, LIVE_RULES,
+                                 n_candidates=60, top_k=3, seed=5,
+                                 player_hp=php, objective=obj,
+                                 log=lambda s: print("  ", s, flush=True))
+        builds[name] = dl
+        kinds = [cards[n].kind for n in dl]
+        print(f"   pick: size {len(dl)}  defense "
+              f"{sum(k in ('shield', 'heal') for k in kinds)}  "
+              f"{sorted(set(dl))}", flush=True)
+
+    print(f"== cross-evaluation under fire: RL(8k) + scripted triage, "
+          f"{PLAYER_HP} HP, paired seeds n=3000 ==", flush=True)
+    report = {}
+    for name, dl in builds.items():
+        w, m, agent = fine_tune(cards, dl, "death", boss, LIVE_RULES,
+                                seed=5, player_hp=PLAYER_HP)
+        sim = Sim(dict(cards), dl, "death", boss, player_hp=PLAYER_HP,
+                  rules=LIVE_RULES)
+        st2 = evaluate_paired(sim, {
+            "RL(8k)": agent.policy(),
+            "triage": make_survival(make_blade_stack(3))}, n=3000)
+        report[name] = dict(deck=dl, **{
+            pilot: {k: s[k] for k in
+                    ("win_rate", "mean_ttk", "median_ttk", "p90_ttk",
+                     "p99_ttk", "mean_hp_left")}
+            for pilot, s in st2.items()})
+        for pilot, s in st2.items():
+            print(f"   {name:<9} [{pilot:<7}] win "
+                  f"{s['win_rate']*100:5.1f}%  mean {s['mean_ttk']:5.2f}"
+                  f"  p90 {s['p90_ttk']:3.0f}  "
+                  f"hp left {s['mean_hp_left']:5.0f}", flush=True)
+        print(f"             {sorted(set(dl))}", flush=True)
+    results[label] = dict(boss=boss.name, boss_hp=boss.hp,
+                          boss_dmg=boss.dmg, player_hp=PLAYER_HP,
+                          picks=report)
+
+json.dump({"school": "death", "matchups": results},
           open("results_survival_build.json", "w", encoding="utf-8"),
           indent=1)
 print("\nwrote results_survival_build.json")
