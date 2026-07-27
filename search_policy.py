@@ -45,6 +45,21 @@ def clone_state(s):
     return ns
 
 
+FOE_KINDS = ("damage", "drain", "trap", "weakness")
+
+
+def _apply(sim, s, a):
+    """Cast a card, a (card, target) tuple, or nothing."""
+    if a is None:
+        return
+    if isinstance(a, tuple):
+        card, tgt = a
+        if sim.can_cast(s, card, tgt):
+            sim.cast(s, card, target=tgt)
+    elif sim.can_cast(s, a):
+        sim.cast(s, a)
+
+
 def _rollout(sim, s, pol, max_turns, fail):
     """Finish the duel from mid-turn (candidate already applied)."""
     while True:
@@ -63,9 +78,7 @@ def _rollout(sim, s, pol, max_turns, fail):
         if s.player.stunned > 0:
             s.player.stunned -= 1
         else:
-            c = pol(sim, s)
-            if c is not None and sim.can_cast(s, c):
-                sim.cast(s, c)
+            _apply(sim, s, pol(sim, s))
 
 
 def make_search_policy(base=None, k=6, fail_penalty=25.0, max_turns=40):
@@ -74,10 +87,16 @@ def make_search_policy(base=None, k=6, fail_penalty=25.0, max_turns=40):
     base_pol = base or make_blade_stack(3)
 
     def policy(sim, s):
+        multi = len(s.living_enemies()) > 1
         cands, seen = [None], set()
         for c in s.hand:
-            if c.name not in seen and sim.can_cast(s, c):
-                seen.add(c.name)
+            if c.name in seen or not sim.can_cast(s, c):
+                continue
+            seen.add(c.name)
+            if multi and c.kind in FOE_KINDS:
+                cands.extend((c, i) for i, e in enumerate(s.enemies)
+                             if e.alive)
+            else:
                 cands.append(c)
         if len(cands) == 1:
             return None
@@ -91,10 +110,13 @@ def make_search_policy(base=None, k=6, fail_penalty=25.0, max_turns=40):
                 dsim.log_events = False
                 dsim.rng.shuffle(ds.player.deck)   # determinize hidden pile
                 if cand is not None:
+                    name = cand[0].name if isinstance(cand, tuple) \
+                        else cand.name
                     m = next(c for c in ds.player.hand
-                             if c.name == cand.name)
-                    if dsim.can_cast(ds, m):
-                        dsim.cast(ds, m)
+                             if c.name == name)
+                    _apply(dsim, ds,
+                           (m, cand[1]) if isinstance(cand, tuple)
+                           else m)
                 v += _rollout(dsim, ds, base_pol, max_turns, fail_penalty)
             v /= k
             if v > best_v:
