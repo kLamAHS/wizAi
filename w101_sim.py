@@ -414,6 +414,9 @@ class Actor:
     cheat: object = None
     is_minion: bool = False
     minion_role: str = "attack"
+    spell_pool: object = None    # living-boss card names (None = legacy)
+    archetype: str = "hitter"
+    discipline: float = 0.7
     minion_power: float = 0.0
     hand: list = field(default_factory=list)
     deck: list = field(default_factory=list)
@@ -454,6 +457,17 @@ class Boss:
                                 # overrides the resist_own convention
     boost_map: object = None    # scraped boost table; overrides boost_opp
     outgoing_bonus: float = 0.0 # scraped outgoing damage % (gear-like)
+    # ---- living-boss layer (2026 boss-AI report; ALL confidence
+    # 'modeled': the report supports pool+state-aware-AI+scripts, not
+    # the exact weights) -------------------------------------------------
+    pool: object = None         # card names the boss may cast; None =
+                                # legacy flat `dmg` per round
+    archetype: str = "hitter"   # hitter|healer|buffer|debuffer|tank
+    discipline: float = 0.7     # P(follow archetype priorities) vs a
+                                # uniform legal pick — the report's
+                                # "imperfect but state-aware" knob
+    pip_chance: float = 0.40    # enemy power-pip odds (not public;
+                                # modeled at the player base cap)
 
     def incoming_mult(self, spell_school):
         if self.resist_map is not None or self.boost_map is not None:
@@ -485,7 +499,12 @@ class Boss:
                      cheat=self.cheat.fresh() if self.cheat else None,
                      stunable=self.stunable, pierce=self.pierce,
                      crit_chance=self.crit_chance,
-                     block_chance=self.block_chance)
+                     block_chance=self.block_chance,
+                     spell_pool=list(self.pool) if self.pool else None,
+                     archetype=self.archetype,
+                     discipline=self.discipline,
+                     power_pip_chance=self.pip_chance
+                     if self.pool else 0.0)
 
 
 # ---------------------------------------------------------------- game state
@@ -602,6 +621,11 @@ class Sim:
             expand_variants(self.cards, sideboard)
         self.decklist, self.boss = decklist, boss
         self.extra_bosses = enemies or []
+        for b in [boss] + self.extra_bosses:
+            missing = [n for n in (b.pool or []) if n not in self.cards]
+            if missing:
+                raise ValueError(f"{b.name}: pool spells not in card "
+                                 f"data: {missing}")
         self.sideboard_list = sideboard or []
         self.player_hp0 = player_hp
         self.player_stats = player_stats or {}
@@ -887,7 +911,12 @@ class Sim:
             pool = [s.player] + [m for m in s.allies if m.alive]
             tgt_foe = max(pool, key=lambda a: a.threat) if pool else None
             foes = pool
-            me, tgt_friend = caster, caster
+            me = caster
+            # ally_idx >= 0 = "the neediest living teammate" (enemy
+            # healers heal their protectee, not themselves — report's
+            # role-minion pattern); < 0 keeps the caster
+            tgt_friend = caster if ally_idx < 0 or not friends else \
+                min(friends, key=lambda f: f.hp / max(f.max_hp, 1))
         minions = [m for m in (s.allies if caster.team == 0 else [])
                    if m.alive]
         return {"self": [me], "ally": [tgt_friend], "allies": friends,
@@ -1247,6 +1276,18 @@ class Sim:
         self._tick_over_time(s, enemy)
         if not enemy.alive:
             return
+        if enemy.spell_pool is not None:
+            self._enemy_pip(s, enemy)   # pips accrue even while stunned
+            if enemy.stunned > 0:
+                enemy.stunned -= 1
+                return
+            card, ally_idx = self._enemy_choose(s, enemy)
+            if card is not None:
+                self._enemy_cast(s, enemy, card, ally_idx)
+            else:
+                self._ev(s, "enemy_pass", actor=enemy.name,
+                         pips=enemy.norm_pips + 2 * enemy.pow_pips)
+            return
         if enemy.stunned > 0:
             enemy.stunned -= 1
             return
@@ -1257,6 +1298,211 @@ class Sim:
                          charm_mult=self._consume_damage_charms(
                              s, enemy, enemy.school),
                          crit_mult=self._crit_mult(enemy, tgt))
+
+    # ---- living-boss caster (2026 boss-AI report; confidence 'modeled':
+    # configured pool + legal-action AI + weighted/imperfect selection.
+    # The pool is REUSABLE — no hidden hand/deck is simulated, matching
+    # the report's finding that no player-like draw model is publicly
+    # evidenced. Scripts (CheatRule) remain the deterministic layer.) ----
+
+    def _enemy_pip(self, s, enemy):
+        chance = enemy.power_pip_chance
+        if s.bubble and s.bubble.fld == "pip_chance":
+            chance = min(1.0, chance + s.bubble.percent)
+        if enemy.norm_pips + enemy.pow_pips >= self.rules.max_pip_slots:
+            # full rack: white pips upgrade to power (the game's escape
+            # hatch; modeled) — without it a saver whose own-school nuke
+            # needs 8+ effective pips can freeze into a forever-pass
+            if enemy.norm_pips and self.rng.random() < chance:
+                enemy.norm_pips -= 1
+                enemy.pow_pips += 1
+            return
+        if self.rng.random() < chance:
+            enemy.pow_pips += 1
+        else:
+            enemy.norm_pips += 1
+
+    def _enemy_afford(self, enemy, card):
+        if card.x_pips:
+            return enemy.norm_pips + enemy.pow_pips >= 1
+        if card.school == enemy.school:
+            return enemy.norm_pips + 2 * enemy.pow_pips >= card.pips
+        return enemy.norm_pips + enemy.pow_pips >= card.pips
+
+    def _enemy_spend(self, enemy, card):
+        if card.x_pips:
+            eff = enemy.norm_pips + enemy.pow_pips * \
+                (2 if card.school == enemy.school else 1)
+            enemy.norm_pips = enemy.pow_pips = 0
+            return eff
+        c = card.pips
+        if card.school == enemy.school:
+            use_pow = min(enemy.pow_pips, c // 2)
+            enemy.pow_pips -= use_pow
+            c -= use_pow * 2
+        use_pow2 = 0
+        while c > enemy.norm_pips and enemy.pow_pips:
+            enemy.pow_pips -= 1
+            use_pow2 += 1
+            c -= 2 if card.school == enemy.school else 1
+        enemy.norm_pips -= max(c, 0)
+        enemy.norm_pips = max(enemy.norm_pips, 0)
+        return card.pips
+
+    def _enemy_legal(self, s, enemy):
+        """Affordable pool cards minus duplicate hanging placements."""
+        tgt = self._resolve_targets(s, enemy, "enemy", 0, -1)
+        tgt = tgt[0] if tgt else None
+        out = []
+        for name in enemy.spell_pool:
+            card = self.cards.get(name)
+            if card is None or not self._enemy_afford(enemy, card):
+                continue
+            if card.kind == "blade" and \
+                    any(h.name == card.name for h in enemy.charms):
+                continue
+            if card.kind in ("trap", "weakness") and tgt is not None:
+                lst = tgt.wards if card.kind == "trap" else tgt.charms
+                if any(h.name == card.name for h in lst):
+                    continue
+            if card.kind == "shield" and \
+                    any(h.name == card.name for h in enemy.wards):
+                continue
+            out.append(card)
+        return out
+
+    def _enemy_cost(self, enemy, card):
+        """Real pip price of casting now: X-pip spells dump the whole
+        rack, so their cost is the current effective total, never the
+        card's printed 0."""
+        if not card.x_pips:
+            return card.pips
+        return enemy.norm_pips + enemy.pow_pips * \
+            (2 if card.school == enemy.school else 1)
+
+    def _enemy_attainable(self, enemy, card):
+        """Can this card EVER be paid for from a full rack? An
+        off-school 8-pip spell can't (7 slots, no doubling) and must
+        never be chosen as the nuke to save toward."""
+        if card.x_pips:
+            return True
+        cap = self.rules.max_pip_slots
+        return card.pips <= cap * (2 if card.school == enemy.school
+                                   else 1)
+
+    def _enemy_immediate(self, enemy, card):
+        """Up-front damage of a cast right now: hit/drain ops only
+        (a DoT's total lands over rounds and cannot 'kill now')."""
+        eff = self._enemy_cost(enemy, card) if card.x_pips else 0
+        total = 0.0
+        for o in card.ops:
+            if o["op"] in ("hit", "drain"):
+                amt = o.get("amount", o.get("total", 0.0))
+                total += amt * (eff if o.get("per_pip") else 1)
+        return total
+
+    def _enemy_choose(self, s, enemy):
+        """Archetype priorities with an imperfection knob: with
+        P(discipline) follow the role's bucket order, else pick
+        uniformly among legal casts (the report: state-aware but
+        imperfect; exact weights not public). Returns (card, ally_idx)
+        — ally_idx >= 0 marks a teammate-directed cast."""
+        legal = self._enemy_legal(s, enemy)
+        if not legal:
+            return None, -1
+        cost = lambda c: self._enemy_cost(enemy, c)
+        if self.rng.random() >= enemy.discipline:
+            return self.rng.choice(legal), -1
+        hits = [c for c in legal if c.kind in ("damage", "drain")]
+        blades = [c for c in legal if c.kind == "blade"]
+        traps = [c for c in legal if c.kind == "trap"]
+        heals = [c for c in legal if c.kind == "heal"]
+        shields = [c for c in legal if c.kind == "shield"]
+        debuffs = [c for c in legal if c.kind in ("weakness", "mantle")]
+        tgt = self._resolve_targets(s, enemy, "enemy", 0, -1)
+        tgt = tgt[0] if tgt else None
+        pool_cards = [self.cards[n] for n in enemy.spell_pool
+                      if n in self.cards]
+        top = max((c for c in pool_cards
+                   if c.kind in ("damage", "drain")
+                   and self._enemy_attainable(enemy, c)),
+                  key=lambda c: c.damage, default=None)
+        arch = enemy.archetype
+
+        if arch == "healer":
+            friends = [e for e in s.enemies if e.alive]
+            hurt = [f for f in friends if f.hp < 0.65 * f.max_hp]
+            if hurt and heals:
+                return max(heals, key=lambda c: c.damage or c.pips), 0
+            if shields:
+                return shields[0], -1
+            return (min(hits, key=cost), -1) if hits else (None, -1)
+        if arch == "buffer":
+            if blades:
+                return blades[0], -1
+            if traps:
+                return traps[0], -1
+            return None, -1
+        if arch == "debuffer":
+            if debuffs:
+                return debuffs[0], -1
+            return (min(hits, key=cost), -1) if hits else (None, -1)
+        if arch == "tank":
+            if shields:
+                return shields[0], -1
+            return (min(hits, key=cost), -1) if hits else (None, -1)
+
+        # hitter (default): kill shot > setup while saving for the top
+        # nuke > fire the top nuke when ready > don't waste a full rack
+        if tgt is not None and hits:
+            kill = [c for c in hits if self._enemy_immediate(enemy, c) *
+                    self._resist_mult(tgt, c.school, enemy.pierce)
+                    >= tgt.hp]
+            if kill:
+                return min(kill, key=cost), -1
+        full = enemy.norm_pips + enemy.pow_pips >= \
+            self.rules.max_pip_slots
+        top_ready = top is not None and (
+            full if top.x_pips else self._enemy_afford(enemy, top))
+        if top is not None and not top_ready:
+            if blades:
+                return blades[0], -1
+            if traps:
+                return traps[0], -1
+            return None, -1                   # save pips for the nuke
+        if top is not None and top_ready and top in hits:
+            return top, -1
+        if full and hits:
+            return max(hits, key=lambda c:
+                       self._enemy_immediate(enemy, c)), -1
+        return None, -1
+
+    def _enemy_cast(self, s, enemy, card, ally_idx=-1):
+        """Fizzle keeps pips (player rule, transplanted — modeled);
+        the pool is reusable. Player-cast mantles and dispels bite:
+        the boss consumes its incoming accuracy charms and dispels
+        exactly like a player caster."""
+        if self._take_dispel(s, enemy, card.school):
+            self._enemy_spend(enemy, card)
+            self._ev(s, "enemy_dispelled", actor=enemy.name,
+                     card=card.name)
+            return
+        acc = min(1.0, card.accuracy + enemy.accuracy_bonus +
+                  self._consume_accuracy_charms(s, enemy, card.school))
+        if self.rng.random() > acc:
+            self._ev(s, "enemy_fizzle", actor=enemy.name, card=card.name)
+            return
+        eff = self._enemy_spend(enemy, card)
+        self._ev(s, "enemy_cast", actor=enemy.name, card=card.name,
+                 pips_spent=eff)
+        ops = card.ops
+        if ally_idx >= 0:
+            # teammate-directed heal: 'self'-authored heal ops follow
+            # the healer's decision, not the card text's player framing
+            ops = [dict(o, tgt="ally") if o["op"] in ("heal", "hot")
+                   else o for o in ops]
+        self.execute_ops(s, enemy, card.name, "enemy", ops,
+                         card.school, pips_spent=eff, ally_idx=ally_idx)
 
     def _minion_turn(self, s, minion):
         self._tick_over_time(s, minion)
