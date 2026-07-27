@@ -36,10 +36,10 @@
      "Ghoul"
     ],
     "RL(8k)": {
-     "win_rate": 0.0026666666666666666,
-     "mean_ttk": 10.625,
+     "win_rate": 0.002,
+     "mean_ttk": 10.5,
      "p90_ttk": 11,
-     "mean_hp_left": 145.4375
+     "mean_hp_left": 191.66666666666666
     },
     "triage": {
      "win_rate": 0.0016666666666666668,
@@ -87,10 +87,10 @@
      "Death Trap"
     ],
     "RL(8k)": {
-     "win_rate": 0.024,
-     "mean_ttk": 8.819444444444445,
-     "p90_ttk": 10,
-     "mean_hp_left": 182.44097222222223
+     "win_rate": 0.017666666666666667,
+     "mean_ttk": 8.735849056603774,
+     "p90_ttk": 11,
+     "mean_hp_left": 178.96226415094338
     },
     "triage": {
      "win_rate": 0.06166666666666667,
@@ -135,23 +135,24 @@
      "Banshee",
      "Sacrifice",
      "Ghoul",
-     "Dark Sprite",
      "Deathblade",
      "Deathblade",
-     "Death Trap",
-     "Curse"
+     "Balanceblade",
+     "Hex",
+     "Curse",
+     "Pixie"
     ],
     "RL(8k)": {
-     "win_rate": 0.072,
-     "mean_ttk": 8.25,
-     "p90_ttk": 10,
-     "mean_hp_left": 273.98314814814813
+     "win_rate": 0.038,
+     "mean_ttk": 9.842105263157896,
+     "p90_ttk": 12,
+     "mean_hp_left": 225.74096491228067
     },
     "triage": {
-     "win_rate": 0.31233333333333335,
-     "mean_ttk": 6.180362860192102,
-     "p90_ttk": 6,
-     "mean_hp_left": 333.70064034151545
+     "win_rate": 0.3343333333333333,
+     "mean_ttk": 7.8943170488534395,
+     "p90_ttk": 8,
+     "mean_hp_left": 360.3696410767697
     }
    }
   }
@@ -161,19 +162,40 @@
   "mean_ttk": null,
   "p90_ttk": null
  },
- "sample_trace": [
-  {
-   "actor": "Krokopatra",
-   "card": "Thunder Snake",
-   "pips_spent": 1,
-   "type": "enemy_cast",
-   "turn": 1
+ "pilot_ladder_at_20": {
+  "blade-stack(3)": {
+   "win_rate": 0.20133333333333334,
+   "mean_ttk": 7.0,
+   "p90_ttk": 7
   },
+  "blade-stack(2)": {
+   "win_rate": 0.18,
+   "mean_ttk": 6.566666666666666,
+   "p90_ttk": 9
+  },
+  "search(k=5)": {
+   "win_rate": 0.24133333333333334,
+   "mean_ttk": 8.48342541436464,
+   "p90_ttk": 11
+  },
+  "RL(24k)+advisor": {
+   "win_rate": 0.07866666666666666,
+   "mean_ttk": 8.338983050847459,
+   "p90_ttk": 12
+  }
+ },
+ "sample_trace": [
   {
    "actor": "Krokopatra",
    "card": "Stormblade",
    "pips_spent": 0,
    "type": "enemy_cast",
+   "turn": 1
+  },
+  {
+   "actor": "Krokopatra",
+   "pips": 2,
+   "type": "enemy_pass",
    "turn": 2
   },
   {
@@ -192,10 +214,24 @@
   },
   {
    "actor": "Krokopatra",
-   "card": "Storm Shield",
-   "pips_spent": 0,
+   "card": "Storm Shark",
+   "pips_spent": 3,
    "type": "enemy_cast",
    "turn": 5
+  },
+  {
+   "actor": "Krokopatra",
+   "card": "Stormblade",
+   "pips_spent": 0,
+   "type": "enemy_cast",
+   "turn": 6
+  },
+  {
+   "actor": "Krokopatra",
+   "card": "Lightning Bats",
+   "pips_spent": 2,
+   "type": "enemy_cast",
+   "turn": 7
   }
  ]
 }

@@ -244,15 +244,27 @@ evidence (exact weights, enemy pip odds) is tagged `modeled`.
 Krokopatra under each model): at level 12 both models say no (719 HP
 soloing 4-person content should fail); at level 20 the flat model
 calls the solo trivial (**98.6%**) while the living boss still wins
-most fights (**31.2%** best pilot) — chip damage understates a hitter
-that blades into Storm Shark spikes and shields your kill turns.
-Two riders: scripted triage BEATS per-deck RL against the living boss
-(31.2% vs 7.2%) because the tabular state cannot see the boss's
-hanging blades — a genuine representation gap opened by stateful
-opponents (roadmap: enemy-state features); and adding one 300-HP
-healer acolyte (which really heals its boss — enemy heals route to
-the neediest teammate) drops the fight to **0%** without target
-switching: the report's role-segmentation pattern, quantified.
+most fights (**33.4%** best pilot — heal-aware triage on a
+Pixie-carrying deck) — chip damage understates a hitter that blades
+into Storm Shark spikes and shields your kill turns.
+Two riders. First, the stochastic opponent INVERTS the baseline
+ladder (`pilot_ladder_at_20` in the results): triage 33.4% >
+search(k=5) 24.1% > blade-stack(3) 20.1% > per-deck RL 3.8–7.9%.
+Diagnosed, not assumed — the blade-blindness hypothesis was tested
+and falsified (enemy blade/shield state was ADDED to the tabular
+featurizer and made 8k-episode RL worse by fragmenting visits; 24k +
+a scripted-advisor warm start still trails every scripted pilot).
+The real cause is sample starvation: opponent stochasticity
+(discipline, enemy fizzles, spell choice) widens the visited-state
+distribution and drowns sparse win credit, exactly where tabular MC
+and shallow determinized rollouts are weakest — the concrete
+motivation for the sequence-model rung. The enemy-state features and
+the `fine_tune(advisor=...)` warm start both ship (correct
+representation and a 2x improvement at 24k, honestly short of the
+prior). Second, one 300-HP healer acolyte (which really heals its
+boss — enemy heals route to the neediest teammate) drops the fight
+to **0%** without target switching: the report's role-segmentation
+pattern, quantified.
 
 This diff was adversarially reviewed by a 30-agent workflow before
 merge; it caught a boss pip-livelock, self-only enemy healing, X-pip

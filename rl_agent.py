@@ -57,7 +57,19 @@ class Featurizer:
         # it); immortal fights keep the old, smaller state space
         php = min(int(s.player_hp // 300), 9) \
             if sim.player_hp0 < 10**9 else -1
-        return (hb, p, bmask, tsig, dmask, nukes_left, tcs, php)
+        # living-boss opponents are STATEFUL: their hanging blades
+        # (incoming spike) and self-shields (my hits blunted) drive
+        # timing decisions the old state couldn't express. Flat bosses
+        # keep the sentinel so their state space is unchanged.
+        boss = s.enemies[0]
+        if getattr(boss, "spell_pool", None) is not None:
+            eb = min(sum(1 for h in boss.charms
+                         if h.kind == "damage" and h.percent > 0), 3)
+            es = 1 if any(h.kind == "damage" and h.percent < 0
+                          for h in boss.wards) else 0
+        else:
+            eb = es = -1
+        return (hb, p, bmask, tsig, dmask, nukes_left, tcs, php, eb, es)
 
     def legal(self, sim, s):
         acts = [PASS]
