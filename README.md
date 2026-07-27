@@ -164,6 +164,8 @@ Regenerate with `python plots.py` (reads the results JSONs, writes
 
 ![Deck scorer validation](plots/scorer.png)
 
+![Deck-conditioned generalist](plots/generalist.png)
+
 ## Live-data results (`w101-pve-live-scrape`)
 
 Real scraped spells vs real scraped bosses (`results_live.json`; paired
@@ -279,16 +281,14 @@ loader report.
    against the dump by a regression test). Note the search's FIRST run
    found a genuine reward hack — boss-only spells mislabeled `core` in
    the dump gave 1-turn kills — now screened + regression-tested.
-   Status: `deck_builder.py`
-   implements rungs 1–2 (legal deck space with capacity/copy limits,
-   template-sampled candidate search, two-stage screen → RL fine-tune,
-   size-aware scoring so extra cards must buy reliability) plus
-   `random_boss()` and a held-out generalization harness. Rungs 3–4
-   remain: a learned deck scorer replacing the simulation screen, and a
-   single deck-conditioned combat policy trained jointly across decks
-   (today each fine-tune trains per-deck). Level gating is
-   max(curated unlock floor, the dump's `level_restriction`) — the
-   restriction field alone is null below ~30.
+   Status: all four rungs are
+   implemented. `deck_builder.py` covers rungs 1–2 (legal deck space
+   with capacity/copy limits, template-sampled candidate search,
+   two-stage screen → RL fine-tune, size-aware scoring so extra cards
+   must buy reliability) plus `random_boss()` and a held-out
+   generalization harness. Level gating is max(curated unlock floor,
+   the dump's `level_restriction`) — the restriction field alone is
+   null below ~30.
    Rung 3 shipped as `deck_scorer.py`: a closed-form ridge surrogate of
    the simulation screen over deck-vs-boss features (damage/blade/trap
    sums, prism gain vs the boss's resists, overkill ratio, plus the
@@ -302,6 +302,22 @@ loader report.
    candidates get simulated, and the pruning is logged, never silent.
    Screens append training rows via `build_deck(screen_log=...)`
    (`deck_screen_log.jsonl`), so the dataset grows with normal use.
+   Rung 4 shipped as `generalist.py`: a deck-conditioned combat policy
+   — linear Q over card-vs-state features (how hard THIS card hits
+   THIS boss through the exact blades/traps hanging, kill-now,
+   duplicate-blade, X-pip-waiting...), trained with the same backward
+   Monte-Carlo returns as the tabular agent but on a fresh random
+   (school, deck, boss) every episode, so one policy plays any legal
+   deck zero-shot. On six held-out (deck, boss) pairs it averages
+   49.2% vs the scripted heuristic's 50.7% and per-deck RL(8k)'s 53.5%
+   — within 1.5 points of the heuristic and 4.3 of the per-deck
+   ceiling at ZERO marginal training per deck. The honest gap: X-pip
+   pip-timing (balance 53% vs RL's 85%) — a linear feature can't
+   express "wait exactly until pips × per-pip ≥ HP". As build_deck's
+   stage-2 evaluator (`build_deck(generalist=...)`) it picks an
+   equally good final deck 3.3x faster (14s vs 46s). Exact hanging-
+   effect percents in the features mattered: with blade/trap COUNTS
+   the death-grind row scored 7%; with percents, 48% — parity.
 8. Post-classic rulesets behind `Rules`: criticals-on eras, mastery
    amulets, school pips/archmastery — each as a frozen named ruleset.
 

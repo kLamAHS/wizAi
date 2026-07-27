@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 
 # validated categorical palette (light mode), fixed slot order
 C = {"heuristic": "#2a78d6", "dp-transfer": "#eb6834",
-     "search": "#1baf7a", "RL": "#eda100"}
+     "search": "#1baf7a", "RL": "#eda100", "generalist": "#8a5cc9"}
 INK, INK2, GRID, BOUND = "#222222", "#555555", "#e5e5e5", "#444444"
 OUT = Path("plots")
 OUT.mkdir(exist_ok=True)
@@ -225,10 +225,46 @@ def scorer_scatter():
     plt.close(fig)
 
 
+def generalist_ladder():
+    """Held-out (deck, boss) pairs: scripted floor, zero-shot
+    generalist, per-deck RL ceiling."""
+    data = json.load(open("results_generalist.json", encoding="utf-8"))
+    rows = data["held_out"]
+    pols = [("heuristic", "heuristic"), ("generalist", "generalist"),
+            ("finetune", "RL")]
+    names = {"heuristic": "scripted heuristic",
+             "generalist": "generalist (zero-shot)",
+             "RL": "per-deck RL(8k)"}
+    fig, ax = plt.subplots(figsize=(8, 4.6))
+    h, gap = 0.24, 0.02
+    for j, (key, slot) in enumerate(pols):
+        ys = [i + (j - 1) * (h + gap) for i in range(len(rows))]
+        xs = [r[key][0] * 100 for r in rows]
+        ax.barh(ys, xs, height=h, color=C[slot], label=names[slot])
+        for y, x in zip(ys, xs):
+            if x < 3:
+                ax.text(1.5, y, "0%", va="center", fontsize=8,
+                        color=INK2)
+    ax.set_yticks(range(len(rows)))
+    ax.set_yticklabels([f"{r['school']} vs {r['boss']}" for r in rows])
+    ax.invert_yaxis()
+    ax.set_xlabel("win rate (%)")
+    ax.set_xlim(0, 100)
+    ax.set_axisbelow(True)
+    ax.grid(axis="y", visible=False)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.14), ncol=3,
+              frameon=False, fontsize=9)
+    ax.set_title("Deck-conditioned generalist: one policy, any deck, "
+                 "zero-shot (held-out pairs)", fontsize=11, loc="left")
+    fig.tight_layout()
+    fig.savefig(OUT / "generalist.png", bbox_inches="tight")
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     made = []
     for fn in (live_ladder, classic_gap, survival_tradeoff, storm_curve,
-               progression_chart, scorer_scatter):
+               progression_chart, scorer_scatter, generalist_ladder):
         try:
             fn()
             made.append(fn.__name__)

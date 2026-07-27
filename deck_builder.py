@@ -20,11 +20,13 @@ by fizzle risk"), not a memorized answer per boss.
 Bilevel rung 3 lives in deck_scorer.py: a ridge surrogate of the
 screen, trained from screen_log JSONL rows; pass it as
 build_deck(scorer=...) to simulate only the predicted-best slice of
-candidates. Still roadmap (rung 4): joint deck+combat training with a
-single deck-conditioned policy. The buildable pool is the curated
-TRAINED whitelist below (the dump carries no trainability marker — see
-the comment on TRAINED); level gating is max(curated unlock floor, game
-data's level_restriction).
+candidates. Rung 4 lives in generalist.py: a deck-conditioned linear-Q
+combat policy trained across random (school, deck, boss) triples; pass
+it as build_deck(generalist=...) to evaluate the top-k zero-shot
+instead of running a per-deck RL fine-tune. The buildable pool is the
+curated TRAINED whitelist below (the dump carries no trainability
+marker — see the comment on TRAINED); level gating is max(curated
+unlock floor, game data's level_restriction).
 """
 import random
 import re
@@ -250,13 +252,14 @@ def fine_tune(cards, dl, school, boss, rules=None, episodes=8000, seed=0):
 def build_deck(cards, school, boss, rules=None, n_candidates=150,
                top_k=5, capacity=16, copy_limit=3, seed=0, log=print,
                level=None, scorer=None, screen_frac=1 / 3,
-               screen_log=None):
+               screen_log=None, generalist=None):
     """Two-stage search over the legal deck space. Returns
     (deck, win, ttk, screen_table). `level` gates the unlocked pool.
     A fitted DeckScorer (`scorer`) pre-ranks candidates so only the top
     `screen_frac` slice is simulated; `screen_log` appends the screen's
     (deck, boss, result) rows to a JSONL file as surrogate training
-    data."""
+    data; a trained GeneralistQ (`generalist`) evaluates the top-k
+    zero-shot instead of running a per-deck RL fine-tune."""
     rng = random.Random(seed)
     pool = legal_pool(cards, school, level=level)
     seen, cands = set(), []
@@ -292,8 +295,16 @@ def build_deck(cards, school, boss, rules=None, n_candidates=150,
                     school=school, boss=boss_to_dict(boss), level=level,
                     deck=dl, win=w0, ttk=m0)) + "\n")
     best = None
+    if generalist is not None and log:
+        log("evaluating top-k with the generalist policy "
+            "(zero-shot, no per-deck training)")
     for w0, m0, dl in table[:top_k]:
-        w, m, _ = fine_tune(cards, dl, school, boss, rules, seed=seed)
+        if generalist is not None:
+            gsim = Sim(dict(cards), dl, school, boss, player_hp=10**9,
+                       rules=rules)
+            w, m = evaluate(gsim, generalist.policy(), n=2000)
+        else:
+            w, m, _ = fine_tune(cards, dl, school, boss, rules, seed=seed)
         if log:
             log(f"  size {len(dl):>2}  screen {w0*100:3.0f}%/{m0:5.2f}  "
                 f"RL {w*100:5.1f}%/{m:5.2f}  {sorted(set(dl))}")
