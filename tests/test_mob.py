@@ -55,6 +55,60 @@ def test_focus_wrapper_hits_the_chosen_target():
     assert won or not sim.last_state.enemies[1].alive or healer_deaths
 
 
+def test_generalist_actions_expand_targets_only_in_mobs():
+    import numpy as np
+    from generalist import legal_actions, phi
+    healer = _boss("healer", 300, pool=["Sprite"], archetype="healer")
+    sim = _sim([healer])
+    s = sim.new_state()
+    s.norm_pips, s.pow_pips = 6, 3
+    acts = legal_actions(sim, s)
+    tuples = [a for a in acts if isinstance(a, tuple)]
+    assert tuples and {t for _, t in tuples} == {0, 1}
+    # primary-target tuple vector == bare-card vector (compat)
+    card = tuples[0][0]
+    assert np.allclose(phi(sim, s, card), phi(sim, s, (card, 0)))
+    # 1v1: no tuples at all
+    solo = Sim(dict(CARDS), ["Wraith", "Deathblade"], "death",
+               _boss(pool=["Thunder Snake"]), player_hp=10**6,
+               rules=LIVE_RULES, rng=random.Random(1))
+    s1 = solo.new_state()
+    s1.norm_pips = 8
+    assert not any(isinstance(a, tuple) for a in legal_actions(solo, s1))
+
+
+def test_generalist_old_policies_load_padded():
+    import json as _json
+    import tempfile, os
+    from generalist import FEATS, GeneralistQ
+    old = {"features": FEATS[:-2], "w": [0.1] * (len(FEATS) - 2)}
+    fd, p = tempfile.mkstemp(suffix=".json")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        _json.dump(old, f)
+    gen = GeneralistQ.load(p)
+    os.unlink(p)
+    assert len(gen.w) == len(FEATS)
+    assert gen.w[-1] == 0.0 and gen.w[-2] == 0.0
+
+
+def test_handcrafted_generalist_kills_the_healer_first():
+    """Value overkill + support-flag: the greedy pick must aim the
+    first hit at the 300-HP healer, not the 2000-HP boss."""
+    from generalist import FEATS, GeneralistQ
+    gen = GeneralistQ()
+    gen.w[FEATS.index("overkill")] = 1.0
+    gen.w[FEATS.index("kill_now")] = 1.0
+    gen.w[FEATS.index("tgt_is_support")] = 1.0
+    gen.w[FEATS.index("k_hit")] = 0.5
+    healer = _boss("healer", 300, pool=["Sprite"], archetype="healer")
+    sim = _sim([healer], seed=4)
+    s = sim.new_state()
+    s.norm_pips, s.pow_pips = 6, 3
+    a = gen.policy()(sim, s)
+    assert isinstance(a, tuple) and a[1] == 1
+    assert a[0].kind in ("damage", "drain")
+
+
 def test_focus_beats_blind_against_a_healer():
     """The report's team-fight rule, measured: focus-fire on the
     healer must strictly beat target-blind play."""

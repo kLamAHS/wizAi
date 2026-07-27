@@ -303,8 +303,26 @@ enemy count = players + 1) — no targeting rule rescues a solo
 level-20 at 915 HP. A pipeline honesty fix rode along: when every
 screen candidate scores 0% (infeasible encounter), the ranking is
 noise and the size tiebreak silently favors SMALL decks — build_deck
-now warns instead of pretending. Next rung: a target dimension for
-the learned pilots, with focus-scripted play as the bar to clear.
+now warns instead of pretending.
+**Learned targeting: a clean negative result**
+(`mob_generalist.py`, `results_mob_generalist.json`). The generalist
+grew a target dimension — (card, target) actions with per-target
+overkill/kill-now/support-flag features, mob episodes mixed into
+training, 1v1 behavior bit-compatible, old policy files zero-padded
+on load — and it FAILS the scripted bar: 0% vs focus(bs2)'s 46.4%,
+opening on the boss instead of the healer. Two fixes were tried and
+documented: raw backward-MC credit (the support features fire only
+in mob episodes, which mostly lose, so healer-hitting absorbs the
+difficulty as negative weight — the feature-level cousin of "losers
+teach losing habits") and an advantage baseline whose state head
+sees mob-ness (absorbs the difficulty, still 0%). The residual cause
+matches the X-pip negative result exactly: killing the healer is a
+MULTI-STEP COMMITMENT that a memoryless linear policy cannot hold
+and ε-greedy exploration almost never completes by chance, so the
+winning sequence barely exists in the data. Two independent
+negatives now isolate the same missing capability — sequence-level
+planning and credit — which is precisely the sequence-model rung of
+the offline-RL roadmap. The scripted focus bar stands.
 
 ## Scope of the current claims
 
