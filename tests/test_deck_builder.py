@@ -143,6 +143,33 @@ def test_build_deck_p90_objective():
     assert 0.0 <= w <= 1.0 and len(dl) > 0
 
 
+def test_sample_deck_offers_defense_only_when_lethal():
+    """Shields enter the template only against a boss that hits back."""
+    pool = legal_pool(CARDS, "death")
+    lethal = Boss("d", 2000, "life", 200)
+    immortal = Boss("d0", 2000, "life", 0)
+    kinds_lethal, kinds_immortal = set(), set()
+    for i in range(30):
+        dl = sample_deck(pool, "death", lethal, random.Random(i))
+        kinds_lethal |= {CARDS[n].kind for n in dl}
+        dl = sample_deck(pool, "death", immortal, random.Random(i))
+        kinds_immortal |= {CARDS[n].kind for n in dl}
+    assert "shield" in kinds_lethal or "heal" in kinds_lethal
+    assert "shield" not in kinds_immortal
+
+
+def test_build_deck_survival_arm():
+    """player_hp= switches the whole pipeline to the lethal objective."""
+    boss = Boss("dummy", 800, "death", 150)
+    boss.resist_map = {"death": 0.5}
+    msgs = []
+    dl, w, m, _ = build_deck(CARDS, "fire", boss, LIVE_RULES,
+                             n_candidates=10, top_k=2, seed=4,
+                             player_hp=900, log=msgs.append)
+    assert any("survival at 900 HP" in s for s in msgs)
+    assert 0.0 <= w <= 1.0 and len(dl) > 0
+
+
 def test_random_boss_shape():
     rng = random.Random(3)
     b = random_boss(rng)

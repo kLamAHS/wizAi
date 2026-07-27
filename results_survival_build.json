@@ -1,0 +1,106 @@
+{
+ "boss": "Jade Oni",
+ "boss_hp": 6000,
+ "boss_dmg": 240,
+ "player_hp": 2160,
+ "school": "death",
+ "picks": {
+  "speed": {
+   "deck": [
+    "Avenging Fossil",
+    "Avenging Fossil",
+    "Avenging Fossil",
+    "Wraith",
+    "Tri Blade",
+    "Deathblade",
+    "Spirit Blade",
+    "Spirit Blade",
+    "Death Trap",
+    "Spirit Trap",
+    "Feint"
+   ],
+   "RL(8k)": {
+    "win_rate": 0.8903333333333333,
+    "mean_ttk": 9.355672032946462,
+    "median_ttk": 9,
+    "p90_ttk": 14,
+    "p99_ttk": 16,
+    "mean_hp_left": 347.2497192062898
+   },
+   "triage": {
+    "win_rate": 0.501,
+    "mean_ttk": 9.0,
+    "median_ttk": 9,
+    "p90_ttk": 9,
+    "p99_ttk": 9,
+    "mean_hp_left": 168.0
+   }
+  },
+  "survival": {
+   "deck": [
+    "Avenging Fossil",
+    "Avenging Fossil",
+    "Avenging Fossil",
+    "Wraith",
+    "Tri Blade",
+    "Balanceblade",
+    "Deathblade",
+    "Deathblade",
+    "Hex",
+    "Feint",
+    "Death Trap",
+    "Death Trap",
+    "Pixie"
+   ],
+   "RL(8k)": {
+    "win_rate": 0.9856666666666667,
+    "mean_ttk": 8.278998985458236,
+    "median_ttk": 8,
+    "p90_ttk": 10,
+    "p99_ttk": 11,
+    "mean_hp_left": 549.0432025701725
+   },
+   "triage": {
+    "win_rate": 0.945,
+    "mean_ttk": 9.49100529100529,
+    "median_ttk": 9,
+    "p90_ttk": 10,
+    "p99_ttk": 11,
+    "mean_hp_left": 450.0512566137566
+   }
+  },
+  "surv-p90": {
+   "deck": [
+    "Avenging Fossil",
+    "Avenging Fossil",
+    "Avenging Fossil",
+    "Wraith",
+    "Tri Blade",
+    "Balanceblade",
+    "Deathblade",
+    "Deathblade",
+    "Hex",
+    "Feint",
+    "Death Trap",
+    "Death Trap",
+    "Pixie"
+   ],
+   "RL(8k)": {
+    "win_rate": 0.9856666666666667,
+    "mean_ttk": 8.278998985458236,
+    "median_ttk": 8,
+    "p90_ttk": 10,
+    "p99_ttk": 11,
+    "mean_hp_left": 549.0432025701725
+   },
+   "triage": {
+    "win_rate": 0.945,
+    "mean_ttk": 9.49100529100529,
+    "median_ttk": 9,
+    "p90_ttk": 10,
+    "p99_ttk": 11,
+    "mean_hp_left": 450.0512566137566
+   }
+  }
+ }
+}

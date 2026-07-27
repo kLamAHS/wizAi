@@ -257,18 +257,29 @@ loader report.
    fire vs Malistaire survival is winnable only through it.
 4. Mob fights: the engine is multi-enemy (AoE, per-target wards, threat)
    but the experiment table is still 1v1.
-5. Risk-sensitive objectives: `build_deck(objective='p90')` now ranks
-   the final pick by (win, p90 TTK, size) instead of the mean — the
-   reliability build (`risk_experiment.py`, `results_risk.json`).
-   Honest first finding: on storm vs a 1.2–2.5k dummy the mean build
-   and the reliability build pick the SAME deck — within the
-   plausibility-capped pool, TTK variance is fizzle-driven, and the
-   blade+nuke redundancy that speeds the mean also trims the tail
-   (the distribution is dominated, not traded). The objective should
-   start biting in survival fights, where a slow tail is a death
-   rather than lost seconds — that experiment needs the builder's
-   survival arm (screen/fine-tune currently pin `player_hp=1e9`).
-   Still open: `max_remaining_damage` as an RL feature.
+5. Risk-sensitive objectives: `build_deck(objective='p90')` ranks the
+   final pick by (win, p90 TTK, size) instead of the mean — the
+   reliability build (`risk_experiment.py`), and
+   `build_deck(player_hp=...)` is the SURVIVAL arm — boss damage
+   counts, the screen proxy gains triage, and the template offers
+   shields/heals only against a boss that hits back
+   (`survival_build.py`, `results_survival_build.json`). Headline
+   (death vs Jade Oni, 240 dmg/round, 9 rounds of player HP): the
+   survival-built deck beats the speed-built deck **98.6% vs 89.0%**
+   under fire and is FASTER (mean 8.28 vs 9.36) — one Pixie + an
+   extra blade keeps the kill line alive — and the deck itself
+   carries the reliability (scripted-triage pilot: 94.5% vs 50.1%).
+   At 6 rounds of HP nothing survives at all (best build 0.3%): the
+   cheatless damage model gives fights a hard HP floor. Honest
+   finding on the tail objective, twice now: mean and p90 pick the
+   SAME deck (storm dummies, and this fight) — within the
+   plausibility-capped pool the winning deck dominates the whole TTK
+   distribution rather than trading mean for tail; the p90 column
+   discriminates candidates (10 vs 14 vs 18) but win rate decides.
+   Still open: `max_remaining_damage` as an RL feature, and an
+   HP-aware state for the per-deck agent (the tabular pilot cannot
+   see its own HP yet still beats triage by killing faster — less
+   exposure beats more healing at this damage level).
 6. Search-generated expert data → filtered behavior cloning → conservative
    offline RL (CQL/IQL) → sequence models, benchmarked against each other
    on held-out bosses/cards/rulesets.
