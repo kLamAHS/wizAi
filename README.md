@@ -310,19 +310,28 @@ grew a target dimension — (card, target) actions with per-target
 overkill/kill-now/support-flag features, mob episodes mixed into
 training, 1v1 behavior bit-compatible, old policy files zero-padded
 on load — and it FAILS the scripted bar: 0% vs focus(bs2)'s 46.4%,
-opening on the boss instead of the healer. Two fixes were tried and
-documented: raw backward-MC credit (the support features fire only
-in mob episodes, which mostly lose, so healer-hitting absorbs the
-difficulty as negative weight — the feature-level cousin of "losers
-teach losing habits") and an advantage baseline whose state head
-sees mob-ness (absorbs the difficulty, still 0%). The residual cause
-matches the X-pip negative result exactly: killing the healer is a
-MULTI-STEP COMMITMENT that a memoryless linear policy cannot hold
-and ε-greedy exploration almost never completes by chance, so the
-winning sequence barely exists in the data. Two independent
-negatives now isolate the same missing capability — sequence-level
-planning and credit — which is precisely the sequence-model rung of
-the offline-RL roadmap. The scripted focus bar stands.
+opening on the boss instead of the healer. A four-arm controlled
+study then separated exploration failure from representation failure
+(self-play, advisor-guided exploration that follows the focus script
+early, BC on random-distribution demonstrations, and BC on
+demonstrations of THE BAR FIGHT ITSELF — no distribution-shift
+excuse): every learned arm scores 0%. Along the way: two credit
+fixes tried (raw backward-MC lets mob-only features absorb the
+mob episodes' difficulty as negative weight — the feature-level
+cousin of "losers teach losing habits"; an advantage baseline with a
+mob-aware state head absorbs it properly, still 0%), and one
+matcher bug caught (focus wraps every card in a target tuple, so
+teacher blade casts logged as PASSes until normalized — demo data
+had deleted the very line it demonstrated). The decisive number came
+from the on-bar cell: the TEACHER itself collapses from 46.4% to 1%
+under 10% action noise — across a ~25-decision grind the winning
+line tolerates almost no deviation, so a memoryless linear ranking
+that wobbles anywhere loses everywhere. Three independent negatives
+(X-pip two-hit planning, healer-first commitment, wobble-free
+sequence execution) now isolate the same missing capability:
+sequence-level planning and consistency — the sequence-model rung,
+with reproducible bars at 46.4% (this fight) and 85% (balance
+X-pip). The scripted focus bar stands.
 
 ## Scope of the current claims
 

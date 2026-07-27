@@ -205,14 +205,28 @@ class GeneralistQ:
             return self.rng.choice(legal)
         return max(legal, key=lambda a: self.q(sim, s, a))
 
-    def train_episode(self, sim, eps):
+    def train_episode(self, sim, eps, advisor=None, adv_w=0.0):
         """Backward MC on shared weights (same scheme as the QAgent).
-        Win = ALL enemies dead (matters in mob fights)."""
+        Win = ALL enemies dead (matters in mob fights). `advisor` is a
+        scripted policy followed with probability adv_w — guided
+        exploration that puts completed multi-step sequences (e.g. a
+        finished healer kill) into the data where eps-greedy alone
+        almost never lands them."""
         s = sim.new_state()
         traj, won = [], False
         while True:
             tc_reflex(sim, s)       # TC reflex: draw free, cast learned
-            a = self.act(sim, s, eps)
+            a = None
+            if advisor is not None and self.rng.random() < adv_w:
+                a = advisor(sim, s)
+                if a is None:
+                    a = PASS
+                elif isinstance(a, tuple) and \
+                        a[0].kind not in FOE_KINDS:
+                    a = a[0]        # focus wraps everything; only
+                                    # foe-directed kinds keep targets
+            if a is None:
+                a = self.act(sim, s, eps)
             sv = np.array([1.0, min(s.boss_hp / 3000.0, 3.0),
                            min((s.norm_pips + 2 * s.pow_pips) / 14.0, 1.0),
                            1.0 if len(s.living_enemies()) > 1 else 0.0])
@@ -276,7 +290,7 @@ def _rand_support(rng):
 
 def train_generalist(cards, episodes=40000, seed=0, rules=None,
                      log=None, snap_every=5000, val_pairs=None,
-                     mob_frac=0.25):
+                     mob_frac=0.25, advisor=None):
     """Each episode draws a fresh random (school, deck, boss); a
     `mob_frac` slice adds a living healer minion so the target
     dimension gets trained. Snapshots keep the weights that score
@@ -312,7 +326,9 @@ def train_generalist(cards, episodes=40000, seed=0, rules=None,
         extra = [_rand_support(rng)] if rng.random() < mob_frac else []
         sim = Sim(dict(cards), dl, sc, boss, player_hp=10**9,
                   rules=rules, rng=rng, enemies=extra)
-        agent.train_episode(sim, eps=max(0.05, 0.3 * (1 - frac)))
+        agent.train_episode(sim, eps=max(0.05, 0.3 * (1 - frac)),
+                            advisor=advisor,
+                            adv_w=max(0.0, 0.5 * (1 - 2 * frac)))
         if (ep + 1) % snap_every == 0:
             wins = []
             for sc_v, dl_v, b_v, ex_v in val_pairs:

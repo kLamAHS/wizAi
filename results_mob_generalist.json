@@ -1,20 +1,35 @@
 {
  "bar": {
-  "generalist": {
+  "self-play": {
    "win_rate": 0.0,
    "mean_ttk": null,
    "p90_ttk": null
   },
-  "focus(bs2)": {
+  "advisor": {
+   "win_rate": 0.0,
+   "mean_ttk": null,
+   "p90_ttk": null
+  },
+  "BC(focus)": {
+   "win_rate": 0.0,
+   "mean_ttk": null,
+   "p90_ttk": null
+  },
+  "BC(on-bar)": {
+   "win_rate": 0.0,
+   "mean_ttk": null,
+   "p90_ttk": null
+  },
+  "focus(bs2) bar": {
    "win_rate": 0.464,
    "mean_ttk": 20.14008620689655,
    "p90_ttk": 23
-  },
-  "blind(bs2)": {
-   "win_rate": 0.0,
-   "mean_ttk": null,
-   "p90_ttk": null
   }
  },
- "first_hit_target": 0
+ "opening_targets": {
+  "self-play": 0,
+  "advisor": 0,
+  "BC(focus)": null,
+  "BC(on-bar)": null
+ }
 }
