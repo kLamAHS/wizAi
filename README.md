@@ -331,7 +331,21 @@ that wobbles anywhere loses everywhere. Three independent negatives
 sequence execution) now isolate the same missing capability:
 sequence-level planning and consistency — the sequence-model rung,
 with reproducible bars at 46.4% (this fight) and 85% (balance
-X-pip). The scripted focus bar stands.
+X-pip).
+**The first bar falls to decision-time search**
+(`sequence_search.py`, `results_sequence.json`). Target-aware
+determinized rollout search with the focus script as rollout base
+scores **63.0%** on the healer fight — clearing the 46.4% teacher
+bar by 16 points AND faster (mean 17.5 vs 20.4) — because search
+PLANS the remaining sequence per draw instead of imitating one: it
+deviates from the script exactly where rollouts prove it profitable,
+so it is not capped at its teacher the way BC is. On the X-pip bar,
+search(k=16) reaches **72.0%** vs blade-stack's 60.0% — half the gap
+to per-deck RL's 85.1% closed with zero training; the residual is
+deck-specific draw memorization a one-ply rollout can't capture,
+which keeps the learned-sequence-model rung motivated for what
+remains. Cost profile is the mirror of RL's: no training, ~1s of
+inference per fight.
 
 ## Scope of the current claims
 
