@@ -15,7 +15,8 @@ Reward: -1 per turn, terminal 0 on kill, -FAIL_PENALTY on timeout/defeat.
 """
 import random, math
 from collections import defaultdict
-from w101_sim import Sim, Boss, load_cards, evaluate, strat_nuke_asap, make_blade_stack
+from w101_sim import (Sim, Boss, load_cards, evaluate, strat_nuke_asap,
+                      make_blade_stack, tc_reflex)
 from dp_solver import solve, dp_policy
 
 FAIL_PENALTY = 25.0
@@ -40,7 +41,9 @@ class Featurizer:
         """Compact state. Hand bits only for damage cards: buff availability
         is already encoded by the legal-action set, but WHICH nuke is in hand
         (vs still in deck) drives the wait/dig/fire decision. nukes_left is
-        the scarcity signal the DP abstraction lacks."""
+        the scarcity signal the DP abstraction lacks. Treasure cards in
+        hand enter by name (the sideboard is small and WHICH TC is up
+        decides the turn)."""
         hb = min(int(s.boss_hp // 250), 24)
         p = min(s.norm_pips + 2 * s.pow_pips, 14)
         bmask = sum(1 << i for i, n in enumerate(self.blades) if n in s.blades)
@@ -49,7 +52,12 @@ class Featurizer:
                     if any(c.name == n for c in s.hand))
         nukes_left = min(sum(1 for c in s.hand if c.kind in DMG_KINDS) +
                          sum(1 for c in s.deck if c.kind in DMG_KINDS), 8)
-        return (hb, p, bmask, tsig, dmask, nukes_left)
+        tcs = tuple(sorted({c.name for c in s.hand if c.source == "tc"}))
+        # own-HP bucket only in mortal fights (heal/shield timing needs
+        # it); immortal fights keep the old, smaller state space
+        php = min(int(s.player_hp // 300), 9) \
+            if sim.player_hp0 < 10**9 else -1
+        return (hb, p, bmask, tsig, dmask, nukes_left, tcs, php)
 
     def legal(self, sim, s):
         acts = [PASS]
@@ -98,7 +106,8 @@ def _dig(s, keep=None):
         if dup:  return (1, _card_value(cd))
         if cd.kind not in DMG_KINDS: return (2, _card_value(cd))
         return (3, cd.damage)
-    junk = [cd for cd in s.hand if cd.name != keep]
+    junk = [cd for cd in s.hand if cd.name != keep
+            and cd not in s.player.fresh_tc]    # game rule: fresh TC stays
     if junk:
         pick = min(junk, key=rank)
         s.hand.remove(pick)
@@ -140,6 +149,7 @@ class QAgent:
         s = sim.new_state()
         traj, won = [], False
         while True:
+            tc_reflex(sim, s)           # TC reflex: draw free, cast learned
             k = self.feat.key(sim, s)
             a, legal, do_dig = self.act(sim, s, eps, dp_w)
             traj.append((k, a))
@@ -163,6 +173,7 @@ class QAgent:
 
     def policy(self):
         def pol(sim, s):
+            tc_reflex(sim, s)
             legal = self.feat.legal(sim, s)
             a = self.greedy(sim, s, legal)
             if a == PASS:
@@ -176,9 +187,11 @@ class QAgent:
 
 
 def train_agent(cards, decklist, school, boss, episodes=60000,
-                warm=True, seed=0, player_hp=10**9, log=None, snap_every=5000):
+                warm=True, seed=0, player_hp=10**9, log=None,
+                snap_every=5000, sideboard=None):
     rng = random.Random(seed)
-    sim = Sim(cards, decklist, school, boss, player_hp=player_hp, rng=rng)
+    sim = Sim(cards, decklist, school, boss, player_hp=player_hp, rng=rng,
+              sideboard=sideboard)
     dp_pol = None
     if warm:
         V, pol, meta = solve(cards, decklist, boss, school)

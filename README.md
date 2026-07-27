@@ -164,6 +164,10 @@ Regenerate with `python plots.py` (reads the results JSONs, writes
 
 ![Deck scorer validation](plots/scorer.png)
 
+![Deck-conditioned generalist](plots/generalist.png)
+
+![Survival builds under fire](plots/survival_builds.png)
+
 ## Live-data results (`w101-pve-live-scrape`)
 
 Real scraped spells vs real scraped bosses (`results_live.json`; paired
@@ -250,14 +254,69 @@ loader report.
 2. Scrape real creature pages (stats, stunable flags, actual cheat
    scripts) to replace the ballpark boss registry; damage *ranges* instead
    of averages.
-3. Sideboard/discard policy learning: the TC mechanic (random draw, no
-   same-round discard) is implemented; wire it into the action space —
-   fire vs Malistaire survival is winnable only through it.
+3. Sideboard/discard policy: DONE — every policy now has the TC
+   reflex (`tc_reflex`: make room honoring the fresh-TC rule, draw
+   one, castable same round), the tabular agent carries TC names AND
+   own HP in its state, and the generalist values drawn TCs by
+   properties zero-shot (`tc_experiment.py`, `results_tc.json`).
+   The motivating claim — "fire vs Malistaire survival is winnable
+   only through TCs" — is REFUTED by arithmetic: the immortal DP
+   bound is 11 turns vs death during round 8; off-school Satyr costs
+   ~4 rounds of pip income (sustain eats the kill budget); zero-pip
+   Death Shields trade 320 damage per TEMPO turn and
+   400L−320S ≤ 2900 has no solution alongside the ~7 damage-line
+   turns 6000 HP requires. Even on a marginal WINNABLE control fight
+   (2800 HP, 500/round), the RL pilot's best use of a shield
+   sideboard is to mostly ignore it (70.9% vs 71.0% bare) and TC
+   heals cost 8 points — offense dominance again, and another pilot-
+   alignment lesson: scripted triage + shields = shield-lock (0%).
+   The TC payoff regime (unraceable burst one-shots, mob fights,
+   bigger HP pools) needs items 4+ below.
+   **Design rule — TCs are never a crutch**: treasure cards cost real
+   gold, and most fights are beatable without them, so TC use is
+   OPT-IN everywhere: no default training run, deck search, or
+   benchmark attaches a sideboard, and every `evaluate_paired` row
+   now reports `mean_tc_casts` so any policy leaning on TCs shows it
+   in the table. If a sideboard search is ever added, TC casts must
+   carry an explicit cost term in the objective — an unpriced TC is
+   a free lunch the optimizer would hack.
 4. Mob fights: the engine is multi-enemy (AoE, per-target wards, threat)
    but the experiment table is still 1v1.
-5. Risk-sensitive objectives (reliability / percentile-TTK scalarizations
-   — `evaluate_paired` already reports the distribution) and
-   `max_remaining_damage` as an RL feature.
+5. Risk-sensitive objectives: `build_deck(objective='p90')` ranks the
+   final pick by (win, p90 TTK, size) instead of the mean — the
+   reliability build (`risk_experiment.py`), and
+   `build_deck(player_hp=...)` is the SURVIVAL arm — boss damage
+   counts, the screen proxy gains triage, and the template offers
+   shields/heals only against a boss that hits back
+   (`survival_build.py`, `results_survival_build.json`, chart below).
+   Two damage regimes vs live Jade Oni. CHIP (240/round, 9 rounds of
+   player HP): the survival-built deck beats the speed-built deck
+   **98.6% vs 89.0%** under fire and is FASTER (mean 8.28 vs 9.36) —
+   one Pixie + an extra blade keeps the kill line alive — and the
+   deck itself carries the reliability (scripted-triage pilot: 94.5%
+   vs 50.1%). BURST (+650 cheat hit every 4th round): burst pressure
+   makes the fight MORE of a race — the winner is the race chassis
+   plus exactly one Pixie flown aggressively (**83.4% vs 58.5%** for
+   the pure-speed build); shield-heavy candidates lose (1–35%), and
+   the winning deck under heal-when-low triage wins 0.6% — the heal
+   must be TIMED between bursts, which RL learns and the script
+   can't. Pipeline lesson from the first burst run: a triage-only
+   survival screen went blind (every candidate 0–6%, ranking =
+   noise) and mis-built at 37%; the screen now scores every
+   candidate under BOTH the race proxy and the triage proxy and
+   keeps the better — the screen must not presuppose the fighting
+   style. At 6 rounds of chip HP nothing survives at all (best build
+   0.3%): the cheatless damage model gives fights a hard HP floor.
+   Honest
+   finding on the tail objective, twice now: mean and p90 pick the
+   SAME deck (storm dummies, and this fight) — within the
+   plausibility-capped pool the winning deck dominates the whole TTK
+   distribution rather than trading mean for tail; the p90 column
+   discriminates candidates (10 vs 14 vs 18) but win rate decides.
+   Still open: `max_remaining_damage` as an RL feature, and an
+   HP-aware state for the per-deck agent (the tabular pilot cannot
+   see its own HP yet still beats triage by killing faster — less
+   exposure beats more healing at this damage level).
 6. Search-generated expert data → filtered behavior cloning → conservative
    offline RL (CQL/IQL) → sequence models, benchmarked against each other
    on held-out bosses/cards/rulesets.
@@ -279,16 +338,14 @@ loader report.
    against the dump by a regression test). Note the search's FIRST run
    found a genuine reward hack — boss-only spells mislabeled `core` in
    the dump gave 1-turn kills — now screened + regression-tested.
-   Status: `deck_builder.py`
-   implements rungs 1–2 (legal deck space with capacity/copy limits,
-   template-sampled candidate search, two-stage screen → RL fine-tune,
-   size-aware scoring so extra cards must buy reliability) plus
-   `random_boss()` and a held-out generalization harness. Rungs 3–4
-   remain: a learned deck scorer replacing the simulation screen, and a
-   single deck-conditioned combat policy trained jointly across decks
-   (today each fine-tune trains per-deck). Level gating is
-   max(curated unlock floor, the dump's `level_restriction`) — the
-   restriction field alone is null below ~30.
+   Status: all four rungs are
+   implemented. `deck_builder.py` covers rungs 1–2 (legal deck space
+   with capacity/copy limits, template-sampled candidate search,
+   two-stage screen → RL fine-tune, size-aware scoring so extra cards
+   must buy reliability) plus `random_boss()` and a held-out
+   generalization harness. Level gating is max(curated unlock floor,
+   the dump's `level_restriction`) — the restriction field alone is
+   null below ~30.
    Rung 3 shipped as `deck_scorer.py`: a closed-form ridge surrogate of
    the simulation screen over deck-vs-boss features (damage/blade/trap
    sums, prism gain vs the boss's resists, overkill ratio, plus the
@@ -302,6 +359,29 @@ loader report.
    candidates get simulated, and the pruning is logged, never silent.
    Screens append training rows via `build_deck(screen_log=...)`
    (`deck_screen_log.jsonl`), so the dataset grows with normal use.
+   Rung 4 shipped as `generalist.py`: a deck-conditioned combat policy
+   — linear Q over card-vs-state features (how hard THIS card hits
+   THIS boss through the exact blades/traps hanging, kill-now,
+   duplicate-blade, X-pip-waiting...), trained with the same backward
+   Monte-Carlo returns as the tabular agent but on a fresh random
+   (school, deck, boss) every episode, so one policy plays any legal
+   deck zero-shot. On six held-out (deck, boss) pairs it averages
+   49.2% vs the scripted heuristic's 50.7% and per-deck RL(8k)'s 53.5%
+   — within 1.5 points of the heuristic and 4.3 of the per-deck
+   ceiling at ZERO marginal training per deck. The honest gap: X-pip
+   pip-timing (balance 53% vs RL's 85%) — a linear feature can't
+   express "wait exactly until pips × per-pip ≥ HP". A hand-coded
+   wait-until-lethal threshold feature was probed and made that row
+   WORSE (53% → 44%): no single Judgement can be lethal there (~16
+   pips needed through blades, 14 is the cap), so the winning line is
+   two chunked hits — the real ceiling is multi-hit sequencing, which
+   a memoryless linear policy cannot plan. Kept as a negative result;
+   the fix belongs to the sequence-model rung of the offline-RL
+   roadmap, not to more features. As build_deck's
+   stage-2 evaluator (`build_deck(generalist=...)`) it picks an
+   equally good final deck 3.3x faster (14s vs 46s). Exact hanging-
+   effect percents in the features mattered: with blade/trap COUNTS
+   the death-grind row scored 7%; with percents, 48% — parity.
 8. Post-classic rulesets behind `Rules`: criticals-on eras, mastery
    amulets, school pips/archmastery — each as a frozen named ruleset.
 

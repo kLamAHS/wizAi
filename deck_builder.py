@@ -20,16 +20,20 @@ by fizzle risk"), not a memorized answer per boss.
 Bilevel rung 3 lives in deck_scorer.py: a ridge surrogate of the
 screen, trained from screen_log JSONL rows; pass it as
 build_deck(scorer=...) to simulate only the predicted-best slice of
-candidates. Still roadmap (rung 4): joint deck+combat training with a
-single deck-conditioned policy. The buildable pool is the curated
-TRAINED whitelist below (the dump carries no trainability marker — see
-the comment on TRAINED); level gating is max(curated unlock floor, game
-data's level_restriction).
+candidates. Rung 4 lives in generalist.py: a deck-conditioned linear-Q
+combat policy trained across random (school, deck, boss) triples; pass
+it as build_deck(generalist=...) to evaluate the top-k zero-shot
+instead of running a per-deck RL fine-tune. The buildable pool is the
+curated TRAINED whitelist below (the dump carries no trainability
+marker — see the comment on TRAINED); level gating is max(curated
+unlock floor, game data's level_restriction).
 """
+import math
 import random
 import re
 
-from w101_sim import Sim, evaluate, make_blade_stack, Boss, OPPOSING
+from w101_sim import (Sim, evaluate, evaluate_paired, make_blade_stack,
+                      Boss, OPPOSING)
 from rl_agent import QAgent
 
 
@@ -203,7 +207,16 @@ def sample_deck(pool, school, boss, rng, capacity=16, copy_limit=3):
     if prisms and rng.random() < 0.8:
         add(prisms[0], rng.randint(1, 2))
     heals = [c for c in pool.values() if c.kind == "heal"]
-    if heals and rng.random() < 0.3:
+    if boss.dmg > 0:
+        # lethal opponent: the template offers defensive roles and the
+        # screen prices whether they pay for their slots
+        shields = [c for c in pool.values() if c.kind == "shield"]
+        for c in rng.sample(shields,
+                            k=min(len(shields), rng.randint(0, 2))):
+            add(c, rng.randint(1, 2))
+        if heals and rng.random() < 0.8:
+            add(rng.choice(heals), rng.randint(1, 2))
+    elif heals and rng.random() < 0.3:
         add(rng.choice(heals), 1)
     return deck if deck else None
 
@@ -215,29 +228,46 @@ def check_legal(deck, capacity, copy_limit):
 
 
 def screen(cards, decks, school, boss, rules=None, n=250, base_seed=7000,
-           progress=None):
-    """Cheap proxy scores: scripted policy on paired seeds."""
+           progress=None, player_hp=None):
+    """Cheap proxy scores: scripted policy on paired seeds. A mortal
+    `player_hp` screens each candidate under BOTH the race proxy and
+    the triage-wrapped survival proxy and keeps the better score —
+    burst bosses are raced, chip bosses are triaged, and the screen
+    must not presuppose which (a triage-only survival screen went
+    blind on a burst boss: every candidate scored 0-6% and the
+    ranking was noise)."""
+    from w101_sim import make_survival
+    pols = [make_blade_stack(3)]
+    if player_hp is not None:
+        pols.append(make_survival(make_blade_stack(3)))
     out = []
     for i, dl in enumerate(decks):
         if progress and i and i % 20 == 0:
             progress(f"screened {i}/{len(decks)} candidates...")
-        sim = Sim(dict(cards), dl, school, boss, player_hp=10**9,
-                  rules=rules)
-        wins, ttk = 0, []
-        for j in range(n):
-            sim.rng = random.Random(base_seed + j)
-            t, won, _ = sim.run(make_blade_stack(3))
-            if won:
-                wins += 1
-                ttk.append(t)
-        out.append((wins / n, sum(ttk) / len(ttk) if ttk else 99.0, dl))
+        sim = Sim(dict(cards), dl, school, boss,
+                  player_hp=player_hp or 10**9, rules=rules)
+        best = (0.0, 99.0)
+        for pol in pols:
+            wins, ttk = 0, []
+            for j in range(n):
+                sim.rng = random.Random(base_seed + j)
+                t, won, _ = sim.run(pol)
+                if won:
+                    wins += 1
+                    ttk.append(t)
+            cand = (wins / n, sum(ttk) / len(ttk) if ttk else 99.0)
+            if (round(cand[0], 2), -cand[1]) > (round(best[0], 2),
+                                                -best[1]):
+                best = cand
+        out.append((best[0], best[1], dl))
     return sorted(out, key=lambda r: (-round(r[0], 2), r[1], len(r[2])))
 
 
-def fine_tune(cards, dl, school, boss, rules=None, episodes=8000, seed=0):
+def fine_tune(cards, dl, school, boss, rules=None, episodes=8000, seed=0,
+              player_hp=10**9):
     """Train the combat policy on one candidate; return (win, ttk, pol)."""
-    sim = Sim(dict(cards), dl, school, boss, player_hp=10**9, rules=rules,
-              rng=random.Random(seed))
+    sim = Sim(dict(cards), dl, school, boss, player_hp=player_hp,
+              rules=rules, rng=random.Random(seed))
     agent = QAgent(dict(cards), dl, school, rng=random.Random(seed + 1))
     for ep in range(episodes):
         frac = ep / episodes
@@ -250,13 +280,21 @@ def fine_tune(cards, dl, school, boss, rules=None, episodes=8000, seed=0):
 def build_deck(cards, school, boss, rules=None, n_candidates=150,
                top_k=5, capacity=16, copy_limit=3, seed=0, log=print,
                level=None, scorer=None, screen_frac=1 / 3,
-               screen_log=None):
+               screen_log=None, generalist=None, objective="mean",
+               player_hp=None):
     """Two-stage search over the legal deck space. Returns
     (deck, win, ttk, screen_table). `level` gates the unlocked pool.
     A fitted DeckScorer (`scorer`) pre-ranks candidates so only the top
     `screen_frac` slice is simulated; `screen_log` appends the screen's
     (deck, boss, result) rows to a JSONL file as surrogate training
-    data."""
+    data; a trained GeneralistQ (`generalist`) evaluates the top-k
+    zero-shot instead of running a per-deck RL fine-tune.
+    `objective` is the risk stance for the final pick: 'mean' ranks by
+    (win, mean TTK, size), 'p90' ranks by (win, p90 TTK, size) — the
+    reliability build that prices the slow tail instead of the average
+    fight. `player_hp` = None builds for the immortal speed objective;
+    a real HP total builds for SURVIVAL — boss damage counts, the
+    screen proxy gains triage, and the template offers shields/heals."""
     rng = random.Random(seed)
     pool = legal_pool(cards, school, level=level)
     seen, cands = set(), []
@@ -281,8 +319,10 @@ def build_deck(cards, school, boss, rules=None, n_candidates=150,
         cands = cands[:keep]
     if log:
         log(f"screening {len(cands)} legal candidates "
-            f"(capacity {capacity}, copy limit {copy_limit})")
-    table = screen(cards, cands, school, boss, rules, progress=log)
+            f"(capacity {capacity}, copy limit {copy_limit}"
+            + (f", survival at {player_hp} HP" if player_hp else "") + ")")
+    table = screen(cards, cands, school, boss, rules, progress=log,
+                   player_hp=player_hp)
     if screen_log:
         import json
         from deck_scorer import boss_to_dict
@@ -292,12 +332,34 @@ def build_deck(cards, school, boss, rules=None, n_candidates=150,
                     school=school, boss=boss_to_dict(boss), level=level,
                     deck=dl, win=w0, ttk=m0)) + "\n")
     best = None
+    if generalist is not None and log:
+        log("evaluating top-k with the generalist policy "
+            "(zero-shot, no per-deck training)")
+    php = player_hp or 10**9
     for w0, m0, dl in table[:top_k]:
-        w, m, _ = fine_tune(cards, dl, school, boss, rules, seed=seed)
+        if generalist is not None:
+            pol = generalist.policy()
+            gsim = Sim(dict(cards), dl, school, boss, player_hp=php,
+                       rules=rules)
+            w, m = evaluate(gsim, pol, n=2000)
+        else:
+            w, m, agent = fine_tune(cards, dl, school, boss, rules,
+                                    seed=seed, player_hp=php)
+            pol = agent.policy()
+        tail = m
+        if objective == "p90":
+            psim = Sim(dict(cards), dl, school, boss, player_hp=php,
+                       rules=rules)
+            st = evaluate_paired(psim, {"pol": pol}, n=1000)["pol"]
+            w, m = st["win_rate"], st["mean_ttk"]
+            tail = st["p90_ttk"]
+            if math.isnan(tail):
+                tail = 99.0
         if log:
+            extra = f"  p90 {tail:5.2f}" if objective == "p90" else ""
             log(f"  size {len(dl):>2}  screen {w0*100:3.0f}%/{m0:5.2f}  "
-                f"RL {w*100:5.1f}%/{m:5.2f}  {sorted(set(dl))}")
-        score = (round(w, 2), -m, -len(dl))
+                f"RL {w*100:5.1f}%/{m:5.2f}{extra}  {sorted(set(dl))}")
+        score = (round(w, 2), -tail, -len(dl))
         if best is None or score > best[0]:
             best = (score, dl, w, m)
     return best[1], best[2], best[3], table

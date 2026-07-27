@@ -502,6 +502,7 @@ class State:
         self.bubble = None
         self.turn = 0
         self.events = []           # structured audit log (Sim(log_events=True))
+        self.tc_casts = 0          # TCs cost real gold: usage is audited
 
     # ---- compat views ------------------------------------------------
     @property
@@ -1113,6 +1114,8 @@ class Sim:
         """Player casts a card. Returns damage dealt (0.0 on fizzle/dispel/
         non-damage). Fizzle keeps pips; the card is discarded (Rules)."""
         caster = s.player
+        if card.source == "tc":
+            s.tc_casts += 1        # gold isn't free: keep TC use auditable
         self._ev(s, "cast_declared", actor=caster.name, card=card.name,
                  target=s.enemies[target].name if target < len(s.enemies)
                  else None)
@@ -1297,8 +1300,11 @@ class Sim:
         return Action(card=res)
 
     def run(self, policy, max_turns=40):
-        """Play one duel. Returns (turns, won, player_hp_left)."""
+        """Play one duel. Returns (turns, won, player_hp_left). The
+        final state stays on self.last_state for audit metrics
+        (tc_casts, events)."""
         s = self.new_state()
+        self.last_state = s
         while s.turn < max_turns:
             self._tick_over_time(s, s.player)
             if s.player.hp <= 0:
@@ -1397,6 +1403,50 @@ def make_blade_stack(n_buffs):
         return None
     return strat
 
+def tc_reflex(sim, s):
+    """Greedy sideboard reflex: make room if the hand is full (the
+    deck refills the hand every round, so a free slot almost never
+    happens on its own — real players discard to draw) and pull one
+    random treasure card. Never discards a TC drawn this round (game
+    rule). Discard ranking: hanging duplicates, then repeats, then
+    utility, then the smallest hit. Drawing is free in-game; WHEN to
+    cast what was drawn stays the policy's decision."""
+    if not s.player.sideboard:
+        return
+    if len(s.hand) >= sim.rules.hand_size:
+        seen = set()
+
+        def rank(cd):
+            pend = (cd.kind == "blade" and cd.name in s.blades) or \
+                   (cd.kind in ("trap", "prism") and cd.name in s.traps)
+            dup = cd.name in seen
+            seen.add(cd.name)
+            v = cd.damage if cd.kind in ("damage", "drain") \
+                else abs(cd.percent) or 0.4
+            if pend:
+                return (0, v)
+            if dup:
+                return (1, v)
+            if cd.kind not in ("damage", "drain"):
+                return (2, v)
+            return (3, v)
+        junk = [cd for cd in s.hand if cd not in s.player.fresh_tc]
+        if not junk:
+            return
+        pick = min(junk, key=rank)
+        s.hand.remove(pick)
+        s.player.graveyard.append(pick)
+    sim.draw_tc(s, 1)
+
+
+def with_tc_draw(policy):
+    """Wrap a policy with the treasure-card reflex (see tc_reflex)."""
+    def strat(sim, s):
+        tc_reflex(sim, s)
+        return policy(sim, s)
+    return strat
+
+
 def make_survival(inner, heal_below=0.45, shield_when_open=True):
     """Wrap a strategy with defensive triage: heal when low, keep a shield
     up, otherwise defer to the inner strategy."""
@@ -1436,10 +1486,11 @@ def evaluate_paired(sim, policies, n=2000, max_turns=40, base_seed=10**6):
     `policies`: dict name -> policy. Returns dict name -> stats."""
     out = {}
     for name, pol in policies.items():
-        ttk, hp_left, wins = [], [], 0
+        ttk, hp_left, wins, tc = [], [], 0, 0
         for i in range(n):
             sim.rng = random.Random(base_seed + i)
             t, won, hp = sim.run(pol, max_turns=max_turns)
+            tc += sim.last_state.tc_casts
             if won:
                 wins += 1
                 ttk.append(t)
@@ -1452,6 +1503,7 @@ def evaluate_paired(sim, policies, n=2000, max_turns=40, base_seed=10**6):
             mean_ttk=sum(ttk) / len(ttk) if ttk else float("nan"),
             median_ttk=pct(0.5), p90_ttk=pct(0.9), p99_ttk=pct(0.99),
             mean_hp_left=sum(hp_left) / len(hp_left) if hp_left else 0.0,
+            mean_tc_casts=tc / n,           # gold spent is never hidden
             ruleset=sim.rules.ruleset_id)
     return out
 
