@@ -162,6 +162,8 @@ Regenerate with `python plots.py` (reads the results JSONs, writes
 
 ![Progression sweep](plots/progression.png)
 
+![Deck scorer validation](plots/scorer.png)
+
 ## Live-data results (`w101-pve-live-scrape`)
 
 Real scraped spells vs real scraped bosses (`results_live.json`; paired
@@ -287,6 +289,19 @@ loader report.
    (today each fine-tune trains per-deck). Level gating is
    max(curated unlock floor, the dump's `level_restriction`) — the
    restriction field alone is null below ~30.
+   Rung 3 shipped as `deck_scorer.py`: a closed-form ridge surrogate of
+   the simulation screen over deck-vs-boss features (damage/blade/trap
+   sums, prism gain vs the boss's resists, overkill ratio, plus the
+   interactions a linear model can't invent — buffs×damage, X-pip×HP).
+   Trained on 1,280 logged screen rows from 32 random bosses and
+   validated on 8 HELD-OUT bosses (split by boss — a row split would
+   leak): mean Spearman 0.67, mean top-1 regret 0.3 points (worst 1.3).
+   `build_deck(scorer=...)` uses it to simulate only the predicted-best
+   third of candidates and finds the identical final deck on a fresh
+   boss. The scorer never replaces simulation — it only picks which
+   candidates get simulated, and the pruning is logged, never silent.
+   Screens append training rows via `build_deck(screen_log=...)`
+   (`deck_screen_log.jsonl`), so the dataset grows with normal use.
 8. Post-classic rulesets behind `Rules`: criticals-on eras, mastery
    amulets, school pips/archmastery — each as a frozen named ruleset.
 

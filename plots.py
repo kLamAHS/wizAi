@@ -195,10 +195,40 @@ def progression_chart():
     plt.close(fig)
 
 
+def scorer_scatter():
+    """Surrogate-predicted vs simulated screen win, held-out bosses.
+    Bosses are encoded by marker shape (color stays reserved for the
+    policy entity system-wide)."""
+    data = json.load(open("scorer_results.json", encoding="utf-8"))
+    fig, ax = plt.subplots(figsize=(5.6, 5.2))
+    ax.plot([0, 100], [0, 100], color=GRID, lw=1.2, zorder=1)
+    ax.text(36, 28, "perfect", fontsize=8, color=INK2, ha="left",
+            rotation=38, rotation_mode="anchor")
+    marks = ["o", "s", "^", "D", "v", "P"]
+    for i, t in enumerate(data["test"]):
+        xs = [w * 100 for w in t["sim"]]
+        ys = [p * 100 for p in t["pred"]]
+        rho = ("n/a" if t["spearman"] is None
+               else f"{t['spearman']:.2f}")
+        ax.plot(xs, ys, marks[i % len(marks)], ms=5, mfc="none",
+                mec=BOUND, mew=1.1, ls="", alpha=0.55,
+                label=f"{t['boss']} [{t['school']}]  ρ={rho}")
+    ax.set_xlabel("simulated screen win rate (%)")
+    ax.set_ylabel("surrogate prediction (%)")
+    ax.set_xlim(-4, 104)
+    ax.set_axisbelow(True)
+    ax.legend(loc="upper left", frameon=False, fontsize=8.5)
+    ax.set_title("Deck scorer: ridge surrogate vs simulation "
+                 "(held-out bosses)", fontsize=11, loc="left")
+    fig.tight_layout()
+    fig.savefig(OUT / "scorer.png")
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     made = []
     for fn in (live_ladder, classic_gap, survival_tradeoff, storm_curve,
-               progression_chart):
+               progression_chart, scorer_scatter):
         try:
             fn()
             made.append(fn.__name__)
