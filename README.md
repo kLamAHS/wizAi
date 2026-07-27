@@ -329,9 +329,28 @@ loader report.
    HP-aware state for the per-deck agent (the tabular pilot cannot
    see its own HP yet still beats triage by killing faster — less
    exposure beats more healing at this damage level).
-6. Search-generated expert data → filtered behavior cloning → conservative
-   offline RL (CQL/IQL) → sequence models, benchmarked against each other
-   on held-out bosses/cards/rulesets.
+6. Offline RL ladder — first three rungs SHIPPED (`offline_rl.py`,
+   `results_offline.json`; the dataset regenerates from seeds and is
+   not committed). Design: policy class held fixed (the generalist's
+   linear features), so the comparison isolates the DATA SOURCE —
+   per-deck tabular experts' demonstrations (38k logged decisions,
+   16 pairs, ε=0.1 behavior noise) vs online RL's own exploration.
+   Zero-shot means on 8 feasibility-filtered held-out pairs:
+   BC-all **48.0%**, BC-filtered **74.8%**, CQL-lite **71.3%**,
+   online generalist **76.7%**, per-pair experts 78.9%, scripted
+   heuristic 83.6%. Findings, in order of surprise: (1) filtering
+   demonstrations to winning episodes is the single biggest lever
+   (+27 points — losers teach losing habits); (2) offline learning
+   from demonstrations nearly matches online exploration in the same
+   policy class (74.8 vs 76.7); (3) nobody learned beats the
+   scripted blade-stack prior on raceable random pairs — and the 8k-
+   episode experts themselves average below it, which caps what any
+   clone can learn (garbage-ceiling, not garbage-in). Remaining
+   rungs: SEARCH-generated expert data (stronger teachers than 8k-
+   episode tabular agents), IQL-style expectile variants, and
+   sequence models for the multi-hit planning the linear class
+   provably can't express (see the generalist's X-pip negative
+   result).
 7. Deck × policy bilevel optimization. First results (death vs live
    Jade Oni): the searched 9-card deck reaches **100% win / TTK 6.45**
    vs the hand-built 12-card oneshot's 92.8% / 9.95 — smaller AND
