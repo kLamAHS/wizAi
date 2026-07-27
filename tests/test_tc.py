@@ -63,6 +63,21 @@ def test_generalist_casts_tcs_zero_shot():
     assert w > 0.5, (w, m)
 
 
+def test_tc_casts_are_audited():
+    """TCs cost real gold: every fight counts them, every paired eval
+    reports them — a policy leaning on TCs can't hide it."""
+    from w101_sim import evaluate_paired
+    gen = GeneralistQ()
+    gen.w[FEATS.index("overkill")] = 1.0
+    sim = _sim(["Helephant@tc"] * 3)
+    st = evaluate_paired(sim, {"gen": gen.policy()}, n=50)["gen"]
+    assert "mean_tc_casts" in st and st["mean_tc_casts"] > 0
+    # and a TC-free fight audits to exactly zero
+    sim0 = _sim(None, boss_hp=300)
+    st0 = evaluate_paired(sim0, {"h": make_blade_stack(0)}, n=50)["h"]
+    assert st0["mean_tc_casts"] == 0.0
+
+
 def test_no_sideboard_behavior_unchanged():
     """Without a sideboard the reflex is inert: blade-stack play on a
     plain deck is byte-identical to the pre-TC path."""

@@ -272,6 +272,14 @@ loader report.
    alignment lesson: scripted triage + shields = shield-lock (0%).
    The TC payoff regime (unraceable burst one-shots, mob fights,
    bigger HP pools) needs items 4+ below.
+   **Design rule — TCs are never a crutch**: treasure cards cost real
+   gold, and most fights are beatable without them, so TC use is
+   OPT-IN everywhere: no default training run, deck search, or
+   benchmark attaches a sideboard, and every `evaluate_paired` row
+   now reports `mean_tc_casts` so any policy leaning on TCs shows it
+   in the table. If a sideboard search is ever added, TC casts must
+   carry an explicit cost term in the objective — an unpriced TC is
+   a free lunch the optimizer would hack.
 4. Mob fights: the engine is multi-enemy (AoE, per-target wards, threat)
    but the experiment table is still 1v1.
 5. Risk-sensitive objectives: `build_deck(objective='p90')` ranks the
