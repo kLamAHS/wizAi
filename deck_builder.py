@@ -28,10 +28,12 @@ curated TRAINED whitelist below (the dump carries no trainability
 marker — see the comment on TRAINED); level gating is max(curated
 unlock floor, game data's level_restriction).
 """
+import math
 import random
 import re
 
-from w101_sim import Sim, evaluate, make_blade_stack, Boss, OPPOSING
+from w101_sim import (Sim, evaluate, evaluate_paired, make_blade_stack,
+                      Boss, OPPOSING)
 from rl_agent import QAgent
 
 
@@ -252,14 +254,18 @@ def fine_tune(cards, dl, school, boss, rules=None, episodes=8000, seed=0):
 def build_deck(cards, school, boss, rules=None, n_candidates=150,
                top_k=5, capacity=16, copy_limit=3, seed=0, log=print,
                level=None, scorer=None, screen_frac=1 / 3,
-               screen_log=None, generalist=None):
+               screen_log=None, generalist=None, objective="mean"):
     """Two-stage search over the legal deck space. Returns
     (deck, win, ttk, screen_table). `level` gates the unlocked pool.
     A fitted DeckScorer (`scorer`) pre-ranks candidates so only the top
     `screen_frac` slice is simulated; `screen_log` appends the screen's
     (deck, boss, result) rows to a JSONL file as surrogate training
     data; a trained GeneralistQ (`generalist`) evaluates the top-k
-    zero-shot instead of running a per-deck RL fine-tune."""
+    zero-shot instead of running a per-deck RL fine-tune.
+    `objective` is the risk stance for the final pick: 'mean' ranks by
+    (win, mean TTK, size), 'p90' ranks by (win, p90 TTK, size) — the
+    reliability build that prices the slow tail instead of the average
+    fight."""
     rng = random.Random(seed)
     pool = legal_pool(cards, school, level=level)
     seen, cands = set(), []
@@ -300,15 +306,28 @@ def build_deck(cards, school, boss, rules=None, n_candidates=150,
             "(zero-shot, no per-deck training)")
     for w0, m0, dl in table[:top_k]:
         if generalist is not None:
+            pol = generalist.policy()
             gsim = Sim(dict(cards), dl, school, boss, player_hp=10**9,
                        rules=rules)
-            w, m = evaluate(gsim, generalist.policy(), n=2000)
+            w, m = evaluate(gsim, pol, n=2000)
         else:
-            w, m, _ = fine_tune(cards, dl, school, boss, rules, seed=seed)
+            w, m, agent = fine_tune(cards, dl, school, boss, rules,
+                                    seed=seed)
+            pol = agent.policy()
+        tail = m
+        if objective == "p90":
+            psim = Sim(dict(cards), dl, school, boss, player_hp=10**9,
+                       rules=rules)
+            st = evaluate_paired(psim, {"pol": pol}, n=1000)["pol"]
+            w, m = st["win_rate"], st["mean_ttk"]
+            tail = st["p90_ttk"]
+            if math.isnan(tail):
+                tail = 99.0
         if log:
+            extra = f"  p90 {tail:5.2f}" if objective == "p90" else ""
             log(f"  size {len(dl):>2}  screen {w0*100:3.0f}%/{m0:5.2f}  "
-                f"RL {w*100:5.1f}%/{m:5.2f}  {sorted(set(dl))}")
-        score = (round(w, 2), -m, -len(dl))
+                f"RL {w*100:5.1f}%/{m:5.2f}{extra}  {sorted(set(dl))}")
+        score = (round(w, 2), -tail, -len(dl))
         if best is None or score > best[0]:
             best = (score, dl, w, m)
     return best[1], best[2], best[3], table

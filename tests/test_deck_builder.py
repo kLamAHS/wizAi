@@ -131,6 +131,18 @@ def test_build_deck_terminates_on_tiny_pool():
     assert w > 0.9
 
 
+def test_build_deck_p90_objective():
+    """objective='p90' ranks the final pick by the slow tail."""
+    boss = Boss("dummy", 400, "death", 0)
+    boss.resist_map = {"death": 0.5}
+    msgs = []
+    dl, w, m, _ = build_deck(CARDS, "death", boss, LIVE_RULES,
+                             n_candidates=8, top_k=2, seed=2,
+                             objective="p90", log=msgs.append)
+    assert any("p90" in s for s in msgs)
+    assert 0.0 <= w <= 1.0 and len(dl) > 0
+
+
 def test_random_boss_shape():
     rng = random.Random(3)
     b = random_boss(rng)

@@ -257,9 +257,18 @@ loader report.
    fire vs Malistaire survival is winnable only through it.
 4. Mob fights: the engine is multi-enemy (AoE, per-target wards, threat)
    but the experiment table is still 1v1.
-5. Risk-sensitive objectives (reliability / percentile-TTK scalarizations
-   — `evaluate_paired` already reports the distribution) and
-   `max_remaining_damage` as an RL feature.
+5. Risk-sensitive objectives: `build_deck(objective='p90')` now ranks
+   the final pick by (win, p90 TTK, size) instead of the mean — the
+   reliability build (`risk_experiment.py`, `results_risk.json`).
+   Honest first finding: on storm vs a 1.2–2.5k dummy the mean build
+   and the reliability build pick the SAME deck — within the
+   plausibility-capped pool, TTK variance is fizzle-driven, and the
+   blade+nuke redundancy that speeds the mean also trims the tail
+   (the distribution is dominated, not traded). The objective should
+   start biting in survival fights, where a slow tail is a death
+   rather than lost seconds — that experiment needs the builder's
+   survival arm (screen/fine-tune currently pin `player_hp=1e9`).
+   Still open: `max_remaining_damage` as an RL feature.
 6. Search-generated expert data → filtered behavior cloning → conservative
    offline RL (CQL/IQL) → sequence models, benchmarked against each other
    on held-out bosses/cards/rulesets.
@@ -313,7 +322,14 @@ loader report.
    — within 1.5 points of the heuristic and 4.3 of the per-deck
    ceiling at ZERO marginal training per deck. The honest gap: X-pip
    pip-timing (balance 53% vs RL's 85%) — a linear feature can't
-   express "wait exactly until pips × per-pip ≥ HP". As build_deck's
+   express "wait exactly until pips × per-pip ≥ HP". A hand-coded
+   wait-until-lethal threshold feature was probed and made that row
+   WORSE (53% → 44%): no single Judgement can be lethal there (~16
+   pips needed through blades, 14 is the cap), so the winning line is
+   two chunked hits — the real ceiling is multi-hit sequencing, which
+   a memoryless linear policy cannot plan. Kept as a negative result;
+   the fix belongs to the sequence-model rung of the offline-RL
+   roadmap, not to more features. As build_deck's
    stage-2 evaluator (`build_deck(generalist=...)`) it picks an
    equally good final deck 3.3x faster (14s vs 46s). Exact hanging-
    effect percents in the features mattered: with blade/trap COUNTS
