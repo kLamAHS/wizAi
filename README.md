@@ -254,9 +254,24 @@ loader report.
 2. Scrape real creature pages (stats, stunable flags, actual cheat
    scripts) to replace the ballpark boss registry; damage *ranges* instead
    of averages.
-3. Sideboard/discard policy learning: the TC mechanic (random draw, no
-   same-round discard) is implemented; wire it into the action space —
-   fire vs Malistaire survival is winnable only through it.
+3. Sideboard/discard policy: DONE — every policy now has the TC
+   reflex (`tc_reflex`: make room honoring the fresh-TC rule, draw
+   one, castable same round), the tabular agent carries TC names AND
+   own HP in its state, and the generalist values drawn TCs by
+   properties zero-shot (`tc_experiment.py`, `results_tc.json`).
+   The motivating claim — "fire vs Malistaire survival is winnable
+   only through TCs" — is REFUTED by arithmetic: the immortal DP
+   bound is 11 turns vs death during round 8; off-school Satyr costs
+   ~4 rounds of pip income (sustain eats the kill budget); zero-pip
+   Death Shields trade 320 damage per TEMPO turn and
+   400L−320S ≤ 2900 has no solution alongside the ~7 damage-line
+   turns 6000 HP requires. Even on a marginal WINNABLE control fight
+   (2800 HP, 500/round), the RL pilot's best use of a shield
+   sideboard is to mostly ignore it (70.9% vs 71.0% bare) and TC
+   heals cost 8 points — offense dominance again, and another pilot-
+   alignment lesson: scripted triage + shields = shield-lock (0%).
+   The TC payoff regime (unraceable burst one-shots, mob fights,
+   bigger HP pools) needs items 4+ below.
 4. Mob fights: the engine is multi-enemy (AoE, per-target wards, threat)
    but the experiment table is still 1v1.
 5. Risk-sensitive objectives: `build_deck(objective='p90')` ranks the

@@ -24,7 +24,7 @@ import random
 
 import numpy as np
 
-from w101_sim import Sim, OPPOSING, evaluate
+from w101_sim import Sim, OPPOSING, evaluate, tc_reflex
 from rl_agent import PASS, MAX_TURNS, FAIL_PENALTY, _dig, DMG_KINDS
 
 FEATS = [
@@ -148,6 +148,7 @@ class GeneralistQ:
         s = sim.new_state()
         traj, won = [], False
         while True:
+            tc_reflex(sim, s)       # TC reflex: draw free, cast learned
             a = self.act(sim, s, eps)
             traj.append(phi(sim, s, a))
             if a == PASS:
@@ -171,6 +172,7 @@ class GeneralistQ:
 
     def policy(self):
         def pol(sim, s):
+            tc_reflex(sim, s)
             a = max(legal_actions(sim, s),
                     key=lambda a: self.q(sim, s, a))
             if a == PASS:

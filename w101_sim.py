@@ -1397,6 +1397,50 @@ def make_blade_stack(n_buffs):
         return None
     return strat
 
+def tc_reflex(sim, s):
+    """Greedy sideboard reflex: make room if the hand is full (the
+    deck refills the hand every round, so a free slot almost never
+    happens on its own — real players discard to draw) and pull one
+    random treasure card. Never discards a TC drawn this round (game
+    rule). Discard ranking: hanging duplicates, then repeats, then
+    utility, then the smallest hit. Drawing is free in-game; WHEN to
+    cast what was drawn stays the policy's decision."""
+    if not s.player.sideboard:
+        return
+    if len(s.hand) >= sim.rules.hand_size:
+        seen = set()
+
+        def rank(cd):
+            pend = (cd.kind == "blade" and cd.name in s.blades) or \
+                   (cd.kind in ("trap", "prism") and cd.name in s.traps)
+            dup = cd.name in seen
+            seen.add(cd.name)
+            v = cd.damage if cd.kind in ("damage", "drain") \
+                else abs(cd.percent) or 0.4
+            if pend:
+                return (0, v)
+            if dup:
+                return (1, v)
+            if cd.kind not in ("damage", "drain"):
+                return (2, v)
+            return (3, v)
+        junk = [cd for cd in s.hand if cd not in s.player.fresh_tc]
+        if not junk:
+            return
+        pick = min(junk, key=rank)
+        s.hand.remove(pick)
+        s.player.graveyard.append(pick)
+    sim.draw_tc(s, 1)
+
+
+def with_tc_draw(policy):
+    """Wrap a policy with the treasure-card reflex (see tc_reflex)."""
+    def strat(sim, s):
+        tc_reflex(sim, s)
+        return policy(sim, s)
+    return strat
+
+
 def make_survival(inner, heal_below=0.45, shield_when_open=True):
     """Wrap a strategy with defensive triage: heal when low, keep a shield
     up, otherwise defer to the inner strategy."""
