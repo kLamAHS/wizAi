@@ -280,6 +280,18 @@ loader report.
    in the table. If a sideboard search is ever added, TC casts must
    carry an explicit cost term in the objective — an unpriced TC is
    a free lunch the optimizer would hack.
+   **The fodder tax, measured** (`tc_fodder.py`,
+   `results_tc_fodder.json` — death vs Jade Oni, immortal tempo, RL
+   pilots trained per arm): lean 11-card deck 99.4%/9.72; the same
+   deck actually USING a 3x Wraith TC sideboard drops to 92.0%/12.55
+   (drawing a TC forcibly discards a real card — on a lean deck the
+   fodder IS the kill line); padding the deck with 4 fodder cards
+   costs 18 points by dilution alone (81.3%/12.64); and the full TC
+   playstyle — fodder carried AND sideboard used — is the worst of
+   all four arms at 61.6%/18.46. TC access never repays its own
+   logistics here; the optimal use of a sideboard on a healthy deck
+   is to not touch it, which is why usage is audited rather than
+   assumed.
 4. Mob fights: the engine is multi-enemy (AoE, per-target wards, threat)
    but the experiment table is still 1v1.
 5. Risk-sensitive objectives: `build_deck(objective='p90')` ranks the
