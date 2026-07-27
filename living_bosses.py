@@ -102,6 +102,35 @@ print(f"\n   living+healer minion at 20: win {st['win_rate']*100:5.1f}%"
       f"  mean {st['mean_ttk']:5.2f}  p90 {st['p90_ttk']:3.0f}",
       flush=True)
 
+# pilot ladder on the living boss: the stochastic opponent INVERTS
+# the usual ranking. Tabular MC starves (sparse wins, wide visited-
+# state distribution — enemy-state features and a scripted-advisor
+# warm start were both tried and help only marginally), shallow
+# determinized search inherits rollout noise, and the fixed scripted
+# line is robust. Diagnosed, not assumed: the 2x2 (episodes x
+# enemy-state features) and advisor runs are in the commit history.
+from search_policy import make_search_policy
+
+print("\n== pilot ladder on the living boss at 20 (same deck) ==",
+      flush=True)
+w24, m24, agent24 = fine_tune(cards, dl, "death", living, LIVE_RULES,
+                              seed=12, player_hp=HP, power_pip=PP,
+                              episodes=24000,
+                              advisor=make_blade_stack(2))
+lsim = Sim(dict(cards), dl, "death", living, player_hp=HP,
+           power_pip=PP, rules=LIVE_RULES)
+ladder = evaluate_paired(lsim, {
+    "blade-stack(3)": make_blade_stack(3),
+    "blade-stack(2)": make_blade_stack(2),
+    "search(k=5)": make_search_policy(k=5),
+    "RL(24k)+advisor": agent24.policy()}, n=1500)
+for n, s in ladder.items():
+    print(f"   {n:<16} win {s['win_rate']*100:5.1f}%  "
+          f"mean {s['mean_ttk']:5.2f}", flush=True)
+pilot_ladder = {n: {k: s[k] for k in ("win_rate", "mean_ttk",
+                                      "p90_ttk")}
+                for n, s in ladder.items()}
+
 # one narrated fight so the boss's turn-by-turn behavior is auditable
 sim = Sim(dict(cards), dl, "death", living, player_hp=HP, power_pip=PP,
           rules=LIVE_RULES, log_events=True)
@@ -129,6 +158,7 @@ def _no_nan(o):
 
 json.dump(_no_nan({"pool": POOL, "levels": report,
                    "healer_minion_at_20": healer_row,
+                   "pilot_ladder_at_20": pilot_ladder,
                    "sample_trace": trace}),
           open("results_living.json", "w", encoding="utf-8"), indent=1,
           allow_nan=False)

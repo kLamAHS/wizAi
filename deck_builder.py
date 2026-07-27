@@ -266,17 +266,24 @@ def screen(cards, decks, school, boss, rules=None, n=250, base_seed=7000,
 
 def fine_tune(cards, dl, school, boss, rules=None, episodes=8000, seed=0,
               player_hp=10**9, sideboard=None, power_pip=None,
-              enemies=None):
-    """Train the combat policy on one candidate; return (win, ttk, pol)."""
+              enemies=None, advisor=None):
+    """Train the combat policy on one candidate; return (win, ttk, pol).
+    `advisor` is an optional scripted policy (e.g. make_blade_stack(3))
+    followed with decaying probability early in training — against
+    stochastic living bosses, sparse wins starve tabular MC of credit
+    and the prior supplies the missing bootstrap."""
     sim = Sim(dict(cards), dl, school, boss, player_hp=player_hp,
               rules=rules, rng=random.Random(seed), sideboard=sideboard,
               power_pip=0.85 if power_pip is None else power_pip,
               enemies=enemies)
-    agent = QAgent(dict(cards), dl, school, rng=random.Random(seed + 1))
+    agent = QAgent(dict(cards), dl, school, dp_pol=advisor,
+                   rng=random.Random(seed + 1))
     for ep in range(episodes):
         frac = ep / episodes
         agent.alpha = 0.30 * (1 - 0.9 * frac)
-        agent.train_episode(sim, eps=max(0.02, 0.3 * (1 - frac)), dp_w=0.0)
+        dp_w = max(0.0, 0.5 * (1 - 2 * frac)) if advisor else 0.0
+        agent.train_episode(sim, eps=max(0.02, 0.3 * (1 - frac)),
+                            dp_w=dp_w)
     w, m = evaluate(sim, agent.policy(), n=2000)
     return w, m, agent
 
