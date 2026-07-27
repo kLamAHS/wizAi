@@ -264,10 +264,10 @@ def screen(cards, decks, school, boss, rules=None, n=250, base_seed=7000,
 
 
 def fine_tune(cards, dl, school, boss, rules=None, episodes=8000, seed=0,
-              player_hp=10**9):
+              player_hp=10**9, sideboard=None):
     """Train the combat policy on one candidate; return (win, ttk, pol)."""
     sim = Sim(dict(cards), dl, school, boss, player_hp=player_hp,
-              rules=rules, rng=random.Random(seed))
+              rules=rules, rng=random.Random(seed), sideboard=sideboard)
     agent = QAgent(dict(cards), dl, school, rng=random.Random(seed + 1))
     for ep in range(episodes):
         frac = ep / episodes
