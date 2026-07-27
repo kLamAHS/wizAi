@@ -1693,6 +1693,34 @@ def with_tc_draw(policy):
     return strat
 
 
+def pick_focus(s):
+    """Kill-the-support-first target selection: the report's team-fight
+    guidance ('healers, shielders, and blade-removers can be higher-
+    priority targets than a slow hitter'). Support archetypes die
+    first (lowest HP among them), then the lowest-HP attacker —
+    finishing kills shrinks incoming damage fastest."""
+    living = [(i, e) for i, e in enumerate(s.enemies) if e.alive]
+    if not living:
+        return 0
+    support = [(i, e) for i, e in living
+               if getattr(e, "archetype", "") in
+               ("healer", "buffer", "debuffer")
+               and getattr(e, "spell_pool", None) is not None]
+    pool = support or living
+    return min(pool, key=lambda t: t[1].hp)[0]
+
+
+def with_focus(policy):
+    """Wrap a card policy with focus-fire targeting: every cast is
+    aimed at pick_focus(s) instead of enemy 0."""
+    def strat(sim, s):
+        card = policy(sim, s)
+        if card is None:
+            return None
+        return (card, pick_focus(s))
+    return strat
+
+
 def make_survival(inner, heal_below=0.45, shield_when_open=True):
     """Wrap a strategy with defensive triage: heal when low, keep a shield
     up, otherwise defer to the inner strategy."""

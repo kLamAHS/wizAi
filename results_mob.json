@@ -1,0 +1,168 @@
+{
+ "level": 20,
+ "player_hp": 915,
+ "solo_deck": [
+  "Banshee",
+  "Banshee",
+  "Sacrifice",
+  "Ghoul",
+  "Deathblade",
+  "Deathblade",
+  "Balanceblade",
+  "Hex",
+  "Curse",
+  "Pixie"
+ ],
+ "mob_deck": [
+  "Banshee",
+  "Banshee",
+  "Banshee",
+  "Ghoul",
+  "Deathblade",
+  "Deathblade",
+  "Balanceblade",
+  "Balanceblade",
+  "Curse",
+  "Sprite"
+ ],
+ "ammo_deck": [
+  "Banshee",
+  "Banshee",
+  "Banshee",
+  "Ghoul",
+  "Ghoul",
+  "Ghoul",
+  "Sacrifice",
+  "Sacrifice",
+  "Sacrifice",
+  "Dark Sprite",
+  "Dark Sprite",
+  "Deathblade",
+  "Balanceblade",
+  "Curse"
+ ],
+ "arms": {
+  "boss alone": {
+   "deck_size": 10,
+   "mortal": {
+    "triage": {
+     "win_rate": 0.381,
+     "mean_ttk": 7.939632545931759,
+     "p90_ttk": 8
+    }
+   },
+   "immortal": {
+    "triage": {
+     "win_rate": 0.721,
+     "mean_ttk": 7.002773925104022,
+     "p90_ttk": 7
+    }
+   }
+  },
+  "+healer, blind": {
+   "deck_size": 10,
+   "mortal": {
+    "triage": {
+     "win_rate": 0.0,
+     "mean_ttk": null,
+     "p90_ttk": null
+    }
+   },
+   "immortal": {
+    "triage": {
+     "win_rate": 0.0,
+     "mean_ttk": null,
+     "p90_ttk": null
+    }
+   }
+  },
+  "+healer, solo deck": {
+   "deck_size": 10,
+   "mortal": {
+    "focus(triage)": {
+     "win_rate": 0.0,
+     "mean_ttk": null,
+     "p90_ttk": null
+    }
+   },
+   "immortal": {
+    "focus(triage)": {
+     "win_rate": 0.0,
+     "mean_ttk": null,
+     "p90_ttk": null
+    }
+   }
+  },
+  "+healer, mob deck": {
+   "deck_size": 10,
+   "mortal": {
+    "focus(triage)": {
+     "win_rate": 0.002,
+     "mean_ttk": 9.75,
+     "p90_ttk": 10
+    },
+    "focus(bs3)": {
+     "win_rate": 0.002,
+     "mean_ttk": 9.75,
+     "p90_ttk": 11
+    }
+   },
+   "immortal": {
+    "focus(triage)": {
+     "win_rate": 0.0675,
+     "mean_ttk": 10.022222222222222,
+     "p90_ttk": 11
+    },
+    "focus(bs3)": {
+     "win_rate": 0.0675,
+     "mean_ttk": 10.022222222222222,
+     "p90_ttk": 11
+    }
+   }
+  },
+  "+healer, ammo deck": {
+   "deck_size": 14,
+   "mortal": {
+    "focus(bs2)": {
+     "win_rate": 0.0015,
+     "mean_ttk": 19.666666666666668,
+     "p90_ttk": 21
+    },
+    "blind(bs2)": {
+     "win_rate": 0.0,
+     "mean_ttk": null,
+     "p90_ttk": null
+    }
+   },
+   "immortal": {
+    "focus(bs2)": {
+     "win_rate": 0.464,
+     "mean_ttk": 20.14008620689655,
+     "p90_ttk": 23
+    },
+    "blind(bs2)": {
+     "win_rate": 0.0,
+     "mean_ttk": null,
+     "p90_ttk": null
+    }
+   }
+  },
+  "+2 healers, ammo deck": {
+   "deck_size": 14,
+   "mortal": {
+    "focus(bs2)": {
+     "win_rate": 0.0,
+     "mean_ttk": null,
+     "p90_ttk": null
+    }
+   },
+   "immortal": {
+    "focus(bs2)": {
+     "win_rate": 0.021,
+     "mean_ttk": 22.476190476190474,
+     "p90_ttk": 25
+    }
+   }
+  }
+ }
+}

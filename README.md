@@ -271,6 +271,41 @@ merge; it caught a boss pip-livelock, self-only enemy healing, X-pip
 cost inversion, and boss immunity to player mantles — all fixed and
 regression-tested (156 tests).
 
+## Mob fights: target switching (roadmap 4, opening move)
+
+`with_focus(policy)` adds the report's team-fight rule — support
+enemies (healer/buffer/debuffer archetypes) die first, then the
+lowest-HP attacker — on top of the engine's per-target casting, and
+`build_deck(enemies=...)` builds against a full encounter with
+focus-wrapped screen proxies. The healer-cliff fight decomposes into
+three separable constraints (`mob_fights.py`, `results_mob.json`;
+level-20 base-stat death wizard vs living Krokopatra + 300-HP healer
+acolyte):
+
+```
+                              mortal      immortal (tempo view)
+boss alone, triage             38.1%        72.1%
++healer, target-blind           0.0%         0.0%   <- the cliff
++healer, focus, solo deck       0.0%         0.0%   <- out of ammo
++healer, focus, ammo deck       0.1%        46.4%   <- both needed
++healer, BLIND, ammo deck        —           0.0%   <- focus necessary
++2 healers, focus, ammo         0.0%         2.1%   <- sustain scales
+```
+
+Three lessons. TARGETING is necessary but not sufficient: with
+identical ammunition, blind play stays at 0% while focus reaches
+46.4%. AMMUNITION binds next: the solo-built 10-card deck (4 hits)
+runs dry at boss=388 even after a perfect healer kill — mob fights
+re-price deck size, and the builder's size penalty is exactly wrong
+for them. And the MORTAL verdict is game-accurate: at base stats a
+boss+minion encounter is multi-player content (the report:
+enemy count = players + 1) — no targeting rule rescues a solo
+level-20 at 915 HP. A pipeline honesty fix rode along: when every
+screen candidate scores 0% (infeasible encounter), the ranking is
+noise and the size tiebreak silently favors SMALL decks — build_deck
+now warns instead of pretending. Next rung: a target dimension for
+the learned pilots, with focus-scripted play as the bar to clear.
+
 ## Scope of the current claims
 
 This is an **Arc-1-style, single-enemy PvE optimization laboratory**, not
