@@ -214,6 +214,51 @@ damage RANGES are now sampled too (`Rules.damage_ranges`; parsed from the
 classic descriptions), so win rates price in damage variance, not just
 fizzle variance.
 
+## Living bosses (2026 boss-AI report)
+
+The July 2026 research report grounds two new layers, both
+confidence-tagged in `docs/RESEARCH.md`:
+
+**Player base curves** (`player_curves.py`): school HP from the
+official-forum L1/L120 anchors (linear interpolation, documented as
+approximation, clamped past 120 — nothing fabricated beyond the
+anchors) and the universal base power-pip ramp (0% before 10, 40% cap
+at 50). The progression sweep now runs on the era pip curve — a
+level-1 wizard gets zero power pips, and the level-15 trough deepens
+honestly (TTK 9.7 vs the geared-pip 6.4).
+
+**The living-boss caster** (`Boss(pool=..., archetype=...,
+discipline=...)`): the report's three-layer model — configured
+reusable spell pool + state-aware-but-imperfect legal-action AI +
+deterministic scripts (our existing `CheatRule` layer IS layer 3) —
+with enemy pips (7-slot rack, white→power upgrade when full), role
+archetypes (hitter/healer/buffer/debuffer/tank), duplicate-hanging
+checks, saving/passing as real actions, and fizzles. Boss casts route
+through the same charm/ward/crit engine as player casts, so mantles
+and dispels bite the boss. Legacy flat-damage bosses are untouched
+(`pool=None`, byte-identical). Everything beyond the report's
+evidence (exact weights, enemy pip odds) is tagged `modeled`.
+
+**Solo-feasibility frontier** (`living_bosses.py`,
+`results_living.json`; base-stat death wizard, no gear/wand, vs
+Krokopatra under each model): at level 12 both models say no (719 HP
+soloing 4-person content should fail); at level 20 the flat model
+calls the solo trivial (**98.6%**) while the living boss still wins
+most fights (**31.2%** best pilot) — chip damage understates a hitter
+that blades into Storm Shark spikes and shields your kill turns.
+Two riders: scripted triage BEATS per-deck RL against the living boss
+(31.2% vs 7.2%) because the tabular state cannot see the boss's
+hanging blades — a genuine representation gap opened by stateful
+opponents (roadmap: enemy-state features); and adding one 300-HP
+healer acolyte (which really heals its boss — enemy heals route to
+the neediest teammate) drops the fight to **0%** without target
+switching: the report's role-segmentation pattern, quantified.
+
+This diff was adversarially reviewed by a 30-agent workflow before
+merge; it caught a boss pip-livelock, self-only enemy healing, X-pip
+cost inversion, and boss immunity to player mantles — all fixed and
+regression-tested (156 tests).
+
 ## Scope of the current claims
 
 This is an **Arc-1-style, single-enemy PvE optimization laboratory**, not

@@ -1,0 +1,201 @@
+{
+ "pool": [
+  "Thunder Snake",
+  "Lightning Bats",
+  "Storm Shark",
+  "Stormblade",
+  "Storm Shield"
+ ],
+ "levels": {
+  "12": {
+   "player_hp": 719,
+   "power_pip": 0.02,
+   "flat": {
+    "deck": [
+     "Banshee",
+     "Banshee"
+    ],
+    "RL(8k)": {
+     "win_rate": 0.0,
+     "mean_ttk": null,
+     "p90_ttk": null,
+     "mean_hp_left": 0.0
+    },
+    "triage": {
+     "win_rate": 0.0,
+     "mean_ttk": null,
+     "p90_ttk": null,
+     "mean_hp_left": 0.0
+    }
+   },
+   "living": {
+    "deck": [
+     "Banshee",
+     "Banshee",
+     "Banshee",
+     "Ghoul"
+    ],
+    "RL(8k)": {
+     "win_rate": 0.0026666666666666666,
+     "mean_ttk": 10.625,
+     "p90_ttk": 11,
+     "mean_hp_left": 145.4375
+    },
+    "triage": {
+     "win_rate": 0.0016666666666666668,
+     "mean_ttk": 10.6,
+     "p90_ttk": 11,
+     "mean_hp_left": 284.65
+    }
+   }
+  },
+  "16": {
+   "player_hp": 817,
+   "power_pip": 0.06,
+   "flat": {
+    "deck": [
+     "Banshee",
+     "Banshee",
+     "Dark Sprite",
+     "Ghoul",
+     "Death Trap",
+     "Death Trap",
+     "Pixie",
+     "Pixie"
+    ],
+    "RL(8k)": {
+     "win_rate": 0.048,
+     "mean_ttk": 10.895833333333334,
+     "p90_ttk": 12,
+     "mean_hp_left": 179.69444444444446
+    },
+    "triage": {
+     "win_rate": 0.505,
+     "mean_ttk": 12.135313531353136,
+     "p90_ttk": 13,
+     "mean_hp_left": 130.13531353135315
+    }
+   },
+   "living": {
+    "deck": [
+     "Banshee",
+     "Banshee",
+     "Banshee",
+     "Ghoul",
+     "Dark Sprite",
+     "Death Trap",
+     "Death Trap"
+    ],
+    "RL(8k)": {
+     "win_rate": 0.024,
+     "mean_ttk": 8.819444444444445,
+     "p90_ttk": 10,
+     "mean_hp_left": 182.44097222222223
+    },
+    "triage": {
+     "win_rate": 0.06166666666666667,
+     "mean_ttk": 8.162162162162161,
+     "p90_ttk": 9,
+     "mean_hp_left": 232.54864864864865
+    }
+   }
+  },
+  "20": {
+   "player_hp": 915,
+   "power_pip": 0.1,
+   "flat": {
+    "deck": [
+     "Banshee",
+     "Banshee",
+     "Banshee",
+     "Deathblade",
+     "Balanceblade",
+     "Curse",
+     "Hex",
+     "Death Trap",
+     "Pixie",
+     "Pixie"
+    ],
+    "RL(8k)": {
+     "win_rate": 0.9856666666666667,
+     "mean_ttk": 6.9299966181941155,
+     "p90_ttk": 8,
+     "mean_hp_left": 304.73283733513694
+    },
+    "triage": {
+     "win_rate": 0.8886666666666667,
+     "mean_ttk": 9.445986496624156,
+     "p90_ttk": 11,
+     "mean_hp_left": 449.59114778694675
+    }
+   },
+   "living": {
+    "deck": [
+     "Banshee",
+     "Banshee",
+     "Sacrifice",
+     "Ghoul",
+     "Dark Sprite",
+     "Deathblade",
+     "Deathblade",
+     "Death Trap",
+     "Curse"
+    ],
+    "RL(8k)": {
+     "win_rate": 0.072,
+     "mean_ttk": 8.25,
+     "p90_ttk": 10,
+     "mean_hp_left": 273.98314814814813
+    },
+    "triage": {
+     "win_rate": 0.31233333333333335,
+     "mean_ttk": 6.180362860192102,
+     "p90_ttk": 6,
+     "mean_hp_left": 333.70064034151545
+    }
+   }
+  }
+ },
+ "healer_minion_at_20": {
+  "win_rate": 0.0,
+  "mean_ttk": null,
+  "p90_ttk": null
+ },
+ "sample_trace": [
+  {
+   "actor": "Krokopatra",
+   "card": "Thunder Snake",
+   "pips_spent": 1,
+   "type": "enemy_cast",
+   "turn": 1
+  },
+  {
+   "actor": "Krokopatra",
+   "card": "Stormblade",
+   "pips_spent": 0,
+   "type": "enemy_cast",
+   "turn": 2
+  },
+  {
+   "actor": "Krokopatra",
+   "card": "Storm Shark",
+   "pips_spent": 3,
+   "type": "enemy_cast",
+   "turn": 3
+  },
+  {
+   "actor": "Krokopatra",
+   "card": "Stormblade",
+   "pips_spent": 0,
+   "type": "enemy_cast",
+   "turn": 4
+  },
+  {
+   "actor": "Krokopatra",
+   "card": "Storm Shield",
+   "pips_spent": 0,
+   "type": "enemy_cast",
+   "turn": 5
+  }
+ ]
+}

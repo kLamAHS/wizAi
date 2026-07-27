@@ -334,3 +334,56 @@ KingsIsle’s public code-of-conduct materials tell players to read the Terms of
 A compliant research workflow is straightforward. Use public official docs and patch notes for rule scaffolding. Use Wizard101 Central and other officially linked community guides for spell, item, creature, and encounter metadata. Use your own recordings and hand-labeled logs to validate transitions. Use simulator rollouts to scale training. Keep all version tags explicit, because modern Wizard101 combat changes through spell audits, mode restrictions, archmastery tuning, pin updates, and advanced-combat removals. If you later want a real-time assistant for personal theorycrafting, keep it strictly **advisory/offline** rather than automated. citeturn41view0turn28view0turn29view0turn33view0
 
 The most actionable final recommendation is this: treat Wizard101 as a **structured symbolic domain with learned uncertainty modules**. Build the rules engine first. Build the spell/item/creature database second. Train BC on symbolic states third. Add offline RL only after the deterministic simulator reproduces public mechanics and held-out human logs. That sequencing matches both the public information landscape of Wizard101 and the offline-RL literature’s core lesson: good static-data performance depends more on disciplined problem formulation than on throwing a larger model at an underspecified environment. citeturn42search0turn42search1turn43search3
+---
+
+## Addendum (July 2026): School stat anchors and the boss-AI model
+
+A second merged research report (user-provided, July 2026) grounds two
+sim layers. What it verifies, at its own confidence grades:
+
+**Player base stats.** Level 1 / level 120 base-health anchors per
+school (official-forum quoted; Storm 400→2343 … Ice 500→4204) and the
+universal base power-pip rule (0% before level 10, ~1 point/level to
+the 40% base cap at 50). The report is explicit that (a) linearity
+between the anchors is NOT proven, and (b) practical combat stats
+(damage, resist, accuracy, critical, block, pierce) are gear-dominated
+with no defensible base curve. `player_curves.py` implements exactly
+this much: exact anchors, linear interpolation tagged as
+approximation, clamped (not extrapolated) past 120, and no fabricated
+combat-stat curves. The 0.85 power-pip figure used by endgame
+experiments is a geared value, not a base one.
+
+**Boss casting.** The report's best-supported model is three layers:
+configured spell pool/deck + state-aware-but-imperfect legal-action AI
++ deterministic encounter scripts — with NO public evidence of a
+player-like hand/draw model, exact selection weights, or multi-turn
+planning. The sim maps one-to-one:
+
+| Report layer                    | Sim implementation                |
+|---------------------------------|-----------------------------------|
+| Configured pool (reusable)      | `Boss.pool` card names; no hidden |
+|                                 | hand/deck simulated               |
+| Legal-action AI, role archetypes| `_enemy_choose`: pip legality,    |
+| (hitter/healer/buffer/debuffer/ | duplicate-hanging checks,         |
+| tank), passing as a real action | archetype priority buckets, pass  |
+| Weighted/unknown selection      | `Boss.discipline`: P(follow role  |
+|                                 | priorities) vs uniform legal pick |
+| Deterministic scripts           | the existing `CheatRule` layer —  |
+|                                 | the report validates this design  |
+| Threat/position targeting       | existing threat-based             |
+|                                 | `_resolve_targets` for team 1     |
+
+Everything above the report's evidence line is tagged `modeled`,
+itemized: enemy power-pip odds (`Boss.pip_chance`, default 0.40 = the
+player base cap), the discipline default (0.7), the archetype
+priority orders, the player-rule transplants (fizzle keeps pips; the
+7-slot rack cap with white→power upgrade when full — the upgrade is
+also the escape hatch that keeps a saving hitter from freezing into
+a forever-pass), and enemy healers routing heals to the neediest
+living teammate. Boss casts route through the same charm/ward/crit/
+fizzle engine as player casts — including consuming incoming
+accuracy charms (player-cast mantles) and dispels, so player debuff
+counterplay works against the caster. Known limitation: enemy
+ally-targeted BUFFS still resolve to self (heals were fixed to
+follow the healer's decision), so the buffer archetype self-blades
+rather than blading a teammate.
