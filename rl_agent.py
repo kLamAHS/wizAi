@@ -45,7 +45,8 @@ class Featurizer:
         hand enter by name (the sideboard is small and WHICH TC is up
         decides the turn)."""
         hb = min(int(s.boss_hp // 250), 24)
-        p = min(s.norm_pips + 2 * s.pow_pips, 14)
+        p = min(s.norm_pips + 2 * s.pow_pips +
+                2 * getattr(s, 'school_pips', 0), 14)
         bmask = sum(1 << i for i, n in enumerate(self.blades) if n in s.blades)
         tsig = tuple(s.traps[n][1] if n in s.traps else 0 for n in self.traps)
         dmask = sum(1 << i for i, n in enumerate(self.dmg)

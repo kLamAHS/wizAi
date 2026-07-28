@@ -48,11 +48,18 @@ effect provenance as a first-class citizen.
   `round_start` / `hp_below`) executing free effect ops — the "rules engine
   plus cheat scripts" pattern. The bundled scripts are illustrative shapes,
   not scraped encounters.
-- **Out of scope, declared:** criticals default off (classic era; the
-  machinery exists, is tested, and is pluggable via `Rules.crit_resolver`),
-  no archmastery/shadow/school pips, no gear/pet stat layer (fields exist,
-  default 0, including flat damage/flat resist), enemy decks are flat
-  scripted hits + cheats. Beguile is the one card excluded as unsupported.
+- **Out of scope, declared:** criticals default off in the classic
+  era but are a shipped ruleset (`rulesets.CRIT_ERA`, rating-based and
+  MODELED), as is the mastery amulet (`Rules.mastery_school`) and
+  archmastery/school pips (`Rules.archmastery` — a real resource with
+  its own rack slots and an own-school spend lock). Still absent:
+  shadow pips, and any full gear/pet stat layer (the fields exist and
+  default to 0, including flat damage/flat resist; `rulesets.
+  stats_for(..., school_gear=True)` supplies a MODELED own-school
+  damage bonus for era probes). Enemy decks are flat scripted
+  hits + cheats by default, or a configured spell pool with archetype
+  AI (`Boss(pool=...)`). Beguile is the one card excluded as
+  unsupported.
 - **Auditable + versioned.** `Sim(log_events=True)` records a structured
   event log per duel (`cast_declared`, `charm_consumed`, `ward_consumed`,
   `prism_converted`, `damage_applied`, `dot_created`, `cheat_fired`, ...):
@@ -649,8 +656,231 @@ loader report.
    equally good final deck 3.3x faster (14s vs 46s). Exact hanging-
    effect percents in the features mattered: with blade/trap COUNTS
    the death-grind row scored 7%; with percents, 48% — parity.
-8. Post-classic rulesets behind `Rules`: criticals-on eras, mastery
-   amulets, school pips/archmastery — each as a frozen named ruleset.
+8. Post-classic rulesets behind `Rules` — SHIPPED for criticals and
+   mastery (`rulesets.py`, `era_shift.py`, `results_eras.json`).
+   `ERAS` freezes five named rulesets (classic / live / crit-era /
+   mastery / modern); `Rules.mastery_school` makes one off-school
+   school pay full power-pip value, and `make_rating_crit()` turns
+   crit/block RATINGS into probabilities with diminishing returns and
+   partial block mitigation. Classic-era behavior is bit-identical
+   (regression-tested), and the crit curves are tagged MODELED — the
+   2026 report is explicit that these formulas are not public.
+
+   Two probes asked whether classic-era strategy conclusions are
+   era-specific (paired seeds, same draws across eras):
+
+   ```
+   criticals: win% by blades stacked before the nuke
+   era         k=0    k=1    k=2    k=3    optimal
+   live        62%    64%    86%    94%    k=3
+   crit-era    72%    81%    93%    97%    k=3
+   ```
+
+   The stacking OPTIMUM is era-invariant (k=3 everywhere), but
+   criticals compress the penalty for rushing: unbuffed play gains
+   +10 points while fully-stacked play gains only +3, so the
+   rush-vs-stack gap narrows from 32 to 25 points. A random damage
+   multiplier partially substitutes for the deterministic one blades
+   provide. (`modern` reproduces `crit-era` exactly, since a storm
+   mastery cannot touch a death deck — a free internal consistency
+   check that the new knob doesn't leak.) Note the first cut of this
+   probe scored every k identically: with 6–7-pip finishers the
+   policy stacks buffs during idle turns regardless of k, so it was
+   measuring the deck, not the era.
+
+   Mastery, a fire wizard vs a 60% fire wall carrying a storm splash:
+   the amulet cuts TTK from **20.9 to 14.0** (−33%) at a flat win rate
+   — the off-school nuke goes from a pip-starved luxury to the main
+   line, which is exactly the item's design intent, reproduced from
+   the pip arithmetic alone.
+
+   **School pips / archmastery** then closed the item
+   (`Rules.archmastery`, `archmastery_probe.py`,
+   `results_archmastery.json`). It is a genuine new RESOURCE, not a
+   flag: a share of gained pips arrive as school pips that pay 2 for
+   the wizard's own school and **nothing anywhere else**, they occupy
+   rack slots, they are spent first (being worthless otherwise), and
+   both featurizers see them (no-op when the era is off, so every
+   earlier number is untouched — regression-tested).
+
+   The repo owner predicted the outcome before the run: *"the AI just
+   learns to use their school pips, since main-class damage is buffed
+   by gear and off-school isn't usually."* Both halves hold, and the
+   mechanical half lands harder than "learns to prefer". A fire
+   wizard with a heavy storm splash, against a boss resisting fire
+   60% — deliberately the worst case, since the wall punishes the
+   school the splash exists to dodge:
+
+   ```
+   era                    splash deck        mono-fire deck   own-school
+                        win     ttk          win     ttk      dmg casts
+   mastery             64.8%   14.04         0.0%     —         41.6%
+   mastery+gear        67.5%   11.26        47.0%   13.10       38.9%
+   am+mastery          25.8%   15.28         0.0%     —         46.0%
+   am+mastery+gear     38.5%   12.91        47.5%   13.02       43.2%
+   ```
+
+   Archmastery costs the splash deck **39 points of win rate**
+   (64.8 → 25.8): school pips pile up fire-locked while the deck's
+   damage is storm, so the rack fills with a currency the hand cannot
+   spend. Own-school damage casts rise (41.6 → 46.0), the predicted
+   direction — but the deeper effect is that the tax falls on the
+   DECK, not the play. And the economic half is exactly as predicted:
+   own-school gear is what makes mono-fire viable at all against a
+   60% fire wall (0% → 47%), and it collapses the splash's edge from
+   +1.83 turns to **+0.11** — parity. Carrying the off-school splash
+   stops paying precisely when gear buffs your own school and pips
+   lock to it.
+
+   Nuance worth stating: the own-school share moves only ~4 points
+   because a policy cannot spend school pips it has no own-school
+   cards for — the adaptation has to happen in DECK CONSTRUCTION.
+
+   So the follow-up ran (`mastery_deck_probe.py`,
+   `results_mastery_deck.json`). `legal_pool(..., mastery=...)` now
+   widens the buildable pool with the amulet school's trained line —
+   48 cards, 17 of them storm — so the builder is FREE to splash and
+   nothing tells it whether to. Same fire wizard, same storm amulet,
+   only the era changes; reported as the storm share of the built
+   deck's damage cards:
+
+   ```
+   boss         mastery   ->  am+mastery+gear
+   neutral       75.0%          50.0%     (−25.0 points)
+   fire-wall     60.0%          60.0%     ( −0.0 points)
+   ```
+
+   On a neutral boss the prediction holds at the level it actually
+   lives on: given a free choice, the builder cuts the splash by a
+   quarter once pips lock and gear buffs fire, unprompted — the same
+   force that cost the hand-built splash 39 points shows up as decks
+   that stop containing it.
+
+   The fire wall is the informative exception, and the reason the
+   first cut of this probe reported "no era effect at all": a boss
+   that resists your school 60% makes splashing correct for a reason
+   that has nothing to do with pips or gear, and it is the bigger
+   force. Run against the wall alone, the probe measures the wall.
+   That is a confound in the apparatus, not a null result — recorded
+   here because it was very nearly published as one.
+
+9. **Gear and pet stat layer, levels 1–120** — SHIPPED (`gear.py`,
+   `gear_probe.py`, `results_gear.json`), from the July 2026 gear/pet
+   research report.
+
+   `player_curves.py` had stopped at base HP and the base power-pip
+   rule with an explicit refusal: practical combat stats "are
+   gear-dominated and have NO defensible base curve; they are
+   deliberately absent here." `gear.py` is that missing layer —
+   damage, resist, accuracy, critical rating, health and power pip on
+   the report's own min/median/max envelope at every 5 levels, plus
+   the pet talent ranges and the two end-state pet builds.
+
+   Provenance is split, because the report splits it. The gear tables
+   are a MODELED benchmark envelope — the report says outright it is
+   "not a claim that every item in the database was exhaustively
+   scraped" — while the pet talent ranges are SOURCED from wiki
+   calculator pages. That distinction is worth keeping because the pet
+   side then cross-checks itself: the report quotes ~22% attack / 15%
+   defense for a finished triple-double, and that is exactly
+   Dealer 10 + Giver 6 + Pain-Giver 6 and Proof 10 + Defy 5 from the
+   independently-sourced talent ranges. Two of its sources agreeing is
+   a real check, so it is a test rather than a comment.
+
+   Three things the module refuses to invent, in `player_curves.py`'s
+   spirit: **block** (the report tracks the stat but publishes no
+   envelope, so nothing emits one without an explicit opt-in), the
+   **universal/school damage split** (built from the only two anchors
+   that exist — Sky Iron Hasta's +10% universal at 30, Wintertusk's
+   all-school +46% at 56 — and linear between them), and values
+   **above 120**, which are held rather than extrapolated.
+
+   One conflict is left visible rather than smoothed: the report's
+   power-pip column reads as gear-only at low level (5% at L20) but as
+   a character-sheet total at high level (100% at L120), and 5% cannot
+   be a total when the documented base rule already gives 10% at L20.
+   `power_pip` takes whichever curve is higher and prefers the
+   better-sourced base rule where they disagree; `gear_power_pip`
+   still exposes the raw column.
+
+   The load-bearing safety property is the crit gate.
+   `Actor.crit_chance` holds a probability in classic and a RATING
+   only when the ruleset installs a rating resolver, so emitting a
+   397 rating into a classic sim would mean "always crit". Gear
+   therefore emits crit only when `rules.crit_resolver` is set, and
+   `rules=None` is criticals-free — which is why every pre-gear number
+   in this repo is untouched by the module existing.
+
+   **Where gear budget becomes combat power — not where the tables
+   say.** The report's headline is that progression is "a series of
+   benchmark jumps" at 30, 56/60, 90, 100, 110, 120. Testing that
+   directly would be circular: the jumps are in the tables and the
+   tables are transcribed. The non-circular question is whether a jump
+   in stat BUDGET converts into a jump in combat. Measured as kill
+   capacity — the boss HP a fixed deck and policy can kill inside a
+   turn budget — at three turn budgets:
+
+   ```
+   turn budget   steps worth >=15% capacity            plateaus
+    6-turn       50->55, 75->80, 80->85, 85->90, 90->95   3.7% avg
+    8-turn       20->25, 25->30, 75->80, 85->90 (80%)     3.5% avg
+   10-turn       45->50, 60->65, 80->85                   5.0% avg
+
+   biggest stat-budget jumps: 55->60 (31%), 50->55 (24%), 45->50 (12%)
+   felt jumps common to all three turn budgets: NONE
+   ```
+
+   Progression really is discrete — a few 17–80% steps separated by
+   3–5% plateaus, never a smooth curve. But **no felt jump survives a
+   change in the turn budget**, and the gear tables' own biggest jump
+   (55→60, +31% budget) is a felt step only at the 6-turn budget. The
+   steps are a property of the CAST ECONOMY — how many nukes fit in
+   the turns available and how many the boss survives — not of the
+   gear ladder. The report is right that the game moves in jumps and
+   the jumps a player feels are not the ones in its tables. Caveat
+   that cuts the same way: this is one deck and one scripted policy
+   family, and a different deck has a different cast economy.
+
+   Getting there required two apparatus fixes worth recording, both
+   the same failure in different clothes. TTK against a fixed dummy is
+   quantized by the blade-stack cycle: at L120 a 6000 HP dummy made
+   the fight pip-bound, so a +22% damage pet shaved exactly 0.00 turns
+   (10000 gave +0.01, 16000 gave +1.57). Scaling the dummy to the stat
+   budget then landed the criticals-off arm exactly on a cycle
+   boundary — 9.00 turns for all three pets. Neither is a fact about
+   pets. Hence capacity rather than TTK for Q1, and a spread of dummy
+   sizes rather than one for Q2.
+
+   **Crit pets are a conditional buy; damage pets are not.** The two
+   end-state builds, as turns saved on a damage race:
+
+   ```
+   era / boss              gear crit   triple-double   quad-critical
+   no criticals (L100)             0        +0.77           +0.00
+   crit era (L60)                117        +0.55           +0.72
+   crit era (L100)               428        +0.25           +0.25
+   crit era (L120)               635        +0.68           +0.14
+   crit era, high block (L100)   428        +0.86           +0.00
+   ```
+
+   The crit pet's value decays monotonically as the wizard's own gear
+   accumulates crit rating — 0.72 turns at rating 117, 0.25 at 428,
+   0.14 at 635 — because the rating curve is diminishing and the pet
+   is buying at the flat end. It is worth **exactly** 0.00 in a
+   criticals-off era and **exactly** 0.00 against a high-block boss,
+   both of which are mechanical zeroes rather than small numbers. It
+   beats the damage pet only in the one arm where gear crit is still
+   low (L60, ratio 1.31).
+
+   Stated honestly in the other direction: the triple-double column
+   wobbles between +0.25 and +0.86 with a per-dummy spread (±0.48 to
+   ±0.97) as wide as its own mean, so **no trend can be claimed for
+   it** — only that it is always positive and never zero. The quad-
+   critical column carries spreads of ±0.00 to ±0.39, which is what
+   lets its decay clear its own noise floor. And on the survival axis
+   the two are indistinguishable: +42.8 vs +42.2 win-rate points over
+   no pet, a 5-point resist difference that this apparatus cannot
+   resolve. The choice between them is made on offense or not at all.
 
 ## Boundary
 

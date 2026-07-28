@@ -77,6 +77,15 @@ class Rules:
     dot_ticks_use_cast_snapshot: bool = True   # modifiers locked at cast
     damage_ranges: bool = False          # sample ops carrying 'spread'
                                          # uniformly instead of using avg
+    mastery_school: object = None        # mastery amulet: this off-school
+                                         # school also gets FULL power-pip
+                                         # value (post-Celestia item)
+    archmastery: float = 0.0             # P(a gained pip is a SCHOOL pip).
+                                         # MODELED: the live orb fills from
+                                         # an Archmastery stat contested
+                                         # against opponents; a per-pip
+                                         # probability is the tractable
+                                         # abstraction of that rate.
 
 
 # ---------------------------------------------------------------- card model
@@ -391,6 +400,7 @@ class Actor:
     team: int                   # 0 = player side, 1 = enemy side
     norm_pips: int = 0
     pow_pips: int = 0
+    school_pips: int = 0                 # own-school ONLY, worth 2 there
     power_pip_chance: float = 0.0
     accuracy_bonus: float = 0.0
     pierce: float = 0.0
@@ -430,7 +440,7 @@ class Actor:
 
     @property
     def pip_slots(self):
-        return self.norm_pips + self.pow_pips
+        return self.norm_pips + self.pow_pips + self.school_pips
 
     def has_stack(self, key, slot=None):
         pools = {"charm": self.charms, "ward": self.wards}
@@ -561,6 +571,14 @@ class State:
         return self.player.pip_slots
 
     @property
+    def school_pips(self):
+        return self.player.school_pips
+
+    @school_pips.setter
+    def school_pips(self, v):
+        self.player.school_pips = v
+
+    @property
     def hand(self):
         return self.player.hand
 
@@ -641,26 +659,47 @@ class Sim:
             s.events.append(kw)
 
     # ---- pips ------------------------------------------------------------
+    def _full_pip(self, card):
+        """Does this card get 2-for-1 power pips? Own school always;
+        the mastery-amulet school too when the ruleset grants one."""
+        return (card.school == self.school or
+                card.school == self.rules.mastery_school)
+
     def _pip_value(self, actor, card):
-        return 2 if card.school == actor.school else 1
+        return 2 if self._full_pip(card) else 1
 
     def afford(self, s, card):
         a = s.player
         if card.x_pips:
             return a.pip_slots >= 1
-        if card.school == self.school:
-            return a.norm_pips + 2 * a.pow_pips >= card.pips
-        return a.norm_pips + a.pow_pips >= card.pips
+        # school pips pay 2 for the wizard's OWN school and nothing
+        # anywhere else — that lock is the whole strategic content of
+        # archmastery
+        own = 2 * a.school_pips if card.school == self.school else 0
+        if self._full_pip(card):
+            return own + a.norm_pips + 2 * a.pow_pips >= card.pips
+        return own + a.norm_pips + a.pow_pips >= card.pips
 
     def spend(self, s, card):
         """Returns effective pips spent (drives X-pip spells)."""
         a = s.player
         if card.x_pips:
             eff = a.norm_pips + a.pow_pips * self._pip_value(a, card)
+            if card.school == self.school:
+                eff += 2 * a.school_pips
+                a.school_pips = 0
             a.norm_pips = a.pow_pips = 0
             return eff
         c = card.pips
-        if card.school == a.school:
+        if card.school == self.school and a.school_pips:
+            use_school = min(a.school_pips, c // 2)   # spend the locked
+            c -= 2 * use_school                       # resource first
+            a.school_pips -= use_school
+            if c == 1 and a.school_pips and \
+                    a.norm_pips + a.pow_pips == 0:
+                a.school_pips -= 1                    # odd remainder
+                c = 0
+        if self._full_pip(card):
             use_pow = min(a.pow_pips, c // 2)
             c -= 2 * use_pow
             a.pow_pips -= use_pow
@@ -682,7 +721,10 @@ class Sim:
         chance = a.power_pip_chance
         if s.bubble and s.bubble.fld == "pip_chance":
             chance = min(1.0, chance + s.bubble.percent)
-        if self.rng.random() < chance:
+        if self.rules.archmastery and \
+                self.rng.random() < self.rules.archmastery:
+            a.school_pips += 1          # locked to the wizard's school
+        elif self.rng.random() < chance:
             a.pow_pips += 1
         else:
             a.norm_pips += 1
@@ -1719,6 +1761,38 @@ def with_focus(policy):
             return None
         return (card, pick_focus(s))
     return strat
+
+
+def make_rating_crit(k_crit=250.0, k_block=250.0, cap=0.85,
+                     min_mult=1.25):
+    """Post-classic criticals from RATINGS rather than flat chances.
+
+    Confidence: MODELED. KingsIsle has never published the curves; the
+    2026 research report is explicit that crit/block are gear-driven
+    and their formulas are not public. What IS public and preserved
+    here: a rating buys diminishing probability, block contests crit,
+    and higher block shaves the multiplier rather than only cancelling
+    it. `Actor.crit_chance`/`block_chance` carry the RATINGS in this
+    resolver (not probabilities) — the era swap is the point of
+    Rules.crit_resolver.
+    """
+    def resolve(caster, target, rng, rules):
+        cr = max(caster.crit_chance, 0.0)
+        if cr <= 0:
+            return 1.0
+        p = min(cap, cr / (cr + k_crit))
+        if rng.random() >= p:
+            return 1.0
+        br = max(target.block_chance, 0.0)
+        if br > 0:
+            pb = min(cap, br / (br + k_block))
+            if rng.random() < pb:
+                return 1.0                      # blocked outright
+            shave = br / (br + k_block)         # partial mitigation
+            return max(min_mult,
+                       1 + (rules.crit_multiplier - 1) * (1 - shave))
+        return rules.crit_multiplier
+    return resolve
 
 
 def make_survival(inner, heal_below=0.45, shield_when_open=True):

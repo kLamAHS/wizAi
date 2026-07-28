@@ -28,6 +28,37 @@ def test_legal_pool_scoped_to_school_plus_universals():
     assert all(c.source == "deck" for c in pool.values())
 
 
+def test_mastery_widens_the_pool_to_the_amulet_school():
+    """A mastery amulet makes the amulet school's TRAINED line packable
+    — and only that line, so the pet/reskin whitelist still holds."""
+    base = legal_pool(CARDS, "fire")
+    wide = legal_pool(CARDS, "fire", mastery="storm")
+    assert set(base) < set(wide)
+    assert "Kraken" in wide and "Kraken" not in base
+    allowed = set(TRAINED["fire"]) | set(TRAINED["storm"]) | set(UNIVERSAL_BUFFS)
+    assert set(wide) <= allowed, set(wide) - allowed
+    assert "Fire Cat Storm" not in wide            # cross-school reskin
+    assert "Catalan" not in wide                   # not a trained spell
+    assert "Colossus" not in wide                  # third school
+
+
+def test_mastery_respects_the_level_gate():
+    """The amulet grants access, not levels: a low-level wizard still
+    cannot pack the amulet school's high-level spells."""
+    lo = legal_pool(CARDS, "fire", level=5, mastery="storm")
+    hi = legal_pool(CARDS, "fire", level=50, mastery="storm")
+    assert "Kraken" not in lo and "Kraken" in hi
+    assert set(lo) < set(hi)
+
+
+def test_pool_stays_school_scoped_without_mastery():
+    """Regression: the mastery widening must be opt-in — the default
+    build (and every result predating it) sees one school."""
+    for school in ("fire", "ice", "storm"):
+        assert legal_pool(CARDS, school) == \
+            legal_pool(CARDS, school, mastery=None)
+
+
 def test_sampled_decks_are_legal():
     pool = legal_pool(CARDS, "death")
     boss = Boss("B", 4000, "life", 0)

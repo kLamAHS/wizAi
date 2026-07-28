@@ -143,7 +143,7 @@ def _player_plausible(name, c):
     return True
 
 
-def legal_pool(cards, school, level=None):
+def legal_pool(cards, school, level=None, mastery=None):
     """Unlocked, deck-buildable cards for a school: the curated TRAINED
     quest line plus the cross-trained universal staples — nothing else,
     so pet cards (Firezilla), mutations and cross-school reskins
@@ -151,7 +151,9 @@ def legal_pool(cards, school, level=None):
     max(curated unlock floor, game data's level_restriction) — the
     progression knob: legal_pool(cards, 'fire', level=12) is a level-12
     wizard."""
-    trained = TRAINED.get(school, {})
+    trained = dict(TRAINED.get(school, {}))
+    if mastery:                      # amulet: that school's trained
+        trained.update(TRAINED.get(mastery, {}))   # line is packable
     pool = {}
     for name, c in cards.items():
         floor = trained.get(name, UNIVERSAL_BUFFS.get(name))
@@ -162,7 +164,8 @@ def legal_pool(cards, school, level=None):
         unlock = max(floor, getattr(c, "level", 1))
         if level is not None and unlock > level:
             continue
-        if c.school == school or name in UNIVERSAL_BUFFS:
+        if c.school == school or name in UNIVERSAL_BUFFS or \
+                (mastery and c.school == mastery):
             if c.kind in ("damage", "drain", "blade", "trap", "prism",
                           "shield", "heal", "weakness"):
                 pool[name] = c
@@ -228,7 +231,8 @@ def check_legal(deck, capacity, copy_limit):
 
 
 def screen(cards, decks, school, boss, rules=None, n=250, base_seed=7000,
-           progress=None, player_hp=None, power_pip=None, enemies=None):
+           progress=None, player_hp=None, power_pip=None, enemies=None,
+           player_stats=None):
     """Cheap proxy scores: scripted policy on paired seeds. A mortal
     `player_hp` screens each candidate under BOTH the race proxy and
     the triage-wrapped survival proxy and keeps the better score —
@@ -251,7 +255,7 @@ def screen(cards, decks, school, boss, rules=None, n=250, base_seed=7000,
         sim = Sim(dict(cards), dl, school, boss,
                   player_hp=player_hp or 10**9, rules=rules,
                   power_pip=0.85 if power_pip is None else power_pip,
-                  enemies=enemies)
+                  enemies=enemies, player_stats=player_stats)
         best = (0.0, 99.0)
         for pol in pols:
             wins, ttk = 0, []
@@ -271,7 +275,7 @@ def screen(cards, decks, school, boss, rules=None, n=250, base_seed=7000,
 
 def fine_tune(cards, dl, school, boss, rules=None, episodes=8000, seed=0,
               player_hp=10**9, sideboard=None, power_pip=None,
-              enemies=None, advisor=None):
+              enemies=None, advisor=None, player_stats=None):
     """Train the combat policy on one candidate; return (win, ttk, pol).
     `advisor` is an optional scripted policy (e.g. make_blade_stack(3))
     followed with decaying probability early in training — against
@@ -280,7 +284,7 @@ def fine_tune(cards, dl, school, boss, rules=None, episodes=8000, seed=0,
     sim = Sim(dict(cards), dl, school, boss, player_hp=player_hp,
               rules=rules, rng=random.Random(seed), sideboard=sideboard,
               power_pip=0.85 if power_pip is None else power_pip,
-              enemies=enemies)
+              enemies=enemies, player_stats=player_stats)
     agent = QAgent(dict(cards), dl, school, dp_pol=advisor,
                    rng=random.Random(seed + 1))
     for ep in range(episodes):
@@ -297,7 +301,8 @@ def build_deck(cards, school, boss, rules=None, n_candidates=150,
                top_k=5, capacity=16, copy_limit=3, seed=0, log=print,
                level=None, scorer=None, screen_frac=1 / 3,
                screen_log=None, generalist=None, objective="mean",
-               player_hp=None, power_pip=None, enemies=None):
+               player_hp=None, power_pip=None, enemies=None,
+               player_stats=None, mastery=None):
     """Two-stage search over the legal deck space. Returns
     (deck, win, ttk, screen_table). `level` gates the unlocked pool.
     A fitted DeckScorer (`scorer`) pre-ranks candidates so only the top
@@ -312,7 +317,7 @@ def build_deck(cards, school, boss, rules=None, n_candidates=150,
     a real HP total builds for SURVIVAL — boss damage counts, the
     screen proxy gains triage, and the template offers shields/heals."""
     rng = random.Random(seed)
-    pool = legal_pool(cards, school, level=level)
+    pool = legal_pool(cards, school, level=level, mastery=mastery)
     seen, cands = set(), []
     tries = 0                       # a level-1 pool may only support a
     while len(cands) < n_candidates and tries < n_candidates * 40:
@@ -339,7 +344,7 @@ def build_deck(cards, school, boss, rules=None, n_candidates=150,
             + (f", survival at {player_hp} HP" if player_hp else "") + ")")
     table = screen(cards, cands, school, boss, rules, progress=log,
                    player_hp=player_hp, power_pip=power_pip,
-                   enemies=enemies)
+                   enemies=enemies, player_stats=player_stats)
     if log and table and round(table[0][0], 2) == 0:
         log("WARNING: screen signal collapsed (best candidate 0%) — "
             "ranking is noise and the size tiebreak then favors SMALL "
@@ -361,17 +366,20 @@ def build_deck(cards, school, boss, rules=None, n_candidates=150,
         if generalist is not None:
             pol = generalist.policy()
             gsim = Sim(dict(cards), dl, school, boss, player_hp=php,
-                       rules=rules, power_pip=0.85 if power_pip is None else power_pip)
+                       rules=rules, power_pip=0.85 if power_pip is None else power_pip,
+                       player_stats=player_stats)
             w, m = evaluate(gsim, pol, n=2000)
         else:
             w, m, agent = fine_tune(cards, dl, school, boss, rules,
                                     seed=seed, player_hp=php,
-                                    power_pip=power_pip, enemies=enemies)
+                                    power_pip=power_pip, enemies=enemies,
+                                    player_stats=player_stats)
             pol = agent.policy()
         tail = m
         if objective == "p90":
             psim = Sim(dict(cards), dl, school, boss, player_hp=php,
-                       rules=rules, power_pip=0.85 if power_pip is None else power_pip)
+                       rules=rules, power_pip=0.85 if power_pip is None else power_pip,
+                       player_stats=player_stats)
             st = evaluate_paired(psim, {"pol": pol}, n=1000)["pol"]
             w, m = st["win_rate"], st["mean_ttk"]
             tail = st["p90_ttk"]

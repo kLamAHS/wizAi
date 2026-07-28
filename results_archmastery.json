@@ -1,0 +1,97 @@
+{
+ "setup": {
+  "boss": "fire-wall 2600hp 60% fire resist",
+  "splash": [
+   "Fireblade",
+   "Fireblade",
+   "Fire Trap",
+   "Fire Trap",
+   "Triton",
+   "Triton",
+   "Triton",
+   "Fire Dragon",
+   "Sunbird",
+   "Fire Elf"
+  ],
+  "mono": [
+   "Fireblade",
+   "Fireblade",
+   "Fire Trap",
+   "Fire Trap",
+   "Fire Dragon",
+   "Fire Dragon",
+   "Sunbird",
+   "Sunbird",
+   "Fire Elf",
+   "Fire Elf"
+  ]
+ },
+ "arms": {
+  "mastery": {
+   "best_policy": "blade-stack(1)",
+   "win": 0.6475,
+   "ttk": 14.042471042471043,
+   "own_school_damage_share": 0.41596365996106427,
+   "cast_mix": {
+    "fire": 641,
+    "storm": 900
+   }
+  },
+  "mastery+gear": {
+   "best_policy": "blade-stack(2)",
+   "win": 0.675,
+   "ttk": 11.262962962962963,
+   "own_school_damage_share": 0.38875878220140514,
+   "cast_mix": {
+    "fire": 498,
+    "storm": 783
+   }
+  },
+  "am+mastery": {
+   "best_policy": "blade-stack(2)",
+   "win": 0.2575,
+   "ttk": 15.281553398058252,
+   "own_school_damage_share": 0.4602739726027397,
+   "cast_mix": {
+    "fire": 504,
+    "storm": 591
+   }
+  },
+  "am+mastery+gear": {
+   "best_policy": "blade-stack(1)",
+   "win": 0.385,
+   "ttk": 12.909090909090908,
+   "own_school_damage_share": 0.43229689067201604,
+   "cast_mix": {
+    "fire": 431,
+    "storm": 566
+   }
+  },
+  "mono/mastery": {
+   "best_policy": "blade-stack(1)",
+   "win": 0.0,
+   "ttk": null
+  },
+  "mono/mastery+gear": {
+   "best_policy": "blade-stack(2)",
+   "win": 0.47,
+   "ttk": 13.095744680851064
+  },
+  "mono/am+mastery": {
+   "best_policy": "blade-stack(1)",
+   "win": 0.0,
+   "ttk": null
+  },
+  "mono/am+mastery+gear": {
+   "best_policy": "blade-stack(2)",
+   "win": 0.475,
+   "ttk": 13.021052631578947
+  },
+  "splash_advantage_turns": {
+   "mastery": null,
+   "mastery+gear": 1.8327817178881016,
+   "am+mastery": null,
+   "am+mastery+gear": 0.11196172248803826
+  }
+ }
+}

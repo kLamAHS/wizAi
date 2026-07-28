@@ -1,0 +1,111 @@
+{
+ "setup": {
+  "bosses": {
+   "neutral": "2600hp, no resists",
+   "fire-wall": "2600hp, 60% fire resist"
+  },
+  "wizard": "fire, storm mastery amulet",
+  "arms": {
+   "mastery": {
+    "era": "mastery",
+    "school_gear": false
+   },
+   "am+mastery+gear": {
+    "era": "am+mastery",
+    "school_gear": true
+   }
+  },
+  "pool_size": 48,
+  "storm_cards_available": 17
+ },
+ "arms": {
+  "neutral/mastery": {
+   "deck": [
+    "Storm Owl",
+    "Storm Owl",
+    "Storm Owl",
+    "Heck Hound",
+    "Tri Blade",
+    "Tri Blade",
+    "Fireblade",
+    "Fire Trap",
+    "Fire Trap",
+    "Storm Trap",
+    "Feint",
+    "Feint",
+    "Pixie"
+   ],
+   "size": 13,
+   "win": 0.9765,
+   "ttk": 8.880696364567333,
+   "damage_cards": 4,
+   "storm_damage": 3,
+   "storm_share_of_damage": 0.75
+  },
+  "neutral/am+mastery+gear": {
+   "deck": [
+    "Storm Owl",
+    "Tempest",
+    "Heck Hound",
+    "Fire Dragon",
+    "Fireblade",
+    "Stormblade",
+    "Feint",
+    "Feint",
+    "Fuel",
+    "Fuel",
+    "Storm Trap",
+    "Storm Trap"
+   ],
+   "size": 12,
+   "win": 0.8345,
+   "ttk": 8.55242660275614,
+   "damage_cards": 4,
+   "storm_damage": 2,
+   "storm_share_of_damage": 0.5
+  },
+  "fire-wall/mastery": {
+   "deck": [
+    "Storm Owl",
+    "Storm Owl",
+    "Fire Dragon",
+    "Leviathan",
+    "Heck Hound",
+    "Spirit Blade",
+    "Tri Blade",
+    "Feint",
+    "Storm Trap",
+    "Fire Prism"
+   ],
+   "size": 10,
+   "win": 0.949,
+   "ttk": 9.814014752370916,
+   "damage_cards": 5,
+   "storm_damage": 3,
+   "storm_share_of_damage": 0.6
+  },
+  "fire-wall/am+mastery+gear": {
+   "deck": [
+    "Storm Owl",
+    "Storm Owl",
+    "Storm Owl",
+    "Rain of Fire",
+    "Heck Hound",
+    "Storm Trap",
+    "Fuel",
+    "Feint",
+    "Fire Prism"
+   ],
+   "size": 9,
+   "win": 0.947,
+   "ttk": 8.598204857444562,
+   "damage_cards": 5,
+   "storm_damage": 3,
+   "storm_share_of_damage": 0.6
+  },
+  "splash_share_drop": {
+   "neutral": 0.25,
+   "fire-wall": 0.0
+  }
+ }
+}
