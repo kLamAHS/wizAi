@@ -154,6 +154,52 @@ edge is draw-distribution knowledge, not mechanics. Search also trades
 mean speed for reliability on the prism line, which is what a
 risk-sensitive objective would ask for.
 
+## Run it
+
+```
+python main.py                          # ~5 minutes, 5 levels
+python main.py --full                   # every world boundary
+python main.py --school storm --levels 30,60,90
+```
+
+One command assembles every layer: gear + pet loadout for the level, a
+real creature from the world that level is questing with the companions
+the scrape names for it, everything CASTING from a spell pool, a deck
+searched over the level-gated pool with Sun enchantments charged their
+real two-slot cost, and a policy fine-tuned on that exact pair. Writes
+`results_main.json` and renders the charts below.
+
+Two things it does that are worth knowing about. It SCREENS encounters
+for solo feasibility — much of the registry is four-person dungeon
+content, and the first end-to-end run picked by size alone, drew Gurtok
+Firebender with two adds, and returned 0% at every level. And it ships
+whichever policy actually won, because the learner does not always win:
+
+```
+lvl  world        encounter               +  deck  trained  scripted   ship
+20   Krokotopia   Frost Colossus          2  12      3.7%     69.9%   race(1)
+50   Dragonspyre  The Collector           2   9     95.9%     97.2%   race(1)
+70   Zafaria      Razorjack               1  12     93.9%     98.6%   race(2)
+100  Khrysalis    Shadow of the Land      1  12     98.1%    100.0%   race(3)
+120  Mirage       Mother Ghulture         2   9    100.0%    100.0%   trained
+```
+
+The tabular learner ranks CARDS, not targets, so on a multi-enemy board
+it cannot commit to killing one thing first — it matches the scripted
+line within a couple of points once the fight is winnable and collapses
+to 3.7% on the one encounter that is genuinely contested. That is the
+representation deficit `mob_generalist.py` isolated, reproduced here by
+the end-to-end run rather than argued for; advisor-guided training moves
+it 4.7% to 6.2%, which is to say barely.
+
+![End-to-end progression](plots/main_progression.png)
+
+![Time to kill](plots/main_ttk.png)
+
+![What the builder packed](plots/main_deck.png)
+
+![How much buffing pays](plots/main_policy.png)
+
 ## Charts
 
 Regenerate with `python plots.py` (reads the results JSONs, writes

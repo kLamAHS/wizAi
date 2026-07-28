@@ -564,6 +564,7 @@ def load_bosses_full(path="bosses_clean.json", report=None, rules=None,
 # because it deserves a sensitivity check rather than trust.
 MINION_HP_SHARE = 0.35
 MINION_RANK_DROP = 2
+MINION_POOL_KEEP = 3   # weakest N of the boss's pool
 _POOL_CARDS = {}
 
 
@@ -605,15 +606,19 @@ def encounter(name, bosses, hp_share=MINION_HP_SHARE, synth=True):
             mb.resist_map = dict(boss.resist_map or {})
             mb.boost_map = dict(boss.boost_map or {})
             if boss.pool:
-                # a mute minion is an HP bag, and HP is the thing an AoE
-                # deck destroys incidentally — so a stand-in that cannot
-                # cast understates the encounter in the one dimension
-                # that matters. It gets the boss's pool minus the top
-                # nuke: same school, a tier down. MODELED.
+                # a mute minion is an HP bag, and HP is what an AoE deck
+                # destroys incidentally — so a silent stand-in
+                # understates the encounter in the dimension that
+                # matters. But it must not cast the BOSS's spells
+                # either: handing two rank-9 adds a Helephant each
+                # deletes a level-50 wizard in two rounds and made the
+                # first end-to-end run 0% at every level. It gets the
+                # WEAK end of the pool — same school, a real tier down.
+                # MODELED.
                 weaker = sorted(
                     boss.pool,
-                    key=lambda n: -getattr(_POOL_CARDS.get(n), "damage", 0))
-                mb.pool = weaker[1:] or list(boss.pool)
+                    key=lambda n: getattr(_POOL_CARDS.get(n), "damage", 0))
+                mb.pool = weaker[:MINION_POOL_KEEP] or list(boss.pool)
                 mb.archetype = boss.archetype
                 mb.dmg = 0
             out.append(mb)

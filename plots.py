@@ -301,6 +301,199 @@ def survival_builds():
     plt.close(fig)
 
 
+# ---------------------------------------------------------------------
+# main.py end-to-end run. Four charts, one job each — never two measures
+# on one axis. Win rate and time-to-kill are different units and get
+# different figures; level is an ORDERED dimension so where it becomes
+# the series key it uses a sequential ramp (one hue, light to dark),
+# not the categorical slots.
+# ---------------------------------------------------------------------
+LEVEL_RAMP = ["#bcd6f4", "#8ab6ea", "#5895dd", "#2a78d6", "#1b559b"]
+
+
+def _ramp(n):
+    if n <= 1:
+        return [LEVEL_RAMP[3]]
+    step = (len(LEVEL_RAMP) - 1) / (n - 1)
+    return [LEVEL_RAMP[round(i * step)] for i in range(n)]
+
+
+def _label_ends(ax, xs, ys, color, fmt="{:.0f}", dy=7, extra=()):
+    """SELECTIVE direct labels: the two endpoints plus any index the
+    caller flags. Labelling every point collided the two series wherever
+    they converged, which on this chart is most of the range."""
+    idx = {0, len(xs) - 1} | set(extra)
+    for i in sorted(idx):
+        ax.annotate(fmt.format(ys[i]), (xs[i], ys[i]),
+                    textcoords="offset points", xytext=(0, dy),
+                    ha="center", fontsize=8.5, color=color)
+
+
+def main_progression(path="results_main.json"):
+    d = json.load(open(path, encoding="utf-8"))
+    rows = d["levels"]
+    x = [r["level"] for r in rows]
+    tr = [r["trained"]["win"] * 100 for r in rows]
+    sc = [r["scripted"]["win"] * 100 for r in rows]
+    fig, ax = plt.subplots(figsize=(8, 4.4))
+    ax.plot(x, sc, "-o", lw=2, ms=8, color=C["heuristic"],
+            label="best scripted line", zorder=2,
+            markeredgecolor="white", markeredgewidth=2)
+    ax.plot(x, tr, "-o", lw=2, ms=8, color=C["RL"],
+            label="trained policy", zorder=3,
+            markeredgecolor="white", markeredgewidth=2)
+    gap = [abs(a - b) for a, b in zip(tr, sc)]
+    worst = gap.index(max(gap))
+    _label_ends(ax, x, tr, C["RL"], extra=(worst,))
+    _label_ends(ax, x, sc, C["heuristic"], dy=-13, extra=(worst,))
+    if max(gap) > 5:
+        ax.annotate(f"{tr[worst]-sc[worst]:+.0f} pts", (x[worst],
+                    (tr[worst] + sc[worst]) / 2),
+                    textcoords="offset points", xytext=(12, -3),
+                    fontsize=8.5, color=INK2)
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{r['level']}\n{r['world']}" for r in rows],
+                       fontsize=8)
+    ax.set_ylabel("win rate (%)")
+    ax.set_ylim(-4, 108)
+    ax.set_axisbelow(True)
+    ax.grid(axis="x", visible=False)
+    ax.legend(frameon=False, fontsize=9, ncol=2, loc="lower center",
+              bbox_to_anchor=(0.5, -0.30))
+    ax.set_title(f"Progression: {d['setup']['school']} wizard vs real "
+                 f"casting encounters", fontsize=11, loc="left")
+    fig.tight_layout()
+    fig.savefig(OUT / "main_progression.png", bbox_inches="tight")
+    plt.close(fig)
+    return OUT / "main_progression.png"
+
+
+def main_ttk(path="results_main.json"):
+    d = json.load(open(path, encoding="utf-8"))
+    rows = [r for r in d["levels"] if r["trained"]["ttk"] == r["trained"]["ttk"]]
+    if not rows:
+        raise FileNotFoundError("no finite TTK to plot")
+    x = [r["level"] for r in rows]
+    tr = [r["trained"]["ttk"] for r in rows]
+    p90 = [r["trained"]["p90"] for r in rows]
+    fig, ax = plt.subplots(figsize=(8, 3.8))
+    ax.fill_between(x, tr, p90, color=C["RL"], alpha=0.16, lw=0,
+                    label="mean to 90th percentile")
+    ax.plot(x, tr, "-o", lw=2, ms=8, color=C["RL"], label="mean TTK",
+            markeredgecolor="white", markeredgewidth=2, zorder=3)
+    _label_ends(ax, x, tr, C["RL"], fmt="{:.1f}")
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{r['level']}\n{r['world']}" for r in rows],
+                       fontsize=8)
+    ax.set_ylabel("turns to clear the encounter")
+    ax.set_ylim(0, max(p90) * 1.12)      # headroom for the p90 band
+    ax.set_axisbelow(True)
+    ax.grid(axis="x", visible=False)
+    ax.legend(frameon=False, fontsize=9, ncol=2, loc="lower center",
+              bbox_to_anchor=(0.5, -0.32))
+    ax.set_title("Speed, and how bad the slow tail is", fontsize=11,
+                 loc="left")
+    fig.tight_layout()
+    fig.savefig(OUT / "main_ttk.png", bbox_inches="tight")
+    plt.close(fig)
+    return OUT / "main_ttk.png"
+
+
+def main_deck(path="results_main.json"):
+    d = json.load(open(path, encoding="utf-8"))
+    rows = d["levels"]
+    x = range(len(rows))
+    ench = [r["enchanted"] for r in rows]
+    plain = [r["deck_cards"] - r["enchanted"] for r in rows]
+    fig, ax = plt.subplots(figsize=(8, 3.8))
+    # 2px surface gap between stacked segments
+    ax.bar(x, plain, 0.56, color=C["heuristic"], label="plain cards",
+           zorder=2)
+    ax.bar(x, ench, 0.56, bottom=[p + 0.14 for p in plain],
+           color=C["generalist"], label="enchanted cards", zorder=2)
+    for i, r in enumerate(rows):
+        ax.annotate(f"{r['deck_slots']} slots", (i, r["deck_cards"] + 0.5),
+                    ha="center", fontsize=8, color=INK2)
+    ax.set_xticks(list(x))
+    ax.set_xticklabels([f"{r['level']}\n{r['world']}" for r in rows],
+                       fontsize=8)
+    ax.set_ylabel("cards in the built deck")
+    # headroom, or the tallest bar's slot label lands off-canvas
+    ax.set_ylim(0, max(r["deck_cards"] for r in rows) * 1.22)
+    ax.set_axisbelow(True)
+    ax.grid(axis="x", visible=False)
+    ax.legend(frameon=False, fontsize=9, ncol=2, loc="lower center",
+              bbox_to_anchor=(0.5, -0.30))
+    ax.set_title("What the builder packed (an enchanted card costs two "
+                 "slots)", fontsize=11, loc="left")
+    fig.tight_layout()
+    fig.savefig(OUT / "main_deck.png", bbox_inches="tight")
+    plt.close(fig)
+    return OUT / "main_deck.png"
+
+
+def main_policy(path="results_main.json"):
+    """Win rate against how many blades go up before the swing. Level is
+    ordered, so it rides a sequential ramp rather than categorical hues."""
+    d = json.load(open(path, encoding="utf-8"))
+    rows = d["levels"]
+    ks = sorted({int(k[5:-1]) for r in rows for k in r["all_policies"]
+                 if k.startswith("race(")})
+
+    def curve(r):
+        return [r["all_policies"].get(f"race({k})", {}).get(
+            "win", float("nan")) * 100 for k in ks]
+
+    # A level whose curve is flat at the ceiling says nothing about how
+    # much buffing pays — it says the fight was already won. Plotting
+    # five such lines on top of each other is noise pretending to be
+    # data, so only the levels where the choice MATTERS are drawn and
+    # the rest are named in the subtitle.
+    live = [r for r in rows
+            if max(curve(r)) - min(curve(r)) > 5]
+    flat = [r for r in rows if r not in live]
+    if not live:
+        raise ValueError("every level is flat — nothing to plot")
+    colors = _ramp(len(live))
+    fig, ax = plt.subplots(figsize=(8, 4.2))
+    for r, col in zip(live, colors):
+        ys = curve(r)
+        ax.plot(ks, ys, "-o", lw=2, ms=7, color=col,
+                markeredgecolor="white", markeredgewidth=1.6,
+                label=f"L{r['level']} ({r['world']})")
+        best = max(range(len(ks)),
+                   key=lambda i: (ys[i] if ys[i] == ys[i] else -1))
+        ax.annotate(f"peak at {ks[best]}", (ks[best], ys[best]),
+                    textcoords="offset points", xytext=(8, 4),
+                    fontsize=8.5, color=col)
+    ax.set_xticks(ks)
+    ax.set_xlabel("blades stacked before the swing")
+    ax.set_ylabel("win rate (%)")
+    ax.set_ylim(-4, 108)
+    ax.set_axisbelow(True)
+    ax.grid(axis="x", visible=False)
+    ax.legend(frameon=False, fontsize=9, ncol=max(1, len(live)),
+              loc="lower center", bbox_to_anchor=(0.5, -0.34))
+    sub = (f"  ·  {len(flat)} of {len(rows)} levels omitted: flat at the "
+           f"ceiling, the fight was already won"
+           if flat else "")
+    ax.set_title(f"How much buffing pays{sub}", fontsize=11, loc="left")
+    fig.tight_layout()
+    fig.savefig(OUT / "main_policy.png", bbox_inches="tight")
+    plt.close(fig)
+    return OUT / "main_policy.png"
+
+
+def main_run(path="results_main.json"):
+    made = []
+    for fn in (main_progression, main_ttk, main_deck, main_policy):
+        try:
+            made.append(fn(path))
+        except (FileNotFoundError, KeyError, ValueError) as e:
+            print(f"skip {fn.__name__}: {e}")
+    return made
+
+
 if __name__ == "__main__":
     made = []
     for fn in (live_ladder, classic_gap, survival_tradeoff, storm_curve,
