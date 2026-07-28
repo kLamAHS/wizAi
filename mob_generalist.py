@@ -75,27 +75,9 @@ DEMO_A = 24                 # legal actions can exceed offline_rl's 10
                             # once targets multiply them
 
 
-def _act_key(x):
-    """Normalize an action for matching: focus wraps EVERY card in a
-    (card, target) tuple, but legal_actions only targets foe-directed
-    kinds — a teacher's bladed tuple must match the bare blade (the
-    first demo run silently turned every teacher setup cast into a
-    PASS this way, deleting the line it was meant to demonstrate)."""
-    from generalist import FOE_KINDS
-    if x is None or x == PASS:
-        return ("__pass__", None)
-    if isinstance(x, tuple):
-        card, tgt = x
-        return (card.name, tgt if card.kind in FOE_KINDS else None)
-    return (x.name, None)
-
-
-def _match_action(acts, a):
-    want = _act_key(a)
-    for i, act in enumerate(acts):
-        if _act_key(act) == want:
-            return i
-    return 0                                    # PASS fallback
+from generalist import match_action as _match_action   # shared helper
+# (the first demo run silently turned every teacher setup cast into a
+# PASS before this normalization existed — see act_key in generalist)
 
 
 def collect_demos(n_eps=2500, mob_frac=0.5, seed=11, eps=0.1,

@@ -86,6 +86,83 @@ def rollout(sim, agent, seed, eps=0.1):
     return steps, won
 
 
+def gen_dataset_policy(cards, rules, teacher, n_pairs=16,
+                       eps_per_pair=100, seed=0, log=None, eps=0.02,
+                       max_a=16, feas_win=0.10):
+    """Search/scripted-teacher variant of gen_dataset: the behavior
+    policy is any (sim, s) -> card | (card, tgt) | None policy. Noise
+    is eps=0.02 per the brittleness lesson (10% noise on a tight line
+    destroys the wins it demonstrates). Pairs are feasibility-screened
+    with a cheap scripted probe so the data isn't despair."""
+    from generalist import legal_actions, match_action, phi
+    from w101_sim import evaluate, make_blade_stack
+
+    rng = random.Random(seed)
+    schools = ("fire", "ice", "storm", "myth", "life", "death", "balance")
+    pools = {sc: legal_pool(cards, sc) for sc in schools}
+    P, M, C, G, W = [], [], [], [], []
+    pairs, made = [], 0
+    while made < n_pairs:
+        sc = schools[len(pairs) % len(schools)]
+        boss = random_boss(rng, f"sdata{len(pairs)}")
+        dl = sample_deck(pools[sc], sc, boss, rng)
+        pairs.append((sc, dl, boss))
+        sim = Sim(dict(cards), dl, sc, boss, player_hp=10**9,
+                  rules=rules)
+        probe, _ = evaluate(sim, make_blade_stack(3), n=200)
+        if probe < feas_win:
+            if log:
+                log(f"    skip {boss.name} ({sc}): probe "
+                    f"{probe*100:.0f}% — no signal")
+            continue
+        made += 1
+        t_wins = 0
+        for e in range(eps_per_pair):
+            sim.rng = random.Random(seed * 10**6 + made * 10**4 + e)
+            s = sim.new_state()
+            steps, won = [], False
+            while True:
+                acts = legal_actions(sim, s)[:max_a]
+                pick = match_action(acts, teacher(sim, s))
+                if rng.random() < eps:
+                    pick = rng.randrange(len(acts))
+                Pm = np.zeros((max_a, len(FEATS)), np.float32)
+                mask = np.zeros(max_a, bool)
+                for i, act in enumerate(acts):
+                    Pm[i] = phi(sim, s, act)
+                    mask[i] = True
+                steps.append((Pm, mask, pick))
+                taken = acts[pick]
+                if taken == PASS:
+                    pass
+                elif isinstance(taken, tuple):
+                    sim.cast(s, taken[0], target=taken[1])
+                else:
+                    sim.cast(s, taken)
+                if not any(en.alive for en in s.enemies):
+                    won = True
+                    break
+                sim.end_round(s)
+                if s.player_hp <= 0 or s.turn >= MAX_TURNS:
+                    break
+            t_wins += won
+            g = 0.0 if won else -FAIL_PENALTY
+            for Pm, mask, pick in reversed(steps):
+                g = -1.0 + g
+                P.append(Pm)
+                M.append(mask)
+                C.append(pick)
+                G.append(g / 10.0)
+                W.append(won)
+        if log:
+            log(f"    pair {made:>2} {boss.name:<18} {sc:<8} teacher "
+                f"{t_wins/eps_per_pair*100:5.1f}%  "
+                f"({len(P)} steps total)")
+    return dict(phis=np.stack(P), mask=np.stack(M),
+                chosen=np.array(C, np.int16),
+                G=np.array(G, np.float32), won=np.array(W, bool)), pairs
+
+
 def gen_dataset(cards, rules, n_pairs=16, eps_per_pair=150, seed=0,
                 log=None):
     """Per pair: fine-tune a tabular expert, then log noisy-expert

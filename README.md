@@ -479,11 +479,24 @@ loader report.
    scripted blade-stack prior on raceable random pairs — and the 8k-
    episode experts themselves average below it, which caps what any
    clone can learn (garbage-ceiling, not garbage-in). Remaining
-   rungs: SEARCH-generated expert data (stronger teachers than 8k-
-   episode tabular agents), IQL-style expectile variants, and
-   sequence models for the multi-hit planning the linear class
-   provably can't express (see the generalist's X-pip negative
-   result).
+   rungs: IQL-style expectile variants and sequence models for the
+   multi-hit planning the linear class provably can't express.
+   SEARCH-GENERATED TEACHERS, done (`offline_search.py`,
+   `results_offline_search.json`) with a finding that sharpened the
+   ladder's theory: stronger teachers made WORSE clones. Search
+   teachers (76–100% per pair, demos at the brittleness-lesson
+   ε=0.02) cloned to 67.6% vs 74.8% from the weaker RL teachers —
+   because clone quality is teacher quality × in-class
+   REPRESENTABILITY × coverage, and search's edge lives in rollout
+   information the linear student cannot observe, while the cleaner
+   demos also covered fewer states (21k vs 38k decisions). The union
+   cell separated the two: combining both datasets recovers the
+   coverage loss (storm row 4.7% → 37.9%, mean back to 73.1%) but
+   plateaus AT the old ceiling, not above it. The binding constraint
+   has formally moved from teacher quality to STUDENT CAPACITY —
+   every data source converges at ~75% for the linear class, which
+   is the third independent line of evidence pointing at the
+   sequence-model rung.
 7. Deck × policy bilevel optimization. First results (death vs live
    Jade Oni): the searched 9-card deck reaches **100% win / TTK 6.45**
    vs the hand-built 12-card oneshot's 92.8% / 9.95 — smaller AND

@@ -157,6 +157,27 @@ def phi(sim, s, a):
     return x
 
 
+def act_key(x):
+    """Normalize an action for identity matching: focus-style wrappers
+    tuple EVERY card, but legal_actions only targets foe-directed
+    kinds, so a teacher's bladed tuple must match the bare blade."""
+    if x is None or x == PASS:
+        return ("__pass__", None)
+    if isinstance(x, tuple):
+        card, tgt = x
+        return (card.name, tgt if card.kind in FOE_KINDS else None)
+    return (x.name, None)
+
+
+def match_action(acts, a):
+    """Index of `a` in the action list, PASS index 0 as fallback."""
+    want = act_key(a)
+    for i, act in enumerate(acts):
+        if act_key(act) == want:
+            return i
+    return 0
+
+
 def legal_actions(sim, s):
     """PASS plus one instance of each distinct castable card. In
     multi-enemy fights, foe-directed kinds expand to one action per
