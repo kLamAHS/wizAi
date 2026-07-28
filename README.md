@@ -493,10 +493,60 @@ loader report.
    cell separated the two: combining both datasets recovers the
    coverage loss (storm row 4.7% → 37.9%, mean back to 73.1%) but
    plateaus AT the old ceiling, not above it. The binding constraint
-   has formally moved from teacher quality to STUDENT CAPACITY —
-   every data source converges at ~75% for the linear class, which
-   is the third independent line of evidence pointing at the
-   sequence-model rung.
+   appeared to move from teacher quality to student capacity — every
+   data source converged at ~75% for the linear class.
+   **That conclusion was wrong, and the sequence rung disproved it**
+   (`seq_policy.py`, `sequence_model.py`,
+   `results_sequence_model.json`). A recurrent student
+   (`w_eff = w0 + U h`, hand-written BPTT behind a numerical
+   gradient-check test) trained on the same union data, benchmarked
+   on the same 8 held-out pairs with equal validation-based model
+   selection and paired seeds — plus the ablation that decides
+   attribution, since `w0` trains in BOTH arms: the same
+   episode-level Adam/BPTT optimizer with the recurrence pinned off
+   (`freeze_U=True`).
+
+   ```
+   arm (same data, paired seeds,      held-out 8    X-pip bar
+        11 selection candidates each)
+   linear BC (train_bc plain SGD)        75.1%        54.8%
+   ablation: U = 0, Adam/BPTT            75.7%        76.8%
+   recurrent: full U h                   71.8%        80.9%
+   (context, other runs/protocols: heuristic 83.6%;
+    per-deck RL on the bar 85.1%; online generalist there 53.4%)
+   ```
+
+   Three conclusions, the third of which cost two rewrites of this
+   paragraph. (1) **Capacity is not the constraint**: a MEMORYLESS
+   linear policy, merely refit on these demonstrations, scores 76.8%
+   on the X-pip bar — the exact fight this README previously called
+   something "the linear class provably can't express". That claim is
+   retracted. (2) **Recurrence is not the answer either**: it buys
+   +4.1 on that bar and loses 3.9 in aggregate, overfitting 3,475
+   episodes. (3) **Most apparent differences here are a selection
+   lottery.** An earlier version of this table reported a 7.6-point
+   "optimizer" gap; adversarial review reproduced the run and showed
+   it was an artifact of giving the linear arm 5 candidate
+   checkpoints while the other arms got 11. Budget-matched, the gap
+   is 0.6 points — noise. Validation score (4 pairs × 200 fights) is
+   nearly uncorrelated with held-out performance, so with an unequal
+   candidate pool the extra draws were worth +7 points to whichever
+   arm had more. Anything measured this way needs matched budgets and
+   a selection signal that actually tracks the target — which is now
+   the top open methodological item for the whole offline ladder.
+
+   Three process notes, all from the adversarial review that gated
+   this merge (34 agents, 8 findings confirmed by refutation):
+   `np.asarray` ALIASES, so `from_linear(w)` shared its array with
+   the linear baseline and Adam silently retrained the control arm
+   (every pre-fix number was invalid — fixed, with a regression
+   test); the dataset generator's feasibility probe used an unseeded
+   Sim, so borderline pairs flipped between runs and its "regenerates
+   deterministically from seeds" docstring was false; and the frozen
+   X-pip bar was printing reference numbers from three different runs
+   and evaluation protocols as if they were one column — now labeled,
+   guarded by an identity assertion, and recorded with pair, deck,
+   n, and protocol in the results file.
 7. Deck × policy bilevel optimization. First results (death vs live
    Jade Oni): the searched 9-card deck reaches **100% win / TTK 6.45**
    vs the hand-built 12-card oneshot's 92.8% / 9.95 — smaller AND
