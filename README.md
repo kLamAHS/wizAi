@@ -507,30 +507,46 @@ loader report.
    (`freeze_U=True`).
 
    ```
-   arm (same data, paired seeds)      held-out 8    X-pip bar
-   linear BC (train_bc plain SGD)        68.1%        25.9%
+   arm (same data, paired seeds,      held-out 8    X-pip bar
+        11 selection candidates each)
+   linear BC (train_bc plain SGD)        75.1%        54.8%
    ablation: U = 0, Adam/BPTT            75.7%        76.8%
-   recurrent: full U h                   69.6%        80.8%
-   (context: heuristic 83.6%; per-deck RL on the bar 85.1%)
+   recurrent: full U h                   71.8%        80.9%
+   (context, other runs/protocols: heuristic 83.6%;
+    per-deck RL on the bar 85.1%; online generalist there 53.4%)
    ```
 
-   Almost the entire gain is the OPTIMIZER, not the memory: holding
-   the policy class exactly linear and changing only how it is fit
-   moves the X-pip bar from 25.9% to 76.8% and the aggregate to
-   75.7%. Recurrence adds a further +4 on the sequencing bar it was
-   built for (76.8 → 80.8, approaching per-deck RL's 85.1 zero-shot)
-   but LOSES 6 points in aggregate — it overfits 3,475 episodes under
-   noisy validation selection. So the ~75% "plateau" was an
-   under-fitting artifact of `train_bc`'s plain-SGD schedule, and the
-   honest ranking of remaining work puts *fit the existing class
-   properly everywhere* above *add capacity*. Two process notes from
-   the adversarial review that gated this merge: `np.asarray`
-   ALIASES, so `from_linear(w)` shared its array with the linear
-   baseline and Adam silently retrained the control arm (every
-   pre-fix number here was invalid — fixed, with a regression test);
-   and the dataset generator's feasibility probe used an unseeded
-   Sim, so borderline pairs flipped between runs and its
-   "regenerates deterministically from seeds" docstring was false.
+   Three conclusions, the third of which cost two rewrites of this
+   paragraph. (1) **Capacity is not the constraint**: a MEMORYLESS
+   linear policy, merely refit on these demonstrations, scores 76.8%
+   on the X-pip bar — the exact fight this README previously called
+   something "the linear class provably can't express". That claim is
+   retracted. (2) **Recurrence is not the answer either**: it buys
+   +4.1 on that bar and loses 3.9 in aggregate, overfitting 3,475
+   episodes. (3) **Most apparent differences here are a selection
+   lottery.** An earlier version of this table reported a 7.6-point
+   "optimizer" gap; adversarial review reproduced the run and showed
+   it was an artifact of giving the linear arm 5 candidate
+   checkpoints while the other arms got 11. Budget-matched, the gap
+   is 0.6 points — noise. Validation score (4 pairs × 200 fights) is
+   nearly uncorrelated with held-out performance, so with an unequal
+   candidate pool the extra draws were worth +7 points to whichever
+   arm had more. Anything measured this way needs matched budgets and
+   a selection signal that actually tracks the target — which is now
+   the top open methodological item for the whole offline ladder.
+
+   Three process notes, all from the adversarial review that gated
+   this merge (34 agents, 8 findings confirmed by refutation):
+   `np.asarray` ALIASES, so `from_linear(w)` shared its array with
+   the linear baseline and Adam silently retrained the control arm
+   (every pre-fix number was invalid — fixed, with a regression
+   test); the dataset generator's feasibility probe used an unseeded
+   Sim, so borderline pairs flipped between runs and its "regenerates
+   deterministically from seeds" docstring was false; and the frozen
+   X-pip bar was printing reference numbers from three different runs
+   and evaluation protocols as if they were one column — now labeled,
+   guarded by an identity assertion, and recorded with pair, deck,
+   n, and protocol in the results file.
 7. Deck × policy bilevel optimization. First results (death vs live
    Jade Oni): the searched 9-card deck reaches **100% win / TTK 6.45**
    vs the hand-built 12-card oneshot's 92.8% / 9.95 — smaller AND

@@ -107,10 +107,17 @@ print("[3/5] incumbent: linear BC-filtered on the union, with the "
       "SAME validation-based model selection the recurrent student "
       "gets (equal treatment, else the comparison is rigged)",
       flush=True)
+# BUDGET-MATCHED: the recurrent/ablation arms get 11 candidates
+# (warm start + 10 epochs), so the linear arm gets 11 too. With an
+# unequal grid (5 vs 11) the extra draws were worth +7 points to
+# whichever arm had more, and validation here is nearly uncorrelated
+# with test — selection is a lottery whose odds are set by the pool.
 best_lin = (-1.0, None, None)
-for ne in (2, 4, 6, 8, 12):
+lin_curve = {}
+for ne in range(1, 12):
     w_try = train_bc(union, winners_only=True, epochs=ne)
     sc_try = val_score(GeneralistQ(w=w_try))
+    lin_curve[ne] = sc_try
     print(f"    linear epochs={ne:>2}: val {sc_try*100:5.1f}%",
           flush=True)
     if sc_try > best_lin[0]:
@@ -186,8 +193,12 @@ print("    means (historical, unpaired, different run — context "
       f"only): old BC-filtered {means['old_bc_filtered']*100:.1f}%  "
       f"heuristic {means['heuristic']*100:.1f}%", flush=True)
 
-print("\n[bonus] frozen X-pip bar (per-deck RL 85.1%, search(k=16) "
-      "72.0%, linear generalist 53%):", flush=True)
+print("\n[bonus] frozen X-pip bar. Reference numbers come from "
+      "DIFFERENT runs and protocols — per-deck RL 85.1% and online "
+      "generalist 53.4% are unpaired n=2000, search(k=16) 72.0% is "
+      "paired n=300; the rows below are paired n=1500. Treat the "
+      "references as context, not as a like-for-like column:",
+      flush=True)
 xrng = random.Random(4242)
 xpair = None
 for i, sc in enumerate(("fire", "storm", "death", "ice", "life",
@@ -197,6 +208,8 @@ for i, sc in enumerate(("fire", "storm", "death", "ice", "life",
     if i == 5:
         xpair = (sc, dl, b)
 sc, dl, xboss = xpair
+assert xboss.name == "held5-ice-3100" and sc == "balance", \
+    f"frozen X-pip pair drifted: {sc}/{xboss.name}"
 xsim = Sim(dict(cards), dl, sc, xboss, player_hp=10**9, rules=LIVE_RULES)
 xst = evaluate_paired(xsim, {"linear": linear.policy(),
                              "ablation": abl.policy(),
@@ -218,7 +231,21 @@ def _no_nan(o):
 
 json.dump(_no_nan({"n_decisions": int(len(union["G"])),
                    "n_win_episodes": n_ep, "held_out": rows,
-                   "means": means, "xpip_bar": xbar}),
+                   "means": means,
+                   "selection": {"linear_val_curve": lin_curve,
+                                 "linear_selected_epochs": best_lin[2],
+                                 "candidates_per_arm": 11,
+                                 "val_pairs": [b.name for _, _, b
+                                               in val_pairs]},
+                   "xpip_bar": {"pair": f"{sc}/{xboss.name}",
+                                "deck": sorted(set(dl)), "n": 1500,
+                                "protocol": "paired seeds",
+                                "arms": xbar,
+                                "reference_other_runs": {
+                                    "per_deck_RL_unpaired_n2000": 0.851,
+                                    "online_generalist_unpaired_n2000":
+                                        0.534,
+                                    "search_k16_paired_n300": 0.72}}}),
           open("results_sequence_model.json", "w", encoding="utf-8"),
           indent=1, allow_nan=False)
 print(f"\nwrote results_sequence_model.json, policy_seq.json "

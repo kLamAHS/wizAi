@@ -1,15 +1,18 @@
 """
 Sequence-capable student: a recurrent policy over the same features.
 
-Three independent negatives isolated ONE deficit — the linear
-generalist cannot hold a plan across steps (X-pip two-hit lines,
-healer-first commitment, wobble-free execution), and the offline
-ladder then showed every data source converging at ~75%: the binding
-constraint had moved from teacher quality to STUDENT CAPACITY.
+HYPOTHESIS UNDER TEST (and largely refuted — read on): three
+negatives suggested the linear generalist could not hold a plan
+across steps, and the offline ladder's ~75% ceiling suggested the
+binding constraint was student capacity.
 
-This is the minimal student that removes that constraint while
-changing nothing else — same features, same demonstrations, same
-benchmark. A hidden state h carries the plan and MODULATES the
+This is the minimal student that adds capacity while changing nothing
+else — same features, same demonstrations, same benchmark. What the
+experiment actually found is that a memoryless linear policy, simply
+REFIT on the same demonstrations, reaches 76.8% on the X-pip bar the
+class was said to be unable to express; recurrence adds only ~4
+points there and loses ground in aggregate. The capacity story did
+not survive its own ablation. A hidden state h carries the plan and MODULATES the
 linear ranking:
 
     w_eff(t) = w0 + U h(t)              scoring weights this step
