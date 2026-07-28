@@ -440,7 +440,7 @@ CREATURE_STATS = {"pierce": ("pierce", 0.339),
 
 def load_bosses_full(path="bosses_clean.json", report=None, rules=None,
                      spell_pools=False, cards=None,
-                     level_mode="world"):
+                     level_mode="world", fill_boost=False):
     """Registry of real bosses. Returns (bosses, registry): `bosses` maps
     name -> Boss ready for Sim; `registry` keeps every scraped field raw
     (ratings, cheats text, locations) for encounter metadata.
@@ -520,6 +520,11 @@ def load_bosses_full(path="bosses_clean.json", report=None, rules=None,
         b.resist_map = resist or None
         b.boost_map = _parse_boost(stats) or None
         b.outgoing_bonus = _num(stats.get("outgoing_boost")) / 100.0
+        if fill_boost and not b.outgoing_bonus and rank:
+            # only 36% of creatures publish this; the rest were fighting
+            # with a flat 0% damage bonus, which no real enemy has
+            from enemy_ranks import outgoing_boost as _ob
+            b.outgoing_bonus = _ob(rank)
         for key, (attr, _cov) in CREATURE_STATS.items():
             if stats.get(key) is None:
                 continue
@@ -598,7 +603,7 @@ def encounter(name, bosses, hp_share=None, synth=True):
         varies. `synth=False` gives only the companions whose stats are
         real.
     """
-    from enemy_ranks import normal_hp
+    from enemy_ranks import normal_hp, outgoing_boost
     boss = bosses[name]
     out = []
     for m in (boss.minions or []):
@@ -611,6 +616,11 @@ def encounter(name, bosses, hp_share=None, synth=True):
             mb = Boss(f"{m} (inferred)", max(1, hp),
                       boss.school, int(40 + 20 * rank))
             mb.rank = rank
+            # a mob with no damage buff is not a mob, it is a prop:
+            # enemies carry an outgoing damage % exactly as players do
+            # from gear, and synthesized ones were getting zero
+            mb.outgoing_bonus = (boss.outgoing_bonus
+                                 or outgoing_boost(rank))
             mb.resist_map = dict(boss.resist_map or {})
             mb.boost_map = dict(boss.boost_map or {})
             if boss.pool:

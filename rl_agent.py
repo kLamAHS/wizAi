@@ -62,6 +62,23 @@ class Featurizer:
         # (incoming spike) and self-shields (my hits blunted) drive
         # timing decisions the old state couldn't express. Flat bosses
         # keep the sentinel so their state space is unchanged.
+        # per-foe health, ONLY on a multi-enemy board — the agent
+        # cannot choose a target it cannot see. Single-enemy fights keep
+        # the shorter tuple, so their state space is untouched.
+        # Multi-enemy targeting signal, kept DELIBERATELY coarse. The
+        # first cut encoded a health bucket per enemy; with three foes
+        # that made almost every state unique, so nothing was ever
+        # visited twice, Q stayed all-zero, and greedy fell through to
+        # the first legal action — PASS. The agent scored a clean 0.0%.
+        # What focus-fire actually needs is which foe is closest to
+        # dying and how many are left, so that is all it gets.
+        foes = ()
+        if len(s.enemies) > 1:
+            alive = [(i, e) for i, e in enumerate(s.enemies) if e.alive]
+            if alive:
+                weakest = min(alive, key=lambda ie: ie[1].hp)[0]
+                foes = (len(alive), weakest,
+                        min(int(min(e.hp for _, e in alive) // 600), 6))
         boss = s.enemies[0]
         if getattr(boss, "spell_pool", None) is not None:
             eb = min(sum(1 for h in boss.charms
@@ -70,16 +87,48 @@ class Featurizer:
                           for h in boss.wards) else 0
         else:
             eb = es = -1
-        return (hb, p, bmask, tsig, dmask, nukes_left, tcs, php, eb, es)
+        base = (hb, p, bmask, tsig, dmask, nukes_left, tcs, php, eb, es)
+        return base + (foes,) if foes else base
 
     def legal(self, sim, s):
+        """Legal actions. On a multi-enemy board a single-target
+        offensive card is expanded per living foe as "name@i", so the
+        agent can commit to killing one thing instead of always hitting
+        slot 0 — the deficit that cost it 54 points at Krokotopia and
+        that mob_generalist.py isolated as representational.
+
+        Single-enemy fights emit bare names exactly as before, so every
+        1v1 result predating this is bit-identical."""
         acts = [PASS]
+        foes = [i for i, e in enumerate(s.enemies) if e.alive]
         seen = set()
         for c in s.hand:
-            if c.name not in seen and sim.can_cast(s, c):
-                seen.add(c.name)
+            if c.name in seen or not sim.can_cast(s, c):
+                continue
+            seen.add(c.name)
+            if len(foes) > 1 and _single_target_offense(c):
+                acts.extend(f"{c.name}@{i}" for i in foes)
+            else:
                 acts.append(c.name)
         return acts
+
+
+def _single_target_offense(card):
+    """A card worth aiming: it hangs or lands something on ONE enemy.
+    AoE ops (tgt 'enemies') hit everything, so a target index is noise."""
+    ops = card.ops or []
+    return (any(o.get("tgt") == "enemy" for o in ops)
+            and not any(o.get("tgt") == "enemies" for o in ops))
+
+
+def split_target(act):
+    """('Kraken@2') -> ('Kraken', 2). Treasure cards carry '@tc' in
+    their own names, so the suffix only counts when it is an integer."""
+    if "@" in act:
+        head, tail = act.rsplit("@", 1)
+        if tail.isdigit():
+            return head, int(tail)
+    return act, 0
 
 
 def apply_action(sim, s, act, dig_keep=None):
@@ -87,9 +136,10 @@ def apply_action(sim, s, act, dig_keep=None):
     if act == PASS:
         _dig(s, keep=dig_keep)
         return
+    name, target = split_target(act)
     for c in s.hand:
-        if c.name == act and sim.can_cast(s, c):
-            sim.cast(s, c)
+        if c.name == name and sim.can_cast(s, c):
+            sim.cast(s, c, target=target)
             return
 
 
@@ -146,11 +196,18 @@ class QAgent:
     def act(self, sim, s, eps, dp_w):
         legal = self.feat.legal(sim, s)
         if self.dp_pol and self.rng.random() < dp_w:
-            card = self.dp_pol(sim, s)          # advisor digs internally on pass
-            if card is None:
+            pick = self.dp_pol(sim, s)          # advisor digs internally on pass
+            if pick is None:
                 return PASS, legal, False       # ...so don't dig again
-            if card.name in legal:
-                return card.name, legal, True
+            # a TARGET-AWARE advisor (with_focus) returns (card, index);
+            # map it onto the same "name@i" action the agent uses, or
+            # its demonstration names an action the agent cannot take
+            # and the whole advisor silently does nothing
+            card, tgt = pick if isinstance(pick, tuple) else (pick, None)
+            for cand in ((f"{card.name}@{tgt}", card.name)
+                         if tgt is not None else (card.name,)):
+                if cand in legal:
+                    return cand, legal, True
         if self.rng.random() < eps:
             return self.rng.choice(legal), legal, True
         return self.greedy(sim, s, legal), legal, True

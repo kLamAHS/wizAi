@@ -115,3 +115,41 @@ def test_rank_spell_mode_agrees_on_damage_density():
                 and not CARDS[n].x_pips]
         meds.append(st.median(vals))
     assert abs(meds[0] - meds[1]) <= 5, meds
+
+
+def test_outgoing_boost_rises_with_rank_and_is_held_outside():
+    from enemy_ranks import BOOST_BY_RANK, outgoing_boost
+    vals = [outgoing_boost(r) for r in sorted(BOOST_BY_RANK)]
+    assert vals == sorted(vals)
+    lo, hi = min(BOOST_BY_RANK), max(BOOST_BY_RANK)
+    assert outgoing_boost(lo - 3) == outgoing_boost(lo)
+    assert outgoing_boost(hi + 9) == outgoing_boost(hi)
+    assert outgoing_boost(0) == 0.0
+
+
+def test_synthetic_minions_carry_a_damage_buff():
+    """Enemies have an outgoing damage % just as players do from gear.
+    Stand-ins were getting zero, which made them props rather than
+    mobs."""
+    bosses, _ = load_bosses_full(str(ROOT / "bosses_clean.json"))
+    name = next(b.name for b in bosses.values()
+                if b.minions and b.rank and b.rank > 8
+                and all(m not in bosses for m in b.minions))
+    _boss, comps = encounter(name, bosses)
+    assert comps and all(c.outgoing_bonus > 0 for c in comps)
+
+
+def test_fill_boost_covers_the_unscraped_majority():
+    """Only 36% of creatures publish an outgoing boost; the rest were
+    fighting with a flat 0%, which no real enemy has."""
+    plain, _ = load_bosses_full(str(ROOT / "bosses_clean.json"))
+    filled, _ = load_bosses_full(str(ROOT / "bosses_clean.json"),
+                                 fill_boost=True)
+    zeros_before = sum(1 for b in plain.values() if not b.outgoing_bonus)
+    zeros_after = sum(1 for b in filled.values()
+                      if not b.outgoing_bonus and b.rank)
+    assert zeros_before > 1000 and zeros_after == 0
+    # scraped values are never overwritten
+    for name, b in plain.items():
+        if b.outgoing_bonus:
+            assert filled[name].outgoing_bonus == b.outgoing_bonus

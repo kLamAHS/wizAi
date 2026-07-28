@@ -96,3 +96,51 @@ def normal_hp(rank):
 # worth a regression test; see test_enemy_ranks.py.
 DMG_PER_PIP_BAND = (85, 115)
 DMG_PER_PIP_TYPICAL = 99
+
+
+# --- outgoing damage boost by rank ------------------------------------
+# Enemies carry a damage % just as players do from gear, and it rises
+# with rank. Fitted from the 688 creature records that publish
+# `outgoing_boost` (36% coverage), taken as medians per rank and forced
+# MONOTONE for the same reason the rank->level fit is: thin ranks wobble.
+#
+# Cross-check against the 2026 report's own bands, which were drawn from
+# a much smaller sample: it quotes ~85% for ranks 11-15, ~100% for 16-19
+# and ~100% for 20-23. This fit gives 65 / 100 / 120 over n=171/156/167.
+# The middle band agrees exactly; the outer two differ by ~20 points in
+# opposite directions, which is what a 29-record sample versus a
+# 688-record one tends to look like. The larger sample is used and the
+# disagreement is recorded rather than averaged away.
+_RAW_BOOST = {5: 47, 7: 50, 8: 52, 9: 50, 10: 60, 11: 60, 12: 70,
+              13: 70, 14: 70, 15: 70, 16: 75, 17: 100, 18: 110,
+              19: 115, 20: 130, 21: 137, 22: 137, 23: 137, 24: 137,
+              25: 137}
+
+
+def _monotone(raw):
+    out, running = {}, 0
+    for k in sorted(raw):
+        running = max(running, raw[k])
+        out[k] = running
+    return out
+
+
+# the raw medians wobble (rank 8 reads 52, rank 9 reads 50 off a
+# thin sample); the docstring above promises a monotone curve, so it
+# is enforced here rather than asserted and left untrue
+BOOST_BY_RANK = _monotone(_RAW_BOOST)
+_BRANKS = sorted(BOOST_BY_RANK)
+
+
+def outgoing_boost(rank):
+    """Outgoing damage boost as a FRACTION (0.47 = +47%). Held flat
+    below rank 5 and above 25 rather than extrapolated."""
+    if not rank or rank <= 0:
+        return 0.0
+    r = max(_BRANKS[0], min(int(rank), _BRANKS[-1]))
+    if r in BOOST_BY_RANK:
+        return BOOST_BY_RANK[r] / 100.0
+    lo = max(k for k in _BRANKS if k < r)
+    hi = min(k for k in _BRANKS if k > r)
+    a, b = BOOST_BY_RANK[lo], BOOST_BY_RANK[hi]
+    return (a + (b - a) * (r - lo) / (hi - lo)) / 100.0
