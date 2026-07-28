@@ -100,15 +100,20 @@ def gen_dataset_policy(cards, rules, teacher, n_pairs=16,
     rng = random.Random(seed)
     schools = ("fire", "ice", "storm", "myth", "life", "death", "balance")
     pools = {sc: legal_pool(cards, sc) for sc in schools}
-    P, M, C, G, W = [], [], [], [], []
-    pairs, made = [], 0
+    P, M, C, G, W, E = [], [], [], [], [], []
+    pairs, made, ep_id = [], 0, 0
     while made < n_pairs:
         sc = schools[len(pairs) % len(schools)]
         boss = random_boss(rng, f"sdata{len(pairs)}")
         dl = sample_deck(pools[sc], sc, boss, rng)
         pairs.append((sc, dl, boss))
+        # the probe MUST be seeded: an unseeded Sim let borderline
+        # pairs flip in or out of the dataset between runs, silently
+        # changing the trained model (caught by an unexplained 6-point
+        # swing in a repeated experiment)
         sim = Sim(dict(cards), dl, sc, boss, player_hp=10**9,
-                  rules=rules)
+                  rules=rules,
+                  rng=random.Random(seed * 7919 + len(pairs)))
         probe, _ = evaluate(sim, make_blade_stack(3), n=200)
         if probe < feas_win:
             if log:
@@ -154,13 +159,16 @@ def gen_dataset_policy(cards, rules, teacher, n_pairs=16,
                 C.append(pick)
                 G.append(g / 10.0)
                 W.append(won)
+                E.append(ep_id)
+            ep_id += 1
         if log:
             log(f"    pair {made:>2} {boss.name:<18} {sc:<8} teacher "
                 f"{t_wins/eps_per_pair*100:5.1f}%  "
                 f"({len(P)} steps total)")
     return dict(phis=np.stack(P), mask=np.stack(M),
                 chosen=np.array(C, np.int16),
-                G=np.array(G, np.float32), won=np.array(W, bool)), pairs
+                G=np.array(G, np.float32), won=np.array(W, bool),
+                ep=np.array(E, np.int32)), pairs
 
 
 def gen_dataset(cards, rules, n_pairs=16, eps_per_pair=150, seed=0,
@@ -171,9 +179,9 @@ def gen_dataset(cards, rules, n_pairs=16, eps_per_pair=150, seed=0,
     rng = random.Random(seed)
     schools = ("fire", "ice", "storm", "myth", "life", "death", "balance")
     pools = {sc: legal_pool(cards, sc) for sc in schools}
-    P, M, C, G, W = [], [], [], [], []
+    P, M, C, G, W, E = [], [], [], [], [], []
     pairs = []
-    made = 0
+    made = ep_id = 0
     while made < n_pairs:
         sc = schools[len(pairs) % len(schools)]
         boss = random_boss(rng, f"data{len(pairs)}")
@@ -200,12 +208,15 @@ def gen_dataset(cards, rules, n_pairs=16, eps_per_pair=150, seed=0,
                 C.append(ch)
                 G.append(g / G_SCALE)
                 W.append(won)
+                E.append(ep_id)
+            ep_id += 1
         if log:
             log(f"    pair {made:>2} {boss.name:<18} {sc:<8} expert "
                 f"{w*100:5.1f}%/{m:5.2f}  ({len(P)} steps total)")
     return dict(phis=np.stack(P), mask=np.stack(M),
                 chosen=np.array(C, np.int16),
-                G=np.array(G, np.float32), won=np.array(W, bool)), pairs
+                G=np.array(G, np.float32), won=np.array(W, bool),
+                ep=np.array(E, np.int32)), pairs
 
 
 # ------------------------------------------------------------- learners

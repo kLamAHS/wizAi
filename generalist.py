@@ -206,7 +206,8 @@ class GeneralistQ:
     """Linear Q over card-vs-state features; plays any deck zero-shot."""
 
     def __init__(self, alpha=0.03, rng=None, w=None):
-        self.w = np.zeros(len(FEATS)) if w is None else np.asarray(w, float)
+        # np.array, not asarray: never alias a caller's weights
+        self.w = np.zeros(len(FEATS)) if w is None else np.array(w, float)
         # state-value baseline head for training: [bias, boss-hp frac,
         # pip frac, in-a-mob-fight]. Features that fire only in HARD
         # episodes (tgt_is_support exists only in mob fights, and mob

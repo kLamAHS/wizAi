@@ -493,10 +493,44 @@ loader report.
    cell separated the two: combining both datasets recovers the
    coverage loss (storm row 4.7% → 37.9%, mean back to 73.1%) but
    plateaus AT the old ceiling, not above it. The binding constraint
-   has formally moved from teacher quality to STUDENT CAPACITY —
-   every data source converges at ~75% for the linear class, which
-   is the third independent line of evidence pointing at the
-   sequence-model rung.
+   appeared to move from teacher quality to student capacity — every
+   data source converged at ~75% for the linear class.
+   **That conclusion was wrong, and the sequence rung disproved it**
+   (`seq_policy.py`, `sequence_model.py`,
+   `results_sequence_model.json`). A recurrent student
+   (`w_eff = w0 + U h`, hand-written BPTT behind a numerical
+   gradient-check test) trained on the same union data, benchmarked
+   on the same 8 held-out pairs with equal validation-based model
+   selection and paired seeds — plus the ablation that decides
+   attribution, since `w0` trains in BOTH arms: the same
+   episode-level Adam/BPTT optimizer with the recurrence pinned off
+   (`freeze_U=True`).
+
+   ```
+   arm (same data, paired seeds)      held-out 8    X-pip bar
+   linear BC (train_bc plain SGD)        68.1%        25.9%
+   ablation: U = 0, Adam/BPTT            75.7%        76.8%
+   recurrent: full U h                   69.6%        80.8%
+   (context: heuristic 83.6%; per-deck RL on the bar 85.1%)
+   ```
+
+   Almost the entire gain is the OPTIMIZER, not the memory: holding
+   the policy class exactly linear and changing only how it is fit
+   moves the X-pip bar from 25.9% to 76.8% and the aggregate to
+   75.7%. Recurrence adds a further +4 on the sequencing bar it was
+   built for (76.8 → 80.8, approaching per-deck RL's 85.1 zero-shot)
+   but LOSES 6 points in aggregate — it overfits 3,475 episodes under
+   noisy validation selection. So the ~75% "plateau" was an
+   under-fitting artifact of `train_bc`'s plain-SGD schedule, and the
+   honest ranking of remaining work puts *fit the existing class
+   properly everywhere* above *add capacity*. Two process notes from
+   the adversarial review that gated this merge: `np.asarray`
+   ALIASES, so `from_linear(w)` shared its array with the linear
+   baseline and Adam silently retrained the control arm (every
+   pre-fix number here was invalid — fixed, with a regression test);
+   and the dataset generator's feasibility probe used an unseeded
+   Sim, so borderline pairs flipped between runs and its
+   "regenerates deterministically from seeds" docstring was false.
 7. Deck × policy bilevel optimization. First results (death vs live
    Jade Oni): the searched 9-card deck reaches **100% win / TTK 6.45**
    vs the hand-built 12-card oneshot's 92.8% / 9.95 — smaller AND
