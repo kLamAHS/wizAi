@@ -734,11 +734,35 @@ loader report.
 
    Nuance worth stating: the own-school share moves only ~4 points
    because a policy cannot spend school pips it has no own-school
-   cards for — the adaptation has to happen in DECK CONSTRUCTION. The
-   natural follow-up is to let `build_deck` see a mastery-widened
-   pool and check that it drops the splash on its own; today
-   `legal_pool` is school-scoped by construction, so the builder
-   cannot splash either way.
+   cards for — the adaptation has to happen in DECK CONSTRUCTION.
+
+   So the follow-up ran (`mastery_deck_probe.py`,
+   `results_mastery_deck.json`). `legal_pool(..., mastery=...)` now
+   widens the buildable pool with the amulet school's trained line —
+   48 cards, 17 of them storm — so the builder is FREE to splash and
+   nothing tells it whether to. Same fire wizard, same storm amulet,
+   only the era changes; reported as the storm share of the built
+   deck's damage cards:
+
+   ```
+   boss         mastery   ->  am+mastery+gear
+   neutral       75.0%          50.0%     (−25.0 points)
+   fire-wall     60.0%          60.0%     ( −0.0 points)
+   ```
+
+   On a neutral boss the prediction holds at the level it actually
+   lives on: given a free choice, the builder cuts the splash by a
+   quarter once pips lock and gear buffs fire, unprompted — the same
+   force that cost the hand-built splash 39 points shows up as decks
+   that stop containing it.
+
+   The fire wall is the informative exception, and the reason the
+   first cut of this probe reported "no era effect at all": a boss
+   that resists your school 60% makes splashing correct for a reason
+   that has nothing to do with pips or gear, and it is the bigger
+   force. Run against the wall alone, the probe measures the wall.
+   That is a confound in the apparatus, not a null result — recorded
+   here because it was very nearly published as one.
 
 ## Boundary
 
