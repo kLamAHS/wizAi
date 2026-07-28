@@ -119,48 +119,109 @@ class Card:
 # Sun-school enchantments are absent from the extracted dump for a
 # structural reason: they modify a card in HAND rather than producing a
 # battle effect, so the effect parser never had anything to read. They
-# are also where a large slice of real player damage lives, which is why
-# a simulated wizard here under-performs a real one.
+# are also where a large slice of real player damage lives.
 #
-# The mechanic that matters is not the +10%. It is the STACK IDENTITY:
-# an enchanted blade counts as a different charm from the plain blade,
-# so both sit on the wizard at once. `Card.source` already carried an
-# `enchant-*` provenance tier in its docstring, and both stack keys —
-# Hanging's (name, source, sub) and the duplicate-placement check's
-# (name, source, sub) — key on it, so the identity split falls out
-# rather than being bolted on.
+# Rules, as supplied by the repo owner:
+#   - played from hand onto a NORMAL DECK SPELL in hand; item cards and
+#     treasure cards cannot be enchanted
+#   - the enchant costs 0 pips; the enchanted spell keeps the original's
+#     pip cost
+#   - ONE enchant per card — they do not stack on each other
+#   - applying one does NOT consume the round, but it does consume the
+#     enchantment card (hence the deck-slot accounting below)
 #
-# Confidence: the +10% magnitude and the stacking rule are as reported
-# by the repo owner. MODELED here: which ops the bonus lands on. A trap
-# card can hang wards on both sides (Feint puts 70% on the enemy and
-# 30% back on you), and the enchant is a damage-trap booster, so the
-# bonus applies only to ops pointing the card's own way — enemy for a
-# trap, self for a blade. Feint therefore becomes 80/30, not 80/40.
-ENCHANTS = {"Sharpen Blade": ("blade", 0.10, "sharp", "self"),
-            "Potent Trap": ("trap", 0.10, "potent", "enemy")}
+# Two families:
+#   PERCENT  Sharpen Blade / Potent Trap: +10 points to the charm or
+#            ward, and — the part that matters far more — the enchanted
+#            card gets its OWN STACK IDENTITY, so it sits alongside the
+#            plain copy instead of being refused as a duplicate. On
+#            Feint that means 80/40 stacking with a plain 70/30, and
+#            because wards COMPOUND the four together are
+#            1.7 * 1.8 * 1.7 * 1.8 rather than anything additive.
+#   DAMAGE   Strong/Giant/Monstrous/Gargantuan/Colossal/Epic: flat base
+#            damage added BEFORE blades and traps multiply, which is why
+#            a +275 Colossal on a mid-size nuke outruns any percentage
+#            the gear sheet can offer.
+#
+# `Card.source` already carried an `enchant-*` provenance tier, and both
+# stack keys — Hanging's (name, source, sub) and the duplicate-placement
+# check's — key on it, so the identity split falls out of existing
+# machinery.
+PCT_ENCHANTS = {"Sharpen Blade": ("blade", 0.10, "sharp"),
+                "Potent Trap": ("trap", 0.10, "potent")}
+# Flat base damage. The owner gave these as pairs with a range each
+# ("Strong / Giant: +100 to +125"); the split within a pair is the
+# conventional one and is INFERRED, the pair bounds are not.
+DMG_ENCHANTS = {"Strong": 100.0, "Giant": 125.0, "Monstrous": 175.0,
+                "Gargantuan": 225.0, "Colossal": 275.0, "Epic": 300.0}
+ENCHANTS = dict(PCT_ENCHANTS)
+ENCHANT_TAGS = ({t for _, _, t in PCT_ENCHANTS.values()}
+                | {n.lower() for n in DMG_ENCHANTS})
+_ENCHANTABLE_SOURCES = ("deck",)
+
+
+def _check_enchantable(card, enchant):
+    if card.source not in _ENCHANTABLE_SOURCES:
+        raise ValueError(
+            f"{enchant} cannot enchant {card.name}: enchantments only "
+            f"apply to normal deck spells (source={card.source!r})")
 
 
 def enchant_card(card, enchant):
-    """A derived Card carrying the enchant's bonus and its own stack
-    identity, so it stacks with the unenchanted original."""
-    if enchant not in ENCHANTS:
+    """A derived Card carrying the enchant and its own stack identity.
+
+    Raises if the card is already enchanted (one per card), if it is a
+    treasure or item card, or if the enchant does not match its kind.
+    """
+    _check_enchantable(card, enchant)
+    if enchant in PCT_ENCHANTS:
+        kind, bonus, tag = PCT_ENCHANTS[enchant]
+        if card.kind != kind:
+            raise ValueError(f"{enchant} enchants {kind} cards, "
+                             f"not {card.kind} ({card.name})")
+        ops, touched = [], False
+        for o in card.ops:
+            o = dict(o)
+            if o.get("percent"):
+                # EVERY percent op, both sides. Potent Trap on Feint
+                # gives 80/40, not 80/30 — the backlash rides along.
+                o["percent"] = round(o["percent"] + bonus, 4)
+                touched = True
+            ops.append(o)
+        if not touched:
+            raise ValueError(f"{enchant} found no percent op on "
+                             f"{card.name}")
+        return replace(card, name=f"{card.name}+{tag}", ops=ops,
+                       percent=round(card.percent + bonus, 4),
+                       source=f"enchant-{tag}")
+
+    if enchant not in DMG_ENCHANTS:
         raise KeyError(f"unknown enchantment {enchant!r}")
-    kind, bonus, tag, direction = ENCHANTS[enchant]
-    if card.kind != kind:
-        raise ValueError(f"{enchant} enchants {kind} cards, "
-                         f"not {card.kind} ({card.name})")
-    ops, touched = [], False
-    for o in card.ops:
+    if card.kind not in ("damage", "drain"):
+        raise ValueError(f"{enchant} enchants damage cards, not "
+                         f"{card.kind} ({card.name})")
+    bonus, tag = DMG_ENCHANTS[enchant], enchant.lower()
+    # Flat damage lands on the spell's PRIMARY hit — the largest single
+    # damage op — rather than being split across a multi-hit's parts or
+    # applied to each. MODELED: the owner gave the magnitudes, not the
+    # distribution rule.
+    idx, best = None, -1.0
+    for i, o in enumerate(card.ops):
+        amt = o.get("amount") if o["op"] in ("hit", "drain") else \
+            o.get("total") if o["op"] == "dot" else None
+        if amt is not None and amt > best:
+            idx, best = i, amt
+    if idx is None:
+        raise ValueError(f"{enchant} found no damage op on {card.name}")
+    ops = []
+    for i, o in enumerate(card.ops):
         o = dict(o)
-        if o.get("percent") and o.get("tgt") == direction:
-            o["percent"] = round(o["percent"] + bonus, 4)
-            touched = True
+        if i == idx:
+            fld = "total" if o["op"] == "dot" else "amount"
+            o[fld] = o[fld] + bonus
         ops.append(o)
-    if not touched:
-        raise ValueError(f"{enchant} found no {direction}-facing "
-                         f"percent op on {card.name}")
     return replace(card, name=f"{card.name}+{tag}", ops=ops,
-                   percent=round(card.percent + bonus, 4),
+                   damage=card.damage + bonus,
                    source=f"enchant-{tag}")
 
 
@@ -182,9 +243,8 @@ def register_enchants(cards, names, enchant):
 def enchanted_deck_size(decklist):
     """Real deck slots used: an enchanted entry costs 2 (spell +
     enchantment), a plain one costs 1."""
-    return sum(2 if "+" in n and n.split("+")[-1] in
-               {t for _, _, t, _ in ENCHANTS.values()} else 1
-               for n in decklist)
+    return sum(2 if n.rsplit("+", 1)[-1] in ENCHANT_TAGS and "+" in n
+               else 1 for n in decklist)
 
 
 def _kind_from_ops(ops):

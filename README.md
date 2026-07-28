@@ -478,28 +478,35 @@ loader report.
    > this probe — TTK is undefined where the wizard cannot win — but
    > "unreachable" was overstated as a claim about the configuration.
 
-2b. **The missing player damage: enchantments** (`ENCHANTS`,
-   `enchant_card`, `enchant_probe.py`, `results_enchants.json`). The
-   repo owner identified the gap after seeing the unreachable result
-   above, and it was in the PLAYER model, not the boss model. Real
-   wizards cross-train **Feint** from Death (70% trap on the enemy,
-   30% back on themselves) and carry Sun **enchantments** — Sharpen
-   Blade and Potent Trap — which add +10% and, far more importantly,
-   give the enchanted card **its own stack identity**, so a sharpened
-   blade sits alongside the plain blade rather than being refused as a
-   duplicate.
-
-   Feint was already modeled, both halves. The enchantments were not,
-   and for a structural reason: they modify a card in HAND rather than
+2b. **The missing player damage: enchantments** (`PCT_ENCHANTS`,
+   `DMG_ENCHANTS`, `enchant_card`, `enchant_probe.py`,
+   `results_enchants.json`). The repo owner identified the gap after
+   seeing the unreachable result above, and it was in the PLAYER model,
+   not the boss model. Real wizards cross-train **Feint** from Death
+   and carry Sun **enchantments**, which are absent from the extracted
+   dump for a structural reason: they modify a card in HAND rather than
    producing a battle effect, so the extraction pipeline's effect
-   parser never had anything to read. They are invisible to the dump
-   by construction, not by oversight.
+   parser never had anything to read. Invisible to the dump by
+   construction, not by oversight.
 
-   The engine needed almost nothing. `Card.source` already documented
-   an `enchant-*` provenance tier, and both stack keys — `Hanging`'s
-   `(name, source, sub)` and the duplicate-placement check's — key on
-   it, so the identity split falls out of machinery that was already
-   there:
+   Rules as supplied: played from hand onto a **normal deck spell**
+   (never an item or treasure card); 0 pips for the enchant, the spell
+   keeps its own cost; **one enchant per card**; applying one does not
+   consume the round but does consume the card. All four are enforced
+   and tested.
+
+   ```
+   PERCENT   Sharpen Blade / Potent Trap   +10 points, and its own
+                                           STACK IDENTITY
+   DAMAGE    Strong 100, Giant 125, Monstrous 175, Gargantuan 225,
+             Colossal 275, Epic 300        flat BASE damage
+   ```
+
+   The engine needed almost nothing for the percent family.
+   `Card.source` already documented an `enchant-*` provenance tier, and
+   both stack keys — `Hanging`'s `(name, source, sub)` and the
+   duplicate-placement check's — key on it, so the identity split falls
+   out of machinery that was already there:
 
    ```
    charms on the wizard:  [('Fireblade', 0.35), ('Fireblade+sharp', 0.45)]
@@ -507,45 +514,65 @@ loader report.
    a second PLAIN copy is still refused as a duplicate
    ```
 
-   **Measured at matched REAL deck slots**, which is the only honest
-   way to ask: an enchanted card is TWO physical cards, the spell plus
-   the enchantment, so `enchanted_deck_size` counts it twice and every
-   arm gets the same 23 physical cards. Otherwise the enchant arm just
-   wins by being a bigger deck.
+   **The compounding arithmetic was already right, and is now pinned to
+   the owner's own worked examples** rather than to my arithmetic,
+   because everything else rests on it. Charms and wards both resolve
+   as `mult *= 1 + percent`:
 
    ```
-   ordinary content (6 real bosses, 6-11k HP)   mean TTK
-   plain                                          10.29
-   both enchant lines                              8.40   (-1.89 turns)
-
-   the endgame bosses, win rate       plain    both
-   Annoushka (17,240 HP)               3.7%   18.0%
-   High Priest Ixta (13,675 HP)       24.7%   45.0%
-   Were-Bear Brute (14,475 HP)       100.0%  100.0%
+   two 35% blades          1.35 x 1.35 = 1.8225   (not 1.70)
+   70% + 80% + 80% feints  1.7 x 1.8 x 1.8 = 5.508 (not 3.30)
+   damage stat 150 -> 160  2.5x -> 2.6x = +4%      (not +10%)
    ```
 
-   Nearly two turns off an ordinary fight, and the endgame bosses go
-   from near-impossible to genuinely contested — at zero extra deck
-   size. The enchants pay for their doubled card cost and then some.
+   That last one is the one worth internalising: the damage stat enters
+   ADDITIVELY as `1 + damage`, so ten points late in the curve buys 4%,
+   while blades and traps compound. It also means the gear tables in
+   item 9 look more dramatic than they play — a real caveat on that
+   section, and the reason `stat_budget` there uses `1 + damage`.
 
-   Read the single-enchant arms with care, and this is a real limit of
-   the design rather than a caveat for form's sake: slot-matching
-   forces each arm to cut something, and they do not all cut the same
-   thing (`sharp` funds its blade enchants out of traps and Feint, and
-   loses ground on the longest fights as a result). Only plain-vs-both
-   is a single-variable comparison, so that is the pair quoted.
+   **Measured at a matched 30 real deck slots.** An enchanted card is
+   TWO physical cards, so `enchanted_deck_size` counts it twice, and
+   every arm pays for its enchants out of the same filler card — which
+   makes each arm ONE substitution against `plain`. (The first cut let
+   each arm fund itself by cutting something different; `sharp` took it
+   out of traps and the arms became unreadable.)
 
-   **Assumed and unpriced**: that enchanting costs deck slots but not
-   TEMPO — the enchanted card is treated as ready to cast when drawn.
-   If applying an enchantment consumes the turn it is used on, every
-   number here is an upper bound. Flagged rather than modeled because
-   it is a game-rules fact this repo has no source for.
+   ```
+   ordinary content (6 real bosses)      mean TTK    vs plain
+   plain                                   13.80
+   sharpened blades                        11.66      +2.14 turns
+   potent traps + Feint                    11.70      +2.10
+   Colossal nukes                          11.82      +1.98
+   all three                                7.88      +5.92
 
-   Still open on this item: cheat SCRIPTS (39% of creatures are
-   flagged `has_cheats` with free-text notes that no parser reads),
-   minions/summons (22%/4%), outgoing healing, and boss damage
-   *ranges* — per-round damage is still the rank-scaled
-   `40 + 20*rank` estimate, tagged `dmg_confidence: inferred`.
+   endgame bosses, win rate      plain    all
+   Annoushka (17,240 HP)         13.0%   67.3%
+   High Priest Ixta (13,675 HP)  53.0%   89.0%
+   ```
+
+   Each family is worth about two turns on its own and they stack to
+   nearly six — a 43% cut in time-to-kill at zero extra deck size. The
+   endgame bosses go from near-hopeless to routine. This is the missing
+   damage, and it was entirely in the player model.
+
+   Two corrections this forced, both to text committed earlier:
+
+   - Potent Trap on Feint gives **80/40**, not 80/30. An earlier cut
+     boosted only the enemy-facing ward on the theory that a trap
+     enchant should not worsen your own backlash. Wrong — and the
+     enchanted Feint stacks with a plain 70/30 besides, which is where
+     the 5.508x example above comes from.
+   - The tempo assumption flagged as unpriced in the first version of
+     this section is **confirmed**: enchanting does not consume the
+     round. The deck-slot cost was the only cost, and it was already
+     modeled.
+
+   Still MODELED, and flagged as such: which single op a flat damage
+   enchant lands on (the largest, so a multi-hit gets it once), and the
+   split within each pair the owner gave as a range (Strong 100 / Giant
+   125 from "+100 to +125", and so on).
+
 3. Sideboard/discard policy: DONE — every policy now has the TC
    reflex (`tc_reflex`: make room honoring the fresh-TC rule, draw
    one, castable same round), the tabular agent carries TC names AND

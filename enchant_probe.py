@@ -64,43 +64,55 @@ LVL = 100
 
 register_enchants(cards, ["Fireblade", "Balanceblade"], "Sharpen Blade")
 register_enchants(cards, ["Fire Trap", "Feint"], "Potent Trap")
+register_enchants(cards, ["Fire Dragon", "Sunbird"], "Colossal")
 
-CORE = ["Fire Dragon"] * 4 + ["Sunbird"] * 3 + ["Fire Elf"] * 2 \
-    + ["Reshuffle"] * 2
+# Every arm starts from the SAME buff package and the same nukes, and
+# every arm pays for its enchants out of the SAME filler card. The
+# first cut let each arm fund its enchants by cutting something
+# different — `sharp` took it out of traps — which made the arms
+# multi-variable and unreadable. Paying in filler makes each arm a
+# single substitution against `plain`.
+BASE = (["Fireblade"] * 3 + ["Balanceblade"] * 2 + ["Fire Trap"] * 3
+        + ["Feint"] * 2 + ["Fire Dragon"] * 4 + ["Fire Elf"] * 2
+        + ["Reshuffle"] * 2)
+FILLER = "Sunbird"
+SLOTS = 30
+
+#  arm -> [(plain name, enchanted name, how many copies to swap)]
 SETUPS = {
-    "plain": ["Fireblade"] * 3 + ["Balanceblade"] * 2
-    + ["Fire Trap"] * 3 + ["Feint"] * 2,
-    "sharp": ["Fireblade"] * 2 + ["Fireblade+sharp"] * 2
-    + ["Balanceblade"] + ["Balanceblade+sharp"]
-    + ["Fire Trap"] * 2 + ["Feint"],
-    "potent": ["Fireblade"] * 3 + ["Balanceblade"]
-    + ["Fire Trap"] * 2 + ["Fire Trap+potent"]
-    + ["Feint"] + ["Feint+potent"],
-    "both": ["Fireblade"] * 2 + ["Fireblade+sharp"]
-    + ["Balanceblade+sharp"]
-    + ["Fire Trap"] + ["Fire Trap+potent"]
-    + ["Feint"] + ["Feint+potent"],
+    "plain": [],
+    "sharp": [("Fireblade", "Fireblade+sharp", 2),
+              ("Balanceblade", "Balanceblade+sharp", 1)],
+    "potent": [("Fire Trap", "Fire Trap+potent", 2),
+               ("Feint", "Feint+potent", 1)],
+    "colossal": [("Fire Dragon", "Fire Dragon+colossal", 2)],
+    "all": [("Fireblade", "Fireblade+sharp", 2),
+            ("Balanceblade", "Balanceblade+sharp", 1),
+            ("Fire Trap", "Fire Trap+potent", 2),
+            ("Feint", "Feint+potent", 1),
+            ("Fire Dragon", "Fire Dragon+colossal", 2)],
 }
-PAD = "Sunbird"          # a plain castable, to level the slot counts
 
 
 def build(setup):
-    dl = list(SETUPS[setup]) + list(CORE)
+    dl = list(BASE)
+    for plain, ench, n in SETUPS[setup]:
+        for _ in range(n):
+            dl[dl.index(plain)] = ench
+    while enchanted_deck_size(dl) < SLOTS:
+        dl.append(FILLER)
+    while enchanted_deck_size(dl) > SLOTS and FILLER in dl:
+        dl.remove(FILLER)
     return dl
 
 
-target = max(enchanted_deck_size(build(k)) for k in SETUPS)
-DECKS = {}
-for k in SETUPS:
-    dl = build(k)
-    while enchanted_deck_size(dl) < target:
-        dl.append(PAD)
-    DECKS[k] = dl
-print(f"matched at {target} real deck slots "
-      f"(an enchanted entry costs 2):", flush=True)
+DECKS = {k: build(k) for k in SETUPS}
+print(f"every arm matched at {SLOTS} real deck slots; enchants are paid "
+      f"for in {FILLER}s, so each arm is one substitution vs plain:",
+      flush=True)
 for k, dl in DECKS.items():
-    print(f"  {k:<7} {len(dl):2d} castables / {enchanted_deck_size(dl)} "
-          f"slots   {sorted(Counter(dl).items())}", flush=True)
+    print(f"  {k:<9} {len(dl):2d} castables / {enchanted_deck_size(dl)} "
+          f"slots   {dl.count(FILLER)} {FILLER}s", flush=True)
 
 
 def race(boss, deck, rules=CRIT_ERA, n=300, max_turns=80):
@@ -184,11 +196,12 @@ for k in DECKS:
         print(f"    {k:<7} {base - ttk_rows[k]:+.2f} turns vs plain",
               flush=True)
 
-json.dump({"setup": {"level": LVL, "slots": target,
+json.dump({"setup": {"level": LVL, "slots": SLOTS,
                      "decks": DECKS,
-                     "note": "arms matched on REAL deck slots; an "
-                             "enchanted entry costs 2 (spell + "
-                             "enchantment)",
+                     "note": "every arm matched at the same real deck "
+                             "slot count; enchants are paid for in "
+                             "filler cards, so each arm is ONE "
+                             "substitution against plain",
                      "confidence": "+10% and the stacking rule as "
                                    "reported by the repo owner; which "
                                    "ops the bonus lands on is MODELED; "

@@ -1,7 +1,7 @@
 {
  "setup": {
   "level": 100,
-  "slots": 23,
+  "slots": 30,
   "decks": {
    "plain": [
     "Fireblade",
@@ -18,107 +18,165 @@
     "Fire Dragon",
     "Fire Dragon",
     "Fire Dragon",
-    "Sunbird",
-    "Sunbird",
-    "Sunbird",
     "Fire Elf",
     "Fire Elf",
     "Reshuffle",
     "Reshuffle",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
     "Sunbird",
     "Sunbird"
    ],
    "sharp": [
-    "Fireblade",
-    "Fireblade",
     "Fireblade+sharp",
     "Fireblade+sharp",
-    "Balanceblade",
+    "Fireblade",
     "Balanceblade+sharp",
+    "Balanceblade",
     "Fire Trap",
     "Fire Trap",
+    "Fire Trap",
+    "Feint",
     "Feint",
     "Fire Dragon",
     "Fire Dragon",
     "Fire Dragon",
     "Fire Dragon",
-    "Sunbird",
-    "Sunbird",
-    "Sunbird",
     "Fire Elf",
     "Fire Elf",
     "Reshuffle",
-    "Reshuffle"
+    "Reshuffle",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird"
    ],
    "potent": [
     "Fireblade",
     "Fireblade",
     "Fireblade",
     "Balanceblade",
-    "Fire Trap",
-    "Fire Trap",
+    "Balanceblade",
     "Fire Trap+potent",
-    "Feint",
+    "Fire Trap+potent",
+    "Fire Trap",
     "Feint+potent",
+    "Feint",
     "Fire Dragon",
     "Fire Dragon",
     "Fire Dragon",
     "Fire Dragon",
-    "Sunbird",
-    "Sunbird",
-    "Sunbird",
     "Fire Elf",
     "Fire Elf",
     "Reshuffle",
     "Reshuffle",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
     "Sunbird"
    ],
-   "both": [
+   "colossal": [
     "Fireblade",
     "Fireblade",
-    "Fireblade+sharp",
-    "Balanceblade+sharp",
+    "Fireblade",
+    "Balanceblade",
+    "Balanceblade",
     "Fire Trap",
-    "Fire Trap+potent",
+    "Fire Trap",
+    "Fire Trap",
     "Feint",
-    "Feint+potent",
+    "Feint",
+    "Fire Dragon+colossal",
+    "Fire Dragon+colossal",
     "Fire Dragon",
     "Fire Dragon",
-    "Fire Dragon",
-    "Fire Dragon",
-    "Sunbird",
-    "Sunbird",
-    "Sunbird",
     "Fire Elf",
     "Fire Elf",
     "Reshuffle",
-    "Reshuffle"
+    "Reshuffle",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird"
+   ],
+   "all": [
+    "Fireblade+sharp",
+    "Fireblade+sharp",
+    "Fireblade",
+    "Balanceblade+sharp",
+    "Balanceblade",
+    "Fire Trap+potent",
+    "Fire Trap+potent",
+    "Fire Trap",
+    "Feint+potent",
+    "Feint",
+    "Fire Dragon+colossal",
+    "Fire Dragon+colossal",
+    "Fire Dragon",
+    "Fire Dragon",
+    "Fire Elf",
+    "Fire Elf",
+    "Reshuffle",
+    "Reshuffle",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird"
    ]
   },
-  "note": "arms matched on REAL deck slots; an enchanted entry costs 2 (spell + enchantment)",
+  "note": "every arm matched at the same real deck slot count; enchants are paid for in filler cards, so each arm is ONE substitution against plain",
   "confidence": "+10% and the stacking rule as reported by the repo owner; which ops the bonus lands on is MODELED; enchanting is assumed to cost deck slots but not tempo"
  },
  "endgame": {
   "Annoushka": {
    "plain": {
-    "win": 0.03666666666666667,
-    "ttk": 28.09090909090909,
+    "win": 0.13,
+    "ttk": 42.743589743589745,
     "policy": "blade-stack(4)"
    },
    "sharp": {
-    "win": 0.0,
-    "ttk": NaN,
-    "policy": "blade-stack(1)"
-   },
-   "potent": {
-    "win": 0.14666666666666667,
-    "ttk": 24.90909090909091,
+    "win": 0.1,
+    "ttk": 35.7,
     "policy": "blade-stack(4)"
    },
-   "both": {
-    "win": 0.18,
-    "ttk": 22.166666666666668,
-    "policy": "blade-stack(3)"
+   "potent": {
+    "win": 0.16666666666666666,
+    "ttk": 32.74,
+    "policy": "blade-stack(1)"
+   },
+   "colossal": {
+    "win": 0.25,
+    "ttk": 36.93333333333333,
+    "policy": "blade-stack(4)"
+   },
+   "all": {
+    "win": 0.6733333333333333,
+    "ttk": 21.574257425742573,
+    "policy": "blade-stack(4)"
    },
    "hp": 17240,
    "resist": {
@@ -129,22 +187,27 @@
   "Were-Bear Brute (Standard)": {
    "plain": {
     "win": 1.0,
-    "ttk": 16.633333333333333,
+    "ttk": 23.013333333333332,
     "policy": "blade-stack(4)"
    },
    "sharp": {
     "win": 1.0,
-    "ttk": 14.266666666666667,
+    "ttk": 19.2,
     "policy": "blade-stack(4)"
    },
    "potent": {
     "win": 1.0,
-    "ttk": 14.536666666666667,
+    "ttk": 18.796666666666667,
     "policy": "blade-stack(4)"
    },
-   "both": {
+   "colossal": {
     "win": 1.0,
-    "ttk": 12.896666666666667,
+    "ttk": 18.863333333333333,
+    "policy": "blade-stack(4)"
+   },
+   "all": {
+    "win": 1.0,
+    "ttk": 10.53,
     "policy": "blade-stack(4)"
    },
    "hp": 14475,
@@ -155,23 +218,28 @@
   },
   "High Priest Ixta": {
    "plain": {
-    "win": 0.24666666666666667,
-    "ttk": 28.486486486486488,
+    "win": 0.53,
+    "ttk": 41.0377358490566,
     "policy": "blade-stack(4)"
    },
    "sharp": {
-    "win": 0.13666666666666666,
-    "ttk": 24.682926829268293,
+    "win": 0.4666666666666667,
+    "ttk": 34.77142857142857,
     "policy": "blade-stack(4)"
    },
    "potent": {
-    "win": 0.39666666666666667,
-    "ttk": 24.319327731092436,
-    "policy": "blade-stack(4)"
+    "win": 0.5,
+    "ttk": 32.873333333333335,
+    "policy": "blade-stack(1)"
    },
-   "both": {
-    "win": 0.45,
-    "ttk": 21.2,
+   "colossal": {
+    "win": 0.72,
+    "ttk": 35.78703703703704,
+    "policy": "blade-stack(1)"
+   },
+   "all": {
+    "win": 0.89,
+    "ttk": 19.38576779026217,
     "policy": "blade-stack(4)"
    },
    "hp": 13675,
@@ -182,9 +250,10 @@
   }
  },
  "ordinary_mean_ttk": {
-  "plain": 10.28549219858156,
-  "sharp": 8.873844274809162,
-  "potent": 9.321647904191618,
-  "both": 8.398176397515527
+  "plain": 13.79646037735849,
+  "sharp": 11.660817582417582,
+  "potent": 11.697643478260868,
+  "colossal": 11.815199999999999,
+  "all": 7.877205150214593
  }
 }

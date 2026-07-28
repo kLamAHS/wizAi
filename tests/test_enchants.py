@@ -8,8 +8,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from data_full import load_spells_full, LIVE_RULES
-from w101_sim import (ENCHANTS, Boss, Sim, enchant_card,
-                      enchanted_deck_size, register_enchants)
+from w101_sim import (DMG_ENCHANTS, PCT_ENCHANTS, Boss, Hanging, Sim,
+                      enchant_card, enchanted_deck_size,
+                      register_enchants)
 
 ROOT = Path(__file__).resolve().parent.parent
 CARDS = load_spells_full(str(ROOT / "spells_full.json"),
@@ -62,15 +63,14 @@ def test_traps_stack_the_same_way_on_the_enemy():
     assert sorted(h.percent for h in s.enemies[0].wards) == [0.4, 0.5]
 
 
-def test_feint_backlash_is_not_boosted():
-    """Feint hangs 70% on the enemy and 30% back on the caster. Potent
-    Trap boosts the trap, not the wizard's own punishment — so it goes
-    to 80/30, never 80/40."""
+def test_potent_feint_is_eighty_forty():
+    """Potent Trap boosts BOTH of Feint's wards: the 70% on the enemy
+    and the 30% backlash on the wizard, giving 80/40. An earlier cut
+    modeled it as 80/30 on the theory that a trap enchant should not
+    make your own punishment worse; that was wrong."""
     e = enchant_card(CARDS["Feint"], "Potent Trap")
-    enemy = [o for o in e.ops if o["tgt"] == "enemy"]
-    own = [o for o in e.ops if o["tgt"] == "self"]
-    assert enemy[0]["percent"] == 0.8
-    assert own[0]["percent"] == 0.3
+    assert [o["percent"] for o in e.ops] == [0.8, 0.4]
+    assert [o["tgt"] for o in e.ops] == ["enemy", "self"]
 
 
 def test_enchant_rejects_the_wrong_card_kind():
@@ -87,7 +87,7 @@ def test_enchant_rejects_the_wrong_card_kind():
 
 def test_unknown_enchant_raises():
     try:
-        enchant_card(CARDS["Fireblade"], "Colossal")
+        enchant_card(CARDS["Fireblade"], "Bewildering")
     except KeyError:
         pass
     else:
@@ -100,7 +100,8 @@ def test_deck_slot_accounting_counts_the_enchant_card():
     assert enchanted_deck_size(["Fireblade", "Sunbird"]) == 2
     assert enchanted_deck_size(["Fireblade+sharp"]) == 2
     assert enchanted_deck_size(["Fireblade", "Fireblade+sharp"]) == 3
-    assert all(len(v) == 4 for v in ENCHANTS.values())
+    assert all(len(v) == 3 for v in PCT_ENCHANTS.values())
+    assert enchanted_deck_size(["Fire Dragon+colossal"]) == 2
 
 
 def test_enchanted_card_is_castable_and_deals_more():
@@ -110,3 +111,116 @@ def test_enchanted_card_is_castable_and_deals_more():
     sim = _sim(["Fire Trap+potent", "Sunbird"], cards)
     s = sim.new_state()
     assert any(c.name == "Fire Trap+potent" for c in s.deck + s.hand)
+
+
+# ---- compounding: the repo owner's worked examples -------------------
+# These are the arithmetic the whole damage model rests on, so they are
+# pinned against the numbers he gave rather than against my own.
+
+def _mult_of(percents, kind="ward"):
+    """Resolve a stack of hangings through the engine and return the
+    multiplier it actually produces."""
+    cards = dict(CARDS)
+    sim = _sim(["Sunbird"], cards)
+    s = sim.new_state()
+    tgt = s.enemies[0] if kind == "ward" else s.player
+    (tgt.wards if kind == "ward" else tgt.charms).clear()
+    for i, pct in enumerate(percents):
+        h = Hanging(f"h{i}", kind, "damage", percent=pct,
+                    schools=None, source=f"src{i}")
+        (tgt.wards if kind == "ward" else tgt.charms).append(h)
+    if kind == "ward":
+        return sim._ward_pass(s, tgt, "fire", 0.0)[0]
+    return sim._consume_damage_charms(s, tgt, "fire")
+
+
+def test_two_blades_compound_to_eighty_two_percent():
+    """'Two 35% blades is an 82% boost (1.35 x 1.35 = 1.82), NOT 70%.'"""
+    assert abs(_mult_of([0.35, 0.35], "charm") - 1.8225) < 1e-9
+
+
+def test_three_feints_compound_to_five_and_a_half_times():
+    """'Two 80% feints and a 70% feint seems like 230% boost, but it's
+    actually 451% (1.7 x 1.8 x 1.8 = 5.508x)'. Additive stacking would
+    give 3.30x, so this test is the difference between a simulator that
+    can model hard boss fights and one that cannot."""
+    got = _mult_of([0.70, 0.80, 0.80])
+    assert abs(got - 5.508) < 1e-9
+    assert abs(got - (1 + 0.7 + 0.8 + 0.8)) > 2.0     # not additive
+
+
+def test_damage_stat_is_additive_not_multiplicative():
+    """'going from 150 to 160 damage ... 2.6/2.5 is 1.04, so only 4%
+    more damage.' The stat enters as 1 + damage, so a 10-point gain
+    late is worth far less than it looks."""
+    cards = dict(CARDS)
+    sim = _sim(["Sunbird"], cards)
+    s = sim.new_state()
+    s.player.damage_bonus = {"*": 1.50}
+    lo = sim._damage_bonus(s.player, "fire")
+    s.player.damage_bonus = {"*": 1.60}
+    hi = sim._damage_bonus(s.player, "fire")
+    assert (lo, hi) == (2.5, 2.6)
+    assert abs(hi / lo - 1.04) < 1e-9
+
+
+def test_flat_damage_enchant_lands_before_the_multipliers():
+    """A Colossal is added to BASE damage, so blades and traps multiply
+    it too — which is why flat enchants outrun percentage gear."""
+    plain = CARDS["Fire Dragon"]
+    boosted = enchant_card(plain, "Colossal")
+    assert boosted.damage == plain.damage + 275
+    hits = [o for o in boosted.ops if o["op"] == "hit"]
+    plain_hits = [o for o in plain.ops if o["op"] == "hit"]
+    assert hits[0]["amount"] == plain_hits[0]["amount"] + 275
+
+
+def test_damage_enchant_hits_only_the_primary_op():
+    """Multi-hit spells get the bonus once, on the largest component,
+    not once per component."""
+    plain = CARDS["Fire Dragon"]
+    e = enchant_card(plain, "Epic")
+    before = [o.get("amount", o.get("total")) for o in plain.ops]
+    after = [o.get("amount", o.get("total")) for o in e.ops]
+    diffs = [b - a for a, b in zip(before, after) if a is not None]
+    assert sorted(diffs) == [0.0, 300.0]
+
+
+def test_damage_enchants_are_ordered_by_tier():
+    vals = list(DMG_ENCHANTS.values())
+    assert vals == sorted(vals)
+    assert DMG_ENCHANTS["Colossal"] == 275 and DMG_ENCHANTS["Epic"] == 300
+
+
+def test_treasure_and_item_cards_cannot_be_enchanted():
+    """'Only works on normal deck spells (not on item cards or other
+    treasure cards).'"""
+    from dataclasses import replace as _replace
+    for src in ("tc", "item", "pet"):
+        card = _replace(CARDS["Fireblade"], source=src)
+        try:
+            enchant_card(card, "Sharpen Blade")
+        except ValueError as e:
+            assert "normal deck spells" in str(e)
+        else:
+            raise AssertionError(f"{src} card accepted an enchant")
+
+
+def test_one_enchant_per_card():
+    """'They do not stack multiple enchants on a single card.'"""
+    once = enchant_card(CARDS["Fire Dragon"], "Colossal")
+    for second in ("Epic", "Strong"):
+        try:
+            enchant_card(once, second)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("double enchant accepted")
+
+
+def test_enchant_keeps_the_original_pip_cost():
+    """'Costs 0 pips to cast the enchant itself, but adds the base pip
+    cost of the original spell.'"""
+    for name, ench in (("Fire Dragon", "Colossal"),
+                       ("Fireblade", "Sharpen Blade")):
+        assert enchant_card(CARDS[name], ench).pips == CARDS[name].pips
