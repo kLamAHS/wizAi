@@ -270,10 +270,27 @@ def sample_deck(pool, school, boss, rng, capacity=16, copy_limit=3):
                 >= n_hits:
             break
         add(c, 1)
-    for c in rng.sample(blades, k=min(len(blades), rng.randint(0, 3))):
-        add(c, rng.randint(1, 2))
+    # Blades are never optional. They COMPOUND (two 35% blades are
+    # 1.35*1.35 = 1.82, not 1.70), so a bladeless deck gives up the
+    # single largest multiplier in the game. The old template rolled
+    # randint(0, 3) and produced zero-blade decks roughly a quarter of
+    # the time — a storm --full run came back with no blades at all
+    # from level 10 through 70, which is why race(1) kept winning the
+    # screen: there was nothing to stack.
+    if blades:
+        n_blades = rng.randint(1, min(3, len(blades)))
+        for c in rng.sample(blades, k=n_blades):
+            add(c, rng.randint(1, 2))
+            # the stacking play: a plain blade and its enchanted copy
+            # are different stack keys, so both land at once
+            twin = pool.get(f"{c.name}+sharp")
+            if twin is not None and rng.random() < 0.6:
+                add(twin, 1)
     for c in rng.sample(traps, k=min(len(traps), rng.randint(0, 3))):
         add(c, rng.randint(1, 2))
+        twin = pool.get(f"{c.name}+potent")
+        if twin is not None and rng.random() < 0.6:
+            add(twin, 1)
     if prisms and rng.random() < 0.8:
         add(prisms[0], rng.randint(1, 2))
     heals = [c for c in pool.values() if c.kind == "heal"]

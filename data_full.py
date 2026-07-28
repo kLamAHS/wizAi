@@ -439,7 +439,8 @@ CREATURE_STATS = {"pierce": ("pierce", 0.339),
 
 
 def load_bosses_full(path="bosses_clean.json", report=None, rules=None,
-                     spell_pools=False, cards=None):
+                     spell_pools=False, cards=None,
+                     level_mode="world", fill_boost=False):
     """Registry of real bosses. Returns (bosses, registry): `bosses` maps
     name -> Boss ready for Sim; `registry` keeps every scraped field raw
     (ratings, cheats text, locations) for encounter metadata.
@@ -475,7 +476,7 @@ def load_bosses_full(path="bosses_clean.json", report=None, rules=None,
         from deck_builder import TRAINED
         if cards is None:
             cards = load_spells_full()
-        pools = build_pools(raw, cards, TRAINED)
+        pools = build_pools(raw, cards, TRAINED, level_mode)
         _set_pool_cards(cards)
     bosses, registry, skipped = {}, {}, []
     found = {k: 0 for k in CREATURE_STATS}
@@ -519,6 +520,11 @@ def load_bosses_full(path="bosses_clean.json", report=None, rules=None,
         b.resist_map = resist or None
         b.boost_map = _parse_boost(stats) or None
         b.outgoing_bonus = _num(stats.get("outgoing_boost")) / 100.0
+        if fill_boost and not b.outgoing_bonus and rank:
+            # only 36% of creatures publish this; the rest were fighting
+            # with a flat 0% damage bonus, which no real enemy has
+            from enemy_ranks import outgoing_boost as _ob
+            b.outgoing_bonus = _ob(rank)
         for key, (attr, _cov) in CREATURE_STATS.items():
             if stats.get(key) is None:
                 continue
@@ -556,12 +562,12 @@ def load_bosses_full(path="bosses_clean.json", report=None, rules=None,
     return bosses, registry
 
 
-# fraction of the boss's health an UNRESOLVED minion is given. MODELED,
-# and the single most arbitrary number in this module: three quarters of
-# the scraped minion references name creatures that have no page of
-# their own (generic mobs like "Fleshless Chattel"), so their stats do
-# not exist anywhere in the file. Exposed as a parameter precisely
-# because it deserves a sensitivity check rather than trust.
+# Legacy fraction-of-boss health for an unresolved minion. SUPERSEDED
+# by enemy_ranks.normal_hp, which derives a mob's health from its RANK
+# against the report's normalized sample instead of from an invented
+# share of whatever it happens to be standing next to. Kept because
+# results predating the change quote it and because hp_share= is still
+# the knob the sensitivity sweep uses.
 MINION_HP_SHARE = 0.35
 MINION_RANK_DROP = 2
 MINION_POOL_KEEP = 3   # weakest N of the boss's pool
@@ -574,7 +580,7 @@ def _set_pool_cards(cards):
     _POOL_CARDS.update(cards or {})
 
 
-def encounter(name, bosses, hp_share=MINION_HP_SHARE, synth=True):
+def encounter(name, bosses, hp_share=None, synth=True):
     """Resolve a boss into the full fight: (boss, [companions]).
 
     Real encounters are not 1v1. `Boss.minions` holds the scraped names
@@ -589,10 +595,15 @@ def encounter(name, bosses, hp_share=MINION_HP_SHARE, synth=True):
       UNRESOLVED (75%) — the name is a generic mob with no page. The
         fight is still not 1v1, so refusing to model it would be a
         worse error than modeling it roughly; `synth=True` builds a
-        stand-in at `hp_share` of the boss's health and a couple of
-        ranks below it, tagged inferred. Pass synth=False to get only
-        the companions whose stats are real.
+        stand-in a couple of ranks below the boss, with health from
+        `enemy_ranks.normal_hp` — the report's rank->HP sample for
+        ORDINARY enemies — and spells from the rank spell-tier
+        heuristic. Pass `hp_share=` to override that with the legacy
+        fraction-of-boss rule, which is what the sensitivity sweep
+        varies. `synth=False` gives only the companions whose stats are
+        real.
     """
+    from enemy_ranks import normal_hp, outgoing_boost
     boss = bosses[name]
     out = []
     for m in (boss.minions or []):
@@ -600,9 +611,16 @@ def encounter(name, bosses, hp_share=MINION_HP_SHARE, synth=True):
             out.append(copy.copy(bosses[m]))
         elif synth:
             rank = max(1, (boss.rank or 1) - MINION_RANK_DROP)
-            mb = Boss(f"{m} (inferred)", max(1, int(boss.hp * hp_share)),
+            hp = (int(boss.hp * hp_share) if hp_share is not None
+                  else normal_hp(rank))
+            mb = Boss(f"{m} (inferred)", max(1, hp),
                       boss.school, int(40 + 20 * rank))
             mb.rank = rank
+            # a mob with no damage buff is not a mob, it is a prop:
+            # enemies carry an outgoing damage % exactly as players do
+            # from gear, and synthesized ones were getting zero
+            mb.outgoing_bonus = (boss.outgoing_bonus
+                                 or outgoing_boost(rank))
             mb.resist_map = dict(boss.resist_map or {})
             mb.boost_map = dict(boss.boost_map or {})
             if boss.pool:

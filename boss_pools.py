@@ -142,16 +142,35 @@ def pool_from_school(school, level, cards, trained, size=5):
     return [c.name for c in hits + blades]
 
 
-def build_pools(records, cards, trained):
+def build_pools(records, cards, trained, level_mode="world"):
     """name -> {'pool', 'archetype', 'level', 'source'} for every
-    creature that can be given one."""
+    creature that can be given one.
+
+    `level_mode` picks how a creature's SPELL TIER is decided:
+
+      'world'  the world its page lists, resolved to that band's last
+               level. My own inference, and generous — it assumes a
+               Zafaria boss casts the best spells Zafaria offers.
+      'rank'   the community heuristic the 2026 enemy-rank report
+               quotes: boss ~ rank * 5, normal ~ rank * 6. SOURCED, and
+               consistently lower than the world rule.
+
+    Both land inside the report's documented 85-115 damage-per-pip band
+    because that band is flat in rank — higher-tier spells cost
+    proportionally more pips — so the choice moves PIP COST and tempo,
+    not damage density.
+    """
+    from enemy_ranks import spell_level
     rank_fit = fit_rank_to_level(records)
     out = {}
     for r in records:
         name, school = r.get("name"), r.get("school")
         if not name or not school:
             continue
-        level, how = estimate_level(r, rank_fit)
+        if level_mode == "rank" and r.get("rank"):
+            level, how = spell_level(r["rank"], "boss"), "rank-heuristic"
+        else:
+            level, how = estimate_level(r, rank_fit)
         pool = pool_from_notes(r, cards)
         source = "spell_notes"
         if len(pool) < 3:

@@ -42,6 +42,18 @@ WORLDS = {
 SIDE_CONTENT = {
     "Grizzleheim / Wintertusk": 40,   # after Dragonspyre, for XP
     "Mount Olympus (Aquila)": 30,     # the Sky Iron Hasta run
+    "Wysteria": 25,                   # unlocks at 25 (2026 rank report)
+}
+
+# Worlds past Empyrea that the owner's main table does not band. Only
+# what a source actually states is recorded — Novus is tied to level
+# 160+ gear and Wallaru is presented as the end of the fourth arc — and
+# the rest deliberately stay absent rather than being interpolated into
+# existence. Nothing keys off this yet; it exists so the next person
+# does not re-derive it from a rank fit.
+BEYOND_TABLE = {
+    "Novus": "level 160+ gear tier",
+    "Wallaru": "end of the fourth story arc, 170+ endgame content",
 }
 
 MAX_BANDED_LEVEL = max(hi for _, hi, _ in WORLDS.values())

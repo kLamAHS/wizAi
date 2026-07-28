@@ -269,3 +269,38 @@ def test_sampled_enchanted_decks_stay_legal():
         assert check_legal(dl, 24, 3), dl
         saw_enchant |= any("+" in n for n in dl)
     assert saw_enchant, "enchanted cards never sampled"
+
+
+def test_sampled_decks_always_carry_a_blade():
+    """Blades COMPOUND — two 35% blades are 1.35*1.35 = 1.82, not 1.70
+    — so a bladeless deck gives up the largest multiplier in the game.
+    The old template rolled randint(0, 3) and produced zero-blade decks
+    about a quarter of the time; a storm --full run came back with no
+    blades at all from level 10 through 70, which is why race(1) kept
+    winning the screen: there was nothing to stack."""
+    boss = Boss("B", 5000, "death", 120)
+    for school, level in (("storm", 50), ("fire", 30), ("ice", 100)):
+        pool = legal_pool(CARDS, school, level=level, enchants=True)
+        if not any(c.kind == "blade" for c in pool.values()):
+            continue
+        for i in range(40):
+            dl = sample_deck(pool, school, boss, random.Random(i),
+                             capacity=24)
+            assert any(pool[n].kind == "blade" for n in dl), (school, dl)
+
+
+def test_template_offers_the_plain_plus_enchanted_stack():
+    """A plain blade and its sharpened copy are different stack keys,
+    so both land at once; the template has to actually offer that pair
+    or the builder can never find it."""
+    pool = legal_pool(CARDS, "storm", level=100, enchants=True)
+    boss = Boss("B", 9000, "death", 150)
+    paired = 0
+    for i in range(60):
+        dl = sample_deck(pool, "storm", boss, random.Random(i),
+                         capacity=30)
+        for n in dl:
+            if n + "+sharp" in dl or n + "+potent" in dl:
+                paired += 1
+                break
+    assert paired > 10, paired
