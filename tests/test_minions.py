@@ -54,10 +54,15 @@ def test_unresolved_companions_are_synthesised_and_labelled():
                 if b.minions and all(m not in BOSSES for m in b.minions))
     boss, comps = encounter(name, BOSSES)
     assert comps and all(c.name.endswith("(inferred)") for c in comps)
+    from enemy_ranks import normal_hp
     for c in comps:
-        assert c.hp == max(1, int(boss.hp * MINION_HP_SHARE))
+        # health now comes from the RANK curve, not a share of whatever
+        # boss the mob happens to be standing next to
+        assert c.hp == max(1, normal_hp(c.rank))
         assert c.rank < boss.rank
         assert c.school == boss.school
+    legacy = encounter(name, BOSSES, hp_share=MINION_HP_SHARE)[1]
+    assert legacy[0].hp == max(1, int(boss.hp * MINION_HP_SHARE))
 
 
 def test_synth_can_be_switched_off_entirely():

@@ -600,6 +600,63 @@ loader report.
    racing over triage, AoE over single-target — is stable; the levels
    are not, and should not be quoted on their own.
 
+2f. **Rank instead of scraping every mob** (`enemy_ranks.py`). The repo
+   owner's proposal, and the right one: rather than pull a page for
+   every ordinary enemy, map RANK to the boss it fights beside and
+   derive the mob from that. Every creature record already carries a
+   rank, and the 2026 enemy-rank report supplies the two things needed
+   to use it.
+
+   **Spell tier.** `normal ~ rank*6`, `elite ~ rank*6+5`,
+   `boss ~ rank*5`. The report is careful that this predicts spell
+   ACCESS and not difficulty, and that is the only job it is given.
+
+   **Health for non-boss enemies**, from the report's normalized
+   sample — Lost Soul 65 and Dark Fairy 115 at rank 1, Gobbler Gorger
+   285 at 2, Gloom Fairy 675 at 5, Belloq Image 5760 at 16. Four
+   anchors over sixteen ranks, interpolated in LOG space because the
+   span is two orders of magnitude, and held flat outside rather than
+   extrapolated: the report's own outlier, Dream Belloq at rank 17 with
+   **300,000 HP**, is exactly why extending a curve through that range
+   would be invention.
+
+   That retires `MINION_HP_SHARE = 0.35`, which was the most arbitrary
+   number left in the loader and which the sensitivity sweep showed was
+   worth **53 points** of win rate across plausible values. A stand-in
+   mob's health now comes from its own rank rather than from a fraction
+   of whatever it happens to be standing next to. The old rule stays
+   reachable via `hp_share=` because the sweep varies it and earlier
+   results quote it.
+
+   **An independent cross-validation fell out of this, and it is the
+   most reassuring number in the repo.** The report observes that enemy
+   natural attack is *flat* across rank — "roughly 85 to 105 damage per
+   pip", reaching 115 at rank 16 — and that late difficulty moves into
+   cheats, pips, pierce and resist instead of attack inflation. This
+   repo builds boss spell pools from school TRAINED lines, an entirely
+   unrelated construction that never saw an enemy page:
+
+   ```
+   rank    2   3   4   5   6   7   8   9  10  11  12  13
+   dmg/pip 92  92  90  98 105  98  99  95  99 100 100  99
+
+   rank   14  15  16  17  18  19  20  21  22  23  24  25
+   dmg/pip 100 101 103 100  99 103 100 102 100  99 100 100
+
+   overall median 99 per pip over 6,644 pool entries
+   ```
+
+   Flat at 99 across twenty-four ranks, inside the reported band at
+   every one. Two unrelated methods agreeing on both the level and the
+   flatness is real evidence, and it is now a regression test.
+
+   Switching the spell-tier rule from my world inference to the
+   report's rank heuristic (`level_mode="rank"`) moves the median by
+   **0** — the band is flat in rank, so higher-tier spells cost
+   proportionally more pips and the choice moves tempo, not damage
+   density. `world` stays the default so no earlier result shifts;
+   `rank` is the sourced alternative and both are tested to agree.
+
 2d. **Bosses cast; they do not auto-attack** (`boss_pools.py`,
    `load_bosses_full(spell_pools=True)`, `casting_bosses.py`,
    `results_casting_bosses.json`). The registry had carried
