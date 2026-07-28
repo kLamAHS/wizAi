@@ -391,9 +391,91 @@ loader report.
    stacking identities, accuracy/shields/pierce/flat stats, ordered prisms,
    DoT/multi-hit/drains/X-pip, cheat scripts with cooldowns and one-shot
    thresholds, property-test suite, determinized search baseline.
-2. Scrape real creature pages (stats, stunable flags, actual cheat
-   scripts) to replace the ballpark boss registry; damage *ranges* instead
-   of averages.
+2. Real creature stats — LARGELY DONE, without scraping anything
+   (`CREATURE_STATS`, `creature_stats.py`,
+   `results_creature_stats.json`). The item asked to scrape creature
+   pages for stats, stunable flags and cheat scripts. No scrape was
+   possible (the owner's IP is banned) or needed: the **pre-ban**
+   `bosses_clean.json` already carried per-creature pierce, starting
+   pips, critical and block ratings for 1912 creatures, and
+   `load_bosses_full` was reading only health, school, resist and
+   boost. The data gap was never in the file — it was in the loader.
+
+   ```
+   stat            coverage   distribution where present
+   starting_pips     98.8%    median 4, max 7
+   stunable          90.2%
+   pierce            33.9%    median 19%, max 70%
+   critical          32.1%    median 97, max 1085
+   critical_block    31.0%    median 57, p90 570, max 1039
+   ```
+
+   Coverage is partial and uneven, and an absent field means the page
+   did not list it, NOT that the creature has none — so
+   `report["coverage"]` records what was actually found and a test
+   pins those rates. Crit and block obey the same gate as `gear.py`:
+   they are RATINGS, emitted only under a rating resolver, so writing
+   a scraped 1085 into a classic sim can never mean "always crit".
+   Every pre-existing field is bit-identical, also tested.
+
+   **This simulator has been quietly easy on the player.** Two of the
+   unused fields are systematically pro-player: bosses opened every
+   fight with an empty pip rack (real median 4), and boss pierce was
+   always zero (real median 19% where listed) so player shields and
+   resist have been working at full strength against opponents that
+   should be cutting through them. Re-running real encounters with
+   pierce zeroed — exactly what the old loader did — against the value
+   sitting in the file:
+
+   ```
+   10 contested encounters (of 26 scanned; the rest pinned at 0/100%)
+   mean win-rate drop   +22.1 points
+   median drop           +0.3 points
+   ```
+
+   The gap between mean and median is the finding: pierce is
+   **bimodal**, not gradual. Six of ten encounters moved by under a
+   point; the other four moved by 25, 25, 71 and 98 points. It does
+   nothing at all until it cuts past the shield stack, and then it
+   flips the fight. Encounters were screened on the CONTROL arm only —
+   a fight already won 100% of the time cannot get easier — because
+   the first cut skipped that and nine of twelve rows were pinned at a
+   ceiling or floor, making the mean two bosses in a trenchcoat.
+
+   **A correction to the gear/pet section below, from real data.**
+   That section reported a quad-critical pet worth exactly 0.00
+   against "a high-block boss" using a block rating of **400 that I
+   invented**. The real distribution is now readable, and it reframes
+   the claim rather than overturning it:
+
+   ```
+   real block bucket   mean block   triple-double   quad-crit   ratio
+   low    (<100)             33        +0.51         +0.18      0.36
+   mid    (100-570)         199        +0.46         +0.10      0.21
+   high   (>=570)           570        +1.44         +0.05      0.03
+   ```
+
+   Block does suppress the crit pet, monotonically, and the direction
+   held up. But **the crit pet already loses 3-to-1 at a block rating
+   of 33**, which is effectively no block at all — so on the content a
+   player actually fights, the driver is crit SATURATION (the pet buys
+   at the flat end of the rating curve), and block is an additional
+   effect on top rather than the explanation. My earlier emphasis was
+   wrong on that point.
+
+   Two honest limits: the high bucket is a single boss (1 of 6 sampled
+   was killable), so it is suggestive only; and block rating tracks
+   TIER in the real data — every creature with block ≥570 has ≥13675
+   HP — so "high block" and "big HP pool" are not independent knobs.
+   The invented-400 scenario turns out to sit on content a solo
+   level-100 single-target fire deck cannot clear at all (0 of 6
+   sampled killable in 80 turns, even with Reshuffle).
+
+   Still open on this item: cheat SCRIPTS (39% of creatures are
+   flagged `has_cheats` with free-text notes that no parser reads),
+   minions/summons (22%/4%), outgoing healing, and boss damage
+   *ranges* — per-round damage is still the rank-scaled
+   `40 + 20*rank` estimate, tagged `dmg_confidence: inferred`.
 3. Sideboard/discard policy: DONE — every policy now has the TC
    reflex (`tc_reflex`: make room honoring the fresh-TC rule, draw
    one, castable same round), the tabular agent carries TC names AND
@@ -942,6 +1024,14 @@ loader report.
    crit era (L120)               635        +0.68           +0.14
    crit era, high block (L100)   428        +0.86           +0.00
    ```
+
+   > **Later correction (roadmap 2).** The "high block" row uses a
+   > block rating of 400 that I invented before the real per-creature
+   > ratings were wired up. Against the actual distribution the
+   > direction holds but the emphasis was wrong: the crit pet already
+   > loses 3-to-1 at a real block rating of 33, so crit SATURATION is
+   > the driver on reachable content and block is an effect on top.
+   > See roadmap item 2 for the measured buckets.
 
    The crit pet's value decays monotonically as the wizard's own gear
    accumulates crit rating — 0.72 turns at rating 117, 0.25 at 428,

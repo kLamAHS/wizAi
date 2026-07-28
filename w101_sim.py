@@ -478,6 +478,12 @@ class Boss:
                                 # "imperfect but state-aware" knob
     pip_chance: float = 0.40    # enemy power-pip odds (not public;
                                 # modeled at the player base cap)
+    start_pips: int = 0         # SCRAPED (98.8% coverage): real bosses
+                                # open the fight with pips already on
+                                # the rack. Only bites for pool-driven
+                                # bosses — a flat-`dmg` boss spends
+                                # nothing, so giving it pips would be
+                                # cosmetic.
 
     def incoming_mult(self, spell_school):
         if self.resist_map is not None or self.boost_map is not None:
@@ -514,7 +520,8 @@ class Boss:
                      archetype=self.archetype,
                      discipline=self.discipline,
                      power_pip_chance=self.pip_chance
-                     if self.pool else 0.0)
+                     if self.pool else 0.0,
+                     norm_pips=self.start_pips if self.pool else 0)
 
 
 # ---------------------------------------------------------------- game state

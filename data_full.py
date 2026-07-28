@@ -429,12 +429,43 @@ def _parse_boost(stats):
     return {}
 
 
-def load_bosses_full(path="bosses_clean.json", report=None):
+#      scraped stat  ->  (Boss attribute, coverage over 1912 creatures)
+CREATURE_STATS = {"pierce": ("pierce", 0.339),
+                  "starting_pips": ("start_pips", 0.988),
+                  "critical": ("crit_chance", 0.321),
+                  "critical_block": ("block_chance", 0.310),
+                  "stunable": ("stunable", 0.902)}
+
+
+def load_bosses_full(path="bosses_clean.json", report=None, rules=None):
     """Registry of real bosses. Returns (bosses, registry): `bosses` maps
     name -> Boss ready for Sim; `registry` keeps every scraped field raw
-    (ratings, cheats text, locations) for encounter metadata."""
+    (ratings, cheats text, locations) for encounter metadata.
+
+    Wires the per-creature combat stats that were scraped alongside
+    health and school and then sat unused: PIERCE (median 19% where
+    present — it eats through player shields and resist on every hit,
+    including the flat-`dmg` path), STARTING PIPS (median 4 — real
+    bosses do not open a fight with an empty rack), and the CRITICAL
+    and BLOCK ratings.
+
+    CRIT GATE, the same load-bearing rule as gear.py: Actor.crit_chance
+    holds a PROBABILITY in the classic era and a RATING only when the
+    ruleset installs a rating resolver, so writing a scraped 1085 into
+    a classic-era sim would mean "always crit". Ratings are therefore
+    emitted only when `rules.crit_resolver` is set; `rules=None` leaves
+    them at zero, which is why every pre-existing number in this repo
+    is unmoved by this wiring.
+
+    Coverage is partial and uneven (see CREATURE_STATS) — an absent
+    field means the wiki page did not list it, NOT that the creature
+    has none. `report["coverage"]` records what was actually found so
+    a result can say how much of its boss table was real.
+    """
     raw = json.load(open(path, encoding="utf-8"))
     bosses, registry, skipped = {}, {}, []
+    found = {k: 0 for k in CREATURE_STATS}
+    crit_era = rules is not None and getattr(rules, "crit_resolver", None)
     for r in raw:
         name, school, hp = r.get("name"), r.get("school"), r.get("health")
         if not name or not school or not hp:
@@ -474,9 +505,24 @@ def load_bosses_full(path="bosses_clean.json", report=None):
         b.resist_map = resist or None
         b.boost_map = _parse_boost(stats) or None
         b.outgoing_bonus = _num(stats.get("outgoing_boost")) / 100.0
+        for key, (attr, _cov) in CREATURE_STATS.items():
+            if stats.get(key) is None:
+                continue
+            found[key] += 1
+            if attr in ("crit_chance", "block_chance"):
+                if crit_era:                       # ratings, not chances
+                    setattr(b, attr, float(_num(stats[key])))
+            elif attr == "pierce":
+                b.pierce = _num(stats[key]) / 100.0
+            elif attr == "start_pips":
+                b.start_pips = int(_num(stats[key]))
         bosses[name] = b
         registry[name] = dict(r, dmg_estimate=dmg,
                               dmg_confidence="inferred")
     if report is not None:
         report["skipped"] = skipped
+        report["coverage"] = {k: {"found": v, "of": len(raw),
+                                  "frac": v / max(len(raw), 1)}
+                              for k, v in found.items()}
+        report["crit_ratings_emitted"] = bool(crit_era)
     return bosses, registry
