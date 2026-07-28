@@ -1,0 +1,193 @@
+{
+ "coverage": {
+  "pierce": {
+   "found": 649,
+   "of": 1912,
+   "frac": 0.33943514644351463
+  },
+  "starting_pips": {
+   "found": 1890,
+   "of": 1912,
+   "frac": 0.9884937238493724
+  },
+  "critical": {
+   "found": 613,
+   "of": 1912,
+   "frac": 0.3206066945606695
+  },
+  "critical_block": {
+   "found": 592,
+   "of": 1912,
+   "frac": 0.30962343096234307
+  },
+  "stunable": {
+   "found": 1725,
+   "of": 1912,
+   "frac": 0.9021966527196653
+  }
+ },
+ "distributions": {
+  "pierce_median": 0.19,
+  "pierce_max": 0.7,
+  "start_pips_median": 4,
+  "block_median": 57.0,
+  "block_p90": 570.0,
+  "block_max": 1039.0,
+  "crit_median": 97.0
+ },
+ "q1_pierce": {
+  "rows": [
+   {
+    "boss": "Jareth",
+    "hp": 10200,
+    "pierce": 0.15,
+    "win_pierce_off": 0.9775,
+    "win_pierce_real": 0.975,
+    "drop_points": 0.2500000000000058
+   },
+   {
+    "boss": "Tumbler",
+    "hp": 10460,
+    "pierce": 0.22,
+    "win_pierce_off": 0.9775,
+    "win_pierce_real": 0.71,
+    "drop_points": 26.750000000000007
+   },
+   {
+    "boss": "Cronus (Tartarus, Challenge)",
+    "hp": 8650,
+    "pierce": 0.14,
+    "win_pierce_off": 0.975,
+    "win_pierce_real": 0.975,
+    "drop_points": 0.0
+   },
+   {
+    "boss": "Ms. Felicity (Tier 5)",
+    "hp": 11000,
+    "pierce": 0.24,
+    "win_pierce_off": 0.71,
+    "win_pierce_real": 0.71,
+    "drop_points": 0.0
+   },
+   {
+    "boss": "R0S1E",
+    "hp": 10200,
+    "pierce": 0.15,
+    "win_pierce_off": 0.98,
+    "win_pierce_real": 0.98,
+    "drop_points": 0.0
+   },
+   {
+    "boss": "Drowned Dan (Tier 3)",
+    "hp": 10235,
+    "pierce": 0.15,
+    "win_pierce_off": 0.975,
+    "win_pierce_real": 0.7275,
+    "drop_points": 24.749999999999993
+   },
+   {
+    "boss": "The Quake Charmer",
+    "hp": 9520,
+    "pierce": 0.24,
+    "win_pierce_off": 0.71,
+    "win_pierce_real": 0.0,
+    "drop_points": 71.0
+   },
+   {
+    "boss": "Metallossus (Tier 4)",
+    "hp": 10520,
+    "pierce": 0.11,
+    "win_pierce_off": 0.975,
+    "win_pierce_real": 0.975,
+    "drop_points": 0.0
+   },
+   {
+    "boss": "Hangriest Gobbler",
+    "hp": 9315,
+    "pierce": 0.23,
+    "win_pierce_off": 0.98,
+    "win_pierce_real": 0.0,
+    "drop_points": 98.0
+   },
+   {
+    "boss": "Cyphurr",
+    "hp": 11760,
+    "pierce": 0.1,
+    "win_pierce_off": 0.98,
+    "win_pierce_real": 0.9775,
+    "drop_points": 0.24999999999999467
+   }
+  ],
+  "scanned": 26,
+  "screen": "control arm win rate in [0.15, 0.98]",
+  "mean_drop_points": 22.1,
+  "median_drop_points": 0.2500000000000002
+ },
+ "q2_pet_by_real_block": {
+  "low   (<100)": {
+   "n_sampled": 6,
+   "reachable": 4,
+   "hp_window": [
+    4000,
+    12000
+   ],
+   "mean_block": 32.75,
+   "no_pet_ttk": 7.523,
+   "triple_double_gain": 0.5109999999999992,
+   "quad_critical_gain": 0.18400000000000016,
+   "quad_over_triple": 0.36007827788649793,
+   "bosses": [
+    "Shaka Zebu",
+    "Grignr",
+    "Uacalxochitl Blood Eye",
+    "Kiathi Nighthunter"
+   ],
+   "unreachable": []
+  },
+  "mid   (100-570)": {
+   "n_sampled": 6,
+   "reachable": 4,
+   "hp_window": [
+    4000,
+    12000
+   ],
+   "mean_block": 199.0,
+   "no_pet_ttk": 8.116999999999999,
+   "triple_double_gain": 0.46499999999999897,
+   "quad_critical_gain": 0.09899999999999842,
+   "quad_over_triple": 0.2129032258064487,
+   "bosses": [
+    "The Shadoe (Standard)",
+    "Goofang",
+    "Inspector Escoffier",
+    "Solomon Crane (Standard)"
+   ],
+   "unreachable": [
+    "Vanitus"
+   ]
+  },
+  "high  (>=570)": {
+   "n_sampled": 6,
+   "reachable": 1,
+   "hp_window": [
+    13000,
+    30000
+   ],
+   "mean_block": 570.0,
+   "no_pet_ttk": 16.06477732793522,
+   "triple_double_gain": 1.4447773279352223,
+   "quad_critical_gain": 0.04864829567715745,
+   "quad_over_triple": 0.03367182937919042,
+   "bosses": [
+    "Were-Bear Brute (Standard)"
+   ],
+   "unreachable": [
+    "Kain von Shane (Challenge)",
+    "Mr. Stone",
+    "Sister Morbidmary (Standard)",
+    "Annoushka",
+    "Shadow Trickster (Rank 22)"
+   ]
+  }
+ }
+}

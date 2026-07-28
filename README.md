@@ -391,9 +391,242 @@ loader report.
    stacking identities, accuracy/shields/pierce/flat stats, ordered prisms,
    DoT/multi-hit/drains/X-pip, cheat scripts with cooldowns and one-shot
    thresholds, property-test suite, determinized search baseline.
-2. Scrape real creature pages (stats, stunable flags, actual cheat
-   scripts) to replace the ballpark boss registry; damage *ranges* instead
-   of averages.
+2. Real creature stats — LARGELY DONE, without scraping anything
+   (`CREATURE_STATS`, `creature_stats.py`,
+   `results_creature_stats.json`). The item asked to scrape creature
+   pages for stats, stunable flags and cheat scripts. No scrape was
+   possible (the owner's IP is banned) or needed: the **pre-ban**
+   `bosses_clean.json` already carried per-creature pierce, starting
+   pips, critical and block ratings for 1912 creatures, and
+   `load_bosses_full` was reading only health, school, resist and
+   boost. The data gap was never in the file — it was in the loader.
+
+   ```
+   stat            coverage   distribution where present
+   starting_pips     98.8%    median 4, max 7
+   stunable          90.2%
+   pierce            33.9%    median 19%, max 70%
+   critical          32.1%    median 97, max 1085
+   critical_block    31.0%    median 57, p90 570, max 1039
+   ```
+
+   Coverage is partial and uneven, and an absent field means the page
+   did not list it, NOT that the creature has none — so
+   `report["coverage"]` records what was actually found and a test
+   pins those rates. Crit and block obey the same gate as `gear.py`:
+   they are RATINGS, emitted only under a rating resolver, so writing
+   a scraped 1085 into a classic sim can never mean "always crit".
+   Every pre-existing field is bit-identical, also tested.
+
+   **This simulator has been quietly easy on the player.** Two of the
+   unused fields are systematically pro-player: bosses opened every
+   fight with an empty pip rack (real median 4), and boss pierce was
+   always zero (real median 19% where listed) so player shields and
+   resist have been working at full strength against opponents that
+   should be cutting through them. Re-running real encounters with
+   pierce zeroed — exactly what the old loader did — against the value
+   sitting in the file:
+
+   ```
+   10 contested encounters (of 26 scanned; the rest pinned at 0/100%)
+   mean win-rate drop   +22.1 points
+   median drop           +0.3 points
+   ```
+
+   The gap between mean and median is the finding: pierce is
+   **bimodal**, not gradual. Six of ten encounters moved by under a
+   point; the other four moved by 25, 25, 71 and 98 points. It does
+   nothing at all until it cuts past the shield stack, and then it
+   flips the fight. Encounters were screened on the CONTROL arm only —
+   a fight already won 100% of the time cannot get easier — because
+   the first cut skipped that and nine of twelve rows were pinned at a
+   ceiling or floor, making the mean two bosses in a trenchcoat.
+
+   **A correction to the gear/pet section below, from real data.**
+   That section reported a quad-critical pet worth exactly 0.00
+   against "a high-block boss" using a block rating of **400 that I
+   invented**. The real distribution is now readable, and it reframes
+   the claim rather than overturning it:
+
+   ```
+   real block bucket   mean block   triple-double   quad-crit   ratio
+   low    (<100)             33        +0.51         +0.18      0.36
+   mid    (100-570)         199        +0.46         +0.10      0.21
+   high   (>=570)           570        +1.44         +0.05      0.03
+   ```
+
+   Block does suppress the crit pet, monotonically, and the direction
+   held up. But **the crit pet already loses 3-to-1 at a block rating
+   of 33**, which is effectively no block at all — so on the content a
+   player actually fights, the driver is crit SATURATION (the pet buys
+   at the flat end of the rating curve), and block is an additional
+   effect on top rather than the explanation. My earlier emphasis was
+   wrong on that point.
+
+   Two honest limits: the high bucket is a single boss (1 of 6 sampled
+   was killable), so it is suggestive only; and block rating tracks
+   TIER in the real data — every creature with block ≥570 has ≥13675
+   HP — so "high block" and "big HP pool" are not independent knobs.
+
+   > **Corrected by item 2b below.** This section first said the
+   > high-block scenario "sits on content a solo level-100
+   > single-target fire deck cannot clear at all". That was a fact
+   > about the 18-card deck used here, not about the wizard: with a
+   > 23-card deck carrying Balanceblade and a 4-blade stack policy,
+   > Were-Bear Brute (Standard) falls at **100%** with no enchants at
+   > all. The reachability screen above is still the right guard for
+   > this probe — TTK is undefined where the wizard cannot win — but
+   > "unreachable" was overstated as a claim about the configuration.
+
+2b. **The missing player damage: enchantments** (`PCT_ENCHANTS`,
+   `DMG_ENCHANTS`, `enchant_card`, `enchant_probe.py`,
+   `results_enchants.json`). The repo owner identified the gap after
+   seeing the unreachable result above, and it was in the PLAYER model,
+   not the boss model. Real wizards cross-train **Feint** from Death
+   and carry Sun **enchantments**, which are absent from the extracted
+   dump for a structural reason: they modify a card in HAND rather than
+   producing a battle effect, so the extraction pipeline's effect
+   parser never had anything to read. Invisible to the dump by
+   construction, not by oversight.
+
+   Rules as supplied: played from hand onto a **normal deck spell**
+   (never an item or treasure card); 0 pips for the enchant, the spell
+   keeps its own cost; **one enchant per card**; applying one does not
+   consume the round but does consume the card. All four are enforced
+   and tested.
+
+   ```
+   PERCENT   Sharpen Blade / Potent Trap   +10 points, and its own
+                                           STACK IDENTITY
+   DAMAGE    Strong 100, Giant 125, Monstrous 175, Gargantuan 225,
+             Colossal 275, Epic 300        flat BASE damage
+   ```
+
+   The flat family raises a spell's **total cumulative** damage by
+   exactly its bonus, distributed across the damage ops in proportion
+   to their share of that total — not added to each, and not dumped on
+   one. Colossal on Fire Dragon (540 hit + 435 DoT) splits 152/123, so
+   the larger share lands upfront and the rest trails through the
+   ticks. That is not cosmetic: hit and DoT share one op group and
+   therefore one charm/ward snapshot, so the split is
+   multiplier-neutral, but DoT damage lands in later rounds, and
+   delaying part of the bonus costs TTK. Per-pip spells (Heck Hound)
+   are REFUSED rather than guessed at — their total is scaled by pips
+   at cast time, so a flat bonus cannot be folded in correctly.
+
+   The engine needed almost nothing for the percent family.
+   `Card.source` already documented an `enchant-*` provenance tier, and
+   both stack keys — `Hanging`'s `(name, source, sub)` and the
+   duplicate-placement check's — key on it, so the identity split falls
+   out of machinery that was already there:
+
+   ```
+   charms on the wizard:  [('Fireblade', 0.35), ('Fireblade+sharp', 0.45)]
+   wards on the boss:     [('Fire Trap', 0.4), ('Fire Trap+potent', 0.5)]
+   a second PLAIN copy is still refused as a duplicate
+   ```
+
+   **The compounding arithmetic was already right, and is now pinned to
+   the owner's own worked examples** rather than to my arithmetic,
+   because everything else rests on it. Charms and wards both resolve
+   as `mult *= 1 + percent`:
+
+   ```
+   two 35% blades          1.35 x 1.35 = 1.8225   (not 1.70)
+   70% + 80% + 80% feints  1.7 x 1.8 x 1.8 = 5.508 (not 3.30)
+   damage stat 150 -> 160  2.5x -> 2.6x = +4%      (not +10%)
+   ```
+
+   That last one is the one worth internalising: the damage stat enters
+   ADDITIVELY as `1 + damage`, so ten points late in the curve buys 4%,
+   while blades and traps compound. It also means the gear tables in
+   item 9 look more dramatic than they play — a real caveat on that
+   section, and the reason `stat_budget` there uses `1 + damage`.
+
+   **Measured at a matched 30 real deck slots.** An enchanted card is
+   TWO physical cards, so `enchanted_deck_size` counts it twice, and
+   every arm pays for its enchants out of the same filler card — which
+   makes each arm ONE substitution against `plain`. (The first cut let
+   each arm fund itself by cutting something different; `sharp` took it
+   out of traps and the arms became unreadable.)
+
+   ```
+   ordinary content (6 real bosses)      mean TTK    vs plain
+   plain                                   13.80
+   sharpened blades                        11.66      +2.14 turns
+   potent traps + Feint                    11.70      +2.10
+   Colossal nukes                          11.89      +1.91
+   all three                                7.93      +5.86
+
+   endgame bosses, win rate      plain    all
+   Annoushka (17,240 HP)         13.0%   67.3%
+   High Priest Ixta (13,675 HP)  53.0%   89.0%
+   ```
+
+   Each family is worth about two turns on its own and they stack to
+   nearly six — a 43% cut in time-to-kill at zero extra deck size. The
+   endgame bosses go from near-hopeless to routine. This is the missing
+   damage, and it was entirely in the player model.
+
+   Two corrections this forced, both to text committed earlier:
+
+   - Potent Trap on Feint gives **80/40**, not 80/30. An earlier cut
+     boosted only the enemy-facing ward on the theory that a trap
+     enchant should not worsen your own backlash. Wrong — and the
+     enchanted Feint stacks with a plain 70/30 besides, which is where
+     the 5.508x example above comes from.
+   - The tempo assumption flagged as unpriced in the first version of
+     this section is **confirmed**: enchanting does not consume the
+     round. The deck-slot cost was the only cost, and it was already
+     modeled.
+
+   **And the BUILDER takes them, unprompted** (`enchant_deck_probe.py`,
+   `results_enchant_decks.json`). The table above is a statement about
+   decks I wrote; the sharper question is whether the deck search finds
+   the trade on its own, and the trade is genuinely non-obvious — an
+   enchanted card costs TWO physical slots and competes for its base
+   spell's copy limit, so every enchant buys power by shrinking the
+   deck. `legal_pool(..., enchants=True)` offers the variants a wizard
+   of that level owns, `check_legal` counts real slots and per-SPELL
+   copies, `sample_deck` respects both, and nothing says whether to use
+   them.
+
+   ```
+   level world        best flat   plain          free to enchant   gain
+    50   Dragonspyre  none        13 cds/13 sl   13 cds/13 sl   0%  +0.00
+    55   Celestia     Monstrous   13 cds/13 sl   11 cds/21 sl  91%  +6.09
+    70   Zafaria      Colossal    13 cds/13 sl   11 cds/19 sl  73%  +5.72
+   100   Khrysalis    Colossal    12 cds/12 sl   11 cds/21 sl  91%  +4.30
+   120   Mirage       Epic        13 cds/13 sl   12 cds/21 sl  75%  +5.00
+                                                (% enchanted)  (turns)
+   ```
+
+   Level 50 is the control and comes out bit-identical — Sun enchants
+   open at Celestia 51, so the arms cannot differ and any difference
+   would be a bug. From 55 up the builder converts most of the deck and
+   **pays for it by shrinking**: 13 castables in 13 slots becomes 11 in
+   21. It gives up a fifth of its distinct plays to make the rest hit
+   harder, gains 4-6 turns at every level, and still stops well short
+   of the 30-slot cap — consistent with the earlier finding that
+   smaller decks are more consistent.
+
+   Win rate tells the same story but compresses (+21.7 points at 55,
+   +1.5 at 120) purely because the plain arm approaches ceiling; TTK is
+   the honest metric here and it is flat across the range.
+
+   The unlock levels were the weakest input and are no longer guessed:
+   `worlds.py` carries the owner's world/level bands and
+   `ENCHANT_UNLOCK` resolves through it, which caught two real errors —
+   Strong had been placed at 48 (Dragonspyre, the wrong world entirely)
+   and Colossal at 68 when Zafaria opens at 61.
+
+   Still MODELED, and flagged as such: the split within each pair the
+   owner gave as a range (Strong 100 / Giant 125 from "+100 to +125",
+   and so on). An earlier cut also put a flat enchant's whole bonus on
+   the spell's largest op, which over-credited every hybrid nuke by
+   moving DoT damage forward in time; the proportional rule above
+   replaced it and cost the Colossal arm 0.07 turns.
+
 3. Sideboard/discard policy: DONE — every policy now has the TC
    reflex (`tc_reflex`: make room honoring the fresh-TC rule, draw
    one, castable same round), the tabular agent carries TC names AND
@@ -469,7 +702,7 @@ loader report.
    HP-aware state for the per-deck agent (the tabular pilot cannot
    see its own HP yet still beats triage by killing faster — less
    exposure beats more healing at this damage level).
-6. Offline RL ladder — first three rungs SHIPPED (`offline_rl.py`,
+6. Offline RL ladder — SHIPPED, four rungs (`offline_rl.py`,
    `results_offline.json`; the dataset regenerates from seeds and is
    not committed). Design: policy class held fixed (the generalist's
    linear features), so the comparison isolates the DATA SOURCE —
@@ -594,6 +827,86 @@ loader report.
    and evaluation protocols as if they were one column — now labeled,
    guarded by an identity assertion, and recorded with pair, deck,
    n, and protocol in the results file.
+
+   **Rung 4 — IQL-style expectile credit** (`train_iql`,
+   `iql_ladder.py`, `results_iql.json`). The first three rungs assign
+   credit bluntly: BC-filtered keeps or drops a decision by whether
+   its EPISODE was won, so every move in a lucky win is taught and
+   every move in an unlucky loss discarded; CQL-lite needs Q-values at
+   actions nobody played. IQL scores each decision by its own
+   ADVANTAGE over a state baseline and never queries an unplayed
+   action — a property pinned by a test that corrupts the unchosen
+   feature rows and asserts the fitted baseline is bit-identical.
+
+   `tau=0.5` collapses the expectile to least squares, so the same
+   function gives the plain-AWR ablation and the expectile can be
+   separated from the per-decision weighting. Adaptations stated
+   rather than hidden (hence `-lite`, as with CQL-lite): the feature
+   space has action features only, so V is fit on a permutation-
+   invariant summary of the legal actions; and with backward-MC
+   returns already logged there is no TD bootstrap.
+
+   A diagnostic printed BEFORE any policy was evaluated, so it
+   predicts the result instead of explaining it afterwards: V explains
+   R² **0.30 / 0.22 / −0.08** of the return at tau 0.5 / 0.7 / 0.9,
+   while the raw return is **−0.71 on wins against −4.55 on losses**.
+   The outcome, not the move, is where the signal lives — so the
+   advantage is largely the win/loss label re-derived, softly.
+
+   Sixteen held-out pairs, eight to SELECT the arm and eight to
+   REPORT it, five training seeds each:
+
+   ```
+   arm               select   report   +/- seeds
+   BC-all             51.8%    13.2%     1.3
+   BC-filtered        74.4%    67.4%     0.8
+   CQL-lite           72.6%    67.4%     0.4
+   AWR (tau=.5)       64.8%    25.5%     0.4
+   IQL (tau=.7)       66.1%    25.8%     1.0
+   IQL (tau=.9)       66.7%    25.3%     0.6
+   IQL beta=2         81.4%    72.7%     1.2
+   IQL beta=5         78.7%    71.2%     1.2
+   IQL beta=15        77.7%    71.0%     1.5
+   IQL+filter         79.3%    71.6%     1.5
+   IQL+filter beta=5  80.3%    70.3%     0.4
+   noise floor +/-1.5 points on the report split
+   ```
+
+   Selected on SELECT: IQL beta=2, scoring **72.7%** on REPORT against
+   BC-filtered's **67.4%** — **+5.3 points**, clearing the floor. The
+   selection was free: best-on-REPORT was the same arm, so the price
+   of honest selection here was 0.0 points.
+
+   Three conclusions, two of them deflationary about IQL specifically:
+
+   - **Advantage weighting does beat the episode filter** (+5.3),
+     which is the rung's reason to exist.
+   - **The expectile — the thing that makes IQL IQL rather than AWR —
+     contributes nothing.** tau 0.5 → 0.7 is +0.2 points and 0.7 →
+     0.9 is −0.4, both under the floor. What wins is advantage-
+     weighted cloning with a correctly scaled temperature, and the
+     optimistic value fit is decoration.
+   - **The two credit schemes do not compose.** Adding the episode
+     filter on top of a well-scaled beta is −0.9 points, under the
+     floor: once the advantage weights are sharp enough they already
+     encode what the win/loss label was telling you.
+
+   beta is the whole story, and it is brutally sensitive: 0.57 → 5 is
+   **+45.5 points**. Anyone reproducing this needs to tune it on a
+   validation split.
+
+   **This probe reproduced, in miniature, the exact mistake this repo
+   has retracted three conclusions for** — recorded because catching
+   it inside one probe is the only reason it is not a fourth
+   retraction. beta was fixed a priori at 1/sd(advantage) = 0.57
+   specifically to avoid tuning against the test set. It lost to
+   BC-filtered by 8.2 points. A sweep run as a confound check then
+   found beta=2 winning by +6.8 — on the same eight pairs it was
+   scored on, which is not a result. The SELECT/REPORT split exists
+   because of that, and the +5.3 above is the number that survived it.
+   Note also how far the low-beta arms fall between splits (66% →
+   25%): a gentle advantage weighting produces a policy that does not
+   transfer, and a single held-out set would have hidden that.
 7. Deck × policy bilevel optimization. First results (death vs live
    Jade Oni): the searched 9-card deck reaches **100% win / TTK 6.45**
    vs the hand-built 12-card oneshot's 92.8% / 9.95 — smaller AND
@@ -862,6 +1175,14 @@ loader report.
    crit era (L120)               635        +0.68           +0.14
    crit era, high block (L100)   428        +0.86           +0.00
    ```
+
+   > **Later correction (roadmap 2).** The "high block" row uses a
+   > block rating of 400 that I invented before the real per-creature
+   > ratings were wired up. Against the actual distribution the
+   > direction holds but the emphasis was wrong: the crit pet already
+   > loses 3-to-1 at a real block rating of 33, so crit SATURATION is
+   > the driver on reachable content and block is an effect on top.
+   > See roadmap item 2 for the measured buckets.
 
    The crit pet's value decays monotonically as the wizard's own gear
    accumulates crit rating — 0.72 turns at rating 117, 0.25 at 428,

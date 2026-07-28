@@ -39,7 +39,7 @@ archmastery/shadow/school pips (post-classic era), enemy decks are flat
 scripted hits + cheats, no player-side team play (allies are minions only).
 """
 import copy, json, random
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import content
 
@@ -112,6 +112,175 @@ class Card:
     @property
     def stack_key(self):
         return (self.name, self.source)
+
+
+# --------------------------------------------------------- enchantments
+#
+# Sun-school enchantments are absent from the extracted dump for a
+# structural reason: they modify a card in HAND rather than producing a
+# battle effect, so the effect parser never had anything to read. They
+# are also where a large slice of real player damage lives.
+#
+# Rules, as supplied by the repo owner:
+#   - played from hand onto a NORMAL DECK SPELL in hand; item cards and
+#     treasure cards cannot be enchanted
+#   - the enchant costs 0 pips; the enchanted spell keeps the original's
+#     pip cost
+#   - ONE enchant per card — they do not stack on each other
+#   - applying one does NOT consume the round, but it does consume the
+#     enchantment card (hence the deck-slot accounting below)
+#
+# Two families:
+#   PERCENT  Sharpen Blade / Potent Trap: +10 points to the charm or
+#            ward, and — the part that matters far more — the enchanted
+#            card gets its OWN STACK IDENTITY, so it sits alongside the
+#            plain copy instead of being refused as a duplicate. On
+#            Feint that means 80/40 stacking with a plain 70/30, and
+#            because wards COMPOUND the four together are
+#            1.7 * 1.8 * 1.7 * 1.8 rather than anything additive.
+#   DAMAGE   Strong/Giant/Monstrous/Gargantuan/Colossal/Epic: flat base
+#            damage added BEFORE blades and traps multiply, which is why
+#            a +275 Colossal on a mid-size nuke outruns any percentage
+#            the gear sheet can offer.
+#
+# `Card.source` already carried an `enchant-*` provenance tier, and both
+# stack keys — Hanging's (name, source, sub) and the duplicate-placement
+# check's — key on it, so the identity split falls out of existing
+# machinery.
+PCT_ENCHANTS = {"Sharpen Blade": ("blade", 0.10, "sharp"),
+                "Potent Trap": ("trap", 0.10, "potent")}
+# Flat base damage. The owner gave these as pairs with a range each
+# ("Strong / Giant: +100 to +125"); the split within a pair is the
+# conventional one and is INFERRED, the pair bounds are not.
+DMG_ENCHANTS = {"Strong": 100.0, "Giant": 125.0, "Monstrous": 175.0,
+                "Gargantuan": 225.0, "Colossal": 275.0, "Epic": 300.0}
+ENCHANTS = dict(PCT_ENCHANTS)
+ENCHANT_TAGS = ({t for _, _, t in PCT_ENCHANTS.values()}
+                | {n.lower() for n in DMG_ENCHANTS})
+_ENCHANTABLE_SOURCES = ("deck",)
+
+
+def _check_enchantable(card, enchant):
+    if card.source not in _ENCHANTABLE_SOURCES:
+        raise ValueError(
+            f"{enchant} cannot enchant {card.name}: enchantments only "
+            f"apply to normal deck spells (source={card.source!r})")
+
+
+def enchant_card(card, enchant):
+    """A derived Card carrying the enchant and its own stack identity.
+
+    Raises if the card is already enchanted (one per card), if it is a
+    treasure or item card, or if the enchant does not match its kind.
+    """
+    _check_enchantable(card, enchant)
+    if enchant in PCT_ENCHANTS:
+        kind, bonus, tag = PCT_ENCHANTS[enchant]
+        if card.kind != kind:
+            raise ValueError(f"{enchant} enchants {kind} cards, "
+                             f"not {card.kind} ({card.name})")
+        ops, touched = [], False
+        for o in card.ops:
+            o = dict(o)
+            if o.get("percent"):
+                # EVERY percent op, both sides. Potent Trap on Feint
+                # gives 80/40, not 80/30 — the backlash rides along.
+                o["percent"] = round(o["percent"] + bonus, 4)
+                touched = True
+            ops.append(o)
+        if not touched:
+            raise ValueError(f"{enchant} found no percent op on "
+                             f"{card.name}")
+        return replace(card, name=f"{card.name}+{tag}", ops=ops,
+                       percent=round(card.percent + bonus, 4),
+                       source=f"enchant-{tag}")
+
+    if enchant not in DMG_ENCHANTS:
+        raise KeyError(f"unknown enchantment {enchant!r}")
+    if card.kind not in ("damage", "drain"):
+        raise ValueError(f"{enchant} enchants damage cards, not "
+                         f"{card.kind} ({card.name})")
+    bonus, tag = DMG_ENCHANTS[enchant], enchant.lower()
+    # The flat bonus raises the spell's TOTAL cumulative damage by
+    # exactly `bonus` and is DISTRIBUTED across its damage ops in
+    # proportion to their share of that total — not added to each, and
+    # not dumped on one. On a hybrid like Fire Dragon (540 hit + 435
+    # DoT) Colossal's +275 splits 152/123, so the larger share lands on
+    # the upfront hit and the rest trails through the ticks.
+    #
+    # This is not cosmetic. Hit and DoT sit in the same op group, so
+    # they share one charm/ward snapshot and the redistribution is
+    # multiplier-neutral — but DoT damage arrives over later rounds, so
+    # moving part of the bonus into the ticks DELAYS it and costs TTK.
+    # An earlier cut put the whole bonus on the largest op, which
+    # over-credited every hybrid nuke.
+    fields = []
+    for i, o in enumerate(card.ops):
+        if o["op"] in ("hit", "drain") and o.get("amount") is not None:
+            fields.append((i, "amount", o["amount"]))
+        elif o["op"] == "dot" and o.get("total") is not None:
+            if o.get("per_pip"):
+                raise ValueError(
+                    f"{enchant} on a per-pip spell ({card.name}) is not "
+                    f"modeled: the flat bonus is not per-pip, but this "
+                    f"op's total is scaled by pips at cast time")
+            fields.append((i, "total", o["total"]))
+    if not fields:
+        raise ValueError(f"{enchant} found no damage op on {card.name}")
+    base_total = sum(v for _, _, v in fields)
+    if base_total <= 0:
+        raise ValueError(f"{enchant} cannot scale {card.name}: "
+                         f"no positive base damage")
+    shares = {i: bonus * v / base_total for i, _, v in fields}
+    # assign the rounding remainder to the largest component so the
+    # spell's total rises by exactly `bonus`
+    biggest = max(fields, key=lambda f: f[2])[0]
+    shares[biggest] += bonus - sum(shares.values())
+    ops = []
+    for i, o in enumerate(card.ops):
+        o = dict(o)
+        if i in shares:
+            fld = next(f for j, f, _ in fields if j == i)
+            o[fld] = round(o[fld] + shares[i], 4)
+        ops.append(o)
+    return replace(card, name=f"{card.name}+{tag}", ops=ops,
+                   damage=card.damage + bonus,
+                   source=f"enchant-{tag}")
+
+
+def register_enchants(cards, names, enchant):
+    """Add enchanted copies of `names` to a card dict (mutated) and
+    return the new names, ready to drop into a decklist.
+
+    DECK COST: an enchanted card is TWO cards in the real deck — the
+    spell and the enchantment that upgrades it. Callers doing deck-size
+    accounting must count it twice; `enchanted_deck_size` does."""
+    out = []
+    for n in names:
+        c = enchant_card(cards[n], enchant)
+        cards[c.name] = c
+        out.append(c.name)
+    return out
+
+
+def is_enchanted(name):
+    return "+" in name and name.rsplit("+", 1)[-1] in ENCHANT_TAGS
+
+
+def enchant_base(name):
+    """The underlying spell of a (possibly enchanted) decklist entry.
+
+    Load-bearing for deck legality: the physical deck holds N copies of
+    Fireblade and the enchanting happens in HAND, so `Fireblade` and
+    `Fireblade+sharp` are the same spell competing for the same
+    per-spell copy limit — they are not two different cards."""
+    return name.rsplit("+", 1)[0] if is_enchanted(name) else name
+
+
+def enchanted_deck_size(decklist):
+    """Real deck slots used: an enchanted entry costs 2 (spell +
+    enchantment), a plain one costs 1."""
+    return sum(2 if is_enchanted(n) else 1 for n in decklist)
 
 
 def _kind_from_ops(ops):
@@ -478,6 +647,12 @@ class Boss:
                                 # "imperfect but state-aware" knob
     pip_chance: float = 0.40    # enemy power-pip odds (not public;
                                 # modeled at the player base cap)
+    start_pips: int = 0         # SCRAPED (98.8% coverage): real bosses
+                                # open the fight with pips already on
+                                # the rack. Only bites for pool-driven
+                                # bosses — a flat-`dmg` boss spends
+                                # nothing, so giving it pips would be
+                                # cosmetic.
 
     def incoming_mult(self, spell_school):
         if self.resist_map is not None or self.boost_map is not None:
@@ -514,7 +689,8 @@ class Boss:
                      archetype=self.archetype,
                      discipline=self.discipline,
                      power_pip_chance=self.pip_chance
-                     if self.pool else 0.0)
+                     if self.pool else 0.0,
+                     norm_pips=self.start_pips if self.pool else 0)
 
 
 # ---------------------------------------------------------------- game state

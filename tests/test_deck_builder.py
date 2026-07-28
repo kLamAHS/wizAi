@@ -206,3 +206,66 @@ def test_random_boss_shape():
     b = random_boss(rng)
     assert 500 <= b.hp <= 8000
     assert b.school in b.resist_map and 0.2 <= b.resist_map[b.school] <= 0.8
+
+
+# ---- enchantments in the buildable pool ------------------------------
+
+def test_enchants_are_opt_in_and_bit_identical_when_off():
+    """Every deck result predating enchantments must survive them."""
+    for lvl in (30, 60, 100, None):
+        assert legal_pool(CARDS, "fire", level=lvl) == \
+            legal_pool(CARDS, "fire", level=lvl, enchants=False)
+
+
+def test_enchanted_pool_respects_the_unlock_levels():
+    from deck_builder import ENCHANT_UNLOCK, _best_damage_enchant
+    # Sun enchants open with Celestia at 51, so all of Dragonspyre is
+    # a clean control band.
+    lo = legal_pool(CARDS, "fire", level=50, enchants=True)
+    assert not any("+" in n for n in lo)          # nothing unlocked yet
+    mid = legal_pool(CARDS, "fire", level=51, enchants=True)
+    assert "Fireblade+sharp" in mid and "Fire Trap+potent" in mid
+    assert _best_damage_enchant(50) is None
+    assert _best_damage_enchant(51) == "Strong"
+    assert _best_damage_enchant(70) == "Colossal"
+    assert _best_damage_enchant(120) == "Epic"
+    assert ENCHANT_UNLOCK["Epic"] > ENCHANT_UNLOCK["Colossal"]
+
+
+def test_only_the_best_flat_enchant_is_offered():
+    """Players carry their best, not their whole collection — offering
+    every tier would blow up the candidate space for nothing."""
+    p = legal_pool(CARDS, "fire", level=120, enchants=True)
+    tiers = {n.rsplit("+", 1)[-1] for n in p if "+" in n}
+    assert "epic" in tiers
+    assert not (tiers & {"strong", "giant", "monstrous", "gargantuan",
+                         "colossal"})
+
+
+def test_legality_counts_real_slots_and_per_spell_copies():
+    from w101_sim import enchanted_deck_size
+    assert check_legal(["Fireblade"] * 3, 16, 3)
+    assert not check_legal(["Fireblade"] * 4, 16, 3)
+    # an enchanted copy is the SAME spell competing for the same limit
+    assert not check_legal(["Fireblade"] * 2 + ["Fireblade+sharp"] * 2,
+                           16, 3)
+    assert check_legal(["Fireblade"] * 2 + ["Fireblade+sharp"], 16, 3)
+    # and it costs two physical slots
+    assert enchanted_deck_size(["Fireblade+sharp"] * 5) == 10
+    assert not check_legal(["Fireblade+sharp"] * 5, 9, 9)
+    assert check_legal(["Fireblade+sharp"] * 5, 10, 9)
+
+
+def test_sampled_enchanted_decks_stay_legal():
+    pool = legal_pool(CARDS, "fire", level=100, enchants=True)
+    boss = Boss("B", 6000, "death", 0)
+    rng = random.Random(4)
+    saw_enchant = False
+    for _ in range(60):
+        dl = sample_deck(pool, "fire", boss, rng, capacity=24,
+                         copy_limit=3)
+        if not dl:
+            continue
+        assert check_legal(dl, 24, 3), dl
+        saw_enchant |= any("+" in n for n in dl)
+    assert saw_enchant, "enchanted cards never sampled"
