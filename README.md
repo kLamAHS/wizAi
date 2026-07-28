@@ -764,6 +764,124 @@ loader report.
    That is a confound in the apparatus, not a null result — recorded
    here because it was very nearly published as one.
 
+9. **Gear and pet stat layer, levels 1–120** — SHIPPED (`gear.py`,
+   `gear_probe.py`, `results_gear.json`), from the July 2026 gear/pet
+   research report.
+
+   `player_curves.py` had stopped at base HP and the base power-pip
+   rule with an explicit refusal: practical combat stats "are
+   gear-dominated and have NO defensible base curve; they are
+   deliberately absent here." `gear.py` is that missing layer —
+   damage, resist, accuracy, critical rating, health and power pip on
+   the report's own min/median/max envelope at every 5 levels, plus
+   the pet talent ranges and the two end-state pet builds.
+
+   Provenance is split, because the report splits it. The gear tables
+   are a MODELED benchmark envelope — the report says outright it is
+   "not a claim that every item in the database was exhaustively
+   scraped" — while the pet talent ranges are SOURCED from wiki
+   calculator pages. That distinction is worth keeping because the pet
+   side then cross-checks itself: the report quotes ~22% attack / 15%
+   defense for a finished triple-double, and that is exactly
+   Dealer 10 + Giver 6 + Pain-Giver 6 and Proof 10 + Defy 5 from the
+   independently-sourced talent ranges. Two of its sources agreeing is
+   a real check, so it is a test rather than a comment.
+
+   Three things the module refuses to invent, in `player_curves.py`'s
+   spirit: **block** (the report tracks the stat but publishes no
+   envelope, so nothing emits one without an explicit opt-in), the
+   **universal/school damage split** (built from the only two anchors
+   that exist — Sky Iron Hasta's +10% universal at 30, Wintertusk's
+   all-school +46% at 56 — and linear between them), and values
+   **above 120**, which are held rather than extrapolated.
+
+   One conflict is left visible rather than smoothed: the report's
+   power-pip column reads as gear-only at low level (5% at L20) but as
+   a character-sheet total at high level (100% at L120), and 5% cannot
+   be a total when the documented base rule already gives 10% at L20.
+   `power_pip` takes whichever curve is higher and prefers the
+   better-sourced base rule where they disagree; `gear_power_pip`
+   still exposes the raw column.
+
+   The load-bearing safety property is the crit gate.
+   `Actor.crit_chance` holds a probability in classic and a RATING
+   only when the ruleset installs a rating resolver, so emitting a
+   397 rating into a classic sim would mean "always crit". Gear
+   therefore emits crit only when `rules.crit_resolver` is set, and
+   `rules=None` is criticals-free — which is why every pre-gear number
+   in this repo is untouched by the module existing.
+
+   **Where gear budget becomes combat power — not where the tables
+   say.** The report's headline is that progression is "a series of
+   benchmark jumps" at 30, 56/60, 90, 100, 110, 120. Testing that
+   directly would be circular: the jumps are in the tables and the
+   tables are transcribed. The non-circular question is whether a jump
+   in stat BUDGET converts into a jump in combat. Measured as kill
+   capacity — the boss HP a fixed deck and policy can kill inside a
+   turn budget — at three turn budgets:
+
+   ```
+   turn budget   steps worth >=15% capacity            plateaus
+    6-turn       50->55, 75->80, 80->85, 85->90, 90->95   3.7% avg
+    8-turn       20->25, 25->30, 75->80, 85->90 (80%)     3.5% avg
+   10-turn       45->50, 60->65, 80->85                   5.0% avg
+
+   biggest stat-budget jumps: 55->60 (31%), 50->55 (24%), 45->50 (12%)
+   felt jumps common to all three turn budgets: NONE
+   ```
+
+   Progression really is discrete — a few 17–80% steps separated by
+   3–5% plateaus, never a smooth curve. But **no felt jump survives a
+   change in the turn budget**, and the gear tables' own biggest jump
+   (55→60, +31% budget) is a felt step only at the 6-turn budget. The
+   steps are a property of the CAST ECONOMY — how many nukes fit in
+   the turns available and how many the boss survives — not of the
+   gear ladder. The report is right that the game moves in jumps and
+   the jumps a player feels are not the ones in its tables. Caveat
+   that cuts the same way: this is one deck and one scripted policy
+   family, and a different deck has a different cast economy.
+
+   Getting there required two apparatus fixes worth recording, both
+   the same failure in different clothes. TTK against a fixed dummy is
+   quantized by the blade-stack cycle: at L120 a 6000 HP dummy made
+   the fight pip-bound, so a +22% damage pet shaved exactly 0.00 turns
+   (10000 gave +0.01, 16000 gave +1.57). Scaling the dummy to the stat
+   budget then landed the criticals-off arm exactly on a cycle
+   boundary — 9.00 turns for all three pets. Neither is a fact about
+   pets. Hence capacity rather than TTK for Q1, and a spread of dummy
+   sizes rather than one for Q2.
+
+   **Crit pets are a conditional buy; damage pets are not.** The two
+   end-state builds, as turns saved on a damage race:
+
+   ```
+   era / boss              gear crit   triple-double   quad-critical
+   no criticals (L100)             0        +0.77           +0.00
+   crit era (L60)                117        +0.55           +0.72
+   crit era (L100)               428        +0.25           +0.25
+   crit era (L120)               635        +0.68           +0.14
+   crit era, high block (L100)   428        +0.86           +0.00
+   ```
+
+   The crit pet's value decays monotonically as the wizard's own gear
+   accumulates crit rating — 0.72 turns at rating 117, 0.25 at 428,
+   0.14 at 635 — because the rating curve is diminishing and the pet
+   is buying at the flat end. It is worth **exactly** 0.00 in a
+   criticals-off era and **exactly** 0.00 against a high-block boss,
+   both of which are mechanical zeroes rather than small numbers. It
+   beats the damage pet only in the one arm where gear crit is still
+   low (L60, ratio 1.31).
+
+   Stated honestly in the other direction: the triple-double column
+   wobbles between +0.25 and +0.86 with a per-dummy spread (±0.48 to
+   ±0.97) as wide as its own mean, so **no trend can be claimed for
+   it** — only that it is always positive and never zero. The quad-
+   critical column carries spreads of ±0.00 to ±0.39, which is what
+   lets its decay clear its own noise floor. And on the survival axis
+   the two are indistinguishable: +42.8 vs +42.2 win-rate points over
+   no pet, a 5-point resist difference that this apparatus cannot
+   resolve. The choice between them is made on offense or not at all.
+
 ## Boundary
 
 Fully offline simulator and research benchmark. The classic ruleset is
