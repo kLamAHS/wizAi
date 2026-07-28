@@ -3,82 +3,28 @@
   "capacity_real_slots": 30,
   "copy_limit": 3,
   "levels": [
-   40,
    50,
+   55,
    70,
    100,
    120
   ],
   "unlocks": {
-   "Sharpen Blade": 50,
-   "Potent Trap": 50,
-   "Strong": 48,
-   "Giant": 52,
+   "Sharpen Blade": 51,
+   "Potent Trap": 51,
+   "Strong": 51,
+   "Giant": 53,
    "Monstrous": 55,
-   "Gargantuan": 58,
-   "Colossal": 68,
-   "Epic": 100
+   "Gargantuan": 57,
+   "Colossal": 61,
+   "Epic": 101
   },
   "confidence": "enchant magnitudes and rules as supplied by the repo owner; level floors INFERRED from the worlds he named"
  },
  "by_level": {
-  "40": {
+  "50": {
    "offered": 0,
    "best_damage_enchant": null,
-   "plain": {
-    "deck": [
-     "Phoenix",
-     "Heck Hound",
-     "Balanceblade",
-     "Balanceblade",
-     "Fireblade",
-     "Fireblade",
-     "Tri Blade",
-     "Fire Trap",
-     "Fire Trap",
-     "Feint",
-     "Fuel",
-     "Fire Prism",
-     "Fire Prism",
-     "Pixie"
-    ],
-    "castables": 14,
-    "slots": 14,
-    "enchanted_cards": 0,
-    "enchanted_share": 0.0,
-    "win": 0.6885,
-    "ttk": 12.594771241830065
-   },
-   "free to enchant": {
-    "deck": [
-     "Phoenix",
-     "Heck Hound",
-     "Balanceblade",
-     "Balanceblade",
-     "Fireblade",
-     "Fireblade",
-     "Tri Blade",
-     "Fire Trap",
-     "Fire Trap",
-     "Feint",
-     "Fuel",
-     "Fire Prism",
-     "Fire Prism",
-     "Pixie"
-    ],
-    "castables": 14,
-    "slots": 14,
-    "enchanted_cards": 0,
-    "enchanted_share": 0.0,
-    "win": 0.6885,
-    "ttk": 12.594771241830065
-   },
-   "ttk_gain": 0.0,
-   "win_gain": 0.0
-  },
-  "50": {
-   "offered": 21,
-   "best_damage_enchant": "Strong",
    "plain": {
     "deck": [
      "Fire Dragon",
@@ -104,10 +50,63 @@
    },
    "free to enchant": {
     "deck": [
-     "Fire Dragon+strong",
-     "Fire Dragon+strong",
-     "Fire Dragon+strong",
-     "Helephant",
+     "Fire Dragon",
+     "Fire Dragon",
+     "Heck Hound",
+     "Phoenix",
+     "Balanceblade",
+     "Tri Blade",
+     "Fuel",
+     "Feint",
+     "Feint",
+     "Hex",
+     "Hex",
+     "Fire Prism",
+     "Fire Prism"
+    ],
+    "castables": 13,
+    "slots": 13,
+    "enchanted_cards": 0,
+    "enchanted_share": 0.0,
+    "win": 0.687,
+    "ttk": 17.404657933042213
+   },
+   "ttk_gain": 0.0,
+   "win_gain": 0.0,
+   "world": "Dragonspyre"
+  },
+  "55": {
+   "offered": 21,
+   "best_damage_enchant": "Monstrous",
+   "plain": {
+    "deck": [
+     "Fire Dragon",
+     "Fire Dragon",
+     "Heck Hound",
+     "Phoenix",
+     "Balanceblade",
+     "Tri Blade",
+     "Fuel",
+     "Feint",
+     "Feint",
+     "Hex",
+     "Hex",
+     "Fire Prism",
+     "Fire Prism"
+    ],
+    "castables": 13,
+    "slots": 13,
+    "enchanted_cards": 0,
+    "enchanted_share": 0.0,
+    "win": 0.766,
+    "ttk": 17.283942558746737
+   },
+   "free to enchant": {
+    "deck": [
+     "Fire Dragon+monstrous",
+     "Fire Dragon+monstrous",
+     "Fire Dragon+monstrous",
+     "Phoenix+monstrous",
      "Fireblade+sharp",
      "Fireblade+sharp",
      "Feint+potent",
@@ -117,14 +116,15 @@
      "Fire Prism"
     ],
     "castables": 11,
-    "slots": 20,
-    "enchanted_cards": 9,
-    "enchanted_share": 0.8181818181818182,
-    "win": 0.9735,
-    "ttk": 12.156137647663071
+    "slots": 21,
+    "enchanted_cards": 10,
+    "enchanted_share": 0.9090909090909091,
+    "win": 0.9825,
+    "ttk": 11.189312977099236
    },
-   "ttk_gain": 5.248520285379142,
-   "win_gain": 28.65
+   "ttk_gain": 6.094629581647501,
+   "win_gain": 21.650000000000002,
+   "world": "Celestia"
   },
   "70": {
    "offered": 24,
@@ -174,11 +174,12 @@
     "ttk": 10.162067235323633
    },
    "ttk_gain": 5.719563138769052,
-   "win_gain": 10.100000000000009
+   "win_gain": 10.100000000000009,
+   "world": "Zafaria"
   },
   "100": {
    "offered": 25,
-   "best_damage_enchant": "Epic",
+   "best_damage_enchant": "Colossal",
    "plain": {
     "deck": [
      "Fire Dragon",
@@ -203,10 +204,10 @@
    },
    "free to enchant": {
     "deck": [
-     "Fire Dragon+epic",
-     "Fire Dragon+epic",
-     "Fire Dragon+epic",
-     "Rain of Fire+epic",
+     "Fire Dragon+colossal",
+     "Fire Dragon+colossal",
+     "Fire Dragon+colossal",
+     "Rain of Fire+colossal",
      "Fireblade+sharp",
      "Fireblade+sharp",
      "Feint+potent",
@@ -219,11 +220,12 @@
     "slots": 21,
     "enchanted_cards": 10,
     "enchanted_share": 0.9090909090909091,
-    "win": 0.999,
-    "ttk": 10.032532532532533
+    "win": 0.9985,
+    "ttk": 10.099649474211317
    },
-   "ttk_gain": 4.368931137096322,
-   "win_gain": 4.249999999999998
+   "ttk_gain": 4.301814195417538,
+   "win_gain": 4.200000000000004,
+   "world": "Khrysalis"
   },
   "120": {
    "offered": 25,
@@ -274,7 +276,8 @@
     "ttk": 10.122428499749121
    },
    "ttk_gain": 5.004353577643954,
-   "win_gain": 1.4500000000000068
+   "win_gain": 1.4500000000000068,
+   "world": "Mirage"
   }
  }
 }

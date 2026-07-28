@@ -219,11 +219,14 @@ def test_enchants_are_opt_in_and_bit_identical_when_off():
 
 def test_enchanted_pool_respects_the_unlock_levels():
     from deck_builder import ENCHANT_UNLOCK, _best_damage_enchant
-    lo = legal_pool(CARDS, "fire", level=40, enchants=True)
+    # Sun enchants open with Celestia at 51, so all of Dragonspyre is
+    # a clean control band.
+    lo = legal_pool(CARDS, "fire", level=50, enchants=True)
     assert not any("+" in n for n in lo)          # nothing unlocked yet
-    mid = legal_pool(CARDS, "fire", level=50, enchants=True)
+    mid = legal_pool(CARDS, "fire", level=51, enchants=True)
     assert "Fireblade+sharp" in mid and "Fire Trap+potent" in mid
-    assert _best_damage_enchant(50) == "Strong"
+    assert _best_damage_enchant(50) is None
+    assert _best_damage_enchant(51) == "Strong"
     assert _best_damage_enchant(70) == "Colossal"
     assert _best_damage_enchant(120) == "Epic"
     assert ENCHANT_UNLOCK["Epic"] > ENCHANT_UNLOCK["Colossal"]

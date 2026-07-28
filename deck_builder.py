@@ -37,6 +37,7 @@ from w101_sim import (Sim, evaluate, evaluate_paired, make_blade_stack,
                       enchant_base, enchant_card, enchanted_deck_size,
                       is_enchanted)
 from rl_agent import QAgent
+from worlds import level_for
 
 
 # ------------------------------------------------------------- trainable set
@@ -145,15 +146,24 @@ def _player_plausible(name, c):
     return True
 
 
-# Sun enchantments unlock by world, and the owner named the worlds
-# rather than the levels: Strong/Giant "early Celestia", Monstrous/
-# Gargantuan "mid-level Celestia", Colossal "Zafaria", Epic
-# "Arcanum/Polaris". The level floors below are INFERRED from those
-# world bands (Celestia 48-60, Zafaria 60-70, Polaris 100-110) and are
-# the least-sourced numbers in this module.
-ENCHANT_UNLOCK = {"Sharpen Blade": 50, "Potent Trap": 50,
-                  "Strong": 48, "Giant": 52, "Monstrous": 55,
-                  "Gargantuan": 58, "Colossal": 68, "Epic": 100}
+# Sun enchantments unlock by WORLD — the owner named worlds, not
+# levels: Sharpen/Potent are Celestia Sun spells, Strong/Giant "early
+# Celestia", Monstrous/Gargantuan "mid-level Celestia", Colossal a
+# "Zafaria upgrade", Epic "Arcanum/Polaris". Resolved through
+# worlds.level_for so the mapping lives in one table instead of being
+# guessed per spell. An earlier cut put Strong at 48 and Colossal at
+# 68, both of which fell in the WRONG WORLD once the real bands were
+# supplied (48 is Dragonspyre; Zafaria opens at 61).
+ENCHANT_UNLOCK = {
+    "Sharpen Blade": level_for("Celestia", "start"),      # 51
+    "Potent Trap": level_for("Celestia", "start"),        # 51
+    "Strong": level_for("Celestia", "early"),             # 51
+    "Giant": level_for("Celestia", "early") + 2,          # 53
+    "Monstrous": level_for("Celestia", "mid"),            # 56
+    "Gargantuan": level_for("Celestia", "mid") + 2,       # 58
+    "Colossal": level_for("Zafaria", "start"),            # 61
+    "Epic": level_for("Polaris", "start"),                # 101
+}
 
 
 def _best_damage_enchant(level):

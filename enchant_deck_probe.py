@@ -14,13 +14,15 @@ wizard of that level owns, `check_legal` counts real slots and
 per-SPELL copies, and `sample_deck` respects both. Nothing tells the
 builder whether to use them.
 
-Swept by level, because the enchants unlock across Celestia to Polaris
-and the answer should move with them: below 48 there is nothing to
-choose, and the best flat enchant grows from Strong to Epic.
+Swept one level per world, each at the END of its world so the wizard
+owns everything that world offers. Level 50 (Dragonspyre) is a clean
+CONTROL: Sun enchants open at Celestia 51, so the two arms cannot
+differ there and any difference would be a bug.
 
 Confidence: the enchant magnitudes and rules are as supplied by the
-repo owner; the LEVEL FLOORS are inferred from the worlds he named
-(see ENCHANT_UNLOCK) and are the least-sourced input here.
+repo owner, and the unlock levels now resolve through `worlds.py`
+against the level bands he supplied — so the floors are sourced to a
+world boundary rather than guessed.
 """
 import copy
 import json
@@ -32,10 +34,15 @@ from deck_builder import (ENCHANT_UNLOCK, build_deck, legal_pool,
                           _best_damage_enchant)
 from gear import loadout
 from w101_sim import Boss, enchant_base, enchanted_deck_size, is_enchanted
+from worlds import world_for
 
 cards = load_spells_full()
 t0 = time.time()
-LEVELS = [40, 50, 70, 100, 120]
+# one level per enchant tier, each the END of its world so the
+# wizard owns everything that world offers: 50 Dragonspyre (a
+# clean control — Sun enchants open at Celestia 51), 55 mid
+# Celestia, 70 Zafaria, 100 Khrysalis, 120 Mirage.
+LEVELS = [50, 55, 70, 100, 120]
 CAPACITY = 30
 
 
@@ -74,8 +81,9 @@ for lvl in LEVELS:
     row["ttk_gain"] = a["ttk"] - b["ttk"]
     row["win_gain"] = (b["win"] - a["win"]) * 100
     report[lvl] = row
-    print(f"L{lvl:<4} best flat enchant {str(best):<11} "
-          f"{offered:2d} enchanted cards offered", flush=True)
+    row["world"] = world_for(lvl)
+    print(f"L{lvl:<4} {str(world_for(lvl)):<12} best flat enchant "
+          f"{str(best):<11} {offered:2d} offered", flush=True)
     print(f"      plain           {a['castables']:2d} cards / "
           f"{a['slots']:2d} slots   win {a['win']*100:5.1f}%  "
           f"ttk {a['ttk']:5.2f}", flush=True)
@@ -90,7 +98,8 @@ for lvl in LEVELS:
     r = report[lvl]
     b = r["free to enchant"]
     picked = sorted({n for n in b["deck"] if is_enchanted(n)})
-    print(f"  L{lvl:<4} {b['enchanted_share']*100:4.0f}% enchanted   "
+    print(f"  L{lvl:<4} {str(r['world']):<12} "
+          f"{b['enchanted_share']*100:4.0f}% enchanted   "
           f"ttk {r['ttk_gain']:+5.2f}  win {r['win_gain']:+5.1f} pts   "
           f"{picked or 'none'}", flush=True)
 
