@@ -19,20 +19,28 @@ student.
                          from the linear solution
 
 The ablation is the whole point: w0 trains in both arms, so without
-it a recurrent-vs-linear gap cannot be attributed to memory. Result
-(see results_sequence_model.json): the ablation captures nearly all
-of the gain, so the plateau was an OPTIMIZER limit, not the capacity
-limit the earlier README claimed.
+it a recurrent-vs-linear gap cannot be attributed to memory.
+
+RESULT (results_sequence_model.json), budget-matched at 11 candidate
+checkpoints per arm: linear 75.1 / ablation 75.7 / recurrent 71.8 on
+the held-out 8; 54.8 / 76.8 / 80.9 on the X-pip bar. So capacity is
+NOT the constraint (a memoryless linear policy clears the bar the
+class supposedly could not express), recurrence is not the answer
+either (+4 there, −4 in aggregate), and the aggregate optimizer gap
+is 0.6 points. An earlier version of this file reported a 7.6-point
+optimizer gap; that was an artifact of an unequal selection budget
+(5 candidates vs 11) — see selection_study.py for how weak the
+validation signal actually is.
 
 Evaluation reproduces the exact 8 held-out pairs of results_offline
-(seed 777, per-pair expert >= 20%), plus the frozen X-pip bar
-(per-deck RL 85.1%, search(k=16) 72.0%, linear generalist 53%).
-Both students get the same validation-based model selection on
-SEPARATE pairs (seed 5150); the test pairs are never used for
-selection, and the held-out table is scored with paired seeds so the
-two students face identical draws.
+(seed 777, per-pair expert >= 20%), plus the frozen X-pip bar. Both
+students get the same validation-based model selection on SEPARATE
+pairs (seed 5150), with the same number of candidates; the test pairs
+are never used for selection, and the held-out table is scored with
+paired seeds so the arms face identical draws.
 """
 import json
+import os
 import random
 import time
 
@@ -49,37 +57,50 @@ from w101_sim import Sim, evaluate, evaluate_paired, make_blade_stack
 cards = load_spells_full()
 t0 = time.time()
 
-print("[1/5] demonstrations: search teachers + RL teachers, unioned",
-      flush=True)
-s_data, _ = gen_dataset_policy(
-    cards, LIVE_RULES, make_search_policy(k=4, base=make_blade_stack(3)),
-    n_pairs=16, eps_per_pair=100, seed=0)
-r_data, _ = gen_dataset(cards, LIVE_RULES, n_pairs=16,
-                        eps_per_pair=150, seed=0)
-pad = s_data["phis"].shape[1] - MAX_A
-union = dict(
-    phis=np.concatenate([s_data["phis"], np.pad(
-        r_data["phis"], ((0, 0), (0, pad), (0, 0)))]),
-    mask=np.concatenate([s_data["mask"], np.pad(
-        r_data["mask"], ((0, 0), (0, pad)))]),
-    chosen=np.concatenate([s_data["chosen"], r_data["chosen"]]),
-    G=np.concatenate([s_data["G"], r_data["G"]]),
-    won=np.concatenate([s_data["won"], r_data["won"]]),
-    ep=np.concatenate([s_data["ep"],
-                       r_data["ep"] + s_data["ep"].max() + 1]))
+CACHE = "offline_union.npz"
+if os.path.exists(CACHE):
+    z = np.load(CACHE)
+    union = {k: z[k] for k in z.files}
+    print(f"[1/5] union loaded from {CACHE}: {len(union['G'])} "
+          f"decisions", flush=True)
+else:
+    print("[1/5] demonstrations: search teachers + RL teachers, "
+          "unioned", flush=True)
+    s_data, _ = gen_dataset_policy(
+        cards, LIVE_RULES,
+        make_search_policy(k=4, base=make_blade_stack(3)),
+        n_pairs=16, eps_per_pair=100, seed=0)
+    r_data, _ = gen_dataset(cards, LIVE_RULES, n_pairs=16,
+                            eps_per_pair=150, seed=0)
+    pad = s_data["phis"].shape[1] - MAX_A
+    union = dict(
+        phis=np.concatenate([s_data["phis"], np.pad(
+            r_data["phis"], ((0, 0), (0, pad), (0, 0)))]),
+        mask=np.concatenate([s_data["mask"], np.pad(
+            r_data["mask"], ((0, 0), (0, pad)))]),
+        chosen=np.concatenate([s_data["chosen"], r_data["chosen"]]),
+        G=np.concatenate([s_data["G"], r_data["G"]]),
+        won=np.concatenate([s_data["won"], r_data["won"]]),
+        ep=np.concatenate([s_data["ep"],
+                           r_data["ep"] + s_data["ep"].max() + 1]))
+    np.savez_compressed(CACHE, **union)
 n_ep = len(episodes_from(union, winners_only=True))
 print(f"    {len(union['G'])} decisions, {n_ep} winning episodes "
       f"({time.time()-t0:.0f}s)", flush=True)
 
 print("[2/5] validation pairs for model selection (seed 5150 — "
       "disjoint from the test pairs)", flush=True)
-# screened to be INFORMATIVE: a pair that is unwinnable or already
-# saturated cannot rank two students (the first cut had one 0% and
-# one 100% pair, so selection was mostly noise)
+# screened to be INFORMATIVE (an unwinnable or saturated pair
+# cannot rank two students) and sized per selection_study.py: 16
+# pairs x 600 fights is the smallest budget whose val->test rank
+# correlation held up at every LARGER budget too. The earlier 4x200
+# budget scored well once, but 8x200 and 8x600 both cost 5.5 points,
+# so that success was luck rather than a floor.
 vrng = random.Random(5150)
 val_pairs, vtried = [], 0
-while len(val_pairs) < 4 and vtried < 40:
-    sc = ("death", "myth", "balance", "fire", "ice")[vtried % 5]
+while len(val_pairs) < 16 and vtried < 90:
+    sc = ("death", "myth", "balance", "fire", "ice",
+          "storm", "life")[vtried % 7]
     vtried += 1
     b = random_boss(vrng, f"seqval{vtried}")
     dl = sample_deck(legal_pool(cards, sc), sc, b, vrng)
@@ -98,7 +119,7 @@ def val_score(model):
     for sc, dl, b in val_pairs:
         sim = Sim(dict(cards), dl, sc, b, player_hp=10**9,
                   rules=LIVE_RULES)
-        st = evaluate_paired(sim, {"p": model.policy()}, n=200)["p"]
+        st = evaluate_paired(sim, {"p": model.policy()}, n=600)["p"]
         tot += st["win_rate"]
     return tot / len(val_pairs)
 
