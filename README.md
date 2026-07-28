@@ -154,6 +154,52 @@ edge is draw-distribution knowledge, not mechanics. Search also trades
 mean speed for reliability on the prism line, which is what a
 risk-sensitive objective would ask for.
 
+## Run it
+
+```
+python main.py                          # ~5 minutes, 5 levels
+python main.py --full                   # every world boundary
+python main.py --school storm --levels 30,60,90
+```
+
+One command assembles every layer: gear + pet loadout for the level, a
+real creature from the world that level is questing with the companions
+the scrape names for it, everything CASTING from a spell pool, a deck
+searched over the level-gated pool with Sun enchantments charged their
+real two-slot cost, and a policy fine-tuned on that exact pair. Writes
+`results_main.json` and renders the charts below.
+
+Two things it does that are worth knowing about. It SCREENS encounters
+for solo feasibility — much of the registry is four-person dungeon
+content, and the first end-to-end run picked by size alone, drew Gurtok
+Firebender with two adds, and returned 0% at every level. And it ships
+whichever policy actually won, because the learner does not always win:
+
+```
+lvl  world        encounter               +  deck  trained  scripted   ship
+20   Krokotopia   Frost Colossus          2  12      3.7%     69.9%   race(1)
+50   Dragonspyre  The Collector           2   9     95.9%     97.2%   race(1)
+70   Zafaria      Razorjack               1  12     93.9%     98.6%   race(2)
+100  Khrysalis    Shadow of the Land      1  12     98.1%    100.0%   race(3)
+120  Mirage       Mother Ghulture         2   9    100.0%    100.0%   trained
+```
+
+The tabular learner ranks CARDS, not targets, so on a multi-enemy board
+it cannot commit to killing one thing first — it matches the scripted
+line within a couple of points once the fight is winnable and collapses
+to 3.7% on the one encounter that is genuinely contested. That is the
+representation deficit `mob_generalist.py` isolated, reproduced here by
+the end-to-end run rather than argued for; advisor-guided training moves
+it 4.7% to 6.2%, which is to say barely.
+
+![End-to-end progression](plots/main_progression.png)
+
+![Time to kill](plots/main_ttk.png)
+
+![What the builder packed](plots/main_deck.png)
+
+![How much buffing pays](plots/main_policy.png)
+
 ## Charts
 
 Regenerate with `python plots.py` (reads the results JSONs, writes
@@ -477,6 +523,190 @@ loader report.
    > all. The reachability screen above is still the right guard for
    > this probe — TTK is undefined where the wizard cannot win — but
    > "unreachable" was overstated as a claim about the configuration.
+
+2e. **Is it worth extracting the ordinary enemies?** (`dps_race.py`,
+   `results_dps_race.json`). The repo owner asked whether he should
+   pull a JSON of non-boss enemies and align them with their bosses,
+   since real fights are a boss plus one to three mobs. That is a
+   question about where the information VALUE sits, so it is
+   measurable. A 2x2 over the synthetic stand-ins, everything casting:
+
+   ```
+   minion HP    casting OFF   casting ON
+   0.2 x boss      81.3%        74.1%
+   0.5 x boss      48.0%         0.8%
+
+   halving minion health   +53.3 points
+   silencing the minions   +27.2 points
+   ```
+
+   **Both matter, and they multiply.** At a fifth of boss health,
+   letting minions cast costs 7 points; at half, it costs 47. Health
+   buys a minion ROUNDS and rounds buy it CASTS, so the two terms are
+   not separable — which is also why the earlier "the health share
+   sits in a dead zone" finding was wrong: it was measured when
+   stand-ins could not cast.
+
+   So the answer is yes, with a shape: what needs extracting is
+   **health and school/level** — enough to fix how long a mob survives
+   and what tier it casts. Fine detail beyond that is not what is
+   moving these numbers. And any result currently leaning on the 75% of
+   companions that are synthetic is sensitive to a modeled constant,
+   which is now stated wherever it applies.
+
+   **The owner's own playstyle, tested.** He described how he plays:
+   build damage buffs, then one-shot with an AoE. Both halves hold, and
+   the first has a genuine interior optimum:
+
+   ```
+   blades before the swing   1     2     3     4     5     6     7     8
+   mean win rate            7.3%  7.5%  7.6%  7.7% 23.1% 20.0% 19.4% 19.4%
+   best defensive line (triage)                     1.5%
+
+   AoE finisher      41.6% win, 10.72 TTK
+   single-target      0.0% win, never clears the party
+   ```
+
+   Five blades is a real peak, not the edge of the sweep — the sweep
+   was extended to eight precisely so it could not be a boundary
+   artifact, and 6-8 fall off because over-buffing gets you killed
+   while you set up. Below five you cannot one-shot and win rate sits
+   flat at ~7.5%; at five it triples. Racing beats the best defensive
+   line by **21.6 points**, and single-target loses outright with a
+   party on the board. "Enough buffs to one-shot with an AoE" is not
+   just a preference — under this model it is the only line that works.
+
+   One measurement caveat worth stating: the encounter set is chosen by
+   a contested-fight screen, and the screen depends on the policy set,
+   so adding policies changes which encounters qualify and shifts the
+   absolute win rates between runs. The ORDERING — five blades on top,
+   racing over triage, AoE over single-target — is stable; the levels
+   are not, and should not be quoted on their own.
+
+2d. **Bosses cast; they do not auto-attack** (`boss_pools.py`,
+   `load_bosses_full(spell_pools=True)`, `casting_bosses.py`,
+   `results_casting_bosses.json`). The registry had carried
+   `dmg = 40 + 20*rank` — a flat per-round hit, tagged `inferred`, and
+   the last fully invented number in the boss model. The repo owner
+   confirms bosses simply cast from their spell pool.
+
+   That flat hit is also what made every real-boss fight cliff-like: an
+   identical hit each round is a deterministic arithmetic race, decided
+   before the first card is drawn. The engine has had the living-boss
+   layer since the 2026 boss-AI report, but it had only ever been
+   driven by hand, one boss at a time. `boss_pools` fills it for 1795
+   of 1909 creatures by two routes, recorded per boss:
+
+   ```
+   school + world band       937   level from the world's last level
+   school + rank fit         518   world not in the level table
+   spell_notes + school      204   the scrape named some spells
+   school + rank fit (held)  104   rank above the trusted range
+   spell_notes                32   the scrape named enough
+   ```
+
+   `spell_notes` is free text but it names real spells ("Casts a
+   version of Storm Lord that doesn't Stun"), so any name that resolves
+   in the card registry goes into the pool. Everything else is built
+   from the boss's school and an estimated level, drawing on the same
+   curated `TRAINED` line the player's deck builder uses.
+
+   The level estimate chains through `worlds.py`, and its fallback is
+   worth describing because the naive version was badly wrong. Where
+   the record's world is in the table, the band's last level is the
+   content level. Where it is not (Grizzleheim, Darkmoor, Karamelle,
+   housing instances), level is fitted from RANK against the creatures
+   whose world IS known. Those raw medians rise cleanly from rank 1 to
+   17 (L10 to L130) and then collapse on tiny samples — rank 24 reads
+   level 20 off eleven records — which handed Annoushka, a 17,240 HP
+   boss, a Dark Sprite. The fit now drops ranks with thin support,
+   forces the curve non-decreasing, and holds the top value above the
+   trusted range instead of extrapolating.
+
+   **The cliff was the model, not the game.** Same 24 real bosses, same
+   seeds, only the boss model changes:
+
+   ```
+                            flat hit   casting
+   mean win rate              59.4%     56.2%
+   pinned at 0% or 100%          22        18
+   contested (5-95%)              2         6    of 24
+
+   by HP band, contested / total
+      3000-7000   n=7          0/7       1/7
+      7000-11000  n=8          2/8       5/8
+     11000-16000  n=9          0/9       0/9
+   ```
+
+   Casting **triples** the number of measurable fights while barely
+   moving mean difficulty — the prediction stated before the run.
+   Damage now routes through the same pip economy, fizzle roll, and
+   ward pass as the player's, so a boss can miss, buff itself, and draw
+   badly. Krokopatra fizzles 9 rounds in 25 and blades itself before
+   hitting.
+
+   This matters beyond realism: nearly every probe in this repo has had
+   to screen for "contested" encounters and throw most candidates away
+   (the pierce probe kept 10 of 26, the minion survival arm 3 of 61).
+   That attrition was an artifact of the flat model.
+
+   **Left OPT-IN deliberately.** `spell_pools=False` is still the
+   default so every result predating this keeps reproducing bit for
+   bit, and a test pins that. Results above this line in the README use
+   the flat model; re-running them under casting bosses is the obvious
+   next sweep and is not done yet.
+
+2c. **These fights are not 1v1** (`Boss.minions`, `encounter`,
+   `minion_fights.py`, `results_minions.json`). `bosses_clean.json`
+   names the creatures that fight alongside each boss for **419 of
+   1909** creatures, and the loader was dropping the field, so every
+   real-boss result in this repo had been fighting it alone.
+
+   The 751 companion references split two ways, and the split is the
+   finding:
+
+   - **25% resolve** to another creature in the file, arriving with
+     real scraped stats. They are **peers, not underlings** — same rank
+     as the boss in over 60% of pairs, ~0.95x its health. These are
+     genuine multi-boss fights (Othin Stormfather plus three Coven
+     Bosses), not boss-plus-adds. Tested.
+   - **75% do not** — generic mobs with no page of their own. The fight
+     is still not 1v1, so refusing to model them would be the larger
+     error; `encounter(..., synth=True)` builds a stand-in at
+     `MINION_HP_SHARE` of the boss's health, tagged `(inferred)`.
+     `synth=False` gives the honest floor of scraped-only companions.
+
+   ```
+   extra TURNS to clear the encounter (immortal wizard, pure race)
+     companions that are real peers     +1.85 median  (up to +4.79)
+     companions that are inferred mobs  +0.00 median
+
+   extra DANGER (mortal wizard, fights contested solo at 30-95%)
+     3 contested of 61 scanned; 2 of the 3 fell 70% -> 0%
+   ```
+
+   Real peers cost about two turns and can flip a contested fight
+   outright. The inferred mobs cost **nothing** here, and the
+   sensitivity sweep agreed — TTK flat at `MINION_HP_SHARE` 0.2 and
+   0.35, moving only at 0.5 and 0.7.
+
+   > **Corrected by 2e below.** That "dead zone" was an artifact of
+   > MUTE minions. These runs predate casting bosses, so the stand-ins
+   > were pure HP bags, and an AoE deck destroys HP incidentally. Once
+   > minions cast, halving their health is worth **53 points** of win
+   > rate, because health buys them ROUNDS and rounds buy them casts.
+   > The arbitrary number is not in a dead zone at all.
+
+   The survival arm is thin on purpose and should be read that way:
+   with flat per-round boss damage these fights are CLIFF-like — a scan
+   of the HP bands wins ~100% below 9k and ~0% above 14k — so only 3 of
+   61 scanned encounters were contested enough to measure at all.
+
+   Also worth recording, since it corrects a guess I made out loud: the
+   builder's decks run **11-14 castable cards**, and the repo owner
+   puts real player decks at **7-12**. The search converged on real
+   practice without being told to, and the "decks are too small" worry
+   was mine, not the data's.
 
 2b. **The missing player damage: enchantments** (`PCT_ENCHANTS`,
    `DMG_ENCHANTS`, `enchant_card`, `enchant_probe.py`,

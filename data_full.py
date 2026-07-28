@@ -43,6 +43,7 @@ Targets: 8 selected enemy, 5/4 all enemies, 9 friendly (default self),
 11 self, 6/7 all allies, 3 the global field, 1 a card (enchant — not yet
 castable in the engine, skipped). Spell type 'aoe' forces multi-target.
 """
+import copy
 import json
 
 from w101_sim import (Boss, Rules, load_cards, Card, _kind_from_ops,
@@ -437,7 +438,8 @@ CREATURE_STATS = {"pierce": ("pierce", 0.339),
                   "stunable": ("stunable", 0.902)}
 
 
-def load_bosses_full(path="bosses_clean.json", report=None, rules=None):
+def load_bosses_full(path="bosses_clean.json", report=None, rules=None,
+                     spell_pools=False, cards=None):
     """Registry of real bosses. Returns (bosses, registry): `bosses` maps
     name -> Boss ready for Sim; `registry` keeps every scraped field raw
     (ratings, cheats text, locations) for encounter metadata.
@@ -463,6 +465,18 @@ def load_bosses_full(path="bosses_clean.json", report=None, rules=None):
     a result can say how much of its boss table was real.
     """
     raw = json.load(open(path, encoding="utf-8"))
+    pools = {}
+    if spell_pools:
+        # bosses CAST — they do not auto-attack. Opt-in for now so that
+        # every result predating this keeps reproducing; see boss_pools
+        # for why the flat `40 + 20*rank` it replaces was the last
+        # invented number in the boss model.
+        from boss_pools import build_pools
+        from deck_builder import TRAINED
+        if cards is None:
+            cards = load_spells_full()
+        pools = build_pools(raw, cards, TRAINED)
+        _set_pool_cards(cards)
     bosses, registry, skipped = {}, {}, []
     found = {k: 0 for k in CREATURE_STATS}
     crit_era = rules is not None and getattr(rules, "crit_resolver", None)
@@ -516,6 +530,13 @@ def load_bosses_full(path="bosses_clean.json", report=None, rules=None):
                 b.pierce = _num(stats[key]) / 100.0
             elif attr == "start_pips":
                 b.start_pips = int(_num(stats[key]))
+        b.rank = rank
+        b.minions = list(r.get("minions") or []) or None
+        if name in pools:
+            spec = pools[name]
+            b.pool = list(spec["pool"])
+            b.archetype = spec["archetype"]
+            b.dmg = 0            # the pool replaces the flat estimate
         bosses[name] = b
         registry[name] = dict(r, dmg_estimate=dmg,
                               dmg_confidence="inferred")
@@ -525,4 +546,80 @@ def load_bosses_full(path="bosses_clean.json", report=None, rules=None):
                                   "frac": v / max(len(raw), 1)}
                               for k, v in found.items()}
         report["crit_ratings_emitted"] = bool(crit_era)
+        report["spell_pools"] = {
+            "enabled": bool(spell_pools),
+            "bosses_with_pool": sum(1 for b in bosses.values() if b.pool),
+            "sources": {k: sum(1 for n in bosses
+                               if n in pools and pools[n]["source"] == k)
+                        for k in {v["source"] for v in pools.values()}}
+            if pools else {}}
     return bosses, registry
+
+
+# fraction of the boss's health an UNRESOLVED minion is given. MODELED,
+# and the single most arbitrary number in this module: three quarters of
+# the scraped minion references name creatures that have no page of
+# their own (generic mobs like "Fleshless Chattel"), so their stats do
+# not exist anywhere in the file. Exposed as a parameter precisely
+# because it deserves a sensitivity check rather than trust.
+MINION_HP_SHARE = 0.35
+MINION_RANK_DROP = 2
+MINION_POOL_KEEP = 3   # weakest N of the boss's pool
+_POOL_CARDS = {}
+
+
+def _set_pool_cards(cards):
+    """Card registry used to rank a synthetic minion's pool."""
+    _POOL_CARDS.clear()
+    _POOL_CARDS.update(cards or {})
+
+
+def encounter(name, bosses, hp_share=MINION_HP_SHARE, synth=True):
+    """Resolve a boss into the full fight: (boss, [companions]).
+
+    Real encounters are not 1v1. `Boss.minions` holds the scraped names
+    of everything that fights alongside it, and they come in two kinds:
+
+      RESOLVED (25% of references) — the name matches another creature
+        in the file, so the companion arrives with its real scraped
+        stats. These turn out to be PEERS, not underlings: same rank as
+        the boss and ~0.95x its health, i.e. genuine multi-boss fights
+        like Othin Stormfather with two Coven Bosses.
+
+      UNRESOLVED (75%) — the name is a generic mob with no page. The
+        fight is still not 1v1, so refusing to model it would be a
+        worse error than modeling it roughly; `synth=True` builds a
+        stand-in at `hp_share` of the boss's health and a couple of
+        ranks below it, tagged inferred. Pass synth=False to get only
+        the companions whose stats are real.
+    """
+    boss = bosses[name]
+    out = []
+    for m in (boss.minions or []):
+        if m in bosses:
+            out.append(copy.copy(bosses[m]))
+        elif synth:
+            rank = max(1, (boss.rank or 1) - MINION_RANK_DROP)
+            mb = Boss(f"{m} (inferred)", max(1, int(boss.hp * hp_share)),
+                      boss.school, int(40 + 20 * rank))
+            mb.rank = rank
+            mb.resist_map = dict(boss.resist_map or {})
+            mb.boost_map = dict(boss.boost_map or {})
+            if boss.pool:
+                # a mute minion is an HP bag, and HP is what an AoE deck
+                # destroys incidentally — so a silent stand-in
+                # understates the encounter in the dimension that
+                # matters. But it must not cast the BOSS's spells
+                # either: handing two rank-9 adds a Helephant each
+                # deletes a level-50 wizard in two rounds and made the
+                # first end-to-end run 0% at every level. It gets the
+                # WEAK end of the pool — same school, a real tier down.
+                # MODELED.
+                weaker = sorted(
+                    boss.pool,
+                    key=lambda n: getattr(_POOL_CARDS.get(n), "damage", 0))
+                mb.pool = weaker[:MINION_POOL_KEEP] or list(boss.pool)
+                mb.archetype = boss.archetype
+                mb.dmg = 0
+            out.append(mb)
+    return boss, out
