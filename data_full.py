@@ -438,7 +438,8 @@ CREATURE_STATS = {"pierce": ("pierce", 0.339),
                   "stunable": ("stunable", 0.902)}
 
 
-def load_bosses_full(path="bosses_clean.json", report=None, rules=None):
+def load_bosses_full(path="bosses_clean.json", report=None, rules=None,
+                     spell_pools=False, cards=None):
     """Registry of real bosses. Returns (bosses, registry): `bosses` maps
     name -> Boss ready for Sim; `registry` keeps every scraped field raw
     (ratings, cheats text, locations) for encounter metadata.
@@ -464,6 +465,17 @@ def load_bosses_full(path="bosses_clean.json", report=None, rules=None):
     a result can say how much of its boss table was real.
     """
     raw = json.load(open(path, encoding="utf-8"))
+    pools = {}
+    if spell_pools:
+        # bosses CAST — they do not auto-attack. Opt-in for now so that
+        # every result predating this keeps reproducing; see boss_pools
+        # for why the flat `40 + 20*rank` it replaces was the last
+        # invented number in the boss model.
+        from boss_pools import build_pools
+        from deck_builder import TRAINED
+        if cards is None:
+            cards = load_spells_full()
+        pools = build_pools(raw, cards, TRAINED)
     bosses, registry, skipped = {}, {}, []
     found = {k: 0 for k in CREATURE_STATS}
     crit_era = rules is not None and getattr(rules, "crit_resolver", None)
@@ -519,6 +531,11 @@ def load_bosses_full(path="bosses_clean.json", report=None, rules=None):
                 b.start_pips = int(_num(stats[key]))
         b.rank = rank
         b.minions = list(r.get("minions") or []) or None
+        if name in pools:
+            spec = pools[name]
+            b.pool = list(spec["pool"])
+            b.archetype = spec["archetype"]
+            b.dmg = 0            # the pool replaces the flat estimate
         bosses[name] = b
         registry[name] = dict(r, dmg_estimate=dmg,
                               dmg_confidence="inferred")
@@ -528,6 +545,13 @@ def load_bosses_full(path="bosses_clean.json", report=None, rules=None):
                                   "frac": v / max(len(raw), 1)}
                               for k, v in found.items()}
         report["crit_ratings_emitted"] = bool(crit_era)
+        report["spell_pools"] = {
+            "enabled": bool(spell_pools),
+            "bosses_with_pool": sum(1 for b in bosses.values() if b.pool),
+            "sources": {k: sum(1 for n in bosses
+                               if n in pools and pools[n]["source"] == k)
+                        for k in {v["source"] for v in pools.values()}}
+            if pools else {}}
     return bosses, registry
 
 

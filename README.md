@@ -478,6 +478,79 @@ loader report.
    > this probe — TTK is undefined where the wizard cannot win — but
    > "unreachable" was overstated as a claim about the configuration.
 
+2d. **Bosses cast; they do not auto-attack** (`boss_pools.py`,
+   `load_bosses_full(spell_pools=True)`, `casting_bosses.py`,
+   `results_casting_bosses.json`). The registry had carried
+   `dmg = 40 + 20*rank` — a flat per-round hit, tagged `inferred`, and
+   the last fully invented number in the boss model. The repo owner
+   confirms bosses simply cast from their spell pool.
+
+   That flat hit is also what made every real-boss fight cliff-like: an
+   identical hit each round is a deterministic arithmetic race, decided
+   before the first card is drawn. The engine has had the living-boss
+   layer since the 2026 boss-AI report, but it had only ever been
+   driven by hand, one boss at a time. `boss_pools` fills it for 1795
+   of 1909 creatures by two routes, recorded per boss:
+
+   ```
+   school + world band       937   level from the world's last level
+   school + rank fit         518   world not in the level table
+   spell_notes + school      204   the scrape named some spells
+   school + rank fit (held)  104   rank above the trusted range
+   spell_notes                32   the scrape named enough
+   ```
+
+   `spell_notes` is free text but it names real spells ("Casts a
+   version of Storm Lord that doesn't Stun"), so any name that resolves
+   in the card registry goes into the pool. Everything else is built
+   from the boss's school and an estimated level, drawing on the same
+   curated `TRAINED` line the player's deck builder uses.
+
+   The level estimate chains through `worlds.py`, and its fallback is
+   worth describing because the naive version was badly wrong. Where
+   the record's world is in the table, the band's last level is the
+   content level. Where it is not (Grizzleheim, Darkmoor, Karamelle,
+   housing instances), level is fitted from RANK against the creatures
+   whose world IS known. Those raw medians rise cleanly from rank 1 to
+   17 (L10 to L130) and then collapse on tiny samples — rank 24 reads
+   level 20 off eleven records — which handed Annoushka, a 17,240 HP
+   boss, a Dark Sprite. The fit now drops ranks with thin support,
+   forces the curve non-decreasing, and holds the top value above the
+   trusted range instead of extrapolating.
+
+   **The cliff was the model, not the game.** Same 24 real bosses, same
+   seeds, only the boss model changes:
+
+   ```
+                            flat hit   casting
+   mean win rate              59.4%     56.2%
+   pinned at 0% or 100%          22        18
+   contested (5-95%)              2         6    of 24
+
+   by HP band, contested / total
+      3000-7000   n=7          0/7       1/7
+      7000-11000  n=8          2/8       5/8
+     11000-16000  n=9          0/9       0/9
+   ```
+
+   Casting **triples** the number of measurable fights while barely
+   moving mean difficulty — the prediction stated before the run.
+   Damage now routes through the same pip economy, fizzle roll, and
+   ward pass as the player's, so a boss can miss, buff itself, and draw
+   badly. Krokopatra fizzles 9 rounds in 25 and blades itself before
+   hitting.
+
+   This matters beyond realism: nearly every probe in this repo has had
+   to screen for "contested" encounters and throw most candidates away
+   (the pierce probe kept 10 of 26, the minion survival arm 3 of 61).
+   That attrition was an artifact of the flat model.
+
+   **Left OPT-IN deliberately.** `spell_pools=False` is still the
+   default so every result predating this keeps reproducing bit for
+   bit, and a test pins that. Results above this line in the README use
+   the flat model; re-running them under casting bosses is the obvious
+   next sweep and is not done yet.
+
 2c. **These fights are not 1v1** (`Boss.minions`, `encounter`,
    `minion_fights.py`, `results_minions.json`). `bosses_clean.json`
    names the creatures that fight alongside each boss for **419 of
