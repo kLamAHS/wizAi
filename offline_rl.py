@@ -274,6 +274,105 @@ def train_cql(data, alpha=1.0, epochs=8, lr0=0.1, batch=256, seed=0):
     return _iterate(data, grad, epochs, lr0, batch, seed)
 
 
+# --- IQL-flavored expectile rung ------------------------------------
+#
+# The ladder's two credit-assignment schemes so far are both blunt.
+# BC-filtered keeps or drops a decision by whether its EPISODE was
+# won, which credits every move in a lucky win and discards every move
+# in an unlucky loss. CQL-lite pushes down actions the data cannot
+# vouch for, which needs Q-values at actions nobody played.
+#
+# IQL's idea is a third option: score each decision by its own
+# ADVANTAGE against a state baseline, and never query an unplayed
+# action at all. The baseline is fit by expectile regression, which is
+# what makes it an optimistic value rather than an average one — at
+# tau > 0.5 the residuals above the line are weighted more heavily, so
+# V approaches "what a good action from here gets" instead of "what
+# the behavior policy averages here". Policy extraction is then
+# advantage-weighted behavior cloning.
+#
+# tau = 0.5 collapses the expectile to plain least squares, so the
+# SAME function with tau=0.5 is the AWR ablation that isolates
+# per-decision weighting from the expectile itself. That is the
+# comparison worth running, not IQL-vs-BC.
+#
+# ADAPTATION, stated because it is not textbook IQL: this feature
+# space has action features only, so V(s) is fit on the masked mean of
+# the legal actions' features — a permutation-invariant state summary.
+# And with full backward-MC returns already logged there is no TD
+# bootstrap; Q is the observed return-to-go. Both are simplifications
+# that make this "IQL-flavored", named -lite for the same reason
+# CQL-lite is.
+
+def state_phi(data):
+    """Permutation-invariant state summary: masked mean over the
+    legal actions' feature rows."""
+    P, M = data["phis"], data["mask"]
+    w = M[..., None].astype(np.float32)
+    return (P * w).sum(axis=1) / np.maximum(w.sum(axis=1), 1.0)
+
+
+def train_expectile_v(data, tau=0.7, epochs=8, lr0=0.1, batch=256,
+                      seed=0, S=None):
+    """Expectile regression of the return onto the state summary.
+
+    L(u) = |tau - 1{u<0}| u^2 with u = G - V. tau=0.5 is least
+    squares; tau->1 weights the upside residuals and yields an
+    optimistic baseline.
+    """
+    G = data["G"]
+    S = state_phi(data) if S is None else S
+
+    def grad(w, b):
+        u = G[b] - S[b] @ w
+        wt = np.abs(tau - (u < 0).astype(np.float64))
+        return (-2.0 * wt * u)[:, None].__mul__(S[b]).sum(axis=0) / len(b)
+
+    return _iterate(data, grad, epochs, lr0, batch, seed)
+
+
+def advantages(data, w_v, S=None):
+    S = state_phi(data) if S is None else S
+    return data["G"] - S @ w_v
+
+
+def train_iql(data, tau=0.7, beta=3.0, clip=20.0, epochs=8, lr0=0.5,
+              batch=256, seed=0, v_kw=None, winners_only=False):
+    """Expectile baseline + advantage-weighted behavior cloning.
+
+    Returns the policy weights. `tau=0.5` gives the plain-AWR ablation.
+    Weights are exp(beta * A) clipped at `clip` (unclipped, one lucky
+    decision can dominate the whole gradient) and normalized to mean 1
+    so `lr0` means the same thing as it does for BC.
+
+    `winners_only` composes the two credit schemes: the episode filter
+    picks which decisions to clone, the advantage weights say how much
+    each one counts. The baseline V is still fit on ALL episodes — an
+    advantage measured only against winners is not an advantage.
+    """
+    S = state_phi(data)
+    w_v = train_expectile_v(data, tau=tau, seed=seed, S=S,
+                            **(v_kw or {}))
+    a = advantages(data, w_v, S)
+    # clip the EXPONENT, not the result: exp(beta*A) overflows to inf
+    # for a large beta before np.minimum ever sees it
+    wt = np.exp(np.minimum(beta * a, np.log(clip)))
+    wt = wt / max(wt.mean(), 1e-9)
+    P, M, C = data["phis"], data["mask"], data["chosen"]
+
+    def grad(w, b):
+        logits = P[b] @ w
+        logits[~M[b]] = -1e9
+        z = np.exp(logits - logits.max(axis=1, keepdims=True))
+        pr = z / z.sum(axis=1, keepdims=True)
+        pr[np.arange(len(b)), C[b]] -= 1.0
+        return ((pr * wt[b][:, None])[:, :, None]
+                * P[b]).sum(axis=(0, 1)) / len(b)
+
+    return _iterate(data, grad, epochs, lr0, batch, seed,
+                    data["won"] if winners_only else None)
+
+
 # ------------------------------------------------------------- benchmark
 
 if __name__ == "__main__":
