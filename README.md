@@ -469,7 +469,7 @@ loader report.
    HP-aware state for the per-deck agent (the tabular pilot cannot
    see its own HP yet still beats triage by killing faster — less
    exposure beats more healing at this damage level).
-6. Offline RL ladder — first three rungs SHIPPED (`offline_rl.py`,
+6. Offline RL ladder — SHIPPED, four rungs (`offline_rl.py`,
    `results_offline.json`; the dataset regenerates from seeds and is
    not committed). Design: policy class held fixed (the generalist's
    linear features), so the comparison isolates the DATA SOURCE —
@@ -594,6 +594,86 @@ loader report.
    and evaluation protocols as if they were one column — now labeled,
    guarded by an identity assertion, and recorded with pair, deck,
    n, and protocol in the results file.
+
+   **Rung 4 — IQL-style expectile credit** (`train_iql`,
+   `iql_ladder.py`, `results_iql.json`). The first three rungs assign
+   credit bluntly: BC-filtered keeps or drops a decision by whether
+   its EPISODE was won, so every move in a lucky win is taught and
+   every move in an unlucky loss discarded; CQL-lite needs Q-values at
+   actions nobody played. IQL scores each decision by its own
+   ADVANTAGE over a state baseline and never queries an unplayed
+   action — a property pinned by a test that corrupts the unchosen
+   feature rows and asserts the fitted baseline is bit-identical.
+
+   `tau=0.5` collapses the expectile to least squares, so the same
+   function gives the plain-AWR ablation and the expectile can be
+   separated from the per-decision weighting. Adaptations stated
+   rather than hidden (hence `-lite`, as with CQL-lite): the feature
+   space has action features only, so V is fit on a permutation-
+   invariant summary of the legal actions; and with backward-MC
+   returns already logged there is no TD bootstrap.
+
+   A diagnostic printed BEFORE any policy was evaluated, so it
+   predicts the result instead of explaining it afterwards: V explains
+   R² **0.30 / 0.22 / −0.08** of the return at tau 0.5 / 0.7 / 0.9,
+   while the raw return is **−0.71 on wins against −4.55 on losses**.
+   The outcome, not the move, is where the signal lives — so the
+   advantage is largely the win/loss label re-derived, softly.
+
+   Sixteen held-out pairs, eight to SELECT the arm and eight to
+   REPORT it, five training seeds each:
+
+   ```
+   arm               select   report   +/- seeds
+   BC-all             51.8%    13.2%     1.3
+   BC-filtered        74.4%    67.4%     0.8
+   CQL-lite           72.6%    67.4%     0.4
+   AWR (tau=.5)       64.8%    25.5%     0.4
+   IQL (tau=.7)       66.1%    25.8%     1.0
+   IQL (tau=.9)       66.7%    25.3%     0.6
+   IQL beta=2         81.4%    72.7%     1.2
+   IQL beta=5         78.7%    71.2%     1.2
+   IQL beta=15        77.7%    71.0%     1.5
+   IQL+filter         79.3%    71.6%     1.5
+   IQL+filter beta=5  80.3%    70.3%     0.4
+   noise floor +/-1.5 points on the report split
+   ```
+
+   Selected on SELECT: IQL beta=2, scoring **72.7%** on REPORT against
+   BC-filtered's **67.4%** — **+5.3 points**, clearing the floor. The
+   selection was free: best-on-REPORT was the same arm, so the price
+   of honest selection here was 0.0 points.
+
+   Three conclusions, two of them deflationary about IQL specifically:
+
+   - **Advantage weighting does beat the episode filter** (+5.3),
+     which is the rung's reason to exist.
+   - **The expectile — the thing that makes IQL IQL rather than AWR —
+     contributes nothing.** tau 0.5 → 0.7 is +0.2 points and 0.7 →
+     0.9 is −0.4, both under the floor. What wins is advantage-
+     weighted cloning with a correctly scaled temperature, and the
+     optimistic value fit is decoration.
+   - **The two credit schemes do not compose.** Adding the episode
+     filter on top of a well-scaled beta is −0.9 points, under the
+     floor: once the advantage weights are sharp enough they already
+     encode what the win/loss label was telling you.
+
+   beta is the whole story, and it is brutally sensitive: 0.57 → 5 is
+   **+45.5 points**. Anyone reproducing this needs to tune it on a
+   validation split.
+
+   **This probe reproduced, in miniature, the exact mistake this repo
+   has retracted three conclusions for** — recorded because catching
+   it inside one probe is the only reason it is not a fourth
+   retraction. beta was fixed a priori at 1/sd(advantage) = 0.57
+   specifically to avoid tuning against the test set. It lost to
+   BC-filtered by 8.2 points. A sweep run as a confound check then
+   found beta=2 winning by +6.8 — on the same eight pairs it was
+   scored on, which is not a result. The SELECT/REPORT split exists
+   because of that, and the +5.3 above is the number that survived it.
+   Note also how far the low-beta arms fall between splits (66% →
+   25%): a gentle advantage weighting produces a policy that does not
+   transfer, and a single held-out set would have hidden that.
 7. Deck × policy bilevel optimization. First results (death vs live
    Jade Oni): the searched 9-card deck reaches **100% win / TTK 6.45**
    vs the hand-built 12-card oneshot's 92.8% / 9.95 — smaller AND
