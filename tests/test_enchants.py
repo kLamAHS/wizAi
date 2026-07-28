@@ -167,7 +167,7 @@ def test_damage_stat_is_additive_not_multiplicative():
 def test_flat_damage_enchant_lands_before_the_multipliers():
     """A Colossal is added to BASE damage, so blades and traps multiply
     it too — which is why flat enchants outrun percentage gear."""
-    plain = CARDS["Fire Dragon"]
+    plain = CARDS["Sunbird"]                 # single-hit: no split
     boosted = enchant_card(plain, "Colossal")
     assert boosted.damage == plain.damage + 275
     hits = [o for o in boosted.ops if o["op"] == "hit"]
@@ -175,15 +175,43 @@ def test_flat_damage_enchant_lands_before_the_multipliers():
     assert hits[0]["amount"] == plain_hits[0]["amount"] + 275
 
 
-def test_damage_enchant_hits_only_the_primary_op():
-    """Multi-hit spells get the bonus once, on the largest component,
-    not once per component."""
+def _damage_ops(card):
+    return [o.get("amount", o.get("total")) for o in card.ops
+            if o["op"] in ("hit", "drain", "dot")]
+
+
+def test_flat_enchant_raises_the_total_by_exactly_the_bonus():
+    """'the total cumulative damage of the DoT spell increases by 275
+    overall' — not 275 per tick, and not 275 on top of each component."""
+    for name in ("Fire Dragon", "Avenging Fossil", "Sunbird"):
+        plain = CARDS[name]
+        e = enchant_card(plain, "Colossal")
+        assert abs(sum(_damage_ops(e)) - sum(_damage_ops(plain)) - 275) < 1e-6
+
+
+def test_flat_enchant_splits_proportionally_toward_the_upfront_hit():
+    """'the larger portion of the +275 boost typically goes to the
+    initial hit, while the remaining value is split among the trailing
+    ticks.' Fire Dragon is 540 hit + 435 DoT, so 275 splits 152/123."""
     plain = CARDS["Fire Dragon"]
-    e = enchant_card(plain, "Epic")
-    before = [o.get("amount", o.get("total")) for o in plain.ops]
-    after = [o.get("amount", o.get("total")) for o in e.ops]
-    diffs = [b - a for a, b in zip(before, after) if a is not None]
-    assert sorted(diffs) == [0.0, 300.0]
+    e = enchant_card(plain, "Colossal")
+    hit_gain = _damage_ops(e)[0] - _damage_ops(plain)[0]
+    dot_gain = _damage_ops(e)[1] - _damage_ops(plain)[1]
+    assert hit_gain > dot_gain > 0
+    assert abs(hit_gain - 275 * 540 / 975) < 1e-3
+    assert abs(dot_gain - 275 * 435 / 975) < 1e-3
+
+
+def test_per_pip_dots_are_refused_rather_than_guessed():
+    """Heck Hound's total is scaled by pips at cast time, so a flat
+    bonus cannot be folded into it correctly. Refused loudly instead of
+    silently multiplied."""
+    try:
+        enchant_card(CARDS["Heck Hound"], "Colossal")
+    except ValueError as e:
+        assert "per-pip" in str(e)
+    else:
+        raise AssertionError("per-pip spell silently enchanted")
 
 
 def test_damage_enchants_are_ordered_by_tier():

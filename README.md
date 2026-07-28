@@ -502,6 +502,18 @@ loader report.
              Colossal 275, Epic 300        flat BASE damage
    ```
 
+   The flat family raises a spell's **total cumulative** damage by
+   exactly its bonus, distributed across the damage ops in proportion
+   to their share of that total — not added to each, and not dumped on
+   one. Colossal on Fire Dragon (540 hit + 435 DoT) splits 152/123, so
+   the larger share lands upfront and the rest trails through the
+   ticks. That is not cosmetic: hit and DoT share one op group and
+   therefore one charm/ward snapshot, so the split is
+   multiplier-neutral, but DoT damage lands in later rounds, and
+   delaying part of the bonus costs TTK. Per-pip spells (Heck Hound)
+   are REFUSED rather than guessed at — their total is scaled by pips
+   at cast time, so a flat bonus cannot be folded in correctly.
+
    The engine needed almost nothing for the percent family.
    `Card.source` already documented an `enchant-*` provenance tier, and
    both stack keys — `Hanging`'s `(name, source, sub)` and the
@@ -543,8 +555,8 @@ loader report.
    plain                                   13.80
    sharpened blades                        11.66      +2.14 turns
    potent traps + Feint                    11.70      +2.10
-   Colossal nukes                          11.82      +1.98
-   all three                                7.88      +5.92
+   Colossal nukes                          11.89      +1.91
+   all three                                7.93      +5.86
 
    endgame bosses, win rate      plain    all
    Annoushka (17,240 HP)         13.0%   67.3%
@@ -568,10 +580,12 @@ loader report.
      round. The deck-slot cost was the only cost, and it was already
      modeled.
 
-   Still MODELED, and flagged as such: which single op a flat damage
-   enchant lands on (the largest, so a multi-hit gets it once), and the
-   split within each pair the owner gave as a range (Strong 100 / Giant
-   125 from "+100 to +125", and so on).
+   Still MODELED, and flagged as such: the split within each pair the
+   owner gave as a range (Strong 100 / Giant 125 from "+100 to +125",
+   and so on). An earlier cut also put a flat enchant's whole bonus on
+   the spell's largest op, which over-credited every hybrid nuke by
+   moving DoT damage forward in time; the proportional rule above
+   replaced it and cost the Colossal arm 0.07 turns.
 
 3. Sideboard/discard policy: DONE — every policy now has the TC
    reflex (`tc_reflex`: make room honoring the fresh-TC rule, draw

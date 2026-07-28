@@ -201,24 +201,47 @@ def enchant_card(card, enchant):
         raise ValueError(f"{enchant} enchants damage cards, not "
                          f"{card.kind} ({card.name})")
     bonus, tag = DMG_ENCHANTS[enchant], enchant.lower()
-    # Flat damage lands on the spell's PRIMARY hit — the largest single
-    # damage op — rather than being split across a multi-hit's parts or
-    # applied to each. MODELED: the owner gave the magnitudes, not the
-    # distribution rule.
-    idx, best = None, -1.0
+    # The flat bonus raises the spell's TOTAL cumulative damage by
+    # exactly `bonus` and is DISTRIBUTED across its damage ops in
+    # proportion to their share of that total — not added to each, and
+    # not dumped on one. On a hybrid like Fire Dragon (540 hit + 435
+    # DoT) Colossal's +275 splits 152/123, so the larger share lands on
+    # the upfront hit and the rest trails through the ticks.
+    #
+    # This is not cosmetic. Hit and DoT sit in the same op group, so
+    # they share one charm/ward snapshot and the redistribution is
+    # multiplier-neutral — but DoT damage arrives over later rounds, so
+    # moving part of the bonus into the ticks DELAYS it and costs TTK.
+    # An earlier cut put the whole bonus on the largest op, which
+    # over-credited every hybrid nuke.
+    fields = []
     for i, o in enumerate(card.ops):
-        amt = o.get("amount") if o["op"] in ("hit", "drain") else \
-            o.get("total") if o["op"] == "dot" else None
-        if amt is not None and amt > best:
-            idx, best = i, amt
-    if idx is None:
+        if o["op"] in ("hit", "drain") and o.get("amount") is not None:
+            fields.append((i, "amount", o["amount"]))
+        elif o["op"] == "dot" and o.get("total") is not None:
+            if o.get("per_pip"):
+                raise ValueError(
+                    f"{enchant} on a per-pip spell ({card.name}) is not "
+                    f"modeled: the flat bonus is not per-pip, but this "
+                    f"op's total is scaled by pips at cast time")
+            fields.append((i, "total", o["total"]))
+    if not fields:
         raise ValueError(f"{enchant} found no damage op on {card.name}")
+    base_total = sum(v for _, _, v in fields)
+    if base_total <= 0:
+        raise ValueError(f"{enchant} cannot scale {card.name}: "
+                         f"no positive base damage")
+    shares = {i: bonus * v / base_total for i, _, v in fields}
+    # assign the rounding remainder to the largest component so the
+    # spell's total rises by exactly `bonus`
+    biggest = max(fields, key=lambda f: f[2])[0]
+    shares[biggest] += bonus - sum(shares.values())
     ops = []
     for i, o in enumerate(card.ops):
         o = dict(o)
-        if i == idx:
-            fld = "total" if o["op"] == "dot" else "amount"
-            o[fld] = o[fld] + bonus
+        if i in shares:
+            fld = next(f for j, f, _ in fields if j == i)
+            o[fld] = round(o[fld] + shares[i], 4)
         ops.append(o)
     return replace(card, name=f"{card.name}+{tag}", ops=ops,
                    damage=card.damage + bonus,
