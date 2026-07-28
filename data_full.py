@@ -476,6 +476,7 @@ def load_bosses_full(path="bosses_clean.json", report=None, rules=None,
         if cards is None:
             cards = load_spells_full()
         pools = build_pools(raw, cards, TRAINED)
+        _set_pool_cards(cards)
     bosses, registry, skipped = {}, {}, []
     found = {k: 0 for k in CREATURE_STATS}
     crit_era = rules is not None and getattr(rules, "crit_resolver", None)
@@ -563,6 +564,13 @@ def load_bosses_full(path="bosses_clean.json", report=None, rules=None,
 # because it deserves a sensitivity check rather than trust.
 MINION_HP_SHARE = 0.35
 MINION_RANK_DROP = 2
+_POOL_CARDS = {}
+
+
+def _set_pool_cards(cards):
+    """Card registry used to rank a synthetic minion's pool."""
+    _POOL_CARDS.clear()
+    _POOL_CARDS.update(cards or {})
 
 
 def encounter(name, bosses, hp_share=MINION_HP_SHARE, synth=True):
@@ -596,5 +604,17 @@ def encounter(name, bosses, hp_share=MINION_HP_SHARE, synth=True):
             mb.rank = rank
             mb.resist_map = dict(boss.resist_map or {})
             mb.boost_map = dict(boss.boost_map or {})
+            if boss.pool:
+                # a mute minion is an HP bag, and HP is the thing an AoE
+                # deck destroys incidentally — so a stand-in that cannot
+                # cast understates the encounter in the one dimension
+                # that matters. It gets the boss's pool minus the top
+                # nuke: same school, a tier down. MODELED.
+                weaker = sorted(
+                    boss.pool,
+                    key=lambda n: -getattr(_POOL_CARDS.get(n), "damage", 0))
+                mb.pool = weaker[1:] or list(boss.pool)
+                mb.archetype = boss.archetype
+                mb.dmg = 0
             out.append(mb)
     return boss, out

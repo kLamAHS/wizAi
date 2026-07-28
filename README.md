@@ -478,6 +478,65 @@ loader report.
    > this probe — TTK is undefined where the wizard cannot win — but
    > "unreachable" was overstated as a claim about the configuration.
 
+2e. **Is it worth extracting the ordinary enemies?** (`dps_race.py`,
+   `results_dps_race.json`). The repo owner asked whether he should
+   pull a JSON of non-boss enemies and align them with their bosses,
+   since real fights are a boss plus one to three mobs. That is a
+   question about where the information VALUE sits, so it is
+   measurable. A 2x2 over the synthetic stand-ins, everything casting:
+
+   ```
+   minion HP    casting OFF   casting ON
+   0.2 x boss      81.3%        74.1%
+   0.5 x boss      48.0%         0.8%
+
+   halving minion health   +53.3 points
+   silencing the minions   +27.2 points
+   ```
+
+   **Both matter, and they multiply.** At a fifth of boss health,
+   letting minions cast costs 7 points; at half, it costs 47. Health
+   buys a minion ROUNDS and rounds buy it CASTS, so the two terms are
+   not separable — which is also why the earlier "the health share
+   sits in a dead zone" finding was wrong: it was measured when
+   stand-ins could not cast.
+
+   So the answer is yes, with a shape: what needs extracting is
+   **health and school/level** — enough to fix how long a mob survives
+   and what tier it casts. Fine detail beyond that is not what is
+   moving these numbers. And any result currently leaning on the 75% of
+   companions that are synthetic is sensitive to a modeled constant,
+   which is now stated wherever it applies.
+
+   **The owner's own playstyle, tested.** He described how he plays:
+   build damage buffs, then one-shot with an AoE. Both halves hold, and
+   the first has a genuine interior optimum:
+
+   ```
+   blades before the swing   1     2     3     4     5     6     7     8
+   mean win rate            7.3%  7.5%  7.6%  7.7% 23.1% 20.0% 19.4% 19.4%
+   best defensive line (triage)                     1.5%
+
+   AoE finisher      41.6% win, 10.72 TTK
+   single-target      0.0% win, never clears the party
+   ```
+
+   Five blades is a real peak, not the edge of the sweep — the sweep
+   was extended to eight precisely so it could not be a boundary
+   artifact, and 6-8 fall off because over-buffing gets you killed
+   while you set up. Below five you cannot one-shot and win rate sits
+   flat at ~7.5%; at five it triples. Racing beats the best defensive
+   line by **21.6 points**, and single-target loses outright with a
+   party on the board. "Enough buffs to one-shot with an AoE" is not
+   just a preference — under this model it is the only line that works.
+
+   One measurement caveat worth stating: the encounter set is chosen by
+   a contested-fight screen, and the screen depends on the policy set,
+   so adding policies changes which encounters qualify and shifts the
+   absolute win rates between runs. The ORDERING — five blades on top,
+   racing over triage, AoE over single-target — is stable; the levels
+   are not, and should not be quoted on their own.
+
 2d. **Bosses cast; they do not auto-attack** (`boss_pools.py`,
    `load_bosses_full(spell_pools=True)`, `casting_bosses.py`,
    `results_casting_bosses.json`). The registry had carried
@@ -581,14 +640,16 @@ loader report.
    ```
 
    Real peers cost about two turns and can flip a contested fight
-   outright. The inferred mobs cost **nothing**, and that is a
-   limitation rather than a result: fire's nukes are AoE, so a
-   stand-in at 35% of boss health dies to splash it was going to deal
-   anyway. The sensitivity sweep says the same thing — TTK is flat at
-   `MINION_HP_SHARE` 0.2 and 0.35, and only starts moving at 0.5 (+0.11
-   turns) and 0.7 (+1.59). The most arbitrary number in the loader sits
-   in a dead zone, which is lucky rather than clever, and any result
-   that leans on the 75% should say so.
+   outright. The inferred mobs cost **nothing** here, and the
+   sensitivity sweep agreed — TTK flat at `MINION_HP_SHARE` 0.2 and
+   0.35, moving only at 0.5 and 0.7.
+
+   > **Corrected by 2e below.** That "dead zone" was an artifact of
+   > MUTE minions. These runs predate casting bosses, so the stand-ins
+   > were pure HP bags, and an AoE deck destroys HP incidentally. Once
+   > minions cast, halving their health is worth **53 points** of win
+   > rate, because health buys them ROUNDS and rounds buy them casts.
+   > The arbitrary number is not in a dead zone at all.
 
    The survival arm is thin on purpose and should be read that way:
    with flat per-round boss damage these fights are CLIFF-like — a scan
