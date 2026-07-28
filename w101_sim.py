@@ -263,11 +263,24 @@ def register_enchants(cards, names, enchant):
     return out
 
 
+def is_enchanted(name):
+    return "+" in name and name.rsplit("+", 1)[-1] in ENCHANT_TAGS
+
+
+def enchant_base(name):
+    """The underlying spell of a (possibly enchanted) decklist entry.
+
+    Load-bearing for deck legality: the physical deck holds N copies of
+    Fireblade and the enchanting happens in HAND, so `Fireblade` and
+    `Fireblade+sharp` are the same spell competing for the same
+    per-spell copy limit — they are not two different cards."""
+    return name.rsplit("+", 1)[0] if is_enchanted(name) else name
+
+
 def enchanted_deck_size(decklist):
     """Real deck slots used: an enchanted entry costs 2 (spell +
     enchantment), a plain one costs 1."""
-    return sum(2 if n.rsplit("+", 1)[-1] in ENCHANT_TAGS and "+" in n
-               else 1 for n in decklist)
+    return sum(2 if is_enchanted(n) else 1 for n in decklist)
 
 
 def _kind_from_ops(ops):

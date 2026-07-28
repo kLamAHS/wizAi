@@ -580,6 +580,44 @@ loader report.
      round. The deck-slot cost was the only cost, and it was already
      modeled.
 
+   **And the BUILDER takes them, unprompted** (`enchant_deck_probe.py`,
+   `results_enchant_decks.json`). The table above is a statement about
+   decks I wrote; the sharper question is whether the deck search finds
+   the trade on its own, and the trade is genuinely non-obvious — an
+   enchanted card costs TWO physical slots and competes for its base
+   spell's copy limit, so every enchant buys power by shrinking the
+   deck. `legal_pool(..., enchants=True)` offers the variants a wizard
+   of that level owns, `check_legal` counts real slots and per-SPELL
+   copies, `sample_deck` respects both, and nothing says whether to use
+   them.
+
+   ```
+   level  best flat   plain deck        free to enchant        gain
+    40    none        14 cards/14 sl    14 cards/14 sl   0%    +0.00
+    50    Strong      13 cards/13 sl    11 cards/20 sl  82%    +5.25
+    70    Colossal    13 cards/13 sl    11 cards/19 sl  73%    +5.72
+   100    Epic        12 cards/12 sl    11 cards/21 sl  91%    +4.37
+   120    Epic        13 cards/13 sl    12 cards/21 sl  75%    +5.00
+                                          (% enchanted)   (turns)
+   ```
+
+   Level 40 is the control and is bit-identical — nothing is unlocked,
+   so the arms cannot differ. From 50 up the builder converts most of
+   the deck and **pays for it by shrinking**: 13 castables in 13 slots
+   becomes 11 castables in 20. It gives up a fifth of its distinct
+   plays to make the rest hit harder, and gains 4-6 turns at every
+   level. It also stops well short of the 30-slot cap, consistent with
+   the earlier finding that smaller decks are more consistent.
+
+   Win rate tells the same story but compresses (+28.6 points at 50,
+   +1.5 at 120) purely because the plain arm approaches ceiling; TTK is
+   the honest metric here and it is flat across the range.
+
+   The level FLOORS are the weakest input: the owner named worlds
+   ("early Celestia", "Zafaria", "Arcanum/Polaris") and `ENCHANT_UNLOCK`
+   infers levels from those bands. The magnitudes and rules are his;
+   the floors are mine.
+
    Still MODELED, and flagged as such: the split within each pair the
    owner gave as a range (Strong 100 / Giant 125 from "+100 to +125",
    and so on). An earlier cut also put a flat enchant's whole bonus on

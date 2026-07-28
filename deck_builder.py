@@ -33,7 +33,9 @@ import random
 import re
 
 from w101_sim import (Sim, evaluate, evaluate_paired, make_blade_stack,
-                      Boss, OPPOSING)
+                      Boss, OPPOSING, DMG_ENCHANTS, PCT_ENCHANTS,
+                      enchant_base, enchant_card, enchanted_deck_size,
+                      is_enchanted)
 from rl_agent import QAgent
 
 
@@ -143,7 +145,57 @@ def _player_plausible(name, c):
     return True
 
 
-def legal_pool(cards, school, level=None, mastery=None):
+# Sun enchantments unlock by world, and the owner named the worlds
+# rather than the levels: Strong/Giant "early Celestia", Monstrous/
+# Gargantuan "mid-level Celestia", Colossal "Zafaria", Epic
+# "Arcanum/Polaris". The level floors below are INFERRED from those
+# world bands (Celestia 48-60, Zafaria 60-70, Polaris 100-110) and are
+# the least-sourced numbers in this module.
+ENCHANT_UNLOCK = {"Sharpen Blade": 50, "Potent Trap": 50,
+                  "Strong": 48, "Giant": 52, "Monstrous": 55,
+                  "Gargantuan": 58, "Colossal": 68, "Epic": 100}
+
+
+def _best_damage_enchant(level):
+    """The strongest flat enchant a wizard of this level owns — players
+    carry their best, not their whole collection."""
+    ok = [(DMG_ENCHANTS[n], n) for n in DMG_ENCHANTS
+          if level is None or ENCHANT_UNLOCK[n] <= level]
+    return max(ok)[1] if ok else None
+
+
+def add_enchanted(pool, level=None):
+    """Widen a pool with the enchanted variants a wizard of this level
+    could actually apply. Returns a NEW pool; the caller decides whether
+    the builder gets to see it.
+
+    Deliberately narrow: the best unlocked flat enchant on damage
+    spells, Sharpen Blade on blades, Potent Trap on traps. Offering
+    every tier of every enchant would blow up the candidate space
+    without modeling anything a player does."""
+    out = dict(pool)
+    best = _best_damage_enchant(level)
+    for name, c in list(pool.items()):
+        try:
+            if c.kind == "blade" and (level is None
+                                      or ENCHANT_UNLOCK["Sharpen Blade"]
+                                      <= level):
+                e = enchant_card(c, "Sharpen Blade")
+            elif c.kind == "trap" and (level is None
+                                       or ENCHANT_UNLOCK["Potent Trap"]
+                                       <= level):
+                e = enchant_card(c, "Potent Trap")
+            elif c.kind in ("damage", "drain") and best:
+                e = enchant_card(c, best)
+            else:
+                continue
+        except ValueError:
+            continue          # per-pip spells and other refusals
+        out[e.name] = e
+    return out
+
+
+def legal_pool(cards, school, level=None, mastery=None, enchants=False):
     """Unlocked, deck-buildable cards for a school: the curated TRAINED
     quest line plus the cross-trained universal staples — nothing else,
     so pet cards (Firezilla), mutations and cross-school reskins
@@ -169,6 +221,8 @@ def legal_pool(cards, school, level=None, mastery=None):
             if c.kind in ("damage", "drain", "blade", "trap", "prism",
                           "shield", "heal", "weakness"):
                 pool[name] = c
+    if enchants:
+        pool = add_enchanted(pool, level)
     return pool
 
 
@@ -190,8 +244,11 @@ def sample_deck(pool, school, boss, rng, capacity=16, copy_limit=3):
     deck = []
 
     def add(card, n):
-        room = capacity - len(deck)
-        deck.extend([card.name] * min(n, copy_limit, room))
+        cost = 2 if is_enchanted(card.name) else 1
+        room = (capacity - enchanted_deck_size(deck)) // cost
+        base = enchant_base(card.name)
+        used = sum(1 for x in deck if enchant_base(x) == base)
+        deck.extend([card.name] * max(0, min(n, copy_limit - used, room)))
 
     n_hits = rng.randint(2, 5)
     top = hits[0] if hits else xpips[0]
@@ -225,9 +282,16 @@ def sample_deck(pool, school, boss, rng, capacity=16, copy_limit=3):
 
 
 def check_legal(deck, capacity, copy_limit):
+    """Legality in REAL deck slots and per-SPELL copies.
+
+    An enchanted entry costs two slots (spell + enchantment) and counts
+    against its base spell's copy limit, because the physical deck holds
+    the plain spell and the enchant is applied in hand. Bit-identical to
+    the old rule for any deck with no enchants."""
     from collections import Counter
-    return len(deck) <= capacity and \
-        all(v <= copy_limit for v in Counter(deck).values())
+    return enchanted_deck_size(deck) <= capacity and \
+        all(v <= copy_limit
+            for v in Counter(map(enchant_base, deck)).values())
 
 
 def screen(cards, decks, school, boss, rules=None, n=250, base_seed=7000,
@@ -302,7 +366,7 @@ def build_deck(cards, school, boss, rules=None, n_candidates=150,
                level=None, scorer=None, screen_frac=1 / 3,
                screen_log=None, generalist=None, objective="mean",
                player_hp=None, power_pip=None, enemies=None,
-               player_stats=None, mastery=None):
+               player_stats=None, mastery=None, enchants=False):
     """Two-stage search over the legal deck space. Returns
     (deck, win, ttk, screen_table). `level` gates the unlocked pool.
     A fitted DeckScorer (`scorer`) pre-ranks candidates so only the top
@@ -317,7 +381,13 @@ def build_deck(cards, school, boss, rules=None, n_candidates=150,
     a real HP total builds for SURVIVAL — boss damage counts, the
     screen proxy gains triage, and the template offers shields/heals."""
     rng = random.Random(seed)
-    pool = legal_pool(cards, school, level=level, mastery=mastery)
+    pool = legal_pool(cards, school, level=level, mastery=mastery,
+                      enchants=enchants)
+    # enchanted variants are DERIVED cards: they exist in the pool but
+    # not in the caller's registry, and every downstream Sim looks its
+    # decklist up by name, so fold them in before anything is simulated
+    if enchants:
+        cards = {**cards, **pool}
     seen, cands = set(), []
     tries = 0                       # a level-1 pool may only support a
     while len(cands) < n_candidates and tries < n_candidates * 40:
