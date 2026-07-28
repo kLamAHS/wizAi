@@ -22,15 +22,16 @@ The ablation is the whole point: w0 trains in both arms, so without
 it a recurrent-vs-linear gap cannot be attributed to memory.
 
 RESULT (results_sequence_model.json), budget-matched at 11 candidate
-checkpoints per arm: linear 75.1 / ablation 75.7 / recurrent 71.8 on
-the held-out 8; 54.8 / 76.8 / 80.9 on the X-pip bar. So capacity is
-NOT the constraint (a memoryless linear policy clears the bar the
-class supposedly could not express), recurrence is not the answer
-either (+4 there, −4 in aggregate), and the aggregate optimizer gap
-is 0.6 points. An earlier version of this file reported a 7.6-point
-optimizer gap; that was an artifact of an unequal selection budget
-(5 candidates vs 11) — see selection_study.py for how weak the
-validation signal actually is.
+checkpoints per arm and selected at the 9,600-fight budget
+selection_study.py certifies: linear 75.1 / ablation 75.7 /
+recurrent 71.5 on the held-out 8; 54.8 / 76.8 / 76.7 on the X-pip
+bar. Capacity is NOT the constraint (a memoryless linear policy
+clears the bar the class supposedly could not express) and recurrence
+buys nothing: −4.2 in aggregate, dead level on the sequencing bar.
+Two earlier versions of this file claimed otherwise — a 7.6-point
+"optimizer" gap (artifact of 5 vs 11 candidates) and a +4.1 recurrent
+edge on the bar (artifact of an 800-fight selection budget that
+selection_study.py later showed to be luck).
 
 Evaluation reproduces the exact 8 held-out pairs of results_offline
 (seed 777, per-pair expert >= 20%), plus the frozen X-pip bar. Both

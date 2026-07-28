@@ -471,16 +471,34 @@ loader report.
    Zero-shot means on 8 feasibility-filtered held-out pairs:
    BC-all **48.0%**, BC-filtered **74.8%**, CQL-lite **71.3%**,
    online generalist **76.7%**, per-pair experts 78.9%, scripted
-   heuristic 83.6%. Findings, in order of surprise: (1) filtering
-   demonstrations to winning episodes is the single biggest lever
-   (+27 points — losers teach losing habits); (2) offline learning
-   from demonstrations nearly matches online exploration in the same
-   policy class (74.8 vs 76.7); (3) nobody learned beats the
-   scripted blade-stack prior on raceable random pairs — and the 8k-
-   episode experts themselves average below it, which caps what any
-   clone can learn (garbage-ceiling, not garbage-in). Remaining
-   rungs: IQL-style expectile variants and sequence models for the
-   multi-hit planning the linear class provably can't express.
+   heuristic 83.6%. **Those numbers predate the selection study, so
+   every one of their conclusions was re-tested** under the corrected
+   regime — 11 candidate checkpoints per learner, selection at the
+   certified 9,600-fight budget, paired seeds, and the full candidate
+   curve reported so the within-learner spread sits next to the
+   between-learner gap (`ladder_recheck.py`,
+   `results_ladder_recheck.json`):
+
+   ```
+   learner        candidate curve (min-max)   selected   original
+   BC-all              47.6 - 56.9%            53.8%      48.0%
+   BC-filtered         69.6 - 75.7%            75.4%      74.8%
+   CQL-lite            70.0 - 77.8%            75.6%      71.3%
+   ```
+
+   A conclusion survives only if the between-learner gap exceeds the
+   within-learner spread. (1) **Filtering demonstrations SURVIVES**:
+   +21.6 points against a 9.3-point noise floor — losers really do
+   teach losing habits, though the effect is +22, not the +27 first
+   reported. (2) **"Filtered BC beats conservative fitted-Q" does
+   NOT**: the corrected gap is −0.2 points (CQL nominally ahead)
+   against a 7.9-point floor, so the original 3.5-point ordering was
+   schedule luck. CQL-lite's best checkpoint (77.8%) is in fact the
+   highest single number in the table. (3) Unchanged: nobody learned
+   beats the scripted blade-stack prior on raceable random pairs, and
+   the 8k-episode experts themselves average below it — a
+   garbage-ceiling, not garbage-in. Remaining rung: IQL-style
+   expectile variants.
    SEARCH-GENERATED TEACHERS, done (`offline_search.py`,
    `results_offline_search.json`) with a finding that sharpened the
    ladder's theory: stronger teachers made WORSE clones. Search
