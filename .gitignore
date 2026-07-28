@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 .pytest_cache/
 offline_data.npz
+offline_union.npz
+offline_rl_teacher.npz

@@ -471,16 +471,34 @@ loader report.
    Zero-shot means on 8 feasibility-filtered held-out pairs:
    BC-all **48.0%**, BC-filtered **74.8%**, CQL-lite **71.3%**,
    online generalist **76.7%**, per-pair experts 78.9%, scripted
-   heuristic 83.6%. Findings, in order of surprise: (1) filtering
-   demonstrations to winning episodes is the single biggest lever
-   (+27 points — losers teach losing habits); (2) offline learning
-   from demonstrations nearly matches online exploration in the same
-   policy class (74.8 vs 76.7); (3) nobody learned beats the
-   scripted blade-stack prior on raceable random pairs — and the 8k-
-   episode experts themselves average below it, which caps what any
-   clone can learn (garbage-ceiling, not garbage-in). Remaining
-   rungs: IQL-style expectile variants and sequence models for the
-   multi-hit planning the linear class provably can't express.
+   heuristic 83.6%. **Those numbers predate the selection study, so
+   every one of their conclusions was re-tested** under the corrected
+   regime — 11 candidate checkpoints per learner, selection at the
+   certified 9,600-fight budget, paired seeds, and the full candidate
+   curve reported so the within-learner spread sits next to the
+   between-learner gap (`ladder_recheck.py`,
+   `results_ladder_recheck.json`):
+
+   ```
+   learner        candidate curve (min-max)   selected   original
+   BC-all              47.6 - 56.9%            53.8%      48.0%
+   BC-filtered         69.6 - 75.7%            75.4%      74.8%
+   CQL-lite            70.0 - 77.8%            75.6%      71.3%
+   ```
+
+   A conclusion survives only if the between-learner gap exceeds the
+   within-learner spread. (1) **Filtering demonstrations SURVIVES**:
+   +21.6 points against a 9.3-point noise floor — losers really do
+   teach losing habits, though the effect is +22, not the +27 first
+   reported. (2) **"Filtered BC beats conservative fitted-Q" does
+   NOT**: the corrected gap is −0.2 points (CQL nominally ahead)
+   against a 7.9-point floor, so the original 3.5-point ordering was
+   schedule luck. CQL-lite's best checkpoint (77.8%) is in fact the
+   highest single number in the table. (3) Unchanged: nobody learned
+   beats the scripted blade-stack prior on raceable random pairs, and
+   the 8k-episode experts themselves average below it — a
+   garbage-ceiling, not garbage-in. Remaining rung: IQL-style
+   expectile variants.
    SEARCH-GENERATED TEACHERS, done (`offline_search.py`,
    `results_offline_search.json`) with a finding that sharpened the
    ladder's theory: stronger teachers made WORSE clones. Search
@@ -507,11 +525,11 @@ loader report.
    (`freeze_U=True`).
 
    ```
-   arm (same data, paired seeds,      held-out 8    X-pip bar
-        11 selection candidates each)
+   arm (same data, paired seeds, 11    held-out 8    X-pip bar
+        candidates, 9,600-fight selection)
    linear BC (train_bc plain SGD)        75.1%        54.8%
    ablation: U = 0, Adam/BPTT            75.7%        76.8%
-   recurrent: full U h                   71.8%        80.9%
+   recurrent: full U h                   71.5%        76.7%
    (context, other runs/protocols: heuristic 83.6%;
     per-deck RL on the bar 85.1%; online generalist there 53.4%)
    ```
@@ -521,19 +539,41 @@ loader report.
    linear policy, merely refit on these demonstrations, scores 76.8%
    on the X-pip bar — the exact fight this README previously called
    something "the linear class provably can't express". That claim is
-   retracted. (2) **Recurrence is not the answer either**: it buys
-   +4.1 on that bar and loses 3.9 in aggregate, overfitting 3,475
-   episodes. (3) **Most apparent differences here are a selection
-   lottery.** An earlier version of this table reported a 7.6-point
-   "optimizer" gap; adversarial review reproduced the run and showed
-   it was an artifact of giving the linear arm 5 candidate
-   checkpoints while the other arms got 11. Budget-matched, the gap
-   is 0.6 points — noise. Validation score (4 pairs × 200 fights) is
-   nearly uncorrelated with held-out performance, so with an unequal
-   candidate pool the extra draws were worth +7 points to whichever
-   arm had more. Anything measured this way needs matched budgets and
-   a selection signal that actually tracks the target — which is now
-   the top open methodological item for the whole offline ladder.
+   retracted. (2) **Recurrence buys nothing here**: −4.2 in aggregate
+   and dead level on the sequencing bar it was designed for. An
+   earlier table credited it with +4.1 there; that vanished the
+   moment model selection was given a validated budget. (3) **Most
+   apparent differences here were a selection lottery.** An earlier
+   version of this table also reported a 7.6-point "optimizer" gap;
+   adversarial review reproduced the run and showed it came from
+   giving the linear arm 5 candidate checkpoints while the others got
+   11. Budget-matched, that gap is 0.6 points.
+
+   So the apparatus itself became the experiment (`selection_study.py`,
+   `results_selection.json`): 11 checkpoints of ONE class, scored
+   against the canonical benchmark and under four validation budgets.
+
+   ```
+   validation budget      spearman(val, test)   selection regret
+   4 pairs x 200 =   800        +0.64              0.0 pts
+   8 pairs x 200 =  1600        -0.08              5.5 pts
+   8 pairs x 600 =  4800        +0.26              5.5 pts
+   16 pairs x 600 = 9600        +0.82              0.0 pts
+   (checkpoint choice alone spans 68.1%-75.1%: a 6.9-point spread)
+   ```
+
+   Reliability is NOT monotone in budget, so the study reports the
+   smallest budget that works *and stays working at every larger
+   budget* — 9,600 fights. The 800-fight budget scores perfectly and
+   is pure luck: the two budgets above it cost 5.5 points each.
+   (`sequence_model.py` used exactly that lucky 800 and now uses
+   9,600.) The sobering headline is the 6.9-point checkpoint spread:
+   it is as large as every architectural "effect" chased in this
+   section, which is why three consecutive conclusions here had to be
+   withdrawn. Every future comparison in this repo needs matched
+   candidate budgets, a validated selection budget, and — where
+   affordable — the whole candidate curve reported rather than one
+   selected point.
 
    Three process notes, all from the adversarial review that gated
    this merge (34 agents, 8 findings confirmed by refutation):

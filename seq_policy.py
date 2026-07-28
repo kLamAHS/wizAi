@@ -6,14 +6,15 @@ negatives suggested the linear generalist could not hold a plan
 across steps, and the offline ladder's ~75% ceiling suggested the
 binding constraint was student capacity.
 
-This is the minimal student that adds capacity while changing nothing
-else — same features, same demonstrations, same benchmark. What the
-experiment actually found is that a memoryless linear policy, simply
-REFIT on the same demonstrations, reaches 76.8% on the X-pip bar the
-class was said to be unable to express; recurrence adds only ~4
+This is the minimal student that adds capacity while changing
+nothing else — same features, same demonstrations, same benchmark.
+What the experiment actually found: a memoryless linear policy,
+simply REFIT on the same demonstrations, reaches 76.8% on the X-pip
+bar the class was said to be unable to express; recurrence adds ~4
 points there and loses ground in aggregate. The capacity story did
-not survive its own ablation. A hidden state h carries the plan and MODULATES the
-linear ranking:
+not survive its own ablation.
+
+A hidden state h carries the plan and MODULATES the linear ranking:
 
     w_eff(t) = w0 + U h(t)              scoring weights this step
     q_i(t)   = w_eff(t) . phi_i(t)      rank legal actions
@@ -23,13 +24,14 @@ so the policy's preferences at step t depend on what it committed to
 at steps < t. With U = 0 it IS the linear policy, so training
 warm-starts from the linear BC solution (`from_linear`).
 
-IMPORTANT: w0 keeps training too, so a gain over the linear baseline
-is NOT automatically a recurrent effect — `freeze_U=True` runs the
-same optimizer with the recurrence pinned off, and that ablation is
-what attributes the difference. On this repo's benchmark it turned
-out to matter enormously: almost all of the improvement was the
-episode-level Adam optimizer, not the memory (see
-results_sequence_model.json and the README).
+IMPORTANT: w0 keeps training too, so a gain over the linear
+baseline is NOT automatically a recurrent effect — `freeze_U=True`
+runs the same optimizer with the recurrence pinned off, and that
+ablation is what attributes the difference. Budget-matched, the
+optimizer accounts for ~0.6 points in aggregate (noise): an earlier
+write-up of this file claimed it "mattered enormously", which was an
+artifact of giving the arms unequal numbers of candidate checkpoints.
+See results_sequence_model.json and the README.
 
 Trained by filtered behavior cloning over whole episodes with
 hand-written backprop-through-time (numpy only, no autodiff). The
