@@ -268,8 +268,15 @@ def main():
                  for r in solo) / len(solo) * 100
         dm = sum(r["trained"]["win"] - r["scripted"]["win"]
                  for r in mob) / len(mob) * 100
-        print(f"\nlearner vs scripted: {ds:+.1f} points on solo bosses, "
-              f"{dm:+.1f} on multi-enemy boards", flush=True)
+        # n is printed because it is usually tiny: the encounter screen
+        # picks whatever is contested in each world, and solo bosses are
+        # a minority of that. A one-encounter "average" is not a finding.
+        print(f"\nlearner vs scripted: {ds:+.1f} points on solo bosses "
+              f"(n={len(solo)}), {dm:+.1f} on multi-enemy boards "
+              f"(n={len(mob)})", flush=True)
+        if min(len(solo), len(mob)) < 3:
+            print(f"  both arms are thin — read the per-level rows, not "
+                  f"these means", flush=True)
         print(f"  the learner ranks CARDS, not targets — see "
               f"mob_generalist.py for the isolation of that deficit",
               flush=True)
