@@ -311,6 +311,12 @@ def survival_builds():
 LEVEL_RAMP = ["#bcd6f4", "#8ab6ea", "#5895dd", "#2a78d6", "#1b559b"]
 
 
+def _width(n, base=8.0, per=0.62, cap=13.0):
+    """Grow the canvas with the category count. A 12-level --full run on
+    an 8-inch axis overlaps its two-line x labels into mush."""
+    return min(cap, max(base, per * n + 2.4))
+
+
 def _ramp(n):
     if n <= 1:
         return [LEVEL_RAMP[3]]
@@ -318,14 +324,22 @@ def _ramp(n):
     return [LEVEL_RAMP[round(i * step)] for i in range(n)]
 
 
-def _label_ends(ax, xs, ys, color, fmt="{:.0f}", dy=7, extra=()):
+def _label_ends(ax, xs, ys, color, fmt="{:.0f}", dy=7, extra=(),
+                other=None):
     """SELECTIVE direct labels: the two endpoints plus any index the
     caller flags. Labelling every point collided the two series wherever
-    they converged, which on this chart is most of the range."""
+    they converged, which on this chart is most of the range.
+
+    `other` is the companion series; when given, each label is placed on
+    the side this series is on at that x, so a label never lands on top
+    of its own line."""
     idx = {0, len(xs) - 1} | set(extra)
     for i in sorted(idx):
+        off = dy
+        if other is not None:
+            off = abs(dy) if ys[i] >= other[i] else -abs(dy) - 4
         ax.annotate(fmt.format(ys[i]), (xs[i], ys[i]),
-                    textcoords="offset points", xytext=(0, dy),
+                    textcoords="offset points", xytext=(0, off),
                     ha="center", fontsize=8.5, color=color)
 
 
@@ -335,7 +349,7 @@ def main_progression(path="results_main.json"):
     x = [r["level"] for r in rows]
     tr = [r["trained"]["win"] * 100 for r in rows]
     sc = [r["scripted"]["win"] * 100 for r in rows]
-    fig, ax = plt.subplots(figsize=(8, 4.4))
+    fig, ax = plt.subplots(figsize=(_width(len(rows)), 4.4))
     ax.plot(x, sc, "-o", lw=2, ms=8, color=C["heuristic"],
             label="best scripted line", zorder=2,
             markeredgecolor="white", markeredgewidth=2)
@@ -344,8 +358,8 @@ def main_progression(path="results_main.json"):
             markeredgecolor="white", markeredgewidth=2)
     gap = [abs(a - b) for a, b in zip(tr, sc)]
     worst = gap.index(max(gap))
-    _label_ends(ax, x, tr, C["RL"], extra=(worst,))
-    _label_ends(ax, x, sc, C["heuristic"], dy=-13, extra=(worst,))
+    _label_ends(ax, x, tr, C["RL"], extra=(worst,), other=sc)
+    _label_ends(ax, x, sc, C["heuristic"], extra=(worst,), other=tr)
     if max(gap) > 5:
         ax.annotate(f"{tr[worst]-sc[worst]:+.0f} pts", (x[worst],
                     (tr[worst] + sc[worst]) / 2),
@@ -376,7 +390,7 @@ def main_ttk(path="results_main.json"):
     x = [r["level"] for r in rows]
     tr = [r["trained"]["ttk"] for r in rows]
     p90 = [r["trained"]["p90"] for r in rows]
-    fig, ax = plt.subplots(figsize=(8, 3.8))
+    fig, ax = plt.subplots(figsize=(_width(len(rows)), 3.8))
     ax.fill_between(x, tr, p90, color=C["RL"], alpha=0.16, lw=0,
                     label="mean to 90th percentile")
     ax.plot(x, tr, "-o", lw=2, ms=8, color=C["RL"], label="mean TTK",
@@ -405,7 +419,7 @@ def main_deck(path="results_main.json"):
     x = range(len(rows))
     ench = [r["enchanted"] for r in rows]
     plain = [r["deck_cards"] - r["enchanted"] for r in rows]
-    fig, ax = plt.subplots(figsize=(8, 3.8))
+    fig, ax = plt.subplots(figsize=(_width(len(rows)), 3.8))
     # 2px surface gap between stacked segments
     ax.bar(x, plain, 0.56, color=C["heuristic"], label="plain cards",
            zorder=2)
@@ -455,7 +469,7 @@ def main_policy(path="results_main.json"):
     if not live:
         raise ValueError("every level is flat — nothing to plot")
     colors = _ramp(len(live))
-    fig, ax = plt.subplots(figsize=(8, 4.2))
+    fig, ax = plt.subplots(figsize=(8.6, 4.2))
     for r, col in zip(live, colors):
         ys = curve(r)
         ax.plot(ks, ys, "-o", lw=2, ms=7, color=col,
@@ -472,7 +486,7 @@ def main_policy(path="results_main.json"):
     ax.set_ylim(-4, 108)
     ax.set_axisbelow(True)
     ax.grid(axis="x", visible=False)
-    ax.legend(frameon=False, fontsize=9, ncol=max(1, len(live)),
+    ax.legend(frameon=False, fontsize=9, ncol=min(4, max(1, len(live))),
               loc="lower center", bbox_to_anchor=(0.5, -0.34))
     sub = (f"  ·  {len(flat)} of {len(rows)} levels omitted: flat at the "
            f"ceiling, the fight was already won"

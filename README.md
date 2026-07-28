@@ -173,24 +173,41 @@ Two things it does that are worth knowing about. It SCREENS encounters
 for solo feasibility — much of the registry is four-person dungeon
 content, and the first end-to-end run picked by size alone, drew Gurtok
 Firebender with two adds, and returned 0% at every level. And it ships
-whichever policy actually won, because the learner does not always win:
+whichever policy actually won, because the learner does not always win.
+`--full`, every world boundary:
 
 ```
 lvl  world        encounter               +  deck  trained  scripted   ship
-20   Krokotopia   Frost Colossus          2  12      3.7%     69.9%   race(1)
-50   Dragonspyre  The Collector           2   9     95.9%     97.2%   race(1)
-70   Zafaria      Razorjack               1  12     93.9%     98.6%   race(2)
-100  Khrysalis    Shadow of the Land      1  12     98.1%    100.0%   race(3)
-120  Mirage       Mother Ghulture         2   9    100.0%    100.0%   trained
+10   Wizard City  Norton                  1   6     51.7%     48.7%   trained
+20   Krokotopia   Frost Colossus          2   9     15.5%     69.8%   race(2)
+30   Marleybone   Seething Wraith         1   6     95.1%     95.7%   race(1)
+40   MooShu       Plague Oni              1   6     72.9%     89.2%   race(1)
+50   Dragonspyre  The Collector           2   6     96.5%     96.7%   race(1)
+60   Celestia     Cuthalla                0   7     63.8%     60.3%   trained
+70   Zafaria      Razorjack               1   6     91.5%     92.1%   race(1)
+80   Avalon       Kayla White Talon       1   6     90.5%     90.8%   race(1)
+90   Azteca       Huemac Spear Wreath     1  11     93.9%     97.7%   race(1)
+100  Khrysalis    Shadow of the Land      1  11     98.4%     99.9%   race(1)
+110  Polaris      Captain Loranzo         1  11     99.4%    100.0%   race(1)
+120  Mirage       Mother Ghulture         2   6    100.0%    100.0%   trained
 ```
 
-The tabular learner ranks CARDS, not targets, so on a multi-enemy board
-it cannot commit to killing one thing first — it matches the scripted
-line within a couple of points once the fight is winnable and collapses
-to 3.7% on the one encounter that is genuinely contested. That is the
-representation deficit `mob_generalist.py` isolated, reproduced here by
-the end-to-end run rather than argued for; advisor-guided training moves
-it 4.7% to 6.2%, which is to say barely.
+The learner wins outright twice (Wizard City +3.0, Celestia +3.5), ties
+at Mirage, and otherwise trails by under a point wherever the fight is
+decided. Where it fails it fails hard: **−54 points at Krokotopia** and
+−16 at MooShu, both multi-enemy boards. The tabular learner ranks CARDS,
+not targets, so it cannot commit to killing one thing first — the
+representation deficit `mob_generalist.py` isolated, reproduced by the
+end-to-end run rather than argued for. Advisor-guided training moves the
+worst case 4.7% to 6.2%, which is to say barely.
+
+The per-arm means (+3.5 solo, −6.8 multi-enemy) are printed with their
+`n`, and here that is n=1 and n=11 — read the rows, not the means.
+
+The deck chart below is the clearest single picture of the enchant
+result: plain blue through Dragonspyre, purple appearing exactly at
+Celestia 51 where Sun enchants unlock, and dominating every world after
+— six castable cards spending twelve real slots at Zafaria.
 
 ![End-to-end progression](plots/main_progression.png)
 
