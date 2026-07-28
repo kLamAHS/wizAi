@@ -64,7 +64,16 @@ def pick_encounter(level, school, cards, bosses, registry, stats, rng,
             if registry[b.name].get("world") == world and b.rank]
     if not pool:
         pool = [b for b in bosses.values() if b.rank]
-    pool.sort(key=lambda b: (0 if b.minions else 1, b.hp, b.name))
+    # Alternate the FIGHT TYPE by level instead of always preferring
+    # company. Sorting mob boards first meant a twelve-level sweep never
+    # once saw a solo boss, and the two want different decks: the repo
+    # owner's rule is AoE and blades for mobs, plus two stackable Feints
+    # for a boss. With only mob boards on offer the builder correctly
+    # packed no Feints, and it read as a bug in the builder when it was
+    # a gap in the sample.
+    want_company = (level // 10) % 2 == 0
+    pool.sort(key=lambda b: (0 if bool(b.minions) == want_company else 1,
+                             b.hp, b.name))
     probe_deck = _probe_deck(school, cards, level)
     fallback = None
     for b in pool[:40]:
@@ -80,7 +89,8 @@ def pick_encounter(level, school, cards, bosses, registry, stats, rng,
             fallback = (b, w)
         if 0.15 <= w <= 0.90:
             if log:
-                log(f"  screened  {b.name} — scripted probe "
+                kind = f"+{len(comps)} adds" if comps else "solo boss"
+                log(f"  screened  {b.name} ({kind}) — scripted probe "
                     f"{w*100:.0f}%, contested")
             return b
     if log:
