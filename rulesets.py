@@ -43,8 +43,19 @@ MODERN = replace(LIVE, ruleset_id="w101-pve-modern", era="celestia+",
                  crit_resolver=make_rating_crit(), crit_multiplier=2.0,
                  mastery_school="storm")
 
+# archmastery: a share of gained pips arrive as SCHOOL pips, which pay
+# 2 for the wizard's own school and nothing anywhere else. MODELED as a
+# per-pip rate (the live orb fills from a stat contested against
+# opponents; the rate is the tractable abstraction of that).
+ARCHMASTERY = replace(LIVE, ruleset_id="w101-pve-archmastery",
+                      era="novus+", archmastery=0.35)
+AM_MASTERY = replace(LIVE, ruleset_id="w101-pve-am-mastery",
+                     era="novus+", archmastery=0.35,
+                     mastery_school="storm")
+
 ERAS = {"classic": CLASSIC, "live": LIVE, "crit-era": CRIT_ERA,
-        "mastery": MASTERY, "modern": MODERN}
+        "mastery": MASTERY, "modern": MODERN,
+        "archmastery": ARCHMASTERY, "am+mastery": AM_MASTERY}
 
 # gear-like ratings for the crit eras (MODELED; ratings, not chances —
 # make_rating_crit turns them into probabilities). Criticals-off eras
@@ -53,7 +64,19 @@ PLAYER_STATS = {"crit": 180.0, "block": 60.0}
 BOSS_STATS = {"crit": 120.0, "block": 140.0}
 
 
-def stats_for(rules):
+# gear damage is SCHOOL-SPECIFIC in the live game: a wizard's gear
+# buffs their own school and does nothing for a splash. MODELED
+# magnitude, but the asymmetry is the documented shape.
+SCHOOL_GEAR_DAMAGE = 0.50
+
+
+def stats_for(rules, school=None, school_gear=False):
     """Player stat block appropriate to a ruleset (empty when the era
-    has no criticals, so classic numbers stay bit-identical)."""
-    return dict(PLAYER_STATS) if rules.crit_resolver else {}
+    has no criticals, so classic numbers stay bit-identical).
+    `school_gear` adds own-school-only damage — off-school splashes
+    get nothing, which is the economics that decides whether a
+    mastery amulet is worth its slot."""
+    st = dict(PLAYER_STATS) if rules.crit_resolver else {}
+    if school_gear and school:
+        st["damage"] = {school: SCHOOL_GEAR_DAMAGE}
+    return st

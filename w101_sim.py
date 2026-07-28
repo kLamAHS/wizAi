@@ -80,6 +80,12 @@ class Rules:
     mastery_school: object = None        # mastery amulet: this off-school
                                          # school also gets FULL power-pip
                                          # value (post-Celestia item)
+    archmastery: float = 0.0             # P(a gained pip is a SCHOOL pip).
+                                         # MODELED: the live orb fills from
+                                         # an Archmastery stat contested
+                                         # against opponents; a per-pip
+                                         # probability is the tractable
+                                         # abstraction of that rate.
 
 
 # ---------------------------------------------------------------- card model
@@ -394,6 +400,7 @@ class Actor:
     team: int                   # 0 = player side, 1 = enemy side
     norm_pips: int = 0
     pow_pips: int = 0
+    school_pips: int = 0                 # own-school ONLY, worth 2 there
     power_pip_chance: float = 0.0
     accuracy_bonus: float = 0.0
     pierce: float = 0.0
@@ -433,7 +440,7 @@ class Actor:
 
     @property
     def pip_slots(self):
-        return self.norm_pips + self.pow_pips
+        return self.norm_pips + self.pow_pips + self.school_pips
 
     def has_stack(self, key, slot=None):
         pools = {"charm": self.charms, "ward": self.wards}
@@ -564,6 +571,14 @@ class State:
         return self.player.pip_slots
 
     @property
+    def school_pips(self):
+        return self.player.school_pips
+
+    @school_pips.setter
+    def school_pips(self, v):
+        self.player.school_pips = v
+
+    @property
     def hand(self):
         return self.player.hand
 
@@ -657,18 +672,33 @@ class Sim:
         a = s.player
         if card.x_pips:
             return a.pip_slots >= 1
+        # school pips pay 2 for the wizard's OWN school and nothing
+        # anywhere else — that lock is the whole strategic content of
+        # archmastery
+        own = 2 * a.school_pips if card.school == self.school else 0
         if self._full_pip(card):
-            return a.norm_pips + 2 * a.pow_pips >= card.pips
-        return a.norm_pips + a.pow_pips >= card.pips
+            return own + a.norm_pips + 2 * a.pow_pips >= card.pips
+        return own + a.norm_pips + a.pow_pips >= card.pips
 
     def spend(self, s, card):
         """Returns effective pips spent (drives X-pip spells)."""
         a = s.player
         if card.x_pips:
             eff = a.norm_pips + a.pow_pips * self._pip_value(a, card)
+            if card.school == self.school:
+                eff += 2 * a.school_pips
+                a.school_pips = 0
             a.norm_pips = a.pow_pips = 0
             return eff
         c = card.pips
+        if card.school == self.school and a.school_pips:
+            use_school = min(a.school_pips, c // 2)   # spend the locked
+            c -= 2 * use_school                       # resource first
+            a.school_pips -= use_school
+            if c == 1 and a.school_pips and \
+                    a.norm_pips + a.pow_pips == 0:
+                a.school_pips -= 1                    # odd remainder
+                c = 0
         if self._full_pip(card):
             use_pow = min(a.pow_pips, c // 2)
             c -= 2 * use_pow
@@ -691,7 +721,10 @@ class Sim:
         chance = a.power_pip_chance
         if s.bubble and s.bubble.fld == "pip_chance":
             chance = min(1.0, chance + s.bubble.percent)
-        if self.rng.random() < chance:
+        if self.rules.archmastery and \
+                self.rng.random() < self.rules.archmastery:
+            a.school_pips += 1          # locked to the wizard's school
+        elif self.rng.random() < chance:
             a.pow_pips += 1
         else:
             a.norm_pips += 1

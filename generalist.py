@@ -96,7 +96,8 @@ def phi(sim, s, a):
         a, ti = a
         tgt = s.enemies[ti]
     x = np.zeros(len(FEATS))
-    pipf = min((s.norm_pips + 2 * s.pow_pips) / 14.0, 1.0)
+    pipf = min((s.norm_pips + 2 * s.pow_pips +
+                2 * getattr(s, 'school_pips', 0)) / 14.0, 1.0)
     hits_left = min(sum(1 for c in s.hand if c.kind in DMG_KINDS) +
                     sum(1 for c in s.deck if c.kind in DMG_KINDS), 8) / 8.0
     x[0] = 1.0

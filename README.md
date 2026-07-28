@@ -50,10 +50,13 @@ effect provenance as a first-class citizen.
   not scraped encounters.
 - **Out of scope, declared:** criticals default off in the classic
   era but are a shipped ruleset (`rulesets.CRIT_ERA`, rating-based and
-  MODELED), as is the mastery amulet (`Rules.mastery_school`); still
-  absent are archmastery/shadow/school pips (a new resource, not a
-  flag) and any gear/pet stat layer (fields exist and default to 0,
-  including flat damage/flat resist). Enemy decks are flat scripted
+  MODELED), as is the mastery amulet (`Rules.mastery_school`) and
+  archmastery/school pips (`Rules.archmastery` — a real resource with
+  its own rack slots and an own-school spend lock). Still absent:
+  shadow pips, and any full gear/pet stat layer (the fields exist and
+  default to 0, including flat damage/flat resist; `rulesets.
+  stats_for(..., school_gear=True)` supplies a MODELED own-school
+  damage bonus for era probes). Enemy decks are flat scripted
   hits + cheats by default, or a configured spell pool with archetype
   AI (`Boss(pool=...)`). Beguile is the one card excluded as
   unsupported.
@@ -691,10 +694,51 @@ loader report.
    line, which is exactly the item's design intent, reproduced from
    the pip arithmetic alone.
 
-   Still open in this item: school pips / archmastery, which is a
-   deeper change to pip accounting than a `Rules` flag (it adds a
-   resource), and is the honest reason the modern era here is
-   "criticals + mastery", not "modern combat".
+   **School pips / archmastery** then closed the item
+   (`Rules.archmastery`, `archmastery_probe.py`,
+   `results_archmastery.json`). It is a genuine new RESOURCE, not a
+   flag: a share of gained pips arrive as school pips that pay 2 for
+   the wizard's own school and **nothing anywhere else**, they occupy
+   rack slots, they are spent first (being worthless otherwise), and
+   both featurizers see them (no-op when the era is off, so every
+   earlier number is untouched — regression-tested).
+
+   The repo owner predicted the outcome before the run: *"the AI just
+   learns to use their school pips, since main-class damage is buffed
+   by gear and off-school isn't usually."* Both halves hold, and the
+   mechanical half lands harder than "learns to prefer". A fire
+   wizard with a heavy storm splash, against a boss resisting fire
+   60% — deliberately the worst case, since the wall punishes the
+   school the splash exists to dodge:
+
+   ```
+   era                    splash deck        mono-fire deck   own-school
+                        win     ttk          win     ttk      dmg casts
+   mastery             64.8%   14.04         0.0%     —         41.6%
+   mastery+gear        67.5%   11.26        47.0%   13.10       38.9%
+   am+mastery          25.8%   15.28         0.0%     —         46.0%
+   am+mastery+gear     38.5%   12.91        47.5%   13.02       43.2%
+   ```
+
+   Archmastery costs the splash deck **39 points of win rate**
+   (64.8 → 25.8): school pips pile up fire-locked while the deck's
+   damage is storm, so the rack fills with a currency the hand cannot
+   spend. Own-school damage casts rise (41.6 → 46.0), the predicted
+   direction — but the deeper effect is that the tax falls on the
+   DECK, not the play. And the economic half is exactly as predicted:
+   own-school gear is what makes mono-fire viable at all against a
+   60% fire wall (0% → 47%), and it collapses the splash's edge from
+   +1.83 turns to **+0.11** — parity. Carrying the off-school splash
+   stops paying precisely when gear buffs your own school and pips
+   lock to it.
+
+   Nuance worth stating: the own-school share moves only ~4 points
+   because a policy cannot spend school pips it has no own-school
+   cards for — the adaptation has to happen in DECK CONSTRUCTION. The
+   natural follow-up is to let `build_deck` see a mastery-widened
+   pool and check that it drops the splash on its own; today
+   `legal_pool` is school-scoped by construction, so the builder
+   cannot splash either way.
 
 ## Boundary
 
