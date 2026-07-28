@@ -39,7 +39,7 @@ archmastery/shadow/school pips (post-classic era), enemy decks are flat
 scripted hits + cheats, no player-side team play (allies are minions only).
 """
 import copy, json, random
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import content
 
@@ -112,6 +112,79 @@ class Card:
     @property
     def stack_key(self):
         return (self.name, self.source)
+
+
+# --------------------------------------------------------- enchantments
+#
+# Sun-school enchantments are absent from the extracted dump for a
+# structural reason: they modify a card in HAND rather than producing a
+# battle effect, so the effect parser never had anything to read. They
+# are also where a large slice of real player damage lives, which is why
+# a simulated wizard here under-performs a real one.
+#
+# The mechanic that matters is not the +10%. It is the STACK IDENTITY:
+# an enchanted blade counts as a different charm from the plain blade,
+# so both sit on the wizard at once. `Card.source` already carried an
+# `enchant-*` provenance tier in its docstring, and both stack keys —
+# Hanging's (name, source, sub) and the duplicate-placement check's
+# (name, source, sub) — key on it, so the identity split falls out
+# rather than being bolted on.
+#
+# Confidence: the +10% magnitude and the stacking rule are as reported
+# by the repo owner. MODELED here: which ops the bonus lands on. A trap
+# card can hang wards on both sides (Feint puts 70% on the enemy and
+# 30% back on you), and the enchant is a damage-trap booster, so the
+# bonus applies only to ops pointing the card's own way — enemy for a
+# trap, self for a blade. Feint therefore becomes 80/30, not 80/40.
+ENCHANTS = {"Sharpen Blade": ("blade", 0.10, "sharp", "self"),
+            "Potent Trap": ("trap", 0.10, "potent", "enemy")}
+
+
+def enchant_card(card, enchant):
+    """A derived Card carrying the enchant's bonus and its own stack
+    identity, so it stacks with the unenchanted original."""
+    if enchant not in ENCHANTS:
+        raise KeyError(f"unknown enchantment {enchant!r}")
+    kind, bonus, tag, direction = ENCHANTS[enchant]
+    if card.kind != kind:
+        raise ValueError(f"{enchant} enchants {kind} cards, "
+                         f"not {card.kind} ({card.name})")
+    ops, touched = [], False
+    for o in card.ops:
+        o = dict(o)
+        if o.get("percent") and o.get("tgt") == direction:
+            o["percent"] = round(o["percent"] + bonus, 4)
+            touched = True
+        ops.append(o)
+    if not touched:
+        raise ValueError(f"{enchant} found no {direction}-facing "
+                         f"percent op on {card.name}")
+    return replace(card, name=f"{card.name}+{tag}", ops=ops,
+                   percent=round(card.percent + bonus, 4),
+                   source=f"enchant-{tag}")
+
+
+def register_enchants(cards, names, enchant):
+    """Add enchanted copies of `names` to a card dict (mutated) and
+    return the new names, ready to drop into a decklist.
+
+    DECK COST: an enchanted card is TWO cards in the real deck — the
+    spell and the enchantment that upgrades it. Callers doing deck-size
+    accounting must count it twice; `enchanted_deck_size` does."""
+    out = []
+    for n in names:
+        c = enchant_card(cards[n], enchant)
+        cards[c.name] = c
+        out.append(c.name)
+    return out
+
+
+def enchanted_deck_size(decklist):
+    """Real deck slots used: an enchanted entry costs 2 (spell +
+    enchantment), a plain one costs 1."""
+    return sum(2 if "+" in n and n.split("+")[-1] in
+               {t for _, _, t, _ in ENCHANTS.values()} else 1
+               for n in decklist)
 
 
 def _kind_from_ops(ops):

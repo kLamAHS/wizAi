@@ -467,9 +467,79 @@ loader report.
    was killable), so it is suggestive only; and block rating tracks
    TIER in the real data — every creature with block ≥570 has ≥13675
    HP — so "high block" and "big HP pool" are not independent knobs.
-   The invented-400 scenario turns out to sit on content a solo
-   level-100 single-target fire deck cannot clear at all (0 of 6
-   sampled killable in 80 turns, even with Reshuffle).
+
+   > **Corrected by item 2b below.** This section first said the
+   > high-block scenario "sits on content a solo level-100
+   > single-target fire deck cannot clear at all". That was a fact
+   > about the 18-card deck used here, not about the wizard: with a
+   > 23-card deck carrying Balanceblade and a 4-blade stack policy,
+   > Were-Bear Brute (Standard) falls at **100%** with no enchants at
+   > all. The reachability screen above is still the right guard for
+   > this probe — TTK is undefined where the wizard cannot win — but
+   > "unreachable" was overstated as a claim about the configuration.
+
+2b. **The missing player damage: enchantments** (`ENCHANTS`,
+   `enchant_card`, `enchant_probe.py`, `results_enchants.json`). The
+   repo owner identified the gap after seeing the unreachable result
+   above, and it was in the PLAYER model, not the boss model. Real
+   wizards cross-train **Feint** from Death (70% trap on the enemy,
+   30% back on themselves) and carry Sun **enchantments** — Sharpen
+   Blade and Potent Trap — which add +10% and, far more importantly,
+   give the enchanted card **its own stack identity**, so a sharpened
+   blade sits alongside the plain blade rather than being refused as a
+   duplicate.
+
+   Feint was already modeled, both halves. The enchantments were not,
+   and for a structural reason: they modify a card in HAND rather than
+   producing a battle effect, so the extraction pipeline's effect
+   parser never had anything to read. They are invisible to the dump
+   by construction, not by oversight.
+
+   The engine needed almost nothing. `Card.source` already documented
+   an `enchant-*` provenance tier, and both stack keys — `Hanging`'s
+   `(name, source, sub)` and the duplicate-placement check's — key on
+   it, so the identity split falls out of machinery that was already
+   there:
+
+   ```
+   charms on the wizard:  [('Fireblade', 0.35), ('Fireblade+sharp', 0.45)]
+   wards on the boss:     [('Fire Trap', 0.4), ('Fire Trap+potent', 0.5)]
+   a second PLAIN copy is still refused as a duplicate
+   ```
+
+   **Measured at matched REAL deck slots**, which is the only honest
+   way to ask: an enchanted card is TWO physical cards, the spell plus
+   the enchantment, so `enchanted_deck_size` counts it twice and every
+   arm gets the same 23 physical cards. Otherwise the enchant arm just
+   wins by being a bigger deck.
+
+   ```
+   ordinary content (6 real bosses, 6-11k HP)   mean TTK
+   plain                                          10.29
+   both enchant lines                              8.40   (-1.89 turns)
+
+   the endgame bosses, win rate       plain    both
+   Annoushka (17,240 HP)               3.7%   18.0%
+   High Priest Ixta (13,675 HP)       24.7%   45.0%
+   Were-Bear Brute (14,475 HP)       100.0%  100.0%
+   ```
+
+   Nearly two turns off an ordinary fight, and the endgame bosses go
+   from near-impossible to genuinely contested — at zero extra deck
+   size. The enchants pay for their doubled card cost and then some.
+
+   Read the single-enchant arms with care, and this is a real limit of
+   the design rather than a caveat for form's sake: slot-matching
+   forces each arm to cut something, and they do not all cut the same
+   thing (`sharp` funds its blade enchants out of traps and Feint, and
+   loses ground on the longest fights as a result). Only plain-vs-both
+   is a single-variable comparison, so that is the pair quoted.
+
+   **Assumed and unpriced**: that enchanting costs deck slots but not
+   TEMPO — the enchanted card is treated as ready to cast when drawn.
+   If applying an enchantment consumes the turn it is used on, every
+   number here is an upper bound. Flagged rather than modeled because
+   it is a game-rules fact this repo has no source for.
 
    Still open on this item: cheat SCRIPTS (39% of creatures are
    flagged `has_cheats` with free-text notes that no parser reads),

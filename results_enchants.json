@@ -1,0 +1,190 @@
+{
+ "setup": {
+  "level": 100,
+  "slots": 23,
+  "decks": {
+   "plain": [
+    "Fireblade",
+    "Fireblade",
+    "Fireblade",
+    "Balanceblade",
+    "Balanceblade",
+    "Fire Trap",
+    "Fire Trap",
+    "Fire Trap",
+    "Feint",
+    "Feint",
+    "Fire Dragon",
+    "Fire Dragon",
+    "Fire Dragon",
+    "Fire Dragon",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Fire Elf",
+    "Fire Elf",
+    "Reshuffle",
+    "Reshuffle",
+    "Sunbird",
+    "Sunbird"
+   ],
+   "sharp": [
+    "Fireblade",
+    "Fireblade",
+    "Fireblade+sharp",
+    "Fireblade+sharp",
+    "Balanceblade",
+    "Balanceblade+sharp",
+    "Fire Trap",
+    "Fire Trap",
+    "Feint",
+    "Fire Dragon",
+    "Fire Dragon",
+    "Fire Dragon",
+    "Fire Dragon",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Fire Elf",
+    "Fire Elf",
+    "Reshuffle",
+    "Reshuffle"
+   ],
+   "potent": [
+    "Fireblade",
+    "Fireblade",
+    "Fireblade",
+    "Balanceblade",
+    "Fire Trap",
+    "Fire Trap",
+    "Fire Trap+potent",
+    "Feint",
+    "Feint+potent",
+    "Fire Dragon",
+    "Fire Dragon",
+    "Fire Dragon",
+    "Fire Dragon",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Fire Elf",
+    "Fire Elf",
+    "Reshuffle",
+    "Reshuffle",
+    "Sunbird"
+   ],
+   "both": [
+    "Fireblade",
+    "Fireblade",
+    "Fireblade+sharp",
+    "Balanceblade+sharp",
+    "Fire Trap",
+    "Fire Trap+potent",
+    "Feint",
+    "Feint+potent",
+    "Fire Dragon",
+    "Fire Dragon",
+    "Fire Dragon",
+    "Fire Dragon",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Fire Elf",
+    "Fire Elf",
+    "Reshuffle",
+    "Reshuffle"
+   ]
+  },
+  "note": "arms matched on REAL deck slots; an enchanted entry costs 2 (spell + enchantment)",
+  "confidence": "+10% and the stacking rule as reported by the repo owner; which ops the bonus lands on is MODELED; enchanting is assumed to cost deck slots but not tempo"
+ },
+ "endgame": {
+  "Annoushka": {
+   "plain": {
+    "win": 0.03666666666666667,
+    "ttk": 28.09090909090909,
+    "policy": "blade-stack(4)"
+   },
+   "sharp": {
+    "win": 0.0,
+    "ttk": NaN,
+    "policy": "blade-stack(1)"
+   },
+   "potent": {
+    "win": 0.14666666666666667,
+    "ttk": 24.90909090909091,
+    "policy": "blade-stack(4)"
+   },
+   "both": {
+    "win": 0.18,
+    "ttk": 22.166666666666668,
+    "policy": "blade-stack(3)"
+   },
+   "hp": 17240,
+   "resist": {
+    "*": 0.4
+   },
+   "block": 622.0
+  },
+  "Were-Bear Brute (Standard)": {
+   "plain": {
+    "win": 1.0,
+    "ttk": 16.633333333333333,
+    "policy": "blade-stack(4)"
+   },
+   "sharp": {
+    "win": 1.0,
+    "ttk": 14.266666666666667,
+    "policy": "blade-stack(4)"
+   },
+   "potent": {
+    "win": 1.0,
+    "ttk": 14.536666666666667,
+    "policy": "blade-stack(4)"
+   },
+   "both": {
+    "win": 1.0,
+    "ttk": 12.896666666666667,
+    "policy": "blade-stack(4)"
+   },
+   "hp": 14475,
+   "resist": {
+    "storm": 0.36
+   },
+   "block": 570.0
+  },
+  "High Priest Ixta": {
+   "plain": {
+    "win": 0.24666666666666667,
+    "ttk": 28.486486486486488,
+    "policy": "blade-stack(4)"
+   },
+   "sharp": {
+    "win": 0.13666666666666666,
+    "ttk": 24.682926829268293,
+    "policy": "blade-stack(4)"
+   },
+   "potent": {
+    "win": 0.39666666666666667,
+    "ttk": 24.319327731092436,
+    "policy": "blade-stack(4)"
+   },
+   "both": {
+    "win": 0.45,
+    "ttk": 21.2,
+    "policy": "blade-stack(4)"
+   },
+   "hp": 13675,
+   "resist": {
+    "*": 0.45
+   },
+   "block": 932.0
+  }
+ },
+ "ordinary_mean_ttk": {
+  "plain": 10.28549219858156,
+  "sharp": 8.873844274809162,
+  "potent": 9.321647904191618,
+  "both": 8.398176397515527
+ }
+}
