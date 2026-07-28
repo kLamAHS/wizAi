@@ -271,6 +271,82 @@ merge; it caught a boss pip-livelock, self-only enemy healing, X-pip
 cost inversion, and boss immunity to player mantles — all fixed and
 regression-tested (156 tests).
 
+## Mob fights: target switching (roadmap 4, opening move)
+
+`with_focus(policy)` adds the report's team-fight rule — support
+enemies (healer/buffer/debuffer archetypes) die first, then the
+lowest-HP attacker — on top of the engine's per-target casting, and
+`build_deck(enemies=...)` builds against a full encounter with
+focus-wrapped screen proxies. The healer-cliff fight decomposes into
+three separable constraints (`mob_fights.py`, `results_mob.json`;
+level-20 base-stat death wizard vs living Krokopatra + 300-HP healer
+acolyte):
+
+```
+                              mortal      immortal (tempo view)
+boss alone, triage             38.1%        72.1%
++healer, target-blind           0.0%         0.0%   <- the cliff
++healer, focus, solo deck       0.0%         0.0%   <- out of ammo
++healer, focus, ammo deck       0.1%        46.4%   <- both needed
++healer, BLIND, ammo deck        —           0.0%   <- focus necessary
++2 healers, focus, ammo         0.0%         2.1%   <- sustain scales
+```
+
+Three lessons. TARGETING is necessary but not sufficient: with
+identical ammunition, blind play stays at 0% while focus reaches
+46.4%. AMMUNITION binds next: the solo-built 10-card deck (4 hits)
+runs dry at boss=388 even after a perfect healer kill — mob fights
+re-price deck size, and the builder's size penalty is exactly wrong
+for them. And the MORTAL verdict is game-accurate: at base stats a
+boss+minion encounter is multi-player content (the report:
+enemy count = players + 1) — no targeting rule rescues a solo
+level-20 at 915 HP. A pipeline honesty fix rode along: when every
+screen candidate scores 0% (infeasible encounter), the ranking is
+noise and the size tiebreak silently favors SMALL decks — build_deck
+now warns instead of pretending.
+**Learned targeting: a clean negative result**
+(`mob_generalist.py`, `results_mob_generalist.json`). The generalist
+grew a target dimension — (card, target) actions with per-target
+overkill/kill-now/support-flag features, mob episodes mixed into
+training, 1v1 behavior bit-compatible, old policy files zero-padded
+on load — and it FAILS the scripted bar: 0% vs focus(bs2)'s 46.4%,
+opening on the boss instead of the healer. A four-arm controlled
+study then separated exploration failure from representation failure
+(self-play, advisor-guided exploration that follows the focus script
+early, BC on random-distribution demonstrations, and BC on
+demonstrations of THE BAR FIGHT ITSELF — no distribution-shift
+excuse): every learned arm scores 0%. Along the way: two credit
+fixes tried (raw backward-MC lets mob-only features absorb the
+mob episodes' difficulty as negative weight — the feature-level
+cousin of "losers teach losing habits"; an advantage baseline with a
+mob-aware state head absorbs it properly, still 0%), and one
+matcher bug caught (focus wraps every card in a target tuple, so
+teacher blade casts logged as PASSes until normalized — demo data
+had deleted the very line it demonstrated). The decisive number came
+from the on-bar cell: the TEACHER itself collapses from 46.4% to 1%
+under 10% action noise — across a ~25-decision grind the winning
+line tolerates almost no deviation, so a memoryless linear ranking
+that wobbles anywhere loses everywhere. Three independent negatives
+(X-pip two-hit planning, healer-first commitment, wobble-free
+sequence execution) now isolate the same missing capability:
+sequence-level planning and consistency — the sequence-model rung,
+with reproducible bars at 46.4% (this fight) and 85% (balance
+X-pip).
+**The first bar falls to decision-time search**
+(`sequence_search.py`, `results_sequence.json`). Target-aware
+determinized rollout search with the focus script as rollout base
+scores **63.0%** on the healer fight — clearing the 46.4% teacher
+bar by 16 points AND faster (mean 17.5 vs 20.4) — because search
+PLANS the remaining sequence per draw instead of imitating one: it
+deviates from the script exactly where rollouts prove it profitable,
+so it is not capped at its teacher the way BC is. On the X-pip bar,
+search(k=16) reaches **72.0%** vs blade-stack's 60.0% — half the gap
+to per-deck RL's 85.1% closed with zero training; the residual is
+deck-specific draw memorization a one-ply rollout can't capture,
+which keeps the learned-sequence-model rung motivated for what
+remains. Cost profile is the mirror of RL's: no training, ~1s of
+inference per fight.
+
 ## Scope of the current claims
 
 This is an **Arc-1-style, single-enemy PvE optimization laboratory**, not
@@ -403,11 +479,24 @@ loader report.
    scripted blade-stack prior on raceable random pairs — and the 8k-
    episode experts themselves average below it, which caps what any
    clone can learn (garbage-ceiling, not garbage-in). Remaining
-   rungs: SEARCH-generated expert data (stronger teachers than 8k-
-   episode tabular agents), IQL-style expectile variants, and
-   sequence models for the multi-hit planning the linear class
-   provably can't express (see the generalist's X-pip negative
-   result).
+   rungs: IQL-style expectile variants and sequence models for the
+   multi-hit planning the linear class provably can't express.
+   SEARCH-GENERATED TEACHERS, done (`offline_search.py`,
+   `results_offline_search.json`) with a finding that sharpened the
+   ladder's theory: stronger teachers made WORSE clones. Search
+   teachers (76–100% per pair, demos at the brittleness-lesson
+   ε=0.02) cloned to 67.6% vs 74.8% from the weaker RL teachers —
+   because clone quality is teacher quality × in-class
+   REPRESENTABILITY × coverage, and search's edge lives in rollout
+   information the linear student cannot observe, while the cleaner
+   demos also covered fewer states (21k vs 38k decisions). The union
+   cell separated the two: combining both datasets recovers the
+   coverage loss (storm row 4.7% → 37.9%, mean back to 73.1%) but
+   plateaus AT the old ceiling, not above it. The binding constraint
+   has formally moved from teacher quality to STUDENT CAPACITY —
+   every data source converges at ~75% for the linear class, which
+   is the third independent line of evidence pointing at the
+   sequence-model rung.
 7. Deck × policy bilevel optimization. First results (death vs live
    Jade Oni): the searched 9-card deck reaches **100% win / TTK 6.45**
    vs the hand-built 12-card oneshot's 92.8% / 9.95 — smaller AND

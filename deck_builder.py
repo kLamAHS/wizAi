@@ -228,7 +228,7 @@ def check_legal(deck, capacity, copy_limit):
 
 
 def screen(cards, decks, school, boss, rules=None, n=250, base_seed=7000,
-           progress=None, player_hp=None, power_pip=None):
+           progress=None, player_hp=None, power_pip=None, enemies=None):
     """Cheap proxy scores: scripted policy on paired seeds. A mortal
     `player_hp` screens each candidate under BOTH the race proxy and
     the triage-wrapped survival proxy and keeps the better score —
@@ -236,17 +236,22 @@ def screen(cards, decks, school, boss, rules=None, n=250, base_seed=7000,
     must not presuppose which (a triage-only survival screen went
     blind on a burst boss: every candidate scored 0-6% and the
     ranking was noise)."""
-    from w101_sim import make_survival
+    from w101_sim import make_survival, with_focus
     pols = [make_blade_stack(3)]
     if player_hp is not None:
         pols.append(make_survival(make_blade_stack(3)))
+    if enemies:
+        # team fights need focus-fire proxies: a target-blind screen
+        # scores every candidate ~0 against a healer and ranks noise
+        pols = [with_focus(p) for p in pols]
     out = []
     for i, dl in enumerate(decks):
         if progress and i and i % 20 == 0:
             progress(f"screened {i}/{len(decks)} candidates...")
         sim = Sim(dict(cards), dl, school, boss,
                   player_hp=player_hp or 10**9, rules=rules,
-                  power_pip=0.85 if power_pip is None else power_pip)
+                  power_pip=0.85 if power_pip is None else power_pip,
+                  enemies=enemies)
         best = (0.0, 99.0)
         for pol in pols:
             wins, ttk = 0, []
@@ -292,7 +297,7 @@ def build_deck(cards, school, boss, rules=None, n_candidates=150,
                top_k=5, capacity=16, copy_limit=3, seed=0, log=print,
                level=None, scorer=None, screen_frac=1 / 3,
                screen_log=None, generalist=None, objective="mean",
-               player_hp=None, power_pip=None):
+               player_hp=None, power_pip=None, enemies=None):
     """Two-stage search over the legal deck space. Returns
     (deck, win, ttk, screen_table). `level` gates the unlocked pool.
     A fitted DeckScorer (`scorer`) pre-ranks candidates so only the top
@@ -333,7 +338,12 @@ def build_deck(cards, school, boss, rules=None, n_candidates=150,
             f"(capacity {capacity}, copy limit {copy_limit}"
             + (f", survival at {player_hp} HP" if player_hp else "") + ")")
     table = screen(cards, cands, school, boss, rules, progress=log,
-                   player_hp=player_hp, power_pip=power_pip)
+                   player_hp=player_hp, power_pip=power_pip,
+                   enemies=enemies)
+    if log and table and round(table[0][0], 2) == 0:
+        log("WARNING: screen signal collapsed (best candidate 0%) — "
+            "ranking is noise and the size tiebreak then favors SMALL "
+            "decks; the encounter may be infeasible for this pool")
     if screen_log:
         import json
         from deck_scorer import boss_to_dict
@@ -356,7 +366,7 @@ def build_deck(cards, school, boss, rules=None, n_candidates=150,
         else:
             w, m, agent = fine_tune(cards, dl, school, boss, rules,
                                     seed=seed, player_hp=php,
-                                    power_pip=power_pip)
+                                    power_pip=power_pip, enemies=enemies)
             pol = agent.policy()
         tail = m
         if objective == "p90":
