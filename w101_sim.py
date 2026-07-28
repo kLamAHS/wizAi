@@ -1853,8 +1853,17 @@ def make_blade_stack(n_buffs):
     Traps are laid before prisms so the FIFO ward pass counts them
     pre-conversion."""
     def buffs(sim, s):
-        return (castable(sim, s, "blade") or castable(sim, s, "trap") or
-                castable(sim, s, "prism"))
+        # blades and traps compete on VALUE, not on category. The old
+        # form was `castable(blade) or castable(trap)`, which
+        # short-circuits: a trap was only ever considered when no blade
+        # was in hand, so Feint — at 70% the biggest multiplier a deck
+        # can carry — went uncast whenever any 35% blade was available.
+        # Decks holding Feint therefore SCORED WORSE in the screen and
+        # were filtered out, which is why built decks carried almost no
+        # traps. Prisms stay last so the FIFO ward pass counts traps
+        # pre-conversion.
+        return (castable(sim, s, "blade") + castable(sim, s, "trap")
+                or castable(sim, s, "prism"))
     def strat(sim, s):
         pend = len(s.blades) + len(s.traps)
         if pend < n_buffs:
