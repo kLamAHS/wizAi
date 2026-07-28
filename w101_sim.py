@@ -647,6 +647,12 @@ class Boss:
                                 # "imperfect but state-aware" knob
     pip_chance: float = 0.40    # enemy power-pip odds (not public;
                                 # modeled at the player base cap)
+    rank: int = 0               # SCRAPED creature rank (0 = unknown);
+                                # the per-round damage estimate and the
+                                # synthetic-minion scale both key on it
+    minions: object = None      # SCRAPED names of the creatures that
+                                # fight alongside this one; see
+                                # data_full.encounter to resolve them
     start_pips: int = 0         # SCRAPED (98.8% coverage): real bosses
                                 # open the fight with pips already on
                                 # the rack. Only bites for pool-driven

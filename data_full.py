@@ -43,6 +43,7 @@ Targets: 8 selected enemy, 5/4 all enemies, 9 friendly (default self),
 11 self, 6/7 all allies, 3 the global field, 1 a card (enchant — not yet
 castable in the engine, skipped). Spell type 'aoe' forces multi-target.
 """
+import copy
 import json
 
 from w101_sim import (Boss, Rules, load_cards, Card, _kind_from_ops,
@@ -516,6 +517,8 @@ def load_bosses_full(path="bosses_clean.json", report=None, rules=None):
                 b.pierce = _num(stats[key]) / 100.0
             elif attr == "start_pips":
                 b.start_pips = int(_num(stats[key]))
+        b.rank = rank
+        b.minions = list(r.get("minions") or []) or None
         bosses[name] = b
         registry[name] = dict(r, dmg_estimate=dmg,
                               dmg_confidence="inferred")
@@ -526,3 +529,48 @@ def load_bosses_full(path="bosses_clean.json", report=None, rules=None):
                               for k, v in found.items()}
         report["crit_ratings_emitted"] = bool(crit_era)
     return bosses, registry
+
+
+# fraction of the boss's health an UNRESOLVED minion is given. MODELED,
+# and the single most arbitrary number in this module: three quarters of
+# the scraped minion references name creatures that have no page of
+# their own (generic mobs like "Fleshless Chattel"), so their stats do
+# not exist anywhere in the file. Exposed as a parameter precisely
+# because it deserves a sensitivity check rather than trust.
+MINION_HP_SHARE = 0.35
+MINION_RANK_DROP = 2
+
+
+def encounter(name, bosses, hp_share=MINION_HP_SHARE, synth=True):
+    """Resolve a boss into the full fight: (boss, [companions]).
+
+    Real encounters are not 1v1. `Boss.minions` holds the scraped names
+    of everything that fights alongside it, and they come in two kinds:
+
+      RESOLVED (25% of references) — the name matches another creature
+        in the file, so the companion arrives with its real scraped
+        stats. These turn out to be PEERS, not underlings: same rank as
+        the boss and ~0.95x its health, i.e. genuine multi-boss fights
+        like Othin Stormfather with two Coven Bosses.
+
+      UNRESOLVED (75%) — the name is a generic mob with no page. The
+        fight is still not 1v1, so refusing to model it would be a
+        worse error than modeling it roughly; `synth=True` builds a
+        stand-in at `hp_share` of the boss's health and a couple of
+        ranks below it, tagged inferred. Pass synth=False to get only
+        the companions whose stats are real.
+    """
+    boss = bosses[name]
+    out = []
+    for m in (boss.minions or []):
+        if m in bosses:
+            out.append(copy.copy(bosses[m]))
+        elif synth:
+            rank = max(1, (boss.rank or 1) - MINION_RANK_DROP)
+            mb = Boss(f"{m} (inferred)", max(1, int(boss.hp * hp_share)),
+                      boss.school, int(40 + 20 * rank))
+            mb.rank = rank
+            mb.resist_map = dict(boss.resist_map or {})
+            mb.boost_map = dict(boss.boost_map or {})
+            out.append(mb)
+    return boss, out

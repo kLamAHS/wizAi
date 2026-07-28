@@ -478,6 +478,56 @@ loader report.
    > this probe — TTK is undefined where the wizard cannot win — but
    > "unreachable" was overstated as a claim about the configuration.
 
+2c. **These fights are not 1v1** (`Boss.minions`, `encounter`,
+   `minion_fights.py`, `results_minions.json`). `bosses_clean.json`
+   names the creatures that fight alongside each boss for **419 of
+   1909** creatures, and the loader was dropping the field, so every
+   real-boss result in this repo had been fighting it alone.
+
+   The 751 companion references split two ways, and the split is the
+   finding:
+
+   - **25% resolve** to another creature in the file, arriving with
+     real scraped stats. They are **peers, not underlings** — same rank
+     as the boss in over 60% of pairs, ~0.95x its health. These are
+     genuine multi-boss fights (Othin Stormfather plus three Coven
+     Bosses), not boss-plus-adds. Tested.
+   - **75% do not** — generic mobs with no page of their own. The fight
+     is still not 1v1, so refusing to model them would be the larger
+     error; `encounter(..., synth=True)` builds a stand-in at
+     `MINION_HP_SHARE` of the boss's health, tagged `(inferred)`.
+     `synth=False` gives the honest floor of scraped-only companions.
+
+   ```
+   extra TURNS to clear the encounter (immortal wizard, pure race)
+     companions that are real peers     +1.85 median  (up to +4.79)
+     companions that are inferred mobs  +0.00 median
+
+   extra DANGER (mortal wizard, fights contested solo at 30-95%)
+     3 contested of 61 scanned; 2 of the 3 fell 70% -> 0%
+   ```
+
+   Real peers cost about two turns and can flip a contested fight
+   outright. The inferred mobs cost **nothing**, and that is a
+   limitation rather than a result: fire's nukes are AoE, so a
+   stand-in at 35% of boss health dies to splash it was going to deal
+   anyway. The sensitivity sweep says the same thing — TTK is flat at
+   `MINION_HP_SHARE` 0.2 and 0.35, and only starts moving at 0.5 (+0.11
+   turns) and 0.7 (+1.59). The most arbitrary number in the loader sits
+   in a dead zone, which is lucky rather than clever, and any result
+   that leans on the 75% should say so.
+
+   The survival arm is thin on purpose and should be read that way:
+   with flat per-round boss damage these fights are CLIFF-like — a scan
+   of the HP bands wins ~100% below 9k and ~0% above 14k — so only 3 of
+   61 scanned encounters were contested enough to measure at all.
+
+   Also worth recording, since it corrects a guess I made out loud: the
+   builder's decks run **11-14 castable cards**, and the repo owner
+   puts real player decks at **7-12**. The search converged on real
+   practice without being told to, and the "decks are too small" worry
+   was mine, not the data's.
+
 2b. **The missing player damage: enchantments** (`PCT_ENCHANTS`,
    `DMG_ENCHANTS`, `enchant_card`, `enchant_probe.py`,
    `results_enchants.json`). The repo owner identified the gap after
