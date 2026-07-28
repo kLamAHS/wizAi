@@ -48,11 +48,15 @@ effect provenance as a first-class citizen.
   `round_start` / `hp_below`) executing free effect ops — the "rules engine
   plus cheat scripts" pattern. The bundled scripts are illustrative shapes,
   not scraped encounters.
-- **Out of scope, declared:** criticals default off (classic era; the
-  machinery exists, is tested, and is pluggable via `Rules.crit_resolver`),
-  no archmastery/shadow/school pips, no gear/pet stat layer (fields exist,
-  default 0, including flat damage/flat resist), enemy decks are flat
-  scripted hits + cheats. Beguile is the one card excluded as unsupported.
+- **Out of scope, declared:** criticals default off in the classic
+  era but are a shipped ruleset (`rulesets.CRIT_ERA`, rating-based and
+  MODELED), as is the mastery amulet (`Rules.mastery_school`); still
+  absent are archmastery/shadow/school pips (a new resource, not a
+  flag) and any gear/pet stat layer (fields exist and default to 0,
+  including flat damage/flat resist). Enemy decks are flat scripted
+  hits + cheats by default, or a configured spell pool with archetype
+  AI (`Boss(pool=...)`). Beguile is the one card excluded as
+  unsupported.
 - **Auditable + versioned.** `Sim(log_events=True)` records a structured
   event log per duel (`cast_declared`, `charm_consumed`, `ward_consumed`,
   `prism_converted`, `damage_applied`, `dot_created`, `cheat_fired`, ...):
@@ -649,8 +653,48 @@ loader report.
    equally good final deck 3.3x faster (14s vs 46s). Exact hanging-
    effect percents in the features mattered: with blade/trap COUNTS
    the death-grind row scored 7%; with percents, 48% — parity.
-8. Post-classic rulesets behind `Rules`: criticals-on eras, mastery
-   amulets, school pips/archmastery — each as a frozen named ruleset.
+8. Post-classic rulesets behind `Rules` — SHIPPED for criticals and
+   mastery (`rulesets.py`, `era_shift.py`, `results_eras.json`).
+   `ERAS` freezes five named rulesets (classic / live / crit-era /
+   mastery / modern); `Rules.mastery_school` makes one off-school
+   school pay full power-pip value, and `make_rating_crit()` turns
+   crit/block RATINGS into probabilities with diminishing returns and
+   partial block mitigation. Classic-era behavior is bit-identical
+   (regression-tested), and the crit curves are tagged MODELED — the
+   2026 report is explicit that these formulas are not public.
+
+   Two probes asked whether classic-era strategy conclusions are
+   era-specific (paired seeds, same draws across eras):
+
+   ```
+   criticals: win% by blades stacked before the nuke
+   era         k=0    k=1    k=2    k=3    optimal
+   live        62%    64%    86%    94%    k=3
+   crit-era    72%    81%    93%    97%    k=3
+   ```
+
+   The stacking OPTIMUM is era-invariant (k=3 everywhere), but
+   criticals compress the penalty for rushing: unbuffed play gains
+   +10 points while fully-stacked play gains only +3, so the
+   rush-vs-stack gap narrows from 32 to 25 points. A random damage
+   multiplier partially substitutes for the deterministic one blades
+   provide. (`modern` reproduces `crit-era` exactly, since a storm
+   mastery cannot touch a death deck — a free internal consistency
+   check that the new knob doesn't leak.) Note the first cut of this
+   probe scored every k identically: with 6–7-pip finishers the
+   policy stacks buffs during idle turns regardless of k, so it was
+   measuring the deck, not the era.
+
+   Mastery, a fire wizard vs a 60% fire wall carrying a storm splash:
+   the amulet cuts TTK from **20.9 to 14.0** (−33%) at a flat win rate
+   — the off-school nuke goes from a pip-starved luxury to the main
+   line, which is exactly the item's design intent, reproduced from
+   the pip arithmetic alone.
+
+   Still open in this item: school pips / archmastery, which is a
+   deeper change to pip accounting than a `Rules` flag (it adds a
+   resource), and is the honest reason the modern era here is
+   "criticals + mastery", not "modern combat".
 
 ## Boundary
 

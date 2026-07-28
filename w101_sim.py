@@ -77,6 +77,9 @@ class Rules:
     dot_ticks_use_cast_snapshot: bool = True   # modifiers locked at cast
     damage_ranges: bool = False          # sample ops carrying 'spread'
                                          # uniformly instead of using avg
+    mastery_school: object = None        # mastery amulet: this off-school
+                                         # school also gets FULL power-pip
+                                         # value (post-Celestia item)
 
 
 # ---------------------------------------------------------------- card model
@@ -641,14 +644,20 @@ class Sim:
             s.events.append(kw)
 
     # ---- pips ------------------------------------------------------------
+    def _full_pip(self, card):
+        """Does this card get 2-for-1 power pips? Own school always;
+        the mastery-amulet school too when the ruleset grants one."""
+        return (card.school == self.school or
+                card.school == self.rules.mastery_school)
+
     def _pip_value(self, actor, card):
-        return 2 if card.school == actor.school else 1
+        return 2 if self._full_pip(card) else 1
 
     def afford(self, s, card):
         a = s.player
         if card.x_pips:
             return a.pip_slots >= 1
-        if card.school == self.school:
+        if self._full_pip(card):
             return a.norm_pips + 2 * a.pow_pips >= card.pips
         return a.norm_pips + a.pow_pips >= card.pips
 
@@ -660,7 +669,7 @@ class Sim:
             a.norm_pips = a.pow_pips = 0
             return eff
         c = card.pips
-        if card.school == a.school:
+        if self._full_pip(card):
             use_pow = min(a.pow_pips, c // 2)
             c -= 2 * use_pow
             a.pow_pips -= use_pow
@@ -1719,6 +1728,38 @@ def with_focus(policy):
             return None
         return (card, pick_focus(s))
     return strat
+
+
+def make_rating_crit(k_crit=250.0, k_block=250.0, cap=0.85,
+                     min_mult=1.25):
+    """Post-classic criticals from RATINGS rather than flat chances.
+
+    Confidence: MODELED. KingsIsle has never published the curves; the
+    2026 research report is explicit that crit/block are gear-driven
+    and their formulas are not public. What IS public and preserved
+    here: a rating buys diminishing probability, block contests crit,
+    and higher block shaves the multiplier rather than only cancelling
+    it. `Actor.crit_chance`/`block_chance` carry the RATINGS in this
+    resolver (not probabilities) — the era swap is the point of
+    Rules.crit_resolver.
+    """
+    def resolve(caster, target, rng, rules):
+        cr = max(caster.crit_chance, 0.0)
+        if cr <= 0:
+            return 1.0
+        p = min(cap, cr / (cr + k_crit))
+        if rng.random() >= p:
+            return 1.0
+        br = max(target.block_chance, 0.0)
+        if br > 0:
+            pb = min(cap, br / (br + k_block))
+            if rng.random() < pb:
+                return 1.0                      # blocked outright
+            shave = br / (br + k_block)         # partial mitigation
+            return max(min_mult,
+                       1 + (rules.crit_multiplier - 1) * (1 - shave))
+        return rules.crit_multiplier
+    return resolve
 
 
 def make_survival(inner, heal_below=0.45, shield_when_open=True):

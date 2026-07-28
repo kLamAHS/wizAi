@@ -10,9 +10,9 @@ This is the minimal student that adds capacity while changing
 nothing else — same features, same demonstrations, same benchmark.
 What the experiment actually found: a memoryless linear policy,
 simply REFIT on the same demonstrations, reaches 76.8% on the X-pip
-bar the class was said to be unable to express; recurrence adds ~4
-points there and loses ground in aggregate. The capacity story did
-not survive its own ablation.
+bar the class was said to be unable to express, and recurrence is
+dead level with it there (76.7) while losing 4.2 points in
+aggregate. The capacity story did not survive its own ablation.
 
 A hidden state h carries the plan and MODULATES the linear ranking:
 

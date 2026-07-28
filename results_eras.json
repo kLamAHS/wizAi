@@ -1,0 +1,108 @@
+{
+ "eras": {
+  "classic": "w101-pve-classic-0.3",
+  "live": "w101-pve-live-scrape",
+  "crit-era": "w101-pve-crit-era",
+  "mastery": "w101-pve-mastery",
+  "modern": "w101-pve-modern"
+ },
+ "results": {
+  "criticals": {
+   "live": {
+    "blade-stack(0)": {
+     "win": 0.6175,
+     "ttk": 7.7105263157894735
+    },
+    "blade-stack(1)": {
+     "win": 0.6375,
+     "ttk": 8.172549019607843
+    },
+    "blade-stack(2)": {
+     "win": 0.8575,
+     "ttk": 8.5
+    },
+    "blade-stack(3)": {
+     "win": 0.94375,
+     "ttk": 8.045033112582782
+    },
+    "best": "blade-stack(3)"
+   },
+   "crit-era": {
+    "blade-stack(0)": {
+     "win": 0.7225,
+     "ttk": 7.26643598615917
+    },
+    "blade-stack(1)": {
+     "win": 0.81125,
+     "ttk": 7.624036979969183
+    },
+    "blade-stack(2)": {
+     "win": 0.92625,
+     "ttk": 7.445344129554656
+    },
+    "blade-stack(3)": {
+     "win": 0.97125,
+     "ttk": 7.307593307593308
+    },
+    "best": "blade-stack(3)"
+   },
+   "modern": {
+    "blade-stack(0)": {
+     "win": 0.7225,
+     "ttk": 7.26643598615917
+    },
+    "blade-stack(1)": {
+     "win": 0.81125,
+     "ttk": 7.624036979969183
+    },
+    "blade-stack(2)": {
+     "win": 0.92625,
+     "ttk": 7.445344129554656
+    },
+    "blade-stack(3)": {
+     "win": 0.97125,
+     "ttk": 7.307593307593308
+    },
+    "best": "blade-stack(3)"
+   }
+  },
+  "mastery": {
+   "live": {
+    "blade-stack(1)": {
+     "win": 0.672,
+     "ttk": 20.886904761904763
+    },
+    "blade-stack(2)": {
+     "win": 0.672,
+     "ttk": 20.886904761904763
+    },
+    "blade-stack(3)": {
+     "win": 0.672,
+     "ttk": 20.886904761904763
+    },
+    "search(k=5)": {
+     "win": 0.548,
+     "ttk": 21.153284671532848
+    }
+   },
+   "mastery": {
+    "blade-stack(1)": {
+     "win": 0.644,
+     "ttk": 14.024844720496894
+    },
+    "blade-stack(2)": {
+     "win": 0.64,
+     "ttk": 14.03125
+    },
+    "blade-stack(3)": {
+     "win": 0.64,
+     "ttk": 14.03125
+    },
+    "search(k=5)": {
+     "win": 0.58,
+     "ttk": 14.53103448275862
+    }
+   }
+  }
+ }
+}
