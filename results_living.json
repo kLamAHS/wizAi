@@ -200,6 +200,16 @@
   "p90_ttk": null
  },
  "pilot_ladder_at_20": {
+  "triage(bs3)": {
+   "win_rate": 0.38333333333333336,
+   "mean_ttk": 8.380869565217392,
+   "p90_ttk": 11
+  },
+  "triage(bs2)": {
+   "win_rate": 0.156,
+   "mean_ttk": 10.158119658119658,
+   "p90_ttk": 13
+  },
   "blade-stack(3)": {
    "win_rate": 0.21733333333333332,
    "mean_ttk": 5.861963190184049,
@@ -216,9 +226,9 @@
    "p90_ttk": 11
   },
   "RL(24k)+advisor": {
-   "win_rate": 0.242,
-   "mean_ttk": 7.121212121212121,
-   "p90_ttk": 9
+   "win_rate": 0.29333333333333333,
+   "mean_ttk": 7.359090909090909,
+   "p90_ttk": 10
   }
  },
  "sample_trace": [

@@ -482,77 +482,123 @@ evidence (exact weights, enemy pip odds) is tagged `modeled`.
 `results_living.json`; base-stat death wizard, no gear/wand, vs
 Krokopatra under each model): at level 12 both models say no (719 HP
 soloing 4-person content should fail); at level 20 the flat model
-calls the solo nearly free (**92.7%**) while the living boss holds
-the same wizard to **22.5%** — chip damage understates a hitter that
-blades into Storm Shark spikes and shields your kill turns. Both
-numbers have drifted with the engine (98.6% and 33.4% when first
-published), but the VERDICT they disagree on has not: the flat model
-has called this solo nearly free and the living model has called it
-hard in every regeneration, and that disagreement is the whole point
-of the layer.
+calls the solo nearly free (**93.9%**) while the living boss holds
+the same wizard to **37.4%** — chip damage understates a hitter that
+blades into Storm Shark spikes and shields your kill turns. Neither
+number is comparable to the 98.6% / 33.4% first published — the deck,
+the engine and the reporting pilot have all moved since, for reasons
+laid out below — but the VERDICT they disagree on has not moved once:
+the flat model has called this solo nearly free and the living model
+has called it hard in every regeneration, and that disagreement is the
+whole point of the layer.
+
+Every level in that table now reports the deck under BOTH triage
+pilots, because they are not interchangeable and the difference is not
+small. `build_deck`'s screen selects candidates with `blade-stack(3)`
+and its triage wrap; this table used to report the winner under
+`blade-stack(2)`, which grades a deck under a policy it was never
+optimized for. On the level-20 living deck that gap is 22 points
+(37.4% vs 15.5%), and it was understating the flat model too — 86.6%
+at bs2 against 93.9% at bs3.
 
 Two riders. First, the stochastic opponent puts SCRIPTED pilots above
-LEARNED ones (`pilot_ladder_at_20` in the results):
+LEARNED ones (`pilot_ladder_at_20` in the results, n=1500):
 
 ```
 pilot at level 20        now      as first published
-blade-stack(3)          22.5%          20.1%
-blade-stack(2)          22.5%          18.0%
-triage                  21.1%          33.4%
-RL(24k)+advisor         17.1%           7.9%
-search(k=5)             11.4%          24.1%
-per-deck RL(8k)          4.4%           3.8%
+triage(bs3)             38.3%            —      (never measured then)
+RL(24k)+advisor         29.3%          7.9%
+search(k=5)             23.2%         24.1%
+blade-stack(3)          21.7%         20.1%
+per-deck RL(8k)         19.7%          3.8%
+triage(bs2)             15.6%         33.4%     (the old "triage" row)
+blade-stack(2)           6.7%         18.0%
 ```
 
-**This is not a like-for-like update, and two of the old claims do not
-survive it.** Two things moved under it. The ladder is played on
-whatever deck the builder returns for level 20, and that deck changed:
-it used to be ten cards including a Pixie, and it is now eight cards
-with no heal and no shield. The engine moved as well — replay triage on
-the OLD deck today and it reads 25.3%, not the 33.4% it published — so
-the right-hand column is history, not a control.
+**The right-hand column is history, not a control.** Both the deck and
+the engine moved under it: the level-20 deck went from ten cards with a
+Pixie, to eight with no defense at all while the lethality test was
+broken, to the nine it builds now — and replaying the OLD deck under
+today's engine gives 25.3%, not the 33.4% it published.
 
 - RETRACTED: "triage 33.4% — the stochastic opponent INVERTS the
-  baseline ladder." Triage's first place was a property of the DECK,
-  not of the pilot. `make_survival` on a deck with no heal and no
-  shield is the identity wrapper — triage and blade-stack are now
-  literally the same policy, and the 21.1%/22.5% split is two readings
-  of one line at different sample sizes (n=3000 and n=1500), not a
-  difference between pilots. The old ladder measured "the deck with the
-  Pixie in it" and attributed it to triage.
-- RETRACTED: "search(k=5) 24.1%, second place." On the current deck
-  search finishes last among the untrained pilots at 11.4%. Whether that
-  is the deck or the search is untested; it is reported as unexplained
-  rather than re-narrated.
-- SURVIVES: scripted beats learned on a stochastic opponent, and the
-  `fine_tune(advisor=...)` warm start is a large improvement that still
-  does not close the gap — now 4.4% → 17.1%, a wider margin than the
-  2x first reported, and still short of 22.5%. The blade-blindness
-  hypothesis stays falsified (enemy blade/shield state was ADDED to the
-  tabular featurizer and made 8k-episode RL worse by fragmenting
-  visits). Sample starvation stays the diagnosis: opponent
-  stochasticity widens the visited-state distribution and drowns sparse
-  win credit, where tabular MC and shallow determinized rollouts are
-  weakest.
+  baseline ladder." That was the DECK, not the pilot. It measured
+  "the deck with the Pixie in it" and credited the wrapper.
+- SURVIVES, and by more than before: scripted beats learned on a
+  stochastic opponent, 38.3% to 29.3%. This one nearly got retracted by
+  mistake — see below.
+- SURVIVES: the `fine_tune(advisor=...)` warm start is a large
+  improvement that still does not close the gap (19.7% → 29.3%), and
+  the blade-blindness hypothesis stays falsified (enemy blade/shield
+  state was ADDED to the tabular featurizer and made 8k-episode RL
+  worse by fragmenting visits). Sample starvation stays the diagnosis:
+  opponent stochasticity widens the visited-state distribution and
+  drowns sparse win credit, where tabular MC and shallow determinized
+  rollouts are weakest.
 
-A builder defect fell out of the regeneration and is recorded, not
-fixed (`builder_regression_probe.py`,
-`results_builder_regression.json`): the level-20 deck the builder now
-returns is measurably worse than one it used to return. Under the
-current engine the old Pixie-carrying deck scores 25.3% and the new one
-21.1% (triage, n=3000, ±0.8). It is not a scoring failure — offer the
-screen both and
-it ranks the old deck first by eleven points on its own n=250 protocol
-(29.2% vs 18.0%) — it is CANDIDATE GENERATION: the templates changed
-(the blade guarantee, the enchanted-twin offers) and no longer emit
-that mix. Quadrupling the candidate budget to 240 recovers 0.4 points
-(21.5%, and it does find a Sprite), so it is not sampling thinness
-either.
+**The near-miss is worth recording.** Run before the triage-wrapped
+lines were added to it, this ladder read `RL(24k)+advisor 24.2% >
+search 23.2% > blade-stack(3) 21.7%` — learners on top, which reads as
+a clean retraction of the scripted-beats-learned claim. It was an
+artifact of the ladder's own composition: every scripted entry on it
+was UNWRAPPED, while the best scripted line available on that deck was
+the triage wrap at 38.3%. The learners were being compared against
+opponents that had been told to ignore the Pixie and the Tower Shield.
+Adding the wrapped lines restores the ordering. One change rode along:
+the ladder's advisor moved from `blade-stack(2)` to `blade-stack(3)`
+(6.7% versus 21.7% on this deck — warm-starting off bs2 was imitating
+a line three times worse than the baseline the agent is then scored
+against, the same defect `main.py` was fixed for). Since the pilots are
+scored on independent paired seeds, that swap is the whole of the
+learner's 24.2% → 29.3%.
 
 Second, one 300-HP healer acolyte (which really heals its boss — enemy
 heals route to the neediest teammate) drops the fight to **0%** without
 target switching: the report's role-segmentation pattern, quantified,
 and unchanged at 0.0% across every regeneration since.
+
+### The builder thought every living boss was harmless
+
+Chasing that deck change found a real bug
+(`builder_regression_probe.py`, `results_builder_regression.json`), and
+it was not in the templates. `sample_deck` gated its entire defensive
+branch — shields at all, heals at 0.8 instead of 0.3 — on
+`boss.dmg > 0`. That is the flat per-round number a LEGACY boss
+carries. A living boss deals its damage out of a spell pool and carries
+`dmg = 0`:
+
+```
+1909 bosses: 1795 pool casters, 114 flat-damage
+pool casters reading dmg == 0: 1795   (94% of every boss in the data)
+```
+
+The test was False for 94% of the game and for every boss `main.py`
+fights. The builder was offering defense to legacy bosses only, and
+treating the entire living-boss layer — added precisely because flat
+damage understates a real fight — as unable to hurt you. Lethality is
+now `can_hurt(boss)`: flat damage OR a spell pool. And it is a property
+of the ENCOUNTER rather than the boss, so `build_deck` ORs in the
+minions — a harmless boss escorted by a hitter still kills you.
+
+```
+same fight, same seeds              before        after
+candidates carrying heal/shield     45/200       189/200
+level-20 deck, triage(bs3), n=3000    21.1%        37.4%
+same, at 4x the candidate budget      21.5%        52.1%
+```
+
+That last row is the one worth reading twice. Before the fix,
+quadrupling the candidate budget bought **0.4 points** — which is what
+made "sampling thinness" look ruled out, and it was: every extra
+candidate came out of the same defense-free template, so more of them
+bought nothing. With defense back on the table the same 4x buys
+**15 points**, and the candidate budget is now a live knob rather than
+a dead one.
+
+It was never a scoring failure. Offer the screen the old
+Pixie-carrying deck and the defense-free one and it ranks the old deck
+first by eleven points on its own n=250 protocol (29.2% vs 18.0%) — it
+simply was not being offered one.
 
 This diff was adversarially reviewed by a 30-agent workflow before
 merge; it caught a boss pip-livelock, self-only enemy healing, X-pip
@@ -572,32 +618,31 @@ acolyte):
 
 ```
                               mortal      immortal (tempo view)
-boss alone, triage             22.1%        80.3%
-+healer, target-blind           0.0%         0.0%   <- the cliff
+boss alone, triage             37.5%        76.8%
++healer, target-blind           0.9%         1.7%   <- the cliff
 +healer, focus, solo deck       0.0%         0.0%   <- out of ammo
-+healer, focus, mob deck        0.1%         8.9%   <- built for the fight
++healer, focus, mob deck        0.1%         2.5%   <- built for the fight
 +healer, focus, ammo deck       0.0%        46.4%   <- both needed
 +healer, BLIND, ammo deck        —           0.0%   <- focus necessary
 +2 healers, focus, ammo         0.0%         1.8%   <- sustain scales
 ```
 
-(Regenerated. Only the `boss alone` row moved materially — 38.1%/72.1%
-before — and the blade/trap fix accounts for none of it: replay the old
-selector on the old deck and the mortal cell reads 24.6% against the
-new selector's 24.7%. Two other things did move it. Most of the drop is
-ENGINE DRIFT: the same deck that scored 38.1% at publication scores
-24.7% today, after a long run of living-boss changes (enemy pip
-economy, damage ranges, caster behaviour) that this row was never
-re-measured against. The rest is the DECK — that row plays the solo
-deck, which `mob_fights.py` reads out of `results_living.json`, and the
-builder now hands it a different one, taking 24.7% to 22.1%. Every row
-below it either plays the hand-built ammo magazine or is pinned at 0%,
-so the load-bearing comparison — 46.4% focus vs 0.0% blind on identical
-cards — is unchanged to the decimal.)
+(Regenerated after the living-boss lethality fix. The `boss alone` row
+is the one that moves, because it plays the SOLO deck that
+`mob_fights.py` reads out of `results_living.json` — the deck now
+carries a Pixie and a Tower Shield, and mortal survival goes 22.1% →
+37.5% while the immortal tempo view barely shifts. That is the fix
+doing exactly and only what it should: defense buys survival, not
+speed. Every row below either plays the hand-built ammo magazine or
+sits near zero, so the load-bearing comparison — 46.4% focus vs 0.0%
+blind on identical cards — is unchanged to the decimal. Two smaller
+movements: the target-blind cliff is no longer exactly 0% (0.9%/1.7%),
+and the mob-deck screen no longer collapses to an all-zero field, so
+the "signal collapsed" warning stops firing on this encounter.)
 
 Three lessons. TARGETING is necessary but not sufficient: with
 identical ammunition, blind play stays at 0% while focus reaches
-46.4%. AMMUNITION binds next: the solo-built deck (8 cards, 4 hits)
+46.4%. AMMUNITION binds next: the solo-built deck (9 cards, 4 hits)
 runs dry at boss=388 even after a perfect healer kill — mob fights
 re-price deck size, and the builder's size penalty is exactly wrong
 for them. And the MORTAL verdict is game-accurate: at base stats a
@@ -606,7 +651,10 @@ enemy count = players + 1) — no targeting rule rescues a solo
 level-20 at 915 HP. A pipeline honesty fix rode along: when every
 screen candidate scores 0% (infeasible encounter), the ranking is
 noise and the size tiebreak silently favors SMALL decks — build_deck
-now warns instead of pretending.
+now warns instead of pretending. (It no longer needs to on this
+encounter: with defensive candidates back in the sample the best one
+screens at 1% rather than 0%. The guard stays — a 1% signal is barely
+better than none, and the next infeasible encounter will trip it.)
 **Learned targeting: a clean negative result**
 (`mob_generalist.py`, `results_mob_generalist.json`). The generalist
 grew a target dimension — (card, target) actions with per-target

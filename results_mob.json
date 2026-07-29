@@ -5,25 +5,26 @@
   "Banshee",
   "Banshee",
   "Banshee",
-  "Sacrifice",
   "Deathblade",
-  "Deathblade",
-  "Hex",
-  "Hex"
+  "Curse",
+  "Death Trap",
+  "Tower Shield",
+  "Pixie",
+  "Pixie"
  ],
  "mob_deck": [
   "Banshee",
   "Banshee",
   "Banshee",
-  "Ghoul",
-  "Dark Sprite",
+  "Sacrifice",
   "Deathblade",
   "Deathblade",
-  "Balanceblade",
-  "Balanceblade",
-  "Hex",
   "Curse",
-  "Curse"
+  "Death Trap",
+  "Death Trap",
+  "Hex",
+  "Sprite",
+  "Sprite"
  ],
  "ammo_deck": [
   "Banshee",
@@ -43,41 +44,41 @@
  ],
  "arms": {
   "boss alone": {
-   "deck_size": 8,
+   "deck_size": 9,
    "mortal": {
     "triage": {
-     "win_rate": 0.2215,
-     "mean_ttk": 6.264108352144469,
-     "p90_ttk": 7
+     "win_rate": 0.3755,
+     "mean_ttk": 8.40479360852197,
+     "p90_ttk": 11
     }
    },
    "immortal": {
     "triage": {
-     "win_rate": 0.8035,
-     "mean_ttk": 6.822650902302427,
+     "win_rate": 0.7685,
+     "mean_ttk": 7.176968119713728,
      "p90_ttk": 9
     }
    }
   },
   "+healer, blind": {
-   "deck_size": 8,
+   "deck_size": 9,
    "mortal": {
     "triage": {
-     "win_rate": 0.0,
-     "mean_ttk": null,
-     "p90_ttk": null
+     "win_rate": 0.0095,
+     "mean_ttk": 9.263157894736842,
+     "p90_ttk": 11
     }
    },
    "immortal": {
     "triage": {
-     "win_rate": 0.0,
-     "mean_ttk": null,
-     "p90_ttk": null
+     "win_rate": 0.0165,
+     "mean_ttk": 8.333333333333334,
+     "p90_ttk": 9
     }
    }
   },
   "+healer, solo deck": {
-   "deck_size": 8,
+   "deck_size": 9,
    "mortal": {
     "focus(triage)": {
      "win_rate": 0.0,
@@ -98,25 +99,25 @@
    "mortal": {
     "focus(triage)": {
      "win_rate": 0.0005,
-     "mean_ttk": 10.0,
-     "p90_ttk": 10
+     "mean_ttk": 11.0,
+     "p90_ttk": 11
     },
     "focus(bs3)": {
-     "win_rate": 0.0005,
-     "mean_ttk": 10.0,
-     "p90_ttk": 10
+     "win_rate": 0.0,
+     "mean_ttk": null,
+     "p90_ttk": null
     }
    },
    "immortal": {
     "focus(triage)": {
-     "win_rate": 0.089,
-     "mean_ttk": 10.9438202247191,
-     "p90_ttk": 12
+     "win_rate": 0.0255,
+     "mean_ttk": 9.058823529411764,
+     "p90_ttk": 9
     },
     "focus(bs3)": {
-     "win_rate": 0.089,
-     "mean_ttk": 10.9438202247191,
-     "p90_ttk": 12
+     "win_rate": 0.0255,
+     "mean_ttk": 9.058823529411764,
+     "p90_ttk": 9
     }
    }
   },
