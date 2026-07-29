@@ -154,6 +154,42 @@ edge is draw-distribution knowledge, not mechanics. Search also trades
 mean speed for reliability on the prism line, which is what a
 risk-sensitive objective would ask for.
 
+## Known failure: the learner on multi-enemy boards
+
+Recorded here rather than buried, because it is the largest open defect
+and it survived three attempted fixes.
+
+On a board with companions the tabular learner converges to **casting
+only blades and never firing**. Instrumented on Plague Oni +1 add:
+Tri Blade 30x, Balanceblade 30x, Stormblade 27x, zero nukes across 30
+episodes. It buffs until it dies.
+
+What is established:
+
+- It is not the missing target selection. That was implemented
+  (actions expand to `name@i` per living foe) and it HELPS on some
+  boards — the learner beats the scripted line at L40 72.9% vs 71.8%
+  and L50 92.4% vs 91.6% in isolation.
+- It is not the exploration schedule alone. 12k, 25k and 40k episodes
+  all land in the same place.
+- It is not advisor absence. Advisor-guided training moves the worst
+  case 4.7% to 6.2%, and choosing the advisor by MEASUREMENT rather
+  than assumption (see below) does not rescue it either: with a
+  race(3) advisor scoring 68% on that exact deck, the learner still
+  finishes at 1.5%.
+- The state space is the prime suspect. The multi-enemy key produces
+  ~41,000 Q entries from 12,000 episodes — roughly three visits each,
+  which is not enough to rank an action.
+
+One real bug WAS found inside this investigation and is fixed: the
+`with_focus` advisor kills the weakest enemy first, which on a board
+where the BOSS is the threat is actively wrong. Measured on Plague Oni
++1: plain racing wins 85.5%, focus-fire 47.8%. Training used to imitate
+`with_focus` by default, so the "advisor" was demonstrating a line 38
+points worse than the baseline the agent was scored against. `main.py`
+now measures every scripted line on the actual deck and imitates the
+winner, and prints which one it chose.
+
 ## Run it
 
 ```

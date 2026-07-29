@@ -39,7 +39,7 @@ from data_full import LIVE_RULES, encounter, load_bosses_full, load_spells_full
 from deck_builder import build_deck, fine_tune, legal_pool
 from gear import loadout
 from w101_sim import (Sim, evaluate_paired, is_enchanted, make_blade_stack,
-                      enchanted_deck_size)
+                      enchanted_deck_size, with_focus)
 from enemy_ranks import normal_hp
 from worlds import world_for
 
@@ -47,6 +47,14 @@ SCHOOLS = ("fire", "ice", "storm", "myth", "life", "death", "balance")
 DEFAULT_LEVELS = (20, 50, 70, 100, 120)
 FULL_LEVELS = (10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120)
 RACE = {f"race({k})": make_blade_stack(k) for k in (1, 2, 3, 4, 5, 6)}
+# focus-fire lines are OFFERED, never assumed. On a board where the boss
+# is the threat, killing the weakest enemy first is actively wrong:
+# measured on Plague Oni +1, plain race wins 85.5% and with_focus 47.8%.
+# Training used to imitate with_focus by default, which meant the
+# "advisor" was demonstrating a line 38 points worse than the one the
+# agent was being compared against.
+FOCUS = {f"focus({k})": with_focus(make_blade_stack(k)) for k in (1, 2, 3)}
+SCRIPTED = {**RACE, **FOCUS}
 
 
 def pick_encounter(level, school, cards, bosses, registry, stats, rng,
@@ -87,7 +95,7 @@ def pick_encounter(level, school, cards, bosses, registry, stats, rng,
                   power_pip=stats["power_pip"],
                   enemies=[copy.copy(c) for c in comps] or None)
         w = max(v["win_rate"] for v in
-                evaluate_paired(sim, RACE, n=120).values())
+                evaluate_paired(sim, SCRIPTED, n=120).values())
         if fallback is None or w > fallback[1]:
             fallback = (b, w)
         if 0.15 <= w <= 0.90:
@@ -178,6 +186,20 @@ def run_level(level, school, cards, bosses, registry, args, log):
         log(f"              {dl.count(name)}x {name}")
 
     full = {**cards, **pool}
+    # Pick the advisor by MEASUREMENT, not by assumption. Imitating a
+    # line that loses teaches losing: with_focus was the default and is
+    # 38 points worse than plain racing on a board where the boss, not
+    # the add, is the threat.
+    probe = Sim(dict(full), dl, school, copy.copy(boss),
+                player_hp=stats["player_hp"], rules=LIVE_RULES,
+                player_stats=stats["player_stats"],
+                power_pip=stats["power_pip"],
+                enemies=[copy.copy(c) for c in comps] or None)
+    scored = evaluate_paired(probe, SCRIPTED, n=300)
+    best_name = max(scored, key=lambda k: (round(scored[k]["win_rate"], 2),
+                                           -scored[k]["mean_ttk"]))
+    log(f"  advisor   {best_name} "
+        f"({scored[best_name]['win_rate']*100:.0f}% on this deck)")
     t = time.time()
     log(f"  training policy ({args.episodes:,} episodes)...")
     w_rl, ttk_rl, agent = fine_tune(
@@ -185,7 +207,8 @@ def run_level(level, school, cards, bosses, registry, args, log):
         episodes=args.episodes, seed=11, player_hp=stats["player_hp"],
         power_pip=stats["power_pip"],
         enemies=[copy.copy(c) for c in comps] or None,
-        player_stats=stats["player_stats"])
+        player_stats=stats["player_stats"],
+        advisor=SCRIPTED[best_name])
     log(f"  trained   {time.time()-t:.0f}s")
 
     sim = Sim(dict(full), dl, school, copy.copy(boss),
@@ -193,7 +216,7 @@ def run_level(level, school, cards, bosses, registry, args, log):
               player_stats=stats["player_stats"],
               power_pip=stats["power_pip"],
               enemies=[copy.copy(c) for c in comps] or None)
-    arms = evaluate_paired(sim, {**RACE, "trained": agent.policy()},
+    arms = evaluate_paired(sim, {**SCRIPTED, "trained": agent.policy()},
                            n=args.eval_n)
     scripted = max((k for k in arms if k != "trained"),
                    key=lambda k: (round(arms[k]["win_rate"], 2),
