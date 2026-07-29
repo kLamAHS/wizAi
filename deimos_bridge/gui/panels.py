@@ -88,11 +88,11 @@ class BoardPanel(QWidget):
         cols.addWidget(foes, 2)
 
         root.addLayout(cols)
-        telemetry.subscribe(self._on_event)
 
-    def _on_event(self, event, payload):
-        if event == "round":
-            self.render(payload)
+    def refresh(self):
+        if not self.tel.rounds:
+            return
+        self.render(self.tel.rounds[-1])
 
     def render(self, rec):
         self.round_lab.setText(f"fight {rec.fight}  ·  round {rec.round}")
@@ -136,11 +136,11 @@ class DecisionsPanel(QWidget):
         self.table = _table(["fight", "round", "cast", "target", "why",
                              "passed over"])
         root.addWidget(self.table)
-        telemetry.subscribe(self._on_event)
 
-    def _on_event(self, event, payload):
-        if event == "round":
-            self.append(payload)
+    def refresh(self):
+        self.table.setRowCount(0)
+        for rec in self.tel.rounds:
+            self.append(rec)
 
     def append(self, rec):
         r = self.table.rowCount()
@@ -254,11 +254,6 @@ class ModelPanel(QWidget):
         self.table = _table(["round", "cast", "target", "predicted", "actual",
                              "error", "%", "clean"])
         root.addWidget(self.table)
-        telemetry.subscribe(self._on_event)
-
-    def _on_event(self, event, payload):
-        if event == "round":
-            self.refresh()
 
     def refresh(self):
         st = self.tel.error_stats()
@@ -327,11 +322,6 @@ class NamingPanel(QWidget):
         root.addWidget(self.detail)
         self.table = _table(["card", "times seen", "cause", "what to do"])
         root.addWidget(self.table)
-        telemetry.subscribe(self._on_event)
-
-    def _on_event(self, event, payload):
-        if event == "round":
-            self.refresh()
 
     def _rows(self):
         """Miss rows, classified. Falls back to a flat list when no
@@ -407,10 +397,6 @@ class RunPanel(QWidget):
         self.progress = QProgressBar()
         self.progress.setVisible(False)
         root.addWidget(self.progress)
-        telemetry.subscribe(self._on_event)
-
-    def _on_event(self, event, payload):
-        self.refresh()
 
     def refresh(self):
         s = self.tel.summary()
