@@ -33,7 +33,7 @@ class LiveWorker(QThread):
     finished_ok = pyqtSignal()
 
     def __init__(self, telemetry, school, deck, policy_name, fights,
-                 agent=None):
+                 agent=None, auto_quest=False):
         super().__init__()
         self.tel = telemetry
         self.school = school
@@ -41,11 +41,40 @@ class LiveWorker(QThread):
         self.policy_name = policy_name
         self.fights = fights
         self.agent = agent
+        self.auto_quest = auto_quest
         self._stop = False
+        #: one-shot questing requests from the GUI thread. A plain list
+        #: rather than a queue: the GUI appends, the loop drains between
+        #: fights, and CPython's list ops are atomic enough for that.
+        self._requests = []
+        self._client = None
 
     def stop(self):
         """Ask the loop to finish after the current fight."""
         self._stop = True
+
+    def request(self, action):
+        """Queue a questing action ('teleport' | 'dialogue').
+
+        Called from the GUI thread. The loop performs it between fights,
+        because the client cannot be driven from two places at once.
+        """
+        self._requests.append(action)
+
+    async def _drain_requests(self):
+        from .. import questing
+
+        while self._requests:
+            action = self._requests.pop(0)
+            if self._client is None:
+                continue
+            if action == "teleport":
+                ok = await questing.teleport_to_quest(self._client)
+                self.status.emit("teleported" if ok else
+                                 "no quest position to teleport to")
+            elif action == "dialogue":
+                n = await questing.advance_dialogue(self._client)
+                self.status.emit(f"advanced {n} dialogue window(s)")
 
     # -- worker thread ----------------------------------------------------
     def run(self):
@@ -138,9 +167,19 @@ class LiveWorker(QThread):
             self._backend = backend
             combat = make_combat_handler(client, backend)
 
-            self.status.emit("connected — walk into a fight")
+            self._client = client
+            self.status.emit(
+                "connected — hunting for fights" if self.auto_quest
+                else "connected — walk into a fight")
             fought = 0
             while not self._stop and (self.fights <= 0 or fought < self.fights):
+                await self._drain_requests()
+                if self._stop:
+                    break
+                if self.auto_quest:
+                    from .. import questing
+                    await questing.hop_to_next_fight(
+                        client, on_status=self.status.emit)
                 self.tel.start_fight()
                 try:
                     # blocks until a duel starts, then plays it out

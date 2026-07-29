@@ -418,3 +418,265 @@ def test_start_live_blocks_a_trained_run_with_no_agent(qapp, monkeypatch):
     assert "hit" in warned
     assert win.live is None
     assert win.start_btn.isEnabled()
+
+
+# ------------------------------------------------------------- questing
+class _Win:
+    """A wizwalker window: a name, children, visibility, maybe text."""
+
+    def __init__(self, name, children=(), visible=True, text=""):
+        self._name = name
+        self._children = list(children)
+        self._visible = visible
+        self._text = text
+
+    async def name(self):
+        return self._name
+
+    async def children(self):
+        return list(self._children)
+
+    async def is_visible(self):
+        return self._visible
+
+    async def maybe_text(self):
+        return self._text
+
+
+class _Mouse:
+    def __init__(self):
+        self.clicks = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def click_window(self, window):
+        self.clicks.append(window)
+        # dialogue closes after two clicks, like a short conversation
+        if len(self.clicks) >= 2:
+            window._visible = False
+
+
+class _QuestClient:
+    def __init__(self, root, position=(1.0, 2.0, 3.0), in_battle=False):
+        self.root_window = root
+        self.mouse_handler = _Mouse()
+        self.teleported = []
+        self._position = position
+        self._in_battle = in_battle
+
+        client = self
+
+        class _QP:
+            async def position(self):
+                if client._position is None:
+                    raise RuntimeError("no quest")
+                return client._position
+
+        self.quest_position = _QP()
+
+    async def teleport(self, position):
+        self.teleported.append(position)
+
+    async def in_battle(self):
+        return self._in_battle
+
+    async def is_loading(self):
+        return False
+
+
+def _dialogue_root(visible=True):
+    button = _Win("btnRight", visible=visible)
+    text = _Win("txtMessage", text="Greetings, young wizard.")
+    return _Win("root", [
+        _Win("WorldView", [
+            _Win("wndDialogMain", [button, _Win("txtArea", [text])])])]), button
+
+
+def test_window_from_path_walks_the_tree():
+    import asyncio
+
+    from deimos_bridge.questing import ADVANCE_DIALOG_PATH, window_from_path
+    root, button = _dialogue_root()
+    found = asyncio.run(window_from_path(root, ADVANCE_DIALOG_PATH))
+    assert found is button
+    assert asyncio.run(window_from_path(root, ["WorldView", "nope"])) is None
+
+
+def test_in_dialogue_tracks_visibility():
+    import asyncio
+
+    from deimos_bridge.questing import in_dialogue
+    root, _ = _dialogue_root(visible=True)
+    assert asyncio.run(in_dialogue(_QuestClient(root)))
+    root, _ = _dialogue_root(visible=False)
+    assert not asyncio.run(in_dialogue(_QuestClient(root)))
+
+
+def test_advance_dialogue_stops_when_the_window_closes():
+    import asyncio
+
+    from deimos_bridge.questing import advance_dialogue
+    root, _ = _dialogue_root()
+    client = _QuestClient(root)
+    clicks = asyncio.run(advance_dialogue(client, settle=0))
+    assert clicks == 2
+    assert len(client.mouse_handler.clicks) == 2
+
+
+def test_advance_dialogue_is_bounded():
+    """A dialogue that reopens forever must not hang the run."""
+    import asyncio
+
+    from deimos_bridge.questing import advance_dialogue
+
+    class _Sticky(_Mouse):
+        async def click_window(self, window):
+            self.clicks.append(window)      # never closes
+
+    root, _ = _dialogue_root()
+    client = _QuestClient(root)
+    client.mouse_handler = _Sticky()
+    assert asyncio.run(advance_dialogue(client, max_clicks=5, settle=0)) == 5
+
+
+def test_teleport_to_quest_reports_failure_rather_than_raising():
+    import asyncio
+
+    from deimos_bridge.questing import teleport_to_quest
+    root, _ = _dialogue_root()
+
+    ok_client = _QuestClient(root)
+    assert asyncio.run(teleport_to_quest(ok_client)) is True
+    assert ok_client.teleported == [(1.0, 2.0, 3.0)]
+
+    no_quest = _QuestClient(root, position=None)
+    assert asyncio.run(teleport_to_quest(no_quest)) is False
+    assert no_quest.teleported == []
+
+
+def test_hop_to_next_fight_stops_once_combat_starts():
+    import asyncio
+
+    from deimos_bridge.questing import hop_to_next_fight
+    root, _ = _dialogue_root(visible=False)
+    client = _QuestClient(root, in_battle=True)
+    said = []
+    assert asyncio.run(hop_to_next_fight(client, settle=0,
+                                         on_status=said.append)) is True
+    assert client.teleported == []          # already fighting, no hop needed
+
+
+def test_hop_to_next_fight_gives_up_rather_than_spinning():
+    import asyncio
+
+    from deimos_bridge.questing import hop_to_next_fight
+    root, _ = _dialogue_root(visible=False)
+    client = _QuestClient(root, in_battle=False)
+    said = []
+    assert asyncio.run(hop_to_next_fight(client, max_hops=3, settle=0,
+                                         on_status=said.append)) is False
+    assert len(client.teleported) == 3
+    assert "gave up" in said[-1]
+
+
+# ----------------------------------------------------------- deck picker
+def test_deck_picker_round_trips_a_decklist(qapp):
+    from data_full import load_spells_full
+    from deimos_bridge.gui.deckpicker import DeckPicker
+
+    cards = load_spells_full()
+    deck = ["Frost Beetle", "Frost Beetle", "Iceblade"]
+    d = DeckPicker(cards, "ice", deck)
+    assert d.decklist() == sorted(deck)
+
+
+def test_deck_picker_search_filters(qapp):
+    from data_full import load_spells_full
+    from deimos_bridge.gui.deckpicker import DeckPicker
+
+    d = DeckPicker(load_spells_full(), "ice")
+    d.search.setText("frostbite")
+    d.refilter()
+    names = [d.results.item(i).data(0x0100) for i in range(d.results.count())]
+    assert names and all("frostbite" in n.lower() for n in names)
+
+
+def test_deck_picker_can_seed_from_the_last_fight(qapp):
+    """The honest 'read it off the game': the client exposes the deck as
+    template ids and wizAi's table has none to match them to, but cards
+    seen in hand during a fight do have names."""
+    from data_full import load_spells_full
+    from deimos_bridge.gui.deckpicker import DeckPicker
+
+    d = DeckPicker(load_spells_full(), "ice", seen=["Frost Beetle", "Iceblade"])
+    assert d.seen_btn.isEnabled()
+    d.on_from_seen()
+    assert sorted(set(d.decklist())) == ["Frost Beetle", "Iceblade"]
+
+
+def test_deck_picker_warns_about_a_deck_that_cannot_kill(qapp):
+    from data_full import load_spells_full
+    from deimos_bridge.gui.deckpicker import DeckPicker
+
+    d = DeckPicker(load_spells_full(), "ice", ["Iceblade", "Iceblade"])
+    assert "cannot kill" in d.warn.text()
+    d.chosen["Frost Beetle"] = 3
+    d.redraw_deck()
+    assert d.warn.text() == ""
+
+
+def test_picker_seed_button_is_off_with_no_run(qapp):
+    from data_full import load_spells_full
+    from deimos_bridge.gui.deckpicker import DeckPicker
+
+    d = DeckPicker(load_spells_full(), "ice")
+    assert not d.seen_btn.isEnabled()
+
+
+def test_questing_buttons_need_a_live_run(qapp, monkeypatch):
+    from deimos_bridge.gui import app as app_mod
+    from deimos_bridge.gui.app import MainWindow
+
+    told = {}
+    monkeypatch.setattr(app_mod.QMessageBox, "information",
+                        lambda *a, **k: told.setdefault("hit", a))
+    win = MainWindow(Telemetry())
+    win.on_teleport()
+    assert "hit" in told
+
+
+def test_live_worker_queues_a_questing_request(qapp):
+    from deimos_bridge.gui.live import LiveWorker
+    w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    w.request("teleport")
+    w.request("dialogue")
+    assert w._requests == ["teleport", "dialogue"]
+
+
+def test_picker_hides_boss_and_event_variants(qapp):
+    """The table holds Iceblade, Iceblade - EM, Iceblade - SIT,
+    IcebladeBOSS01 and more. A mob can cast those; a player cannot, and
+    they bury the real card in the search results."""
+    from deimos_bridge.gui.deckpicker import DeckPicker
+    from deimos_bridge.live_state import build_catalog
+
+    cat = build_catalog()
+    assert "IcebladeBOSS01" in cat["cards"]          # still in the table
+    assert "IcebladeBOSS01" not in cat["canonical"]  # but not player-facing
+    assert "Iceblade" in cat["canonical"]
+
+    d = DeckPicker(cat["cards"], "ice", canonical=cat["canonical"])
+    d.search.setText("iceblade")
+    d.refilter()
+    names = [d.results.item(i).data(0x0100) for i in range(d.results.count())]
+    assert "Iceblade" in names
+    assert not any("BOSS" in n for n in names)
+
+    d.player_only.setCurrentIndex(1)                 # every variant
+    d.refilter()
+    names = [d.results.item(i).data(0x0100) for i in range(d.results.count())]
+    assert any("BOSS" in n for n in names)

@@ -120,8 +120,18 @@ def build_catalog(spells_path="spells_full.json", cards_path="cards_clean.json")
         else:
             clashes.add(code)
 
+    # The player-facing spells. Same rule as the langcode groups: a
+    # record whose `name` IS its `base_spell` is the real card, and
+    # everything else pointing at it is an event/boss/test variant
+    # (Iceblade - EM, Iceblade - SIT, IcebladeBOSS01, Wand Ice_Boss001).
+    # The card table has to keep those -- a mob really can cast them --
+    # but anything asking "what could I put in my deck" wants this set.
+    canonical = {rec["name"] for rec in raw
+                 if rec.get("name") and rec["name"] == rec.get("base_spell")}
+
     return {"cards": cards, "reasons": reasons, "known": known,
-            "langcodes": langcodes, "ambiguous_langcodes": clashes}
+            "langcodes": langcodes, "ambiguous_langcodes": clashes,
+            "canonical": canonical}
 
 
 class NameResolver:
