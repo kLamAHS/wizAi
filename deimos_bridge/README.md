@@ -356,3 +356,44 @@ Prisms are deliberately *not* school-filtered: charms are consumed
 against the card's own school before the ward pass converts it, so an ice
 blade still multiplies an ice hit that a prism is about to turn into
 myth. Filtering them cost 24 points on `ice/prism` before that was fixed.
+
+## Deck entry, and questing
+
+**Deck.** Press **Choose…** next to the deck field. Three ways in: *Build
+one for me* runs `deck_builder.build_deck` for the school and level;
+search-and-click filters the card table as you type; *From the last
+fight* seeds from the cards actually seen in hand during the last run.
+
+That last one is as close to "read my deck off the game" as is honest.
+The client exposes the deck as **template ids** (`deck_behavior.spell_list`),
+and wizAi's card table carries no template ids to match them against —
+`spells_full.json` records have no id field at all. So a real deck read
+cannot be turned into names. Cards *in combat* can, because
+`CombatCard.name()` returns one.
+
+The search hides boss and event variants by default. The table holds
+`Iceblade`, `Iceblade - EM`, `Iceblade - SIT`, `IcebladeBOSS01` and more —
+a mob can cast those, you cannot, and they bury the real card. The filter
+uses the same `base_spell` rule as the langcode index: the canonical
+record is the one whose `name` *is* its `base_spell`. 1,301 of the 8,148
+table entries. Switch to "every variant" to see them all.
+
+**Questing.** `deimos_bridge/questing.py` has two helpers and a loop
+built from them, all on plain wizwalker:
+
+- **Teleport to quest** — `client.quest_position`, the same hook
+  `wizwalker/examples/quest_teleporter.py` uses.
+- **Advance dialogue** — clicks `WorldView/wndDialogMain/btnRight`, the
+  window path Deimos uses (`src/paths.py:30`). Bounded, so a dialogue
+  that reopens forever cannot hang a run.
+- **Auto-quest between fights** — teleport, clear dialogue, check for
+  combat, repeat. Enough to keep feeding the policy fights unattended.
+
+This is **not** Deimos's auto-questing, and is not trying to be. That is
+navigation graphs, sigils, dungeon logic, and it lives in
+`Deimos/src/questing.py`, which imports `src.sprinty_client`,
+`src.utils`, `src.paths`, `thefuzz`, wizsprinter and most of the rest of
+Deimos. Wiring it in would drag the whole dependency set back, including
+wizsprinter's Python 3.13 floor, to reimplement something Deimos already
+does better in its own window. Run Deimos for questing and this for the
+fights.

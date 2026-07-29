@@ -14,10 +14,11 @@ import sys
 from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtWidgets import (QApplication, QComboBox, QFileDialog, QGroupBox,
                              QHBoxLayout, QLabel, QLineEdit, QMainWindow,
-                             QMessageBox, QProgressBar, QPushButton, QSpinBox,
+                             QMessageBox, QProgressBar, QPushButton, QSpinBox, QCheckBox,
                              QTabWidget, QVBoxLayout, QWidget)
 
 from ..telemetry import Telemetry
+from .deckpicker import pick_deck
 from .live import LiveWorker
 from .panels import (BoardPanel, DecisionsPanel, ModelPanel, NamingPanel,
                      RunPanel, _label)
@@ -157,14 +158,37 @@ class MainWindow(QMainWindow):
 
         deck_row = QHBoxLayout()
         deck_row.addWidget(QLabel("deck"))
-        self.deck = QLineEdit(
-            "Fireblade,Fireblade,Fireblade,Sunbird,Sunbird,Sunbird,Tri Blade")
+        self.deck = QLineEdit()
+        self.deck.setPlaceholderText(
+            "press Choose… — or paste comma-separated card names")
         self.deck.setToolTip(
-            "Comma-separated card names. Required for a trained policy: the "
-            "Q table is keyed on this deck's own blade and nuke positions, "
-            "so a table trained for one decklist means nothing for another.")
+            "Required for a trained policy: the Q table is keyed on this "
+            "deck's own blade and nuke positions, so a table trained for "
+            "one decklist means nothing for another.")
         deck_row.addWidget(self.deck)
+        self.deck_btn = QPushButton("Choose…")
+        self.deck_btn.clicked.connect(self.on_pick_deck)
+        deck_row.addWidget(self.deck_btn)
         outer.addLayout(deck_row)
+
+        quest_row = QHBoxLayout()
+        self.auto_quest = QCheckBox("Auto-quest between fights")
+        self.auto_quest.setToolTip(
+            "Between fights, teleport to the quest marker and click through "
+            "dialogue until a fight starts. Not Deimos's full questing — "
+            "no navigation or sigils — but enough to keep feeding the "
+            "policy fights without babysitting it.")
+        quest_row.addWidget(self.auto_quest)
+
+        self.tp_btn = QPushButton("Teleport to quest")
+        self.tp_btn.clicked.connect(self.on_teleport)
+        quest_row.addWidget(self.tp_btn)
+
+        self.dialogue_btn = QPushButton("Advance dialogue")
+        self.dialogue_btn.clicked.connect(self.on_dialogue)
+        quest_row.addWidget(self.dialogue_btn)
+        quest_row.addStretch()
+        outer.addLayout(quest_row)
 
         self.train_progress = QProgressBar()
         self.train_progress.setVisible(False)
@@ -225,6 +249,50 @@ class MainWindow(QMainWindow):
         self.status.setText("training failed")
         QMessageBox.critical(self, "wizAi", message)
 
+    # -- deck ------------------------------------------------------------
+    def on_pick_deck(self):
+        try:
+            from ..live_state import build_catalog
+            catalog = build_catalog()
+            cards = catalog["cards"]
+        except Exception as exc:
+            QMessageBox.critical(self, "wizAi", f"card table failed: {exc}")
+            return
+        # Cards actually seen in hand during the last live run. This is
+        # the only honest "read it off the game": the client exposes the
+        # deck as template ids and wizAi's table carries none, so a real
+        # deck read cannot be turned into names -- but a card in combat
+        # can, because CombatCard.name() returns one.
+        seen = sorted({name for rec in self.tel.rounds for name in rec.hand})
+        chosen = pick_deck(self, cards, self.school.currentText(),
+                           self.decklist(), seen,
+                           canonical=catalog.get("canonical"))
+        if chosen is not None:
+            self.deck.setText(",".join(chosen))
+            self.status.setText(f"deck set — {len(chosen)} cards")
+
+    # -- questing --------------------------------------------------------
+    def _quest_action(self, coro_name, label):
+        """Run one questing helper against the live client.
+
+        Only available while a run is connected: these need the hooks,
+        and the worker owns the client.
+        """
+        if self.live is None or not self.live.isRunning():
+            QMessageBox.information(
+                self, "wizAi",
+                "Press Play live first — teleporting needs the hooks "
+                "installed, and the live run owns the client connection.")
+            return
+        self.live.request(coro_name)
+        self.status.setText(label)
+
+    def on_teleport(self):
+        self._quest_action("teleport", "teleporting to the quest marker…")
+
+    def on_dialogue(self):
+        self._quest_action("dialogue", "clicking through dialogue…")
+
     # -- live ------------------------------------------------------------
     def on_start_live(self):
         if self.live is not None and self.live.isRunning():
@@ -242,7 +310,8 @@ class MainWindow(QMainWindow):
             return
 
         self.live = LiveWorker(self.tel, self.school.currentText(), deck,
-                               policy, self.fights.value(), agent=self.agent)
+                               policy, self.fights.value(), agent=self.agent,
+                               auto_quest=self.auto_quest.isChecked())
         self.live.status.connect(self.on_live_status)
         self.live.round_done.connect(self.on_round)
         self.live.fight_done.connect(lambda n: self.refresh_all())
