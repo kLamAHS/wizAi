@@ -132,9 +132,12 @@ class DecisionsPanel(QWidget):
         root.addWidget(_label(
             "Each row is one planning phase. 'passed over' is what else was "
             "castable — a policy that keeps declining a nuke it could afford "
-            "is the shape of a state-featurisation bug.", PALETTE["muted"]))
-        self.table = _table(["fight", "round", "cast", "target", "why",
-                             "passed over"])
+            "is the shape of a state-featurisation bug. 'policy' names which "
+            "one actually decided: a trained policy that says 'fallback' is "
+            "playing the heuristic, not the table you trained.",
+            PALETTE["muted"]))
+        self.table = _table(["fight", "round", "policy", "cast", "target",
+                             "why", "passed over"])
         root.addWidget(self.table)
 
     def refresh(self):
@@ -146,12 +149,18 @@ class DecisionsPanel(QWidget):
         r = self.table.rowCount()
         self.table.insertRow(r)
         colour = PALETTE["warn"] if rec.passing else PALETTE["text"]
+        # A fallback row is tinted: it is the one case where the row
+        # looks like a normal decision but was not made by the policy the
+        # run is nominally measuring.
+        policy = rec.policy or "—"
         self.table.setItem(r, 0, _cell(rec.fight))
         self.table.setItem(r, 1, _cell(rec.round))
-        self.table.setItem(r, 2, _cell(rec.chosen or "pass", colour))
-        self.table.setItem(r, 3, _cell(rec.target_name or "—"))
-        self.table.setItem(r, 4, _cell(rec.reason, PALETTE["muted"]))
-        self.table.setItem(r, 5, _cell(", ".join(rec.alternatives) or "—",
+        self.table.setItem(r, 2, _cell(
+            policy, PALETTE["warn"] if "fallback" in policy else PALETTE["muted"]))
+        self.table.setItem(r, 3, _cell(rec.chosen or "pass", colour))
+        self.table.setItem(r, 4, _cell(rec.target_name or "—"))
+        self.table.setItem(r, 5, _cell(rec.reason, PALETTE["muted"]))
+        self.table.setItem(r, 6, _cell(", ".join(rec.alternatives) or "—",
                                        PALETTE["muted"]))
         self.table.scrollToBottom()
 

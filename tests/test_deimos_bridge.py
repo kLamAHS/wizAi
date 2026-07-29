@@ -890,3 +890,96 @@ def test_school_aware_matches_or_beats_blade_stack_on_the_live_decks():
             r = evaluate_paired(sim, pols, n=200)
             assert r["new"]["win_rate"] >= r["old"]["win_rate"] - 0.03, \
                 f"{school}/{label}: {r['new']['win_rate']} < {r['old']['win_rate']}"
+
+
+# ------------------------------------------------ which policy actually played
+def test_a_decision_names_the_policy_that_made_it():
+    """Without this the Decisions log cannot answer 'is the model I
+    selected driving?' -- every policy produces the same shape of row."""
+    be = _backend()
+    be.policy_name = "blade-stack(2)"
+    be.attach_combat(simple_fight(hand=("Fireblade", "Sunbird"), pips=4))
+    d = run(be.decide())
+    assert d.policy == "blade-stack(2)"
+
+
+def test_a_trained_policy_says_when_it_fell_back():
+    """The failure this exists to surface: a trained policy that never
+    recognises a board plays the fallback heuristic, and the fight looks
+    completely normal while doing it."""
+    from deimos_bridge.policies import TrainedPolicy
+
+    class _Agent:
+        Q = {}
+
+        class feat:
+            @staticmethod
+            def key(sim, s):
+                return ("k",)
+
+            @staticmethod
+            def legal(sim, s):
+                return ["__pass__"]
+
+    wrapped = TrainedPolicy(_Agent(), fallback=lambda sim, s: "Sunbird")
+    be = _backend(policy=wrapped)
+    be.policy_name = "trained (Q)"
+    be.attach_combat(simple_fight(hand=("Fireblade", "Sunbird"), pips=4))
+    d = run(be.decide())
+    assert d.card_name == "Sunbird"
+    assert d.policy == "trained (Q) — fallback (state not in Q table)"
+
+
+def test_a_raising_policy_does_not_report_a_stale_source():
+    """`last_source` is left over from the previous call when the policy
+    blows up, and reporting it would credit the Q table for a round it
+    never decided."""
+    class _Boom:
+        last_source = "Q table"
+
+        def __call__(self, sim, s):
+            raise RuntimeError("nope")
+
+    be = _backend(policy=_Boom())
+    be.policy_name = "trained (Q)"
+    be.attach_combat(simple_fight())
+    d = run(be.decide())
+    assert d.passing
+    assert d.policy == "trained (Q)"
+    assert "RuntimeError" in d.reason
+
+
+def test_the_policy_can_be_swapped_between_rounds():
+    """The point of the hot swap: reconnecting to change models throws
+    away the deck and the health reading the next decision depends on."""
+    be = _backend(policy=lambda sim, s: "Fireblade")
+    be.policy_name = "a"
+    be.attach_combat(simple_fight(hand=("Fireblade", "Sunbird"), pips=4))
+    first = run(be.decide())
+
+    be.set_policy(lambda sim, s: "Sunbird", "b")
+    second = run(be.decide())
+
+    assert (first.card_name, first.policy) == ("Fireblade", "a")
+    assert (second.card_name, second.policy) == ("Sunbird", "b")
+
+
+def test_a_swap_does_not_land_halfway_through_a_round():
+    """`decide` reads the policy and its label together, once, before
+    calling. A swap arriving mid-decision must not rename the round it
+    interrupted -- the row would then name a policy that did not choose
+    the card on it."""
+    be = _backend()
+
+    def _swapper(sim, s):
+        be.set_policy(lambda *a: "Sunbird", "after")   # arrives mid-round
+        return "Fireblade"
+
+    be.set_policy(_swapper, "before")
+    be.attach_combat(simple_fight(hand=("Fireblade", "Sunbird"), pips=4))
+    d = run(be.decide())
+    assert d.card_name == "Fireblade"         # the in-flight policy's answer
+    assert d.policy == "before"               # ...credited to it, not "after"
+
+    nxt = run(be.decide())                    # the next round is swapped
+    assert (nxt.card_name, nxt.policy) == ("Sunbird", "after")

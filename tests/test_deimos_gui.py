@@ -107,11 +107,12 @@ def test_describe_hanging_reads_as_arithmetic():
 # ---------------------------------------------------------------- telemetry
 class _Decision:
     def __init__(self, card_name=None, target_index=None, passing=False,
-                 reason=""):
+                 reason="", policy=""):
         self.card_name = card_name
         self.target_index = target_index
         self.passing = passing
         self.reason = reason
+        self.policy = policy
 
 
 class _Resolver:
@@ -374,10 +375,10 @@ def test_live_worker_builds_each_policy(qapp):
         return LiveWorker(Telemetry(), "ice", ["Frost Beetle"], name, 1,
                           agent=agent)
 
-    assert callable(worker("school-aware")._build_policy({}))
-    assert callable(worker("blade-stack(3)")._build_policy({}))
-    assert callable(worker("blade-stack(2)")._build_policy({}))
-    assert callable(worker("nuke-asap")._build_policy({}))
+    assert callable(worker("school-aware")._build_policy())
+    assert callable(worker("blade-stack(3)")._build_policy())
+    assert callable(worker("blade-stack(2)")._build_policy())
+    assert callable(worker("nuke-asap")._build_policy())
 
 
 def test_live_worker_refuses_a_trained_policy_with_no_agent(qapp):
@@ -386,7 +387,7 @@ def test_live_worker_refuses_a_trained_policy_with_no_agent(qapp):
     from deimos_bridge.gui.live import LiveWorker
     w = LiveWorker(Telemetry(), "ice", ["Frost Beetle"], "trained (Q)", 1)
     with pytest.raises(RuntimeError, match="No trained policy"):
-        w._build_policy({})
+        w._build_policy()
 
 
 def test_live_worker_reports_a_missing_wizwalker_clearly(qapp):
@@ -1517,3 +1518,248 @@ def test_gui_trains_mortal(qapp):
     assert win.player_hp.value() < 10 ** 9
     worker = TrainWorker({}, [], "ice", 500, player_hp=win.player_hp.value())
     assert worker.player_hp == win.player_hp.value()
+
+
+# --------------------------------------------- swapping models while connected
+def _real_backend():
+    """The genuine `WizAiBackend`, not a stand-in.
+
+    A stub with the same attribute names would pass these tests while the
+    real swap contract rotted underneath -- that failure mode has already
+    cost this project once. The backend needs no client to construct.
+    """
+    from data_full import load_spells_full
+
+    from deimos_bridge.live_backend import WizAiBackend
+    return WizAiBackend.from_trained(
+        school="ice", deck=["Frost Beetle"] * 4, cards=load_spells_full(),
+        policy=lambda sim, s: None, policy_name="school-aware")
+
+
+def _ice_combat():
+    """A board a swapped-in policy can actually decide on."""
+    from deimos_bridge.mock_client import MockCard, MockCombat, MockMember
+    return MockCombat(
+        [MockMember("Wizard", 800, client=True, team_id=0, normal_pips=2),
+         MockMember("Lost Soul", 450, monster=True, team_id=1)],
+        [MockCard("Frost Beetle"), MockCard("Iceblade")])
+
+
+def test_set_policy_swaps_without_touching_the_connection(qapp):
+    """The whole point. Reconnecting to change models throws away what
+    the run observed -- the cards the deck picker learned, the health the
+    client reported -- which are the inputs to the next decision."""
+    from deimos_bridge.gui.live import LiveWorker
+
+    tel = Telemetry()
+    w = LiveWorker(tel, "ice", ["Frost Beetle"] * 4, "school-aware", 1)
+    w._backend = be = _real_backend()
+    was = be.policy
+
+    assert w.set_policy("ttk-lookahead") is True
+    assert be.policy_name == "ttk-lookahead"
+    assert be.policy is not was                   # actually replaced
+    assert w.policy_name == "ttk-lookahead"
+    assert tel.policy_name == "ttk-lookahead"
+
+    # And the swapped-in policy plays, rather than merely being installed.
+    be.attach_combat(_ice_combat())
+    import asyncio
+    d = asyncio.run(be.decide())
+    assert not d.passing, d.reason
+    assert d.policy == "ttk-lookahead"
+
+
+def test_selecting_trained_with_nothing_trained_keeps_the_old_policy(qapp):
+    """A backend left with no policy cannot play, and the fight is still
+    running -- so a failed swap has to be a no-op, not a teardown."""
+    from deimos_bridge.gui.live import LiveWorker
+
+    w = LiveWorker(Telemetry(), "ice", ["Frost Beetle"] * 4, "school-aware", 1)
+    be = w._backend = _real_backend()
+    was = be.policy
+
+    assert w.set_policy("trained (Q)") is False
+    assert be.policy is was
+    assert be.policy_name == "school-aware"
+    assert w.policy_name == "school-aware"
+
+
+def test_swapping_away_from_trained_drops_the_coverage_readout(qapp):
+    """`trained` drives the 'Q table decided N%' line. Left set, it would
+    report a learned policy's numbers for the heuristic that replaced
+    it."""
+    from deimos_bridge.gui.live import LiveWorker
+
+    agent, cards, deck = _tiny_agent(player_hp=800)
+    w = LiveWorker(Telemetry(), "ice", deck, "trained (Q)", 1, agent=agent)
+    w._backend = _real_backend()
+
+    assert w.set_policy("trained (Q)") is True
+    assert w.trained is not None
+    assert w.set_policy("ttk-lookahead") is True
+    assert w.trained is None
+
+
+def test_the_dropdown_swaps_a_running_fight(qapp):
+    """Wiring check: changing the combo has to reach the worker, not
+    just sit there until the next Play live."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    swaps = []
+
+    class _Live:
+        trained = None
+
+        def isRunning(self):
+            return True
+
+        def set_policy(self, name, agent=None):
+            swaps.append(name)
+            return True
+
+    win.live = _Live()
+    # Something other than the default, or the combo emits nothing.
+    assert win.policy.currentText() != "nuke-asap"
+    win.policy.setCurrentText("nuke-asap")
+    assert swaps == ["nuke-asap"]
+
+
+def test_training_stays_available_during_a_live_run(qapp):
+    """Requiring a disconnect to train meant training on guesses: the
+    deck the picker learned and the health the client reported both come
+    from a connected run."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.on_start_live = lambda: None       # not connecting to a real game
+    assert win.train_btn.isEnabled()
+
+
+def test_retraining_hands_the_new_table_to_the_running_fight(qapp):
+    """Otherwise the fight keeps playing the table that was current when
+    Play live was pressed, and a retrain looks like it did nothing."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    handed = []
+
+    class _Live:
+        trained = None
+
+        def isRunning(self):
+            return True
+
+        def set_policy(self, name, agent=None):
+            handed.append((name, agent))
+            return True
+
+    win.live = _Live()
+    win.policy.blockSignals(True)
+    win.policy.setCurrentText("trained (Q)")
+    win.policy.blockSignals(False)
+
+    sentinel = object()
+    win.on_trained(sentinel)
+    assert handed == [("trained (Q)", sentinel)]
+    assert win.agent is sentinel
+
+
+def test_max_health_is_read_off_the_client(qapp):
+    """Training buckets health as a fraction of the maximum, so a table
+    trained against a typed-in 800 and played on a 1,300 HP wizard
+    indexes different states for the same board."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.on_hp_read(1337)
+    assert win.player_hp.value() == 1337
+
+
+def test_reading_max_health_never_fails_the_connect(qapp):
+    """A stat read is a nicety; the hooks are already up by then and
+    losing the run over it would be absurd."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    class _Stats:
+        async def max_hitpoints(self):
+            raise RuntimeError("bad read")
+
+    class _Client:
+        stats = _Stats()
+
+    w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    asyncio.run(w._read_max_hp(_Client()))       # must not raise
+
+
+def test_the_run_records_which_policy_played_each_round():
+    """Read back off the rounds, not off a counter on the policy: after
+    a mid-run swap the policy object only knows about the rounds it was
+    installed for."""
+    tel = Telemetry(policy_name="school-aware")
+    read = _read(2000, 1, hand=("Fireblade",))
+    tel.observe(_Decision(card_name="Fireblade", policy="school-aware"), read)
+    tel.observe(_Decision(card_name="Fireblade",
+                          policy="trained (Q) — Q table"), read)
+    tel.observe(_Decision(card_name="Fireblade",
+                          policy="trained (Q) — Q table"), read)
+    assert tel.policy_mix() == {"trained (Q) — Q table": 2, "school-aware": 1}
+
+
+def test_a_round_with_no_policy_label_falls_back_to_the_run_name():
+    """Older records and the CLI path carry no per-decision label."""
+    tel = Telemetry(policy_name="ttk-lookahead")
+    tel.observe(_Decision(card_name="Fireblade"),
+                _read(2000, 1, hand=("Fireblade",)))
+    assert tel.rounds[-1].policy == "ttk-lookahead"
+
+
+def test_the_window_says_whether_the_selected_model_is_driving(qapp):
+    """The reported symptom was that a trained policy 'just passed every
+    turn' with nothing on screen to say why. Coverage has to be visible
+    without exporting the run."""
+    from deimos_bridge.gui.app import MainWindow
+    from deimos_bridge.policies import TrainedPolicy
+
+    tel = Telemetry(policy_name="trained (Q)")
+    read = _read(2000, 1, hand=("Fireblade",))
+    for _ in range(3):
+        tel.observe(_Decision(card_name="Fireblade",
+                              policy="trained (Q) — fallback (state not in "
+                                     "Q table)"), read)
+    win = MainWindow(tel)
+
+    class _Agent:
+        Q = {}
+
+        class feat:
+            @staticmethod
+            def key(sim, s):
+                return ("k",)
+
+            @staticmethod
+            def legal(sim, s):
+                return ["__pass__"]
+
+    # Built through the real constructor, then driven -- a hand-stuffed
+    # instance would not prove the counters move.
+    trained = TrainedPolicy(_Agent(), fallback=lambda sim, s: None)
+    for _ in range(3):
+        trained(None, None)
+
+    class _Live:
+        def isRunning(self):
+            return True
+
+    live = _Live()
+    live.trained = trained
+    win.live = live
+
+    win._update_policy_state()
+    text = win.policy_state.text()
+    assert "3 round(s)" in text
+    assert "fallback" in text
+    assert "0%" in text

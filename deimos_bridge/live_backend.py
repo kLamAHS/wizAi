@@ -61,11 +61,17 @@ class PolicyDecision:
     """
 
     def __init__(self, card_name=None, target_index=None, passing=False,
-                 reason=""):
+                 reason="", policy=""):
         self.card_name = card_name
         self.target_index = target_index
         self.passing = passing
         self.reason = reason
+        #: which policy played this round, and by which path. Recorded
+        #: per decision rather than per run because the policy can be
+        #: swapped mid-run, and because a trained policy falling through
+        #: to its fallback is indistinguishable from the fallback itself
+        #: unless it is written down at the moment it happens.
+        self.policy = policy
 
     def __repr__(self):
         if self.passing:
@@ -84,7 +90,7 @@ class WizAiBackend:
     """
 
     def __init__(self, policy, cards, school, decklist=None, cast_time=0.3,
-                 on_decision=None, rules=None, catalog=None):
+                 on_decision=None, rules=None, catalog=None, policy_name=""):
         """
         Args:
             policy:   `policy(sim, state) -> Card | str | None`, wizAi's
@@ -95,8 +101,16 @@ class WizAiBackend:
                       feature -- the client cannot report undrawn cards.
             on_decision: optional callback(PolicyDecision, LiveRead) for
                       logging a live run.
+            policy_name: what to call `policy` on screen. Purely a label;
+                      the decision loop never reads it.
         """
-        self.policy = policy
+        #: The policy and its display name, held as one tuple so that
+        #: swapping is a single atomic rebind. Two attributes would let a
+        #: decision read the new name against the old callable and log a
+        #: round under a policy that did not choose the card on it.
+        #: `.policy` and `.policy_name` are properties over this, so
+        #: assigning either still works.
+        self._policy = (policy, policy_name)
         self.cards = cards
         self.school = school
         self.decklist = list(decklist or [])
@@ -111,6 +125,33 @@ class WizAiBackend:
         #: casts from this, so the card it clicks and the target it picks
         #: come from the same snapshot the policy saw.
         self.last_read = None
+
+    # -- the policy, swappable mid-fight ----------------------------------
+    @property
+    def policy(self):
+        return self._policy[0]
+
+    @policy.setter
+    def policy(self, value):
+        self._policy = (value, self._policy[1])
+
+    @property
+    def policy_name(self):
+        return self._policy[1]
+
+    @policy_name.setter
+    def policy_name(self, value):
+        self._policy = (self._policy[0], value)
+
+    def set_policy(self, policy, name=""):
+        """Swap the policy and its label together, mid-fight if need be.
+
+        One rebind. Setting the two attributes in sequence would leave a
+        window where a decision in flight reads the new name and the old
+        callable, and mislabels the round -- which defeats the point of
+        recording the name at all.
+        """
+        self._policy = (policy, name)
 
     # -- BaseCombatBackend ------------------------------------------------
     def attach_combat(self, combat):
@@ -143,15 +184,24 @@ class WizAiBackend:
         self.last_read = read
 
         sim = self._sim_for(read)
+        # Read once, both halves together. `_policy` is rebindable from
+        # the GUI thread, and a round that asked one policy for a card
+        # must be logged against that policy, not against whatever
+        # replaced it midway.
+        policy, label = self._policy
         try:
-            choice = self.policy(sim, read.state)
+            choice = policy(sim, read.state)
         except Exception as exc:                      # a policy must never
             decision = PolicyDecision(                # break a live fight
-                passing=True, reason=f"policy raised {type(exc).__name__}: {exc}")
+                passing=True, policy=label or "policy",
+                reason=f"policy raised {type(exc).__name__}: {exc}")
             self._record(decision, read)
             return decision
 
         decision = self._interpret(choice, read)
+        # After the call, deliberately: a wrapped policy records which
+        # path it took while deciding.
+        decision.policy = self._why(policy, label)
         self._record(decision, read)
         return decision
 
@@ -191,6 +241,19 @@ class WizAiBackend:
 
         return PolicyDecision(card_name=name, target_index=target_index,
                               reason="policy choice")
+
+    def _why(self, policy, label=""):
+        """Which policy just decided, and by which path.
+
+        The path half only exists for wrappers that keep one --
+        `TrainedPolicy` sets `last_source` on every call. Without it a
+        learned policy and the heuristic it silently fell back to produce
+        identical decision logs, so "is the model I selected actually
+        driving?" has no answer.
+        """
+        label = label or self.policy_name or "policy"
+        source = getattr(policy, "last_source", "")
+        return f"{label} — {source}" if source else label
 
     def _record(self, decision, read):
         self.history.append(decision)

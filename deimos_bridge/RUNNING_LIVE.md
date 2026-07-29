@@ -121,9 +121,9 @@ Now **walk into a fight in the game.** At each planning phase the runner
 prints the decision:
 
 ```
-  round 1: Fireblade  (policy choice)
-  round 2: Fireblade  (policy choice)
-  round 3: Sunbird  (policy choice)
+  round 1: Fireblade  (blade-stack)
+  round 2: Fireblade  (blade-stack)
+  round 3: Sunbird  (blade-stack)
   fight over
 ```
 
@@ -165,6 +165,48 @@ Same run, with the board, the decisions, the damage-model residuals and
 the naming triage live. Try `--demo` first — it drives the whole window
 from canned data and needs no game, so you can see what the panels do
 before trusting one.
+
+### Changing and training models without disconnecting
+
+Press **Play live** once and leave it connected. From there:
+
+- **The policy dropdown swaps mid-fight.** The change lands on the next
+  planning phase; the round already in flight finishes under the policy
+  that started it. No reconnect, so the run's telemetry stays continuous
+  and you can compare two policies inside one session.
+- **Train works while connected.** It runs at a lower thread priority so
+  the fight keeps its timing, and when it finishes — if `trained (Q)` is
+  the current selection — the new table is handed to the running fight
+  in place.
+- **Your max health is read off the client on connect** and filled into
+  the *my HP* box. That number matters more than it looks: `Featurizer`
+  buckets health as a fraction of the maximum, so a table trained
+  against a guessed 800 and played on a 1,300 HP wizard indexes
+  different states for the same board.
+
+This ordering is the useful one, not a convenience. Both inputs to a good
+training run — the deck (the picker learns card names from what it saw in
+combat) and the health — only exist *after* you have been connected, so
+requiring a disconnect to train meant training on guesses.
+
+### Is the model actually driving?
+
+Under the controls is a line reading something like:
+
+```
+14 round(s): trained (Q) — Q table ×12  ·  trained (Q) — fallback (state not in Q table) ×2
+Q table decided 86% of the boards it was shown (2 fell back to the heuristic)
+```
+
+That is the answer to "did selecting the trained policy do anything?" —
+which is otherwise unanswerable, because a Q table with no opinion falls
+back to the heuristic and plays a completely ordinary-looking fight. The
+**Decisions** tab carries the same thing per row, with fallback rows
+tinted.
+
+A coverage near zero means the agent has never seen boards like these.
+Train more episodes, or train with the deck and health you are actually
+holding rather than the defaults.
 
 ---
 
