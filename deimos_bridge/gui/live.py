@@ -33,7 +33,8 @@ class LiveWorker(QThread):
     finished_ok = pyqtSignal()
 
     def __init__(self, telemetry, school, deck, policy_name, fights,
-                 agent=None, auto_quest=False, auto_dialogue=True):
+                 agent=None, auto_quest=False, auto_dialogue=True,
+                 collect_wisps=True, use_potions=True):
         super().__init__()
         self.tel = telemetry
         self.school = school
@@ -43,6 +44,11 @@ class LiveWorker(QThread):
         self.agent = agent
         self.auto_quest = auto_quest
         self.auto_dialogue = auto_dialogue
+        #: between-fights upkeep. An unattended run dies by attrition
+        #: long before it runs out of quests, and a policy that lost at
+        #: 12% health has told you nothing about the policy.
+        self.collect_wisps = collect_wisps
+        self.use_potions = use_potions
         #: Deimos's own questing, if its requirements are installed. It
         #: has the navigation ours lacks -- navmap teleports, spiral
         #: doors, dungeon entry, NPC talking -- and composes cleanly
@@ -280,6 +286,16 @@ class LiveWorker(QThread):
                 fought += 1
                 self.tel.end_fight()
                 self.fight_done.emit(fought)
+
+                if not self._stop and (self.collect_wisps or self.use_potions):
+                    from .. import upkeep
+                    try:
+                        await upkeep.after_fight(
+                            client, wisps=self.collect_wisps,
+                            potions=self.use_potions,
+                            on_status=self.status.emit)
+                    except Exception:
+                        pass      # upkeep is a nicety, never a blocker
                 self.status.emit(
                     f"fight {fought} over — waiting for the next"
                     if not self._stop else "stopping…")

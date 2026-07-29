@@ -436,6 +436,28 @@ from the service task instead.
 on. `init_client()` supplies them, defaulting to no pet training and no
 potion buying.
 
+### Between-fights upkeep
+
+An unattended run dies by attrition long before it runs out of quests,
+and a policy that lost because the wizard was at 12% health has told you
+nothing about the policy. Two toggles, both on by default:
+
+- **Collect wisps** — after each fight, teleport over the health and mana
+  wisps it dropped. Skips any sitting next to a mob (Deimos's
+  `find_safe_entities_from`), so topping up does not start a second
+  fight, and is bounded so a zone full of pickups cannot stall the loop.
+- **Use potions** — drinks one below Deimos's threshold (under 55%
+  health, or low mana). It never *buys*: refilling means a vendor trip,
+  real gold, and a navigation detour that can strand the run.
+
+`upkeep.py` builds both on `SprintyClient`, which is **pure wizwalker**.
+Deimos's own `collect_wisps` lives in `src/utils.py` and would drag in
+wizsprinter with it, so the three calls are rebuilt directly — upkeep
+works on the light install, with no extra dependency. Deimos's questing
+already does this inside `auto_quest_solo`, but only while questing;
+here it is its own toggle so it also runs when auto-quest is off, which
+is exactly the case when farming one fixed mob.
+
 Cost: `src.utils` imports `wizwalker.extensions.wizsprinter`, so this
 needs wizsprinter (Python 3.13+) plus `thefuzz`, `loguru`, `pyyaml` and
 `requests`. `setup-windows.bat` installs them and treats failure as

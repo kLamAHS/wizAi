@@ -1038,3 +1038,205 @@ def test_only_one_dialogue_clicker_runs(qapp):
     asyncio.run(drive())
     assert client.mouse_handler.clicks == [], \
         "our dialogue clicker ran while Deimos's questing was driving"
+
+
+# ---------------------------------------------------------------- upkeep
+class _Entity:
+    def __init__(self, xyz):
+        self._xyz = xyz
+
+    async def location(self):
+        return self._xyz
+
+
+class _Stats:
+    def __init__(self, hp=1000, max_hp=1000, mana=100, max_mana=100,
+                 level=50, charges=2.0):
+        self._v = dict(hp=hp, max_hp=max_hp, mana=mana, max_mana=max_mana,
+                       level=level, charges=charges)
+
+    async def current_hitpoints(self):
+        return self._v["hp"]
+
+    async def max_hitpoints(self):
+        return self._v["max_hp"]
+
+    async def current_mana(self):
+        return self._v["mana"]
+
+    async def max_mana(self):
+        return self._v["max_mana"]
+
+    async def reference_level(self):
+        return self._v["level"]
+
+    async def potion_charge(self):
+        return self._v["charges"]
+
+
+class _UpkeepClient:
+    def __init__(self, stats=None):
+        self.stats = stats or _Stats()
+        self.teleported = []
+
+    async def teleport(self, xyz):
+        self.teleported.append(xyz)
+
+
+def test_needs_potion_matches_deimos_threshold():
+    """Low mana, or under 55% health (src/utils.py:527-544)."""
+    import asyncio
+
+    from deimos_bridge.upkeep import needs_potion
+
+    healthy = _UpkeepClient(_Stats(hp=1000, max_hp=1000, mana=100))
+    assert asyncio.run(needs_potion(healthy)) is False
+
+    hurt = _UpkeepClient(_Stats(hp=500, max_hp=1000, mana=100))
+    assert asyncio.run(needs_potion(hurt)) is True        # 50% < 55%
+
+    drained = _UpkeepClient(_Stats(hp=1000, max_hp=1000, mana=1,
+                                   max_mana=100))
+    assert asyncio.run(needs_potion(drained)) is True
+
+
+def test_needs_potion_is_false_on_an_unreadable_client():
+    """A failed stat read must not trigger potion spam."""
+    import asyncio
+
+    from deimos_bridge.upkeep import needs_potion
+
+    class _Broken:
+        class stats:
+            @staticmethod
+            async def current_mana():
+                raise RuntimeError("MemoryReadError")
+
+    assert asyncio.run(needs_potion(_Broken())) is False
+
+
+def test_drink_potion_does_nothing_without_a_charge():
+    import asyncio
+
+    from deimos_bridge.upkeep import drink_potion
+
+    empty = _UpkeepClient(_Stats(charges=0.0))
+    assert asyncio.run(drink_potion(empty)) is False
+
+
+def test_collect_wisps_teleports_to_each(monkeypatch):
+    import asyncio
+
+    from deimos_bridge import upkeep
+
+    picked = [_Entity("wisp1"), _Entity("wisp2")]
+
+    class _Sprinty:
+        def __init__(self, client):
+            pass
+
+        async def get_base_entities_with_vague_name(self, name):
+            return picked if name == "WispHealth" else []
+
+        async def find_safe_entities_from(self, entities):
+            return entities
+
+    monkeypatch.setattr(upkeep, "_sprinty", lambda client: _Sprinty(client))
+    client = _UpkeepClient()
+    assert asyncio.run(upkeep.collect_wisps(client)) == 2
+    assert client.teleported == ["wisp1", "wisp2"]
+
+
+def test_collect_wisps_skips_the_ones_next_to_a_mob(monkeypatch):
+    """Topping up should not start a second fight."""
+    import asyncio
+
+    from deimos_bridge import upkeep
+
+    class _Sprinty:
+        def __init__(self, client):
+            pass
+
+        async def get_base_entities_with_vague_name(self, name):
+            return [_Entity("safe"), _Entity("guarded")] if name == "WispHealth" else []
+
+        async def find_safe_entities_from(self, entities):
+            return [e for e in entities if e._xyz == "safe"]
+
+    monkeypatch.setattr(upkeep, "_sprinty", lambda client: _Sprinty(client))
+    client = _UpkeepClient()
+    assert asyncio.run(upkeep.collect_wisps(client)) == 1
+    assert client.teleported == ["safe"]
+
+
+def test_collect_wisps_is_bounded(monkeypatch):
+    """A zone strewn with pickups must not stall the loop."""
+    import asyncio
+
+    from deimos_bridge import upkeep
+
+    many = [_Entity(f"w{i}") for i in range(50)]
+
+    class _Sprinty:
+        def __init__(self, client):
+            pass
+
+        async def get_base_entities_with_vague_name(self, name):
+            return many if name == "WispHealth" else []
+
+        async def find_safe_entities_from(self, entities):
+            return entities
+
+    monkeypatch.setattr(upkeep, "_sprinty", lambda client: _Sprinty(client))
+    client = _UpkeepClient()
+    assert asyncio.run(upkeep.collect_wisps(client, limit=5)) == 5
+
+
+def test_collect_wisps_is_a_no_op_when_sprinty_is_missing(monkeypatch):
+    """On a machine without Deimos this returns 0, not an exception."""
+    import asyncio
+
+    from deimos_bridge import upkeep
+
+    def _boom(client):
+        raise ImportError("no src.sprinty_client")
+
+    monkeypatch.setattr(upkeep, "_sprinty", _boom)
+    assert asyncio.run(upkeep.collect_wisps(_UpkeepClient())) == 0
+
+
+def test_after_fight_takes_wisps_before_potions(monkeypatch):
+    """Wisps are free and can lift the wizard back over the potion
+    threshold, so spending a charge first would waste it."""
+    import asyncio
+
+    from deimos_bridge import upkeep
+
+    order = []
+
+    async def _wisps(client, **kw):
+        order.append("wisps")
+        return 1
+
+    async def _needs(client, **kw):
+        order.append("check")
+        return False
+
+    monkeypatch.setattr(upkeep, "collect_wisps", _wisps)
+    monkeypatch.setattr(upkeep, "needs_potion", _needs)
+    asyncio.run(upkeep.after_fight(_UpkeepClient()))
+    assert order == ["wisps", "check"]
+
+
+def test_upkeep_toggles_reach_the_worker(qapp):
+    from deimos_bridge.gui.app import MainWindow
+    from deimos_bridge.gui.live import LiveWorker
+
+    win = MainWindow(Telemetry())
+    assert win.collect_wisps.isChecked()
+    assert win.use_potions.isChecked()
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1,
+                        collect_wisps=False, use_potions=False)
+    assert worker.collect_wisps is False
+    assert worker.use_potions is False
