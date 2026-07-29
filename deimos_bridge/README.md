@@ -378,16 +378,36 @@ uses the same `base_spell` rule as the langcode index: the canonical
 record is the one whose `name` *is* its `base_spell`. 1,301 of the 8,148
 table entries. Switch to "every variant" to see them all.
 
-**Questing.** `deimos_bridge/questing.py` has two helpers and a loop
-built from them, all on plain wizwalker:
+**Questing.** `deimos_bridge/questing.py`, all on plain wizwalker:
 
 - **Teleport to quest** — `client.quest_position`, the same hook
   `wizwalker/examples/quest_teleporter.py` uses.
-- **Advance dialogue** — clicks `WorldView/wndDialogMain/btnRight`, the
-  window path Deimos uses (`src/paths.py:30`). Bounded, so a dialogue
-  that reopens forever cannot hang a run.
-- **Auto-quest between fights** — teleport, clear dialogue, check for
-  combat, repeat. Enough to keep feeding the policy fights unattended.
+- **Auto-dialogue** — watches for dialogue and clicks through it for the
+  whole run, paused during combat so it cannot fight the card clicks.
+  Bounded per conversation, so one that reopens forever cannot hang a run.
+- **Auto-quest between fights** — wait out loading, read the marker,
+  teleport, clear dialogue, press X, look for combat, repeat.
+
+Three things that version one got wrong, all of which showed up on the
+first real run:
+
+- **The buttons did nothing.** Requests were drained at the top of the
+  fight loop, which spends nearly all its time blocked inside
+  `wait_for_combat` — so a press queued while waiting sat there until a
+  fight had started *and* finished. They now run on a concurrent service
+  task and act within a second.
+- **The hunt died at the first zone change.** It returned on the first
+  failed read, and a zone change makes several fail in a row. It now
+  waits out loading screens, retries, and only gives up after `max_hops`
+  or on a cause retrying cannot fix.
+- **It never interacted.** Arriving at the marker is not enough for
+  sigils, dungeon doors or quest NPCs, so it presses X.
+
+If a teleport does nothing, the usual cause is the **in-game quest arrow
+being switched off**: `activate_all_hooks` notes that "the quest hook is
+not written if the quest arrow is off" (`memory/handler.py:187`), which
+leaves the position reading as the origin. That is reported as a reason
+now rather than a silent failure.
 
 This is **not** Deimos's auto-questing, and is not trying to be. That is
 navigation graphs, sigils, dungeon logic, and it lives in
