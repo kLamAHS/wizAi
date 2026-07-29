@@ -1,0 +1,287 @@
+{
+  "school": "fire",
+  "curve": {
+    "school": "fire",
+    "levels": "20,50,70,100,120",
+    "episodes": 6000,
+    "eval_n": 600,
+    "candidates": 60,
+    "top_k": 6,
+    "damage_limit": 1.4,
+    "d_k0": 60.0,
+    "d_n0": 25.0,
+    "resist_limit": 0.85,
+    "r_k0": 40.0,
+    "r_n0": 15.0,
+    "sweep": 120,
+    "out": "results_deimos.json"
+  },
+  "levels": [
+    {
+      "level": 20,
+      "world": "Krokotopia",
+      "school": "fire",
+      "boss": "Biti Nirini",
+      "boss_hp": 510,
+      "boss_rank": 3,
+      "companions": [],
+      "deck": [
+        "Sunbird",
+        "Sunbird",
+        "Balanceblade",
+        "Fire Trap",
+        "Fire Trap",
+        "Fire Prism",
+        "Fire Prism",
+        "Pixie"
+      ],
+      "gear_damage": {
+        "fire": 0.02727272727272727,
+        "*": 0.022727272727272728
+      },
+      "advisor": "race(3)",
+      "engines": {
+        "wizai": {
+          "trained_win": 0.9283333333333333,
+          "trained_ttk": 3.495511669658887,
+          "best_scripted": "race(3)",
+          "scripted_win": 0.8166666666666667,
+          "scripted_ttk": 4.144897959183673,
+          "edge_points": 11.16666666666667
+        },
+        "deimos": {
+          "trained_win": 0.9283333333333333,
+          "trained_ttk": 3.495511669658887,
+          "best_scripted": "race(3)",
+          "scripted_win": 0.8166666666666667,
+          "scripted_ttk": 4.144897959183673,
+          "edge_points": 11.16666666666667
+        }
+      },
+      "win_delta": 0.0,
+      "edge_delta": 0.0
+    },
+    {
+      "level": 50,
+      "world": "Dragonspyre",
+      "school": "fire",
+      "boss": "Blackblade",
+      "boss_hp": 2400,
+      "boss_rank": 7,
+      "companions": [],
+      "deck": [
+        "Fire Dragon",
+        "Helephant",
+        "Fireblade",
+        "Fireblade",
+        "Hex",
+        "Feint",
+        "Feint",
+        "Tower Shield",
+        "Tower Shield",
+        "Pixie"
+      ],
+      "gear_damage": {
+        "fire": 0.32447552447552447,
+        "*": 0.03802447552447552
+      },
+      "advisor": "race(3)",
+      "engines": {
+        "wizai": {
+          "trained_win": 0.9583333333333334,
+          "trained_ttk": 6.4,
+          "best_scripted": "race(2)",
+          "scripted_win": 0.935,
+          "scripted_ttk": 5.944741532976827,
+          "edge_points": 2.3333333333333317
+        },
+        "deimos": {
+          "trained_win": 0.9583333333333334,
+          "trained_ttk": 6.4,
+          "best_scripted": "race(2)",
+          "scripted_win": 0.935,
+          "scripted_ttk": 5.944741532976827,
+          "edge_points": 2.3333333333333317
+        }
+      },
+      "win_delta": 0.0,
+      "edge_delta": 0.0
+    },
+    {
+      "level": 70,
+      "world": "Zafaria",
+      "school": "fire",
+      "boss": "Mokompo Storm Growler",
+      "boss_hp": 1280,
+      "boss_rank": 7,
+      "companions": [],
+      "deck": [
+        "Fire Dragon+colossal",
+        "Heck Hound",
+        "Efreet+colossal",
+        "Fire Dragon",
+        "Rain of Fire+colossal",
+        "Fireblade+sharp",
+        "Fireblade+sharp",
+        "Fire Trap+potent",
+        "Fire Trap+potent"
+      ],
+      "gear_damage": {
+        "fire": 0.662
+      },
+      "advisor": "race(1)",
+      "engines": {
+        "wizai": {
+          "trained_win": 0.7166666666666667,
+          "trained_ttk": 4.044186046511628,
+          "best_scripted": "race(1)",
+          "scripted_win": 0.7066666666666667,
+          "scripted_ttk": 4.122641509433962,
+          "edge_points": 1.0000000000000009
+        },
+        "deimos": {
+          "trained_win": 0.7166666666666667,
+          "trained_ttk": 4.044186046511628,
+          "best_scripted": "race(1)",
+          "scripted_win": 0.7066666666666667,
+          "scripted_ttk": 4.122641509433962,
+          "edge_points": 1.0000000000000009
+        }
+      },
+      "win_delta": 0.0,
+      "edge_delta": 0.0
+    },
+    {
+      "level": 100,
+      "world": "Khrysalis",
+      "school": "fire",
+      "boss": "King Alric FateSailor",
+      "boss_hp": 10560,
+      "boss_rank": 12,
+      "companions": [
+        "Deer Mouse Revenant (Ice) (inferred)",
+        "Deer Mouse Revenant (inferred)"
+      ],
+      "deck": [
+        "Fire Dragon+colossal",
+        "Fire Dragon+colossal",
+        "Fire Dragon+colossal",
+        "Efreet+colossal",
+        "Spirit Blade",
+        "Spirit Blade",
+        "Spirit Blade+sharp",
+        "Tri Blade+sharp",
+        "Fireblade+sharp"
+      ],
+      "gear_damage": {
+        "fire": 1.1395
+      },
+      "advisor": "race(3)",
+      "engines": {
+        "wizai": {
+          "trained_win": 0.9266666666666666,
+          "trained_ttk": 16.58992805755396,
+          "best_scripted": "race(3)",
+          "scripted_win": 1.0,
+          "scripted_ttk": 16.05666666666667,
+          "edge_points": -7.333333333333336
+        },
+        "deimos": {
+          "trained_win": 0.0016666666666666668,
+          "trained_ttk": 19.0,
+          "best_scripted": "race(1)",
+          "scripted_win": 0.9916666666666667,
+          "scripted_ttk": 19.057142857142857,
+          "edge_points": -99.0
+        }
+      },
+      "win_delta": -92.5,
+      "edge_delta": -91.66666666666666
+    },
+    {
+      "level": 120,
+      "world": "Mirage",
+      "school": "fire",
+      "boss": "Mother Ghulture",
+      "boss_hp": 4560,
+      "boss_rank": 15,
+      "companions": [
+        "Ghulture (Death) (Ghulture Nest) (inferred)",
+        "Ghulture (Myth) (Ghulture Nest) (inferred)"
+      ],
+      "deck": [
+        "Fire Dragon+epic",
+        "Fire Dragon+epic",
+        "Tri Blade+sharp",
+        "Fireblade+sharp",
+        "Cosmic Charge",
+        "Cosmic Charge"
+      ],
+      "gear_damage": {
+        "fire": 1.4715
+      },
+      "advisor": "race(1)",
+      "engines": {
+        "wizai": {
+          "trained_win": 1.0,
+          "trained_ttk": 5.0,
+          "best_scripted": "race(1)",
+          "scripted_win": 1.0,
+          "scripted_ttk": 6.0,
+          "edge_points": 0.0
+        },
+        "deimos": {
+          "trained_win": 1.0,
+          "trained_ttk": 6.0,
+          "best_scripted": "race(1)",
+          "scripted_win": 1.0,
+          "scripted_ttk": 7.0,
+          "edge_points": 0.0
+        }
+      },
+      "win_delta": 0.0,
+      "edge_delta": 0.0
+    }
+  ],
+  "sweep": {
+    "level": 120,
+    "boss": "Mother Ghulture",
+    "rows": [
+      {
+        "damage_limit": 1.0,
+        "trained_win": 1.0,
+        "trained_ttk": 7.0,
+        "edge_points": 0.0,
+        "best_scripted": "race(1)"
+      },
+      {
+        "damage_limit": 1.4,
+        "trained_win": 1.0,
+        "trained_ttk": 6.0,
+        "edge_points": 0.0,
+        "best_scripted": "race(1)"
+      },
+      {
+        "damage_limit": 1.8,
+        "trained_win": 1.0,
+        "trained_ttk": 6.0,
+        "edge_points": 0.0,
+        "best_scripted": "race(1)"
+      },
+      {
+        "damage_limit": 2.4,
+        "trained_win": 1.0,
+        "trained_ttk": 6.0,
+        "edge_points": 0.0,
+        "best_scripted": "race(1)"
+      },
+      {
+        "damage_limit": 999.0,
+        "trained_win": 1.0,
+        "trained_ttk": 5.0,
+        "edge_points": 0.0,
+        "best_scripted": "race(1)"
+      }
+    ]
+  }
+}

@@ -1,0 +1,353 @@
+{
+  "school": "fire",
+  "curve": {
+    "school": "fire",
+    "levels": "20",
+    "episodes": 6000,
+    "eval_n": 500,
+    "candidates": 60,
+    "top_k": 6,
+    "damage_limit": 1.4,
+    "d_k0": 60.0,
+    "d_n0": 25.0,
+    "resist_limit": 0.85,
+    "r_k0": 40.0,
+    "r_n0": 15.0,
+    "sweep": 0,
+    "robustness": "20,50,70,100,120",
+    "out": "results_deimos_robustness.json"
+  },
+  "levels": [
+    {
+      "level": 20,
+      "world": "Krokotopia",
+      "school": "fire",
+      "boss": "Biti Nirini",
+      "boss_hp": 510,
+      "boss_rank": 3,
+      "companions": [],
+      "deck": [
+        "Sunbird",
+        "Sunbird",
+        "Balanceblade",
+        "Fire Trap",
+        "Fire Trap",
+        "Fire Prism",
+        "Fire Prism",
+        "Pixie"
+      ],
+      "gear_damage": {
+        "fire": 0.02727272727272727,
+        "*": 0.022727272727272728
+      },
+      "advisor": "race(3)",
+      "engines": {
+        "wizai": {
+          "trained_win": 0.922,
+          "trained_ttk": 3.5206073752711498,
+          "best_scripted": "race(3)",
+          "scripted_win": 0.818,
+          "scripted_ttk": 4.15158924205379,
+          "edge_points": 10.40000000000001
+        },
+        "deimos": {
+          "trained_win": 0.922,
+          "trained_ttk": 3.5206073752711498,
+          "best_scripted": "race(3)",
+          "scripted_win": 0.818,
+          "scripted_ttk": 4.15158924205379,
+          "edge_points": 10.40000000000001
+        }
+      },
+      "win_delta": 0.0,
+      "edge_delta": 0.0
+    }
+  ],
+  "robustness": [
+    {
+      "level": 20,
+      "boss": "Biti Nirini",
+      "baseline_win": 0.924,
+      "margin": 0.95,
+      "rows": [
+        {
+          "scale": 1.0,
+          "trained_win": 0.924,
+          "trained_ttk": 3.9935064935064934,
+          "best_scripted": "race(3)",
+          "scripted_win": 0.818
+        },
+        {
+          "scale": 0.99,
+          "trained_win": 0.924,
+          "trained_ttk": 3.9935064935064934,
+          "best_scripted": "race(3)",
+          "scripted_win": 0.818
+        },
+        {
+          "scale": 0.97,
+          "trained_win": 0.84,
+          "trained_ttk": 4.152380952380953,
+          "best_scripted": "race(3)",
+          "scripted_win": 0.818
+        },
+        {
+          "scale": 0.95,
+          "trained_win": 0.84,
+          "trained_ttk": 4.154761904761905,
+          "best_scripted": "race(3)",
+          "scripted_win": 0.818
+        },
+        {
+          "scale": 0.92,
+          "trained_win": 0.744,
+          "trained_ttk": 4.31989247311828,
+          "best_scripted": "race(3)",
+          "scripted_win": 0.818
+        },
+        {
+          "scale": 0.88,
+          "trained_win": 0.668,
+          "trained_ttk": 4.502994011976048,
+          "best_scripted": "race(3)",
+          "scripted_win": 0.818
+        },
+        {
+          "scale": 0.8,
+          "trained_win": 0.468,
+          "trained_ttk": 5.188034188034188,
+          "best_scripted": "race(3)",
+          "scripted_win": 0.818
+        }
+      ]
+    },
+    {
+      "level": 50,
+      "boss": "Blackblade",
+      "baseline_win": 0.952,
+      "margin": 0.95,
+      "rows": [
+        {
+          "scale": 1.0,
+          "trained_win": 0.952,
+          "trained_ttk": 6.300420168067227,
+          "best_scripted": "race(3)",
+          "scripted_win": 0.954
+        },
+        {
+          "scale": 0.99,
+          "trained_win": 0.952,
+          "trained_ttk": 6.300420168067227,
+          "best_scripted": "race(3)",
+          "scripted_win": 0.954
+        },
+        {
+          "scale": 0.97,
+          "trained_win": 0.952,
+          "trained_ttk": 6.300420168067227,
+          "best_scripted": "race(3)",
+          "scripted_win": 0.954
+        },
+        {
+          "scale": 0.95,
+          "trained_win": 0.952,
+          "trained_ttk": 6.3088235294117645,
+          "best_scripted": "race(3)",
+          "scripted_win": 0.954
+        },
+        {
+          "scale": 0.92,
+          "trained_win": 0.82,
+          "trained_ttk": 6.578048780487805,
+          "best_scripted": "race(3)",
+          "scripted_win": 0.93
+        },
+        {
+          "scale": 0.88,
+          "trained_win": 0.604,
+          "trained_ttk": 6.986754966887418,
+          "best_scripted": "race(3)",
+          "scripted_win": 0.888
+        },
+        {
+          "scale": 0.8,
+          "trained_win": 0.454,
+          "trained_ttk": 9.533039647577093,
+          "best_scripted": "race(2)",
+          "scripted_win": 0.81
+        }
+      ]
+    },
+    {
+      "level": 70,
+      "boss": "Mokompo Storm Growler",
+      "baseline_win": 0.718,
+      "margin": 0.8,
+      "rows": [
+        {
+          "scale": 1.0,
+          "trained_win": 0.718,
+          "trained_ttk": 4.075208913649025,
+          "best_scripted": "race(1)",
+          "scripted_win": 0.702
+        },
+        {
+          "scale": 0.99,
+          "trained_win": 0.718,
+          "trained_ttk": 4.075208913649025,
+          "best_scripted": "race(1)",
+          "scripted_win": 0.702
+        },
+        {
+          "scale": 0.97,
+          "trained_win": 0.694,
+          "trained_ttk": 4.178674351585014,
+          "best_scripted": "race(1)",
+          "scripted_win": 0.702
+        },
+        {
+          "scale": 0.95,
+          "trained_win": 0.694,
+          "trained_ttk": 4.178674351585014,
+          "best_scripted": "race(1)",
+          "scripted_win": 0.702
+        },
+        {
+          "scale": 0.92,
+          "trained_win": 0.682,
+          "trained_ttk": 4.2404692082111435,
+          "best_scripted": "race(1)",
+          "scripted_win": 0.702
+        },
+        {
+          "scale": 0.88,
+          "trained_win": 0.68,
+          "trained_ttk": 4.235294117647059,
+          "best_scripted": "race(1)",
+          "scripted_win": 0.702
+        },
+        {
+          "scale": 0.8,
+          "trained_win": 0.666,
+          "trained_ttk": 4.351351351351352,
+          "best_scripted": "race(1)",
+          "scripted_win": 0.702
+        }
+      ]
+    },
+    {
+      "level": 100,
+      "boss": "King Alric FateSailor",
+      "baseline_win": 0.952,
+      "margin": 1.0,
+      "rows": [
+        {
+          "scale": 1.0,
+          "trained_win": 0.952,
+          "trained_ttk": 16.93487394957983,
+          "best_scripted": "race(3)",
+          "scripted_win": 1.0
+        },
+        {
+          "scale": 0.99,
+          "trained_win": 0.808,
+          "trained_ttk": 17.400990099009903,
+          "best_scripted": "race(3)",
+          "scripted_win": 1.0
+        },
+        {
+          "scale": 0.97,
+          "trained_win": 0.02,
+          "trained_ttk": 19.0,
+          "best_scripted": "race(3)",
+          "scripted_win": 1.0
+        },
+        {
+          "scale": 0.95,
+          "trained_win": 0.012,
+          "trained_ttk": 19.0,
+          "best_scripted": "race(1)",
+          "scripted_win": 0.99
+        },
+        {
+          "scale": 0.92,
+          "trained_win": 0.002,
+          "trained_ttk": 20.0,
+          "best_scripted": "race(1)",
+          "scripted_win": 0.99
+        },
+        {
+          "scale": 0.88,
+          "trained_win": 0.0,
+          "trained_ttk": NaN,
+          "best_scripted": "race(1)",
+          "scripted_win": 0.99
+        },
+        {
+          "scale": 0.8,
+          "trained_win": 0.0,
+          "trained_ttk": NaN,
+          "best_scripted": "race(3)",
+          "scripted_win": 0.99
+        }
+      ]
+    },
+    {
+      "level": 120,
+      "boss": "Mother Ghulture",
+      "baseline_win": 1.0,
+      "margin": 0.8,
+      "rows": [
+        {
+          "scale": 1.0,
+          "trained_win": 1.0,
+          "trained_ttk": 5.0,
+          "best_scripted": "race(1)",
+          "scripted_win": 1.0
+        },
+        {
+          "scale": 0.99,
+          "trained_win": 1.0,
+          "trained_ttk": 5.0,
+          "best_scripted": "race(1)",
+          "scripted_win": 1.0
+        },
+        {
+          "scale": 0.97,
+          "trained_win": 1.0,
+          "trained_ttk": 6.0,
+          "best_scripted": "race(1)",
+          "scripted_win": 1.0
+        },
+        {
+          "scale": 0.95,
+          "trained_win": 1.0,
+          "trained_ttk": 6.0,
+          "best_scripted": "race(1)",
+          "scripted_win": 1.0
+        },
+        {
+          "scale": 0.92,
+          "trained_win": 1.0,
+          "trained_ttk": 6.0,
+          "best_scripted": "race(1)",
+          "scripted_win": 1.0
+        },
+        {
+          "scale": 0.88,
+          "trained_win": 1.0,
+          "trained_ttk": 6.0,
+          "best_scripted": "race(1)",
+          "scripted_win": 1.0
+        },
+        {
+          "scale": 0.8,
+          "trained_win": 1.0,
+          "trained_ttk": 7.0,
+          "best_scripted": "race(1)",
+          "scripted_win": 1.0
+        }
+      ]
+    }
+  ]
+}

@@ -116,6 +116,30 @@ class DeimosSim(Sim):
         return (1 - res) * (1 + target.boost.get(school, 0.0))
 
 
+class ScaledSim(Sim):
+    """`Sim` with the player's outgoing damage multiplied by a constant.
+
+    Not a model of anything -- a probe. Every attempt to carry a policy
+    from a simulator to a real client changes its damage by *some*
+    amount, and the honest question is not "by how much" (nobody knows)
+    but "how much can it take". This scales damage by a flat factor so
+    that sensitivity can be measured without committing to a story about
+    where the discrepancy comes from.
+
+    It is also the control for `DeimosSim`: if a curve and a flat cut of
+    the same size move the win rate by the same amount, the collapse is
+    the policy's, not the curve's.
+    """
+
+    def __init__(self, *args, scale: float = 1.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.scale = scale
+
+    def _damage_bonus(self, caster, school):
+        bonus = super()._damage_bonus(caster, school)
+        return bonus * self.scale if caster.team == 0 else bonus
+
+
 def paired_engines(cards, decklist, school, boss, *, curve=None,
                    seed=10 ** 6, **kwargs):
     """One `Sim` and one `DeimosSim` over identical inputs.

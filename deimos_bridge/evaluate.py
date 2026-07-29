@@ -195,6 +195,76 @@ def sweep_curve(level, school, cards, bosses, registry, args, log,
     return {"level": level, "boss": boss.name, "rows": rows}
 
 
+#: Flat damage multipliers for the robustness probe. 1.00 is the world
+#: the policy trained in; everything below it is a cheaper question than
+#: "what exactly does the client do" -- namely "how wrong can the
+#: simulator be before this policy stops working".
+ROBUSTNESS_SCALES = (1.00, 0.99, 0.97, 0.95, 0.92, 0.88, 0.80)
+
+
+def robustness(level, school, cards, bosses, registry, args, log):
+    """How far the trained policy can be pushed before it stops winning.
+
+    This is the transfer question asked without needing the client's
+    constants. No policy trained in a simulator meets a real client whose
+    damage matches to the point; what matters is the margin. A policy
+    that holds its win rate down to 0.80 will survive the crossing. One
+    that falls off a cliff at 0.97 was fitted to the simulator's exact
+    arithmetic and will not.
+
+    The scripted lines are scored alongside as a reference: they are not
+    learned, so whatever they do under perturbation is the fight's own
+    sensitivity rather than any policy's.
+    """
+    from main import pick_encounter
+    from deimos_bridge.engine import ScaledSim
+
+    rng = random.Random(1000 + level)
+    stats = loadout(level, school, rules=LIVE_RULES)
+    boss = pick_encounter(level, school, cards, bosses, registry, stats, rng)
+    _b, comps = encounter(boss.name, bosses)
+    pool = legal_pool(cards, school, level=level, enchants=True)
+    full = {**cards, **pool}
+
+    decklist, *_ = build_deck(
+        cards, school, copy.copy(boss), LIVE_RULES,
+        n_candidates=args.candidates, top_k=args.top_k, seed=7, level=level,
+        enchants=True, log=None, **_fight_kwargs(stats, comps))
+    _w, _ttk, agent = fine_tune(
+        full, decklist, school, copy.copy(boss), LIVE_RULES,
+        episodes=args.episodes, seed=11, **_fight_kwargs(stats, comps))
+    policies = {**SCRIPTED, "trained": agent.policy()}
+
+    log(f"\n  robustness at level {level} vs {boss.name} "
+        f"({boss.hp:,} HP, {len(comps)} companions)")
+    log(f"    {'dmg x':>7} {'trained':>9} {'ttk':>7} {'best scripted':>15}")
+
+    rows, baseline = [], None
+    for scale in ROBUSTNESS_SCALES:
+        sim = ScaledSim(dict(full), decklist, school, copy.copy(boss),
+                        scale=scale, **_sim_kwargs(stats, comps))
+        arms = evaluate_paired(sim, policies, n=args.eval_n)
+        trained, scripted = arms["trained"], _best_scripted(arms)
+        if baseline is None:
+            baseline = trained["win_rate"]
+        rows.append({"scale": scale, "trained_win": trained["win_rate"],
+                     "trained_ttk": trained["mean_ttk"],
+                     "best_scripted": scripted,
+                     "scripted_win": arms[scripted]["win_rate"]})
+        log(f"    {scale:>7.2f} {trained['win_rate'] * 100:>8.1f}% "
+            f"{trained['mean_ttk']:>7.2f} "
+            f"{scripted} {arms[scripted]['win_rate'] * 100:>6.1f}%")
+
+    # The margin: the largest cut the policy absorbs while keeping most
+    # of its unperturbed win rate.
+    holds = [r["scale"] for r in rows
+             if baseline and r["trained_win"] >= 0.9 * baseline]
+    margin = min(holds) if holds else 1.0
+    log(f"    margin: holds 90% of its win rate down to x{margin:.2f}")
+    return {"level": level, "boss": boss.name, "baseline_win": baseline,
+            "margin": margin, "rows": rows}
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--school", default="fire")
@@ -211,6 +281,8 @@ def main():
     p.add_argument("--r-n0", type=float, default=15.0)
     p.add_argument("--sweep", type=int, default=0,
                    help="also sweep the damage cap at this level")
+    p.add_argument("--robustness", default="",
+                   help="comma-separated levels to probe for damage margin")
     p.add_argument("--out", default="results_deimos.json")
     args = p.parse_args()
 
@@ -234,6 +306,10 @@ def main():
     if args.sweep:
         payload["sweep"] = sweep_curve(args.sweep, args.school, cards, bosses,
                                        registry, args, log)
+    if args.robustness:
+        payload["robustness"] = [
+            robustness(int(lv), args.school, cards, bosses, registry, args, log)
+            for lv in args.robustness.split(",") if lv.strip()]
 
     log(f"\n{'=' * 70}\nSUMMARY  (win% and edge, wizAi -> Deimos curves)")
     log(f"{'level':>6} {'boss':<28} {'wizAi win':>10} {'deimos win':>11} "

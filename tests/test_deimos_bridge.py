@@ -390,6 +390,44 @@ def test_enemies_are_not_curved_by_default(fixture_fight):
     assert sim._damage_bonus(player, "fire") < 2.50
 
 
+def test_scaled_sim_is_a_no_op_at_one(fixture_fight):
+    """The robustness probe's own control."""
+    from w101_sim import Sim
+    from deimos_bridge.engine import ScaledSim
+
+    base = _run(Sim, fixture_fight)
+    same = _run(ScaledSim, fixture_fight, scale=1.0)
+    assert same["mean_ttk"] == pytest.approx(base["mean_ttk"], rel=1e-9)
+    assert same["win_rate"] == pytest.approx(base["win_rate"])
+
+
+def test_scaled_sim_only_touches_the_player(fixture_fight):
+    """An enemy's damage must not move, or the probe measures two things."""
+    from w101_sim import Actor
+    from deimos_bridge.engine import ScaledSim
+
+    cards, decklist, boss, stats, rules = fixture_fight
+    sim = ScaledSim(dict(cards), decklist, "fire", copy.copy(boss), scale=0.5,
+                    player_hp=stats["player_hp"], rules=rules,
+                    player_stats=stats["player_stats"],
+                    power_pip=stats["power_pip"])
+    loaded = {"fire": 0.40}
+    enemy = Actor(name="e", school="fire", hp=100, max_hp=100, team=1,
+                  damage_bonus=loaded)
+    player = Actor(name="p", school="fire", hp=100, max_hp=100, team=0,
+                   damage_bonus=loaded)
+    assert sim._damage_bonus(enemy, "fire") == pytest.approx(1.40)
+    assert sim._damage_bonus(player, "fire") == pytest.approx(0.70)
+
+
+def test_scaling_damage_down_slows_the_kill(fixture_fight):
+    from deimos_bridge.engine import ScaledSim
+
+    full = _run(ScaledSim, fixture_fight, scale=1.0)
+    cut = _run(ScaledSim, fixture_fight, scale=0.80)
+    assert cut["mean_ttk"] > full["mean_ttk"]
+
+
 def test_curve_enemies_flag_makes_the_model_symmetric(fixture_fight):
     from w101_sim import Actor
     from deimos_bridge.engine import DeimosSim
