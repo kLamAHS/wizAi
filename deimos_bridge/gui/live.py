@@ -33,7 +33,8 @@ class LiveWorker(QThread):
     finished_ok = pyqtSignal()
 
     def __init__(self, telemetry, school, deck, policy_name, fights,
-                 agent=None, auto_quest=False, auto_dialogue=True):
+                 agent=None, auto_quest=False, auto_dialogue=True,
+                 collect_wisps=True, use_potions=True):
         super().__init__()
         self.tel = telemetry
         self.school = school
@@ -43,6 +44,16 @@ class LiveWorker(QThread):
         self.agent = agent
         self.auto_quest = auto_quest
         self.auto_dialogue = auto_dialogue
+        #: between-fights upkeep. An unattended run dies by attrition
+        #: long before it runs out of quests, and a policy that lost at
+        #: 12% health has told you nothing about the policy.
+        self.collect_wisps = collect_wisps
+        self.use_potions = use_potions
+        #: Deimos's own questing, if its requirements are installed. It
+        #: has the navigation ours lacks -- navmap teleports, spiral
+        #: doors, dungeon entry, NPC talking -- and composes cleanly
+        #: because auto_quest_solo no-ops during combat.
+        self.quester = None
         self._stop = False
         #: one-shot questing requests from the GUI thread. A plain list
         #: rather than a queue: the GUI appends, the loop drains between
@@ -96,10 +107,16 @@ class LiveWorker(QThread):
                             f"advanced {n} dialogue window(s)" if n
                             else "no dialogue open")
 
-                if self.auto_dialogue and await questing.in_dialogue(client):
+                if self.auto_dialogue and self.quester is None \
+                        and await questing.in_dialogue(client):
+                    # Deimos's questing does its own dialogue handling;
+                    # a second clicker would fight it.
                     n = await questing.advance_dialogue(client)
                     if n:
                         self.status.emit(f"auto-dialogue: {n} window(s)")
+
+                if self.auto_quest and self.quester is not None:
+                    await self._quest_step(client)
 
                 await asyncio.sleep(0.5)
             except asyncio.CancelledError:
@@ -108,6 +125,41 @@ class LiveWorker(QThread):
                 # The service task must outlive a bad read; the fight
                 # loop is the thing that matters.
                 await asyncio.sleep(1.0)
+
+    async def _setup_questing(self, client):
+        """Prefer Deimos's questing; fall back to ours if it will not import."""
+        from .. import deimos_questing
+
+        ok, reason = deimos_questing.available()
+        if not ok:
+            self.status.emit("using the light questing — " + reason.splitlines()[0])
+            return
+        try:
+            self.quester = await deimos_questing.make_quester(client)
+            self.status.emit("questing: using Deimos's navigator")
+        except Exception as exc:
+            self.quester = None
+            self.status.emit(f"using the light questing ({type(exc).__name__})")
+
+    async def _quest_step(self, client):
+        """One tick of whichever questing is in play.
+
+        Deimos's is a *step*, not a loop: its own driver is
+        `while questing_status: sleep(1); auto_quest_solo(...)`, and
+        running that here would take the fight loop's ownership away.
+        """
+        from .. import questing
+
+        if self.quester is not None:
+            ok = await self.quester.step()
+            if not ok and self.quester.failures in (1, 10, 50):
+                self.status.emit(
+                    f"questing step failed ({self.quester.failures}x): "
+                    f"{self.quester.last_error}")
+            return
+        await questing.hop_to_next_fight(
+            client, on_status=self.status.emit,
+            should_stop=lambda: self._stop)
 
     # -- worker thread ----------------------------------------------------
     def run(self):
@@ -201,6 +253,9 @@ class LiveWorker(QThread):
             self._backend = backend
             combat = make_combat_handler(client, backend)
 
+            if self.auto_quest:
+                await self._setup_questing(client)
+
             self._client = client
             self.status.emit(
                 "connected — hunting for fights" if self.auto_quest
@@ -208,7 +263,11 @@ class LiveWorker(QThread):
             servicer = asyncio.ensure_future(self._service_loop(client))
             fought = 0
             while not self._stop and (self.fights <= 0 or fought < self.fights):
-                if self.auto_quest:
+                if self.auto_quest and self.quester is None:
+                    # The light questing is a blocking hunt, so it runs
+                    # here. Deimos's is a step and runs on the service
+                    # task instead, which keeps it ticking even while
+                    # this loop is parked in wait_for_combat.
                     from .. import questing
                     await questing.hop_to_next_fight(
                         client, on_status=self.status.emit,
@@ -227,6 +286,16 @@ class LiveWorker(QThread):
                 fought += 1
                 self.tel.end_fight()
                 self.fight_done.emit(fought)
+
+                if not self._stop and (self.collect_wisps or self.use_potions):
+                    from .. import upkeep
+                    try:
+                        await upkeep.after_fight(
+                            client, wisps=self.collect_wisps,
+                            potions=self.use_potions,
+                            on_status=self.status.emit)
+                    except Exception:
+                        pass      # upkeep is a nicety, never a blocker
                 self.status.emit(
                     f"fight {fought} over — waiting for the next"
                     if not self._stop else "stopping…")

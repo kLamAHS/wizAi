@@ -188,6 +188,22 @@ class MainWindow(QMainWindow):
             "combat, so it cannot fight the card clicks.")
         quest_row.addWidget(self.auto_dialogue)
 
+        self.collect_wisps = QCheckBox("Collect wisps")
+        self.collect_wisps.setChecked(True)
+        self.collect_wisps.setToolTip(
+            "After each fight, walk over the health and mana wisps it "
+            "dropped. Skips any sitting next to a mob, so topping up does "
+            "not start a second fight.")
+        quest_row.addWidget(self.collect_wisps)
+
+        self.use_potions = QCheckBox("Use potions")
+        self.use_potions.setChecked(True)
+        self.use_potions.setToolTip(
+            "Drink one when low on health or mana, using Deimos's threshold "
+            "(under 55% health, or low mana). Never buys — refilling means "
+            "a vendor trip that can strand the run.")
+        quest_row.addWidget(self.use_potions)
+
         self.tp_btn = QPushButton("Teleport to quest")
         self.tp_btn.clicked.connect(self.on_teleport)
         quest_row.addWidget(self.tp_btn)
@@ -320,7 +336,9 @@ class MainWindow(QMainWindow):
         self.live = LiveWorker(self.tel, self.school.currentText(), deck,
                                policy, self.fights.value(), agent=self.agent,
                                auto_quest=self.auto_quest.isChecked(),
-                               auto_dialogue=self.auto_dialogue.isChecked())
+                               auto_dialogue=self.auto_dialogue.isChecked(),
+                               collect_wisps=self.collect_wisps.isChecked(),
+                               use_potions=self.use_potions.isChecked())
         self.live.status.connect(self.on_live_status)
         self.live.round_done.connect(self.on_round)
         self.live.fight_done.connect(lambda n: self.refresh_all())
