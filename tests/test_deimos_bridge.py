@@ -668,6 +668,44 @@ def test_handler_falls_back_to_pass_when_the_cast_throws():
 
 
 # ------------------------------------------------------------- diagnostics
+def test_the_two_known_signatures_are_told_apart(tmp_path):
+    """The whole point of knowing both: a binary carrying the fork's
+    signature but not the vendored one means "install the fork", not
+    "restart the client". Confusing the two sends someone restarting a
+    client that will never work."""
+    import random
+
+    from deimos_bridge.diagnose_hooks import (AUTOBOT_PATTERN, FORK_PATTERN,
+                                              scan_file)
+
+    random.seed(2)
+    noise = bytes(random.randrange(256) for _ in range(60_000))
+    old_sig = (b"\x48\x8B\xC4\x55\x41\x54\x41\x55\x41\x56\x41\x57"
+               + b"\xAA" * 7 + b"\x48" + b"\xAA" * 6 + b"\x48" + b"\xAA" * 7
+               + b"\x48\x89\x58\x10\x48\x89\x70\x18\x48\x89\x78\x20"
+               + b"\xAA" * 7 + b"\x48\x33\xC4" + b"\xAA" * 7
+               + b"\x4C\x8B\xE9" + b"\xAA" * 7 + b"\x80" + b"\xAA" * 6
+               + b"\x0F")
+    new_sig = (b"\x48\x89\x5C\x24\xAA\x48\x89\x74\x24\xAA"
+               b"\x48\x89\x7C\x24\xAA"
+               b"\x55\x41\x54\x41\x55\x41\x56\x41\x57"
+               b"\x48\x8D\xAC\x24" + b"\xAA" * 4 + b"\x48\x81\xEC"
+               + b"\xAA" * 4 + b"\x48\x8B\x05" + b"\xAA" * 4
+               + b"\x48\x33\xC4\x48\x89\x85" + b"\xAA" * 4
+               + b"\x4C\x8B\xF1" + b"\xAA" * 7 + b"\x80" + b"\xAA" * 6
+               + b"\x0F\x84" + b"\xAA" * 4)
+
+    old_exe = tmp_path / "old.exe"
+    old_exe.write_bytes(noise[:3000] + old_sig + noise[3000:])
+    new_exe = tmp_path / "patched.exe"
+    new_exe.write_bytes(noise[:3000] + new_sig + noise[3000:])
+
+    assert scan_file(str(old_exe), AUTOBOT_PATTERN)
+    assert not scan_file(str(old_exe), FORK_PATTERN)
+    assert scan_file(str(new_exe), FORK_PATTERN)
+    assert not scan_file(str(new_exe), AUTOBOT_PATTERN)
+
+
 def test_autobot_pattern_matches_the_one_wizwalker_ships():
     """The diagnostic duplicates the signature rather than importing it,
     because the import is exactly what may be broken when you need it. So

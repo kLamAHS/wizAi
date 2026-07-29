@@ -12,7 +12,8 @@ a fight.
 | | |
 |---|---|
 | OS | Windows. Not negotiable — see "Why not Linux/Wine" at the bottom. |
-| Python | **3.11 or newer.** That is wizwalker's floor (`libs/wizwalker/pyproject.toml`), and wizwalker is all this needs. |
+| Python | **3.11 or newer.** That is wizwalker's floor, and wizwalker is all this needs. |
+| wizwalker | the [LaurenzLikeThat fork](https://github.com/LaurenzLikeThat/wizwalker), not the copy vendored in `Deimos/libs` — the game patched past that one. `setup-windows.bat` handles it. |
 | Game | Wizard101 installed, running, and **logged in to the wizard you want to play**. |
 | Repo | This repository, with `Deimos/` present — it is a subtree, not a submodule, so a normal clone already has it. |
 
@@ -24,24 +25,39 @@ directly.
 
 ## 1. Install
 
+Double-click **`setup-windows.bat`** in the repository root. That is the
+whole step. It creates `.venv`, installs the wizwalker fork, numpy and
+PyQt6, and verifies the imports. It is safe to re-run.
+
+You need `git` and Python 3.11+ on PATH first; the script checks and says
+so if not.
+
+<details>
+<summary>What it does, and why the fork</summary>
+
 Only **wizwalker** is required. `run_live.py` goes through
 `WizAiCombatHandler`, which subclasses `wizwalker.combat.CombatHandler`;
 wizsprinter is used only by the alternate backend path, and
-`combat_api_shim.py` falls back to local stand-ins when it is absent.
+`combat_api_shim.py` falls back to local stand-ins when it is absent. So
+none of Deimos's heavier requirements apply — no wizsprinter (`>=3.13`),
+no wizlaunch (a Rust extension), no build tools, no `uv`.
 
-That matters, because wizwalker is the cheap one: pure Python, `>=3.11`,
-no Rust. Installing all of Deimos would drag in wizsprinter (`>=3.13`)
-and wizlaunch (a Rust extension) for nothing.
+But **not** the wizwalker vendored in `Deimos/libs`. Wizard101 patched
+and the autobot function's prologue changed, so that copy's byte
+signature no longer matches and hook installation dies with
+`PatternFailed`. [LaurenzLikeThat's
+fork](https://github.com/LaurenzLikeThat/wizwalker) tracks the current
+build. It is a drop-in — same package name, same `>=3.11` floor, same
+pure-Python dependencies.
 
 ```powershell
-# from the repository root
-python --version                     # must be 3.11+
 python -m venv .venv
-.venv\Scripts\python.exe -m pip install -e Deimos\libs\wizwalker numpy
+.venv\Scripts\python.exe -m pip install "git+https://github.com/LaurenzLikeThat/wizwalker"
+.venv\Scripts\python.exe -m pip install numpy PyQt6
 ```
 
-`numpy` is wizAi's only extra dependency, and only for `--policy
-trained` (`rl_agent` → `dp_solver`). Add `PyQt6` if you want the GUI.
+`numpy` is only needed for `--policy trained` (`rl_agent` →
+`dp_solver`); `PyQt6` only for the GUI.
 
 Check it took:
 
@@ -49,28 +65,25 @@ Check it took:
 .venv\Scripts\python.exe -c "import wizwalker; print('ok')"
 ```
 
-If that raises `AttributeError` on `windll`, you are not on Windows. If it
-raises `ModuleNotFoundError: pymem`, the install did not complete —
-`pymem` is declared `sys_platform == 'win32'`, so it only installs there.
-
-<details>
-<summary>Or install the whole Deimos workspace with uv</summary>
-
-Heavier, and only worth it if you also want Deimos's own bot. Needs
-Python 3.13+ and [uv](https://docs.astral.sh/uv/):
-
-```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-# then CLOSE AND REOPEN the terminal -- the installer edits PATH
-cd Deimos
-uv sync
-cd ..
-Deimos\.venv\Scripts\python.exe -m pip install numpy
-```
-
-Substitute `Deimos\.venv\Scripts\python.exe` for `.venv\Scripts\python.exe`
-everywhere below. PyQt6 comes along for free, since Deimos depends on it.
+`AttributeError` on `windll` means you are not on Windows.
+`ModuleNotFoundError: pymem` means the install did not complete — `pymem`
+is declared `sys_platform == 'win32'`, so it only installs there.
 </details>
+
+### Running it afterwards
+
+Two batch files in the repository root, both of which find `.venv`
+relative to themselves — so a desktop **shortcut** to either works, as
+long as the `.bat` stays in the folder:
+
+| | |
+|---|---|
+| `wizAi-gui.bat` | opens the window; press **Play live** |
+| `wizAi-live.bat` | the console runner; takes any `run_live` argument, e.g. `wizAi-live.bat --school ice --fights 5` |
+
+They use `python.exe` rather than `pythonw.exe` on purpose: the console
+stays open, so an error before the window appears is visible instead of
+the app silently never starting.
 
 ---
 
@@ -95,7 +108,7 @@ From the **repository root** (not from `Deimos/`), so that `data_full`,
 .venv\Scripts\python.exe -m deimos_bridge.run_live --school fire
 ```
 
-You should see:
+or just double-click `wizAi-live.bat`. You should see:
 
 ```
 wizAi policy 'blade-stack' taking over combat (fire wizard)
@@ -209,10 +222,18 @@ running process cannot have altered, and tells you which you have:
   enough, the process has to die. Check Task Manager for a lingering
   `WizardGraphicalClient.exe`, and close `Deimos.exe` or any other
   wizwalker script, since two tools patching the same region cause this.
-- *Signature is not in the binary* → the game has been patched since this
-  wizwalker was written and the byte pattern no longer exists. Restarting
-  cannot help. Update wizwalker — check for a newer Deimos release, which
-  vendors a matching copy.
+- *Signature is not in the binary, but the fork's is* → the game has been
+  patched past your wizwalker. Restarting cannot help. This is what the
+  copy vendored in `Deimos/libs` does today; install the fork:
+
+  ```powershell
+  .venv\Scripts\python.exe -m pip uninstall -y wizwalker
+  .venv\Scripts\python.exe -m pip install "git+https://github.com/LaurenzLikeThat/wizwalker"
+  ```
+
+  or just re-run `setup-windows.bat`.
+- *Neither signature is in the binary* → the game has moved past both.
+  Check for a newer Deimos release or a newer fork.
 
 **Hooks fail some other way, or memory reads raise immediately.**
 Try running the terminal as Administrator. wizwalker attaches to the game
