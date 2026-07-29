@@ -34,7 +34,7 @@ class LiveWorker(QThread):
 
     def __init__(self, telemetry, school, deck, policy_name, fights,
                  agent=None, auto_quest=False, auto_dialogue=True,
-                 collect_wisps=True, use_potions=True):
+                 collect_wisps=True, use_potions=True, script=""):
         super().__init__()
         self.tel = telemetry
         self.school = school
@@ -54,6 +54,9 @@ class LiveWorker(QThread):
         #: doors, dungeon entry, NPC talking -- and composes cleanly
         #: because auto_quest_solo no-ops during combat.
         self.quester = None
+        #: a deimoslang program, stepped between fights like the quester
+        self.script = script or ""
+        self.runner = None
         self._stop = False
         #: one-shot questing requests from the GUI thread. A plain list
         #: rather than a queue: the GUI appends, the loop drains between
@@ -107,15 +110,27 @@ class LiveWorker(QThread):
                             f"advanced {n} dialogue window(s)" if n
                             else "no dialogue open")
 
-                if self.auto_dialogue and self.quester is None \
-                        and await questing.in_dialogue(client):
-                    # Deimos's questing does its own dialogue handling;
-                    # a second clicker would fight it.
-                    n = await questing.advance_dialogue(client)
-                    if n:
-                        self.status.emit(f"auto-dialogue: {n} window(s)")
+                if self.auto_dialogue and self.quester is None:
+                    # Deimos's questing does its own dialogue handling, so
+                    # a second clicker would race it for the same button.
+                    if await questing.open_dialogue_if_near(client):
+                        self.status.emit("opened a dialogue")
+                        await asyncio.sleep(0.6)
+                    if await questing.in_dialogue(client):
+                        n = await questing.advance_dialogue(client)
+                        if n:
+                            self.status.emit(f"auto-dialogue: {n} window(s)")
 
-                if self.auto_quest and self.quester is not None:
+                if self.runner is not None:
+                    if not await self.runner.step() and self.runner.finished:
+                        self.status.emit("script finished")
+                        self.runner = None
+                    elif self.runner is not None and \
+                            self.runner.failures in (1, 10):
+                        self.status.emit(
+                            f"script error: {self.runner.last_error}")
+
+                if self.auto_quest:
                     await self._quest_step(client)
 
                 await asyncio.sleep(0.5)
@@ -141,6 +156,16 @@ class LiveWorker(QThread):
             self.quester = None
             self.status.emit(f"using the light questing ({type(exc).__name__})")
 
+    async def _setup_script(self, client):
+        from .. import scripts
+
+        try:
+            self.runner = scripts.make_runner(client, self.script)
+            self.status.emit("script loaded")
+        except Exception as exc:
+            self.runner = None
+            self.status.emit(f"script not loaded: {exc}")
+
     async def _quest_step(self, client):
         """One tick of whichever questing is in play.
 
@@ -157,9 +182,11 @@ class LiveWorker(QThread):
                     f"questing step failed ({self.quester.failures}x): "
                     f"{self.quester.last_error}")
             return
-        await questing.hop_to_next_fight(
-            client, on_status=self.status.emit,
-            should_stop=lambda: self._stop)
+        # One hop per tick. The blocking hunt cannot run here -- it would
+        # stall the request queue -- and running it from the fight loop
+        # was the bug: that loop parks in wait_for_combat, so a hunt
+        # placed before it fired once per fight and then never again.
+        await questing.hop_once(client, on_status=self.status.emit)
 
     # -- worker thread ----------------------------------------------------
     def run(self):
@@ -182,6 +209,9 @@ class LiveWorker(QThread):
                     "No trained policy yet — press Train first, or pick "
                     "another policy.")
             return self.agent.policy()
+        if self.policy_name.startswith("ttk"):
+            from ..policies import greedy_ttk
+            return greedy_ttk()
         if self.policy_name.startswith("school-aware"):
             from ..policies import school_aware_blade_stack
             return school_aware_blade_stack(3)
@@ -255,6 +285,8 @@ class LiveWorker(QThread):
 
             if self.auto_quest:
                 await self._setup_questing(client)
+            if self.script:
+                await self._setup_script(client)
 
             self._client = client
             self.status.emit(
@@ -263,17 +295,9 @@ class LiveWorker(QThread):
             servicer = asyncio.ensure_future(self._service_loop(client))
             fought = 0
             while not self._stop and (self.fights <= 0 or fought < self.fights):
-                if self.auto_quest and self.quester is None:
-                    # The light questing is a blocking hunt, so it runs
-                    # here. Deimos's is a step and runs on the service
-                    # task instead, which keeps it ticking even while
-                    # this loop is parked in wait_for_combat.
-                    from .. import questing
-                    await questing.hop_to_next_fight(
-                        client, on_status=self.status.emit,
-                        should_stop=lambda: self._stop)
-                    if self._stop:
-                        break
+                # Questing of either kind runs on the service task, which
+                # keeps ticking while this loop is parked in
+                # wait_for_combat below.
                 self.tel.start_fight()
                 try:
                     # blocks until a duel starts, then plays it out
@@ -301,6 +325,8 @@ class LiveWorker(QThread):
                     if not self._stop else "stopping…")
             self.finished_ok.emit()
         finally:
+            if self.runner is not None:
+                self.runner.stop()
             if servicer is not None:
                 servicer.cancel()
                 try:

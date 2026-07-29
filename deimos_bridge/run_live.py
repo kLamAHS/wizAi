@@ -60,6 +60,9 @@ def _log_decision(log):
 
 def build_policy(kind, cards, school, deck):
     """`policy(sim, state) -> Card | str | None`."""
+    if kind == "ttk":
+        from .policies import greedy_ttk
+        return greedy_ttk()
     if kind == "school-aware":
         from .policies import school_aware_blade_stack
         return school_aware_blade_stack(3)
@@ -195,12 +198,15 @@ async def run(args):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--school", default="fire")
-    ap.add_argument("--policy", default="school-aware",
-                    choices=("school-aware", "blade-stack", "nuke", "trained"),
-                    help="school-aware (default) only stacks buffs that can "
-                         "act on the hit it intends to fire; blade-stack is "
-                         "the heuristic the published tables use, which "
-                         "assumes a school-coherent deck")
+    ap.add_argument("--policy", default="ttk",
+                    choices=("ttk", "school-aware", "blade-stack", "nuke",
+                             "trained"),
+                    help="ttk (default) simulates every candidate move and "
+                         "picks the one that kills soonest; school-aware "
+                         "stacks a fixed number of buffs but only ones that "
+                         "can act on the hit; blade-stack is the heuristic "
+                         "the published tables use, which assumes a "
+                         "school-coherent deck")
     ap.add_argument("--deck", default="",
                     help="comma-separated card names, for the scarcity "
                          "feature and for training the 'trained' policy")

@@ -25,8 +25,8 @@ from .panels import (BoardPanel, DecisionsPanel, ModelPanel, NamingPanel,
 from .theme import PALETTE, stylesheet
 
 SCHOOLS = ["fire", "ice", "storm", "myth", "life", "death", "balance"]
-POLICIES = ["school-aware", "blade-stack(3)", "blade-stack(2)",
-            "nuke-asap", "trained (Q)"]
+POLICIES = ["ttk-lookahead", "school-aware", "blade-stack(3)",
+            "blade-stack(2)", "nuke-asap", "trained (Q)"]
 
 
 class TrainWorker(QThread):
@@ -214,6 +214,21 @@ class MainWindow(QMainWindow):
         quest_row.addStretch()
         outer.addLayout(quest_row)
 
+        script_row = QHBoxLayout()
+        self.use_script = QCheckBox("Run script")
+        self.use_script.setToolTip(
+            "Run a Deimos bot script (deimoslang) alongside the policy. It "
+            "steps only while out of combat, so wizAi still fights.")
+        script_row.addWidget(self.use_script)
+        self.script_btn = QPushButton("Paste script…")
+        self.script_btn.clicked.connect(self.on_edit_script)
+        script_row.addWidget(self.script_btn)
+        self.script_lab = _label("no script", PALETTE["muted"])
+        script_row.addWidget(self.script_lab)
+        script_row.addStretch()
+        outer.addLayout(script_row)
+        self.script_source = ""
+
         self.train_progress = QProgressBar()
         self.train_progress.setVisible(False)
         outer.addWidget(self.train_progress)
@@ -295,6 +310,17 @@ class MainWindow(QMainWindow):
             self.deck.setText(",".join(chosen))
             self.status.setText(f"deck set — {len(chosen)} cards")
 
+    # -- scripts ---------------------------------------------------------
+    def on_edit_script(self):
+        from .scriptdialog import edit_script
+        source = edit_script(self, self.script_source)
+        if source is not None:
+            self.script_source = source
+            lines = len([ln for ln in source.splitlines() if ln.strip()])
+            self.script_lab.setText(f"{lines} line(s) loaded" if lines
+                                    else "no script")
+            self.use_script.setChecked(bool(lines))
+
     # -- questing --------------------------------------------------------
     def _quest_action(self, coro_name, label):
         """Run one questing helper against the live client.
@@ -338,7 +364,9 @@ class MainWindow(QMainWindow):
                                auto_quest=self.auto_quest.isChecked(),
                                auto_dialogue=self.auto_dialogue.isChecked(),
                                collect_wisps=self.collect_wisps.isChecked(),
-                               use_potions=self.use_potions.isChecked())
+                               use_potions=self.use_potions.isChecked(),
+                               script=(self.script_source
+                                       if self.use_script.isChecked() else ""))
         self.live.status.connect(self.on_live_status)
         self.live.round_done.connect(self.on_round)
         self.live.fight_done.connect(lambda n: self.refresh_all())

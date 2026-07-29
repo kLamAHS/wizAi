@@ -34,9 +34,11 @@ What it does, and the traps each part exists to avoid:
 """
 import asyncio
 
-#: `src/paths.py:30,32` — the dialogue advance button and its text area.
+#: `src/paths.py:30,32,45` — the dialogue advance button, its text area,
+#: and the "press X" prompt the game shows when something is interactable.
 ADVANCE_DIALOG_PATH = ["WorldView", "wndDialogMain", "btnRight"]
 DIALOG_TEXT_PATH = ["WorldView", "wndDialogMain", "txtArea", "txtMessage"]
+NPC_RANGE_PATH = ["WorldView", "NPCRangeWin"]
 
 
 # --------------------------------------------------------------------------
@@ -212,9 +214,96 @@ async def in_battle(client) -> bool:
     return await _safe(client.in_battle, False)
 
 
+async def near_interactable(client) -> bool:
+    """Is the game showing its "press X" prompt?
+
+    `NPCRangeWin` is the window that appears when a sigil, dungeon door
+    or quest NPC is in range (`src/paths.py:45`).
+    """
+    window = await window_from_path(client.root_window, NPC_RANGE_PATH)
+    return window is not None and await _visible(window)
+
+
+async def open_dialogue_if_near(client) -> bool:
+    """Start the conversation, rather than waiting for one to appear.
+
+    Auto-dialogue that only clicks an *already open* window still needs a
+    human to walk up and press X, which is most of the work. If the
+    prompt is showing and no dialogue is up yet, press X to open it.
+    """
+    if await in_dialogue(client):
+        return False
+    if not await near_interactable(client):
+        return False
+    return await press_x(client)
+
+
 # --------------------------------------------------------------------------
 # the hunt
 # --------------------------------------------------------------------------
+async def hop_once(client, settle: float = 1.2, on_status=None) -> bool:
+    """One hop. Returns True if a fight is now on.
+
+    Exists as its own step because the blocking hunt below cannot be run
+    from the live worker's service task -- and running it from the fight
+    loop was the bug behind "auto-quest does nothing". That loop parks
+    inside `wait_for_combat` for as long as it takes a fight to start, so
+    a hunt placed before it got exactly one attempt per fight and then
+    sat idle forever. Called once per service tick, this keeps trying.
+    """
+    def say(message):
+        if on_status:
+            on_status(message)
+
+    await wait_until_ready(client)
+    if await in_battle(client):
+        return True
+
+    # Dialogue blocks movement, so clear it before trying to move -- and
+    # open it first if the game is offering.
+    if await open_dialogue_if_near(client):
+        await asyncio.sleep(settle)
+    if await in_dialogue(client):
+        say("clicking through dialogue…")
+        await advance_dialogue(client)
+        await wait_until_ready(client)
+        if await in_battle(client):
+            return True
+
+    position, reason = await read_quest_position(client)
+    if position is None:
+        say(reason)
+        return False
+
+    say("teleporting to the quest marker…")
+    ok, reason = await teleport_to_quest(client)
+    if not ok:
+        say(reason)
+        return False
+
+    await asyncio.sleep(settle)
+    await wait_until_ready(client)          # a door starts a zone change
+
+    if await open_dialogue_if_near(client):
+        await asyncio.sleep(settle)
+    if await in_dialogue(client):
+        await advance_dialogue(client)
+        await wait_until_ready(client)
+    if await in_battle(client):
+        return True
+
+    # Arriving is often not enough: sigils, dungeon doors and quest NPCs
+    # need an interact.
+    await press_x(client)
+    await asyncio.sleep(settle)
+    await wait_until_ready(client)
+    if await in_dialogue(client):
+        await advance_dialogue(client)
+        await wait_until_ready(client)
+
+    return await in_battle(client)
+
+
 async def hop_to_next_fight(client, max_hops: int = 25, settle: float = 1.2,
                             on_status=None, should_stop=None) -> bool:
     """Teleport toward the quest until a fight starts.
