@@ -180,6 +180,8 @@ def _dig(s, keep=None):
 # ---------------------------------------------------------------- Q-learning
 
 class QAgent:
+    turn_cost = 1.0
+
     def __init__(self, cards, decklist, school, dp_pol=None,
                  alpha=0.25, gamma=1.0, rng=None):
         self.feat = Featurizer(cards, decklist)
@@ -237,7 +239,12 @@ class QAgent:
                 break
         G = 0.0 if won else -FAIL_PENALTY
         for k, a in reversed(traj):
-            G = -1.0 + self.gamma * G
+            # `turn_cost` is the per-turn penalty that makes the agent
+            # prefer fast kills. It is a knob because on a board the
+            # agent cannot win, EVERY episode ends at -FAIL_PENALTY and
+            # the only thing left to optimise is turn count — which
+            # rewards dying sooner rather than finding the win.
+            G = -self.turn_cost + self.gamma * G
             self.Q[(k, a)] += self.alpha * (G - self.Q[(k, a)])
         return turns, won
 

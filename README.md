@@ -299,25 +299,38 @@ to the classic tables — different rules, values, and boss stats):
 
 ```
 matchup                                DP-LB   heuristic   dp-transfer   search(k=5)    RL(20k)
-fire vs Lord Nightshade (690)           3.36   98%/ 5.5     82%/ 3.4      100%/ 4.1     98%/ 5.5
-fire vs Krokopatra (960, 70% storm-res) 3.36   98%/ 5.5     82%/ 3.4      100%/ 4.2     98%/ 5.2
-death vs Jade Oni (6000, 80% life-res)  8.35   77%/11.1     83%/ 9.2       89%/10.4     94%/10.4
-storm vs Jade Oni (6000)                8.73    0%/  —      43%/10.0        0%/  —      59%/12.5
-balance vs Krokopatra (960)             3.45   97%/ 9.0     98%/ 4.3       96%/ 5.2     99%/ 6.3
-ice [prism] vs Krokopatra (960)         4.31*  99%/ 5.5     97%/ 4.7       97%/ 5.0     97%/ 5.9
+fire vs Lord Nightshade (690)           3.36    98%/ 5.03    74%/ 5.90    99%/ 4.34    98%/ 5.63
+fire vs Krokopatra (960, 70% storm-res) 3.36    98%/ 5.49    70%/ 6.00    99%/ 4.59    97%/ 6.44
+death vs Jade Oni (6000, 80% life-res)  8.35    78%/11.14    83%/ 9.23    88%/10.56    93%/10.87
+storm vs Jade Oni (6000)                8.52    52%/11.13    39%/12.24    71%/12.10    81%/11.32
+balance vs Krokopatra (960)             3.45    99%/ 6.93    98%/ 4.25    94%/ 5.37    99%/ 4.83
+ice [prism] vs Krokopatra (960)         4.31    98%/ 5.29    95%/ 4.91    98%/ 5.16    98%/ 6.13
 ```
 
-*(Table shows the first live run; `results_live.json` + `plots/` are
-regenerated per data drop and are canonical. Under exact roll tables the
-notable shift: damage variance costs the scarcity-blind DP transfer ~10
-points on the fire matchups — 82% -> 70-74% — while heuristic/search/RL
-barely move.)*
+> **Regenerated after the blade/trap fix, and the storm row changed
+> completely.** `make_blade_stack` selected buffs with
+> `castable(blade) or castable(trap)`, which short-circuits, so a trap
+> was only ever considered when no blade was in hand — Feint, the
+> biggest multiplier a deck can carry, went uncast whenever any 35%
+> blade was available. The storm row previously read **0% for both the
+> heuristic and the search**, and the paragraph below built a story on
+> that. It now reads 52% and 71%. The old numbers measured a bug.
 
-The storm row is the headline: with two Krakens and an X-pip Tempest
-against 6,000 HP, **no scripted policy wins at all** — the blade-stack
-heuristic can't sequence it, and the determinized search inherits that
-blindness because its rollouts use the heuristic as the base policy (all
-candidates look equally lost). The DP transfer wins 43% because the
+*(`results_live.json` + `plots/` are regenerated per data drop and are
+canonical. Under exact roll tables the notable shift: damage variance
+costs the scarcity-blind DP transfer ~10 points on the fire matchups —
+82% -> 70-74% — while heuristic/search/RL barely move.)*
+
+The storm row was the headline, and it was wrong. It read "no scripted
+policy wins at all", with the blade-stack heuristic and the search both
+at 0% — and the explanation offered was that the heuristic cannot
+sequence the fight and the search inherits its blindness through its
+rollout base policy. That explanation was plausible and the numbers
+were an artifact: the heuristic could not cast the Feint in its own
+deck. With the short-circuit fixed the heuristic wins 52% and the
+search 71%, so the sequencing bar was never as high as claimed. What
+survives is the ordering — search still beats the heuristic by 19
+points here, and RL beats both. The DP transfer wins because the
 abstraction actually knows the Tempest pip math, and the RL agent reaches
 59% by learning X-pip patience on top of draw adaptation. Debugging this
 table also caught two real defects (a drain-only-hand stall in the DP
