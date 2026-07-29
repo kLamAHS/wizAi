@@ -552,6 +552,63 @@ def test_handler_falls_back_to_pass_when_the_cast_throws():
     assert combat.passed == 1
 
 
+# ------------------------------------------------------------- diagnostics
+def test_autobot_pattern_matches_the_one_wizwalker_ships():
+    """The diagnostic duplicates the signature rather than importing it,
+    because the import is exactly what may be broken when you need it. So
+    the copy has to be checked against the original."""
+    import re as _stdre
+
+    src = open("Deimos/libs/wizwalker/wizwalker/memory/handler.py",
+               encoding="utf-8").read()
+    body = _stdre.search(r"AUTOBOT_PATTERN = \((.*?)\n    \)", src, _stdre.S)
+    assert body, "AUTOBOT_PATTERN not found in wizwalker"
+    theirs = "".join(_stdre.findall(r'rb"([^"]*)"', body.group(1)))
+
+    from deimos_bridge.diagnose_hooks import AUTOBOT_PATTERN
+    ours = AUTOBOT_PATTERN.decode("latin-1")
+    assert ours == theirs, "the diagnostic's copy has drifted from wizwalker"
+
+
+def test_scanner_finds_the_signature_and_does_not_invent_one(tmp_path):
+    """Both directions matter: a false negative would send someone off to
+    update wizwalker for nothing, and a false positive would send them
+    restarting a client that will never work."""
+    import random
+
+    from deimos_bridge.diagnose_hooks import scan_file
+
+    random.seed(1)
+    noise = bytes(random.randrange(256) for _ in range(120_000))
+    signature = (
+        b"\x48\x8B\xC4\x55\x41\x54\x41\x55\x41\x56\x41\x57" + b"\xAA" * 7 +
+        b"\x48" + b"\xAA" * 6 + b"\x48" + b"\xAA" * 7 +
+        b"\x48\x89\x58\x10\x48\x89\x70\x18\x48\x89\x78\x20" + b"\xAA" * 7 +
+        b"\x48\x33\xC4" + b"\xAA" * 7 + b"\x4C\x8B\xE9" + b"\xAA" * 7 +
+        b"\x80" + b"\xAA" * 6 + b"\x0F")
+
+    has = tmp_path / "has.bin"
+    has.write_bytes(noise[:4000] + signature + noise[4000:])
+    lacks = tmp_path / "lacks.bin"
+    lacks.write_bytes(noise)
+
+    assert scan_file(str(has)) == [4000]
+    assert scan_file(str(lacks)) == []
+
+
+def test_scanner_sees_a_zeroed_autobot_region_as_absent():
+    """The failure mode the diagnostic exists to identify: a previous
+    attach zeroed the region, so the bytes are gone from memory while the
+    file on disk still has them."""
+    import tempfile
+
+    from deimos_bridge.diagnose_hooks import scan_file
+    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
+        f.write(b"\x00" * 8000)
+        path = f.name
+    assert scan_file(path) == []
+
+
 # --------------------------------------------------------------- enum audit
 def test_wizai_effect_table_matches_the_client_enum():
     """wizAi's effect_type_enum.json against the enum lifted out of the

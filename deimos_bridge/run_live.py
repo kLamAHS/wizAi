@@ -124,7 +124,23 @@ async def run(args):
         if not clients:
             raise SystemExit("no Wizard101 client found -- is the game running?")
         client = clients[0]
-        await client.activate_hooks()
+        try:
+            await client.activate_hooks()
+        except Exception as exc:
+            # PatternFailed here has two causes with one message, and the
+            # message's advice ("restart the client") only fixes one of
+            # them. Rather than reprint it, hand over to the diagnostic
+            # that can actually tell them apart.
+            if "PatternFailed" in type(exc).__name__ or "Pattern" in str(exc):
+                raise SystemExit(
+                    "wizwalker could not install its hooks: the autobot "
+                    "signature was not found in the running client.\n\n"
+                    "That has two causes and the built-in advice only "
+                    "covers one. Run this to find out which:\n\n"
+                    "    .venv\\Scripts\\python.exe -m "
+                    "deimos_bridge.diagnose_hooks\n"
+                ) from exc
+            raise
 
         backend = WizAiBackend(policy=policy, cards=cards, school=args.school,
                                decklist=deck, on_decision=_log_decision(log),

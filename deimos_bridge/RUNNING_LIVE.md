@@ -186,7 +186,35 @@ wizwalker finds the game by window class `"Wizard Graphical Client"`
 (`utils.get_all_wizard_handles`). The game must be fully launched — the
 launcher alone is not enough.
 
-**Hooks fail, or memory reads raise immediately.**
+**`wizwalker.errors.PatternFailed: Pattern b'\x48\x8B\xC4...' failed.
+You most likely need to restart the client.`**
+
+This one message covers two different problems, and restarting only fixes
+one of them. Run:
+
+```powershell
+.venv\Scripts\python.exe -m deimos_bridge.diagnose_hooks
+```
+
+It scans the game binary **on disk** for the same signature, which the
+running process cannot have altered, and tells you which you have:
+
+- *Signature is in the binary* → the failure is stale state in the
+  running process. `_prepare_autobot` overwrites 3900 bytes of the
+  autobot function with zeros to use as scratch space for hook shellcode
+  (`memory/handler.py:80-93`), and `_rewrite_autobot` restores them on a
+  clean shutdown. A crash or a Ctrl-C at the wrong moment skips that, so
+  the region stays zeroed and the next scan finds nothing. **Close the
+  game completely** — logging out or relaunching from the launcher is not
+  enough, the process has to die. Check Task Manager for a lingering
+  `WizardGraphicalClient.exe`, and close `Deimos.exe` or any other
+  wizwalker script, since two tools patching the same region cause this.
+- *Signature is not in the binary* → the game has been patched since this
+  wizwalker was written and the byte pattern no longer exists. Restarting
+  cannot help. Update wizwalker — check for a newer Deimos release, which
+  vendors a matching copy.
+
+**Hooks fail some other way, or memory reads raise immediately.**
 Try running the terminal as Administrator. wizwalker attaches to the game
 process, patches instructions and injects a hook thread; if your Python
 cannot open the process with write access, none of it works.
