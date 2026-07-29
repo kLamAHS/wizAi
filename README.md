@@ -177,9 +177,26 @@ What is established:
   than assumption (see below) does not rescue it either: with a
   race(3) advisor scoring 68% on that exact deck, the learner still
   finishes at 1.5%.
-- The state space is the prime suspect. The multi-enemy key produces
-  ~41,000 Q entries from 12,000 episodes — roughly three visits each,
-  which is not enough to rank an action.
+- The state space is a real part of it, but not the whole answer. The
+  multi-enemy key produces ~41,000 Q entries from 12,000 episodes —
+  roughly three visits each, which cannot rank an action. Swapping the
+  TABULAR agent for the LINEAR generalist, which generalises across
+  states instead of tabulating them, was measured on the three boards
+  that fail:
+
+  ```
+  board                    scripted   tabular   linear generalist
+  Plague Oni  +1 add          85.5%      0.0%        7.7%
+  Frost Colossus +2 adds      11.0%      0.0%       13.8%
+  Warden Abasi +1 add          0.0%      0.0%        0.0%
+  ```
+
+  The linear class is never worse and sometimes better — it beats the
+  scripted line outright on Frost Colossus. So tabulation IS part of
+  the problem and the multi-enemy arm should not be tabular. But it
+  closes nowhere near the Plague Oni gap, so representation is not the
+  whole story either, and the honest state is that neither learner
+  class is competitive with a two-line scripted race on a mob board.
 
 One real bug WAS found inside this investigation and is fixed: the
 `with_focus` advisor kills the weakest enemy first, which on a board
