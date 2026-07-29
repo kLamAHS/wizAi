@@ -54,6 +54,10 @@ class LiveWorker(QThread):
         #: doors, dungeon entry, NPC talking -- and composes cleanly
         #: because auto_quest_solo no-ops during combat.
         self.quester = None
+        #: set when a trained policy is in play, so its coverage can be
+        #: reported -- "the agent had never seen 94% of these boards" is
+        #: the most useful thing to know about a learned live run.
+        self.trained = None
         #: a deimoslang program, stepped between fights like the quester
         self.script = script or ""
         self.runner = None
@@ -208,7 +212,12 @@ class LiveWorker(QThread):
                 raise RuntimeError(
                     "No trained policy yet — press Train first, or pick "
                     "another policy.")
-            return self.agent.policy()
+            from ..policies import trained_policy
+            # Wrapped, not raw: a tabular agent has no opinion about a
+            # state it never visited, and QAgent.greedy turns "no
+            # opinion" into PASS. See policies.TrainedPolicy.
+            self.trained = trained_policy(self.agent)
+            return self.trained
         if self.policy_name.startswith("ttk"):
             from ..policies import greedy_ttk
             return greedy_ttk()
@@ -310,6 +319,13 @@ class LiveWorker(QThread):
                 fought += 1
                 self.tel.end_fight()
                 self.fight_done.emit(fought)
+
+                if self.trained is not None:
+                    t = self.trained
+                    self.status.emit(
+                        f"trained policy: knew {t.coverage * 100:.0f}% of "
+                        f"{t.seen + t.missed} boards "
+                        f"({t.missed} fell back)")
 
                 if not self._stop and (self.collect_wisps or self.use_potions):
                     from .. import upkeep

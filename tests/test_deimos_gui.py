@@ -1401,3 +1401,119 @@ def test_script_dialog_round_trips(qapp):
     assert d.source() == "waitfor combat\n"
     d.on_check()
     assert d.result.text()          # says something either way
+
+
+# --------------------------------------------------------- trained policy
+def _tiny_agent(player_hp, episodes=1200):
+    from data_full import load_spells_full
+    from rl_agent import train_agent
+    from w101_sim import Boss
+
+    cards = load_spells_full()
+    deck = ["Frost Beetle"] * 4 + ["Snow Serpent"] * 4 + ["Iceblade"] * 2
+    agent, _ = train_agent(
+        cards, deck, "ice",
+        Boss(name="d", hp=1200, school="fire", dmg=60),
+        episodes=episodes, player_hp=player_hp)
+    return agent, cards, deck
+
+
+def _live_sim(cards, deck, player_hp=800, mob_hp=1200):
+    import random
+
+    from w101_sim import Boss, Sim
+    return Sim(cards, deck, "ice",
+               Boss(name="mob", hp=mob_hp, school="fire", dmg=60),
+               rng=random.Random(3), player_hp=player_hp)
+
+
+def test_an_immortally_trained_agent_knows_nothing_about_a_live_board():
+    """The reported bug, reproduced. train_agent defaults to
+    player_hp=10**9 and Featurizer.key writes -1 into the health slot for
+    an immortal fight, so a policy trained on the default shares almost
+    no state with a mortal wizard -- the Q table reads zero, and
+    QAgent.greedy falls through to the first legal action, which is
+    PASS."""
+    from deimos_bridge.policies import trained_policy
+
+    agent, cards, deck = _tiny_agent(player_hp=10 ** 9)
+    wrapped = trained_policy(agent)
+    sim = _live_sim(cards, deck)
+    for _ in range(6):
+        s = sim.new_state()
+        wrapped(sim, s)
+    assert wrapped.coverage < 0.5, wrapped.coverage
+
+
+def test_training_mortal_makes_the_state_spaces_overlap():
+    from deimos_bridge.policies import trained_policy
+
+    agent, cards, deck = _tiny_agent(player_hp=800)
+    wrapped = trained_policy(agent)
+    sim = _live_sim(cards, deck, player_hp=800)
+    for _ in range(6):
+        s = sim.new_state()
+        wrapped(sim, s)
+    assert wrapped.coverage > 0.5, wrapped.coverage
+
+
+def test_an_unseen_state_falls_back_instead_of_passing():
+    """The safety net. Even trained mortal, real bosses and wand item
+    cards produce states no training visited, and silently passing is
+    the worst possible answer."""
+    from deimos_bridge.policies import trained_policy
+
+    agent, cards, deck = _tiny_agent(player_hp=10 ** 9)
+    sim = _live_sim(cards, deck)
+    s = sim.new_state()
+
+    assert agent.policy()(sim, s) is None          # raw agent: pass
+    wrapped = trained_policy(agent)
+    assert wrapped(sim, s) is not None             # wrapped: plays
+    assert wrapped.missed == 1
+
+
+def test_the_wrapper_does_not_grow_the_q_table():
+    """QAgent.Q is a defaultdict; indexing it to ask whether a state is
+    known would insert a zero for every board ever seen."""
+    from deimos_bridge.policies import trained_policy
+
+    agent, cards, deck = _tiny_agent(player_hp=800)
+    before = len(agent.Q)
+    wrapped = trained_policy(agent)
+    sim = _live_sim(cards, deck)
+    for _ in range(4):
+        wrapped(sim, sim.new_state())
+    assert len(agent.Q) == before
+
+
+def test_coverage_starts_at_one_and_tracks_misses():
+    from deimos_bridge.policies import TrainedPolicy
+
+    class _Agent:
+        Q = {}
+
+        class feat:
+            @staticmethod
+            def key(sim, s):
+                return ("k",)
+
+            @staticmethod
+            def legal(sim, s):
+                return ["__pass__"]
+
+    p = TrainedPolicy(_Agent(), fallback=lambda sim, s: "fallback")
+    assert p.coverage == 1.0
+    assert p(None, None) == "fallback"
+    assert p.coverage == 0.0
+
+
+def test_gui_trains_mortal(qapp):
+    """The default that caused the bug was immortal; the window must not
+    reintroduce it."""
+    from deimos_bridge.gui.app import MainWindow, TrainWorker
+
+    win = MainWindow(Telemetry())
+    assert win.player_hp.value() < 10 ** 9
+    worker = TrainWorker({}, [], "ice", 500, player_hp=win.player_hp.value())
+    assert worker.player_hp == win.player_hp.value()

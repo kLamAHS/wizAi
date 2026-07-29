@@ -99,6 +99,77 @@ def choose_nuke(sim, state):
 
 
 # --------------------------------------------------------------------------
+# trained policies, and the hole they fall into
+# --------------------------------------------------------------------------
+class TrainedPolicy:
+    """A `QAgent` that declines to guess where it was never trained.
+
+    A tabular Q-learner has no opinion about a state it has not visited:
+    every action scores 0, `QAgent.greedy` takes `max` over the legal
+    list, and `Featurizer.legal` puts `PASS` first -- so an unseen state
+    silently becomes "pass". `rl_agent.py:66-77` records this exact
+    failure ("Q stayed all-zero, and greedy fell through to the first
+    legal action -- PASS. The agent scored a clean 0.0%").
+
+    Live play walks into it immediately, and for a reason that is
+    invisible unless you go looking. `train_agent` defaults to
+    `player_hp=10**9`, and `Featurizer.key` puts `-1` in the health slot
+    for an immortal fight and a real bucket otherwise:
+
+        php = min(int(s.player_hp // 300), 9) if sim.player_hp0 < 10**9 else -1
+
+    So a policy trained with the default is keyed on `php == -1` in every
+    state it ever saw, and a live wizard with 800 health is keyed on
+    `php == 2`. The two state spaces do not intersect **at all**, the Q
+    table is uniformly zero for everything live, and the agent passes
+    every single turn. Which is what it did.
+
+    Training mortal fixes the overlap. It does not fix the general
+    problem: real bosses, wand item cards and unfamiliar health buckets
+    will always produce states no amount of training visited. So this
+    wraps the agent rather than trusting it -- where the table has an
+    opinion it is used, and where it does not the fallback plays. The
+    miss rate is counted, because "the trained policy had never seen 94%
+    of these boards" is the single most useful thing to know about a live
+    run of a learned policy.
+    """
+
+    def __init__(self, agent, fallback=None):
+        self.agent = agent
+        self.fallback = fallback or greedy_ttk()
+        self.seen = 0
+        self.missed = 0
+
+    @property
+    def coverage(self) -> float:
+        total = self.seen + self.missed
+        return 1.0 if not total else self.seen / total
+
+    def __call__(self, sim, s):
+        try:
+            key = self.agent.feat.key(sim, s)
+            legal = self.agent.feat.legal(sim, s)
+        except Exception:
+            self.missed += 1
+            return self.fallback(sim, s)
+
+        # `.get`, not `[]`: QAgent.Q is a defaultdict, and indexing it
+        # here would insert a zero for every state we merely asked about.
+        known = any(self.agent.Q.get((key, a), 0.0) for a in legal)
+        if not known:
+            self.missed += 1
+            return self.fallback(sim, s)
+
+        self.seen += 1
+        return self.agent.policy()(sim, s)
+
+
+def trained_policy(agent, fallback=None):
+    """`policy(sim, state)` for a QAgent, with a fallback for unseen states."""
+    return TrainedPolicy(agent, fallback)
+
+
+# --------------------------------------------------------------------------
 # lookahead
 # --------------------------------------------------------------------------
 class _Fixed:

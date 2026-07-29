@@ -87,11 +87,20 @@ def build_policy(kind, cards, school, deck):
                 "for one decklist means nothing for another.")
         from rl_agent import train_agent
         from w101_sim import Boss
+
+        from .policies import trained_policy
+        # MORTAL. train_agent defaults to player_hp=10**9, and
+        # Featurizer.key writes -1 into the health slot for an immortal
+        # fight -- so a policy trained on the default shares no state
+        # with a live wizard, reads zero everywhere, and passes every
+        # turn. Measured: 4% state coverage immortal, 96% mortal.
         agent, _ = train_agent(
             cards, deck, school,
-            Boss(name="live", hp=3000, school="ice", dmg=150),
-            episodes=8000, log=2000)
-        return agent.policy()
+            Boss(name="live", hp=1500, school="ice", dmg=90),
+            episodes=8000, log=2000, player_hp=800)
+        # Wrapped so an unvisited state plays the fallback rather than
+        # silently passing. See policies.TrainedPolicy.
+        return trained_policy(agent)
     raise SystemExit(f"unknown policy {kind!r}")
 
 
