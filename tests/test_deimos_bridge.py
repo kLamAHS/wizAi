@@ -754,3 +754,101 @@ def test_shim_matches_the_real_combat_api_shape():
     assert mc.condition is None
     assert mc.target.target_type is shim.TargetType.type_enemy
     assert mc.target.extra_data is None and mc.target.is_literal is False
+
+
+# ------------------------------------------------------- live-play policies
+def test_self_targeted_cards_are_cast_at_the_caster():
+    """A blade is `tgt: 'self'`. Aiming it at a mob fails silently and
+    wastes the round -- which is what happened on the first live fight:
+    the policy chose Mythblade, the click went to the enemy, nothing was
+    placed. wizsprinter resolves `type_self` to `get_client_member()`."""
+    from deimos_bridge.live_backend import _primary_target
+    from data_full import load_spells_full
+
+    cards = load_spells_full()
+    assert _primary_target(cards["Mythblade"]) == "self"
+    assert _primary_target(cards["Iceblade"]) == "self"
+    assert _primary_target(cards["Tower Shield"]) == "self"
+    assert _primary_target(cards["Frost Beetle"]) == "enemy"
+    assert _primary_target(cards["Ice Trap"]) == "enemy"
+    assert _primary_target(cards["Blizzard"]) == "enemies"
+
+
+def test_handler_clicks_the_caster_for_a_blade():
+    be = _backend(policy=lambda sim, s: "Iceblade",
+                  deck=["Iceblade"] * 3 + ["Frost Beetle"] * 3)
+    me = MockMember("Wizard", 2000, client=True, normal_pips=4, team_id=0)
+    foe = MockMember("Lost Soul", 900, monster=True, team_id=1)
+    combat = MockCombat([me, foe], [MockCard("Iceblade")])
+    h = _Handler(combat, be)
+    run(h.handle_round())
+    assert combat._cards[0].cast_log == [me], \
+        f"blade was aimed at {combat._cards[0].cast_log}, not the caster"
+
+
+def test_handler_clicks_nothing_for_an_aoe():
+    be = _backend(policy=lambda sim, s: "Blizzard",
+                  deck=["Blizzard"] * 4)
+    me = MockMember("Wizard", 2000, client=True, normal_pips=7, team_id=0)
+    combat = MockCombat(
+        [me, MockMember("A", 500, monster=True, team_id=1),
+         MockMember("B", 500, monster=True, team_id=1)],
+        [MockCard("Blizzard")])
+    h = _Handler(combat, be)
+    run(h.handle_round())
+    assert combat._cards[0].cast_log == [None]
+
+
+def test_school_aware_policy_ignores_a_buff_it_cannot_use():
+    """The live observation: an ice wizard holding a Mythblade and a
+    storm wand card stacked the blade, which can never multiply the hit."""
+    from deimos_bridge.policies import buff_matches
+    from data_full import load_spells_full
+
+    cards = load_spells_full()
+    assert not buff_matches(cards["Mythblade"], "ice")
+    assert buff_matches(cards["Iceblade"], "ice")
+    assert buff_matches(cards["Tri Blade"], "ice")       # ice/storm/fire
+    assert buff_matches(cards["Balanceblade"], "ice")    # universal
+    assert not buff_matches(cards["Tri Blade"], "death")
+
+
+def test_dead_ward_legs_are_not_counted_as_pending_buffs():
+    """A Tri Trap places fire, ice and storm legs. An ice hit consumes
+    only the ice one; the other two sit on the enemy forever. `State.traps`
+    counts all three, so make_blade_stack fires on a stack of one live
+    multiplier and two corpses."""
+    from deimos_bridge.policies import pending_for
+    from w101_sim import Actor, Hanging, State
+
+    player = Actor(name="W", school="ice", hp=1000, max_hp=1000, team=0)
+    enemy = Actor(name="M", school="ice", hp=1000, max_hp=1000, team=1)
+    for school in ("fire", "storm"):          # the stranded legs
+        enemy.wards.append(Hanging(name="Tri Trap", slot="ward", kind="damage",
+                                   percent=0.3, schools={school}, sub=hash(school)))
+    s = State(player, [enemy])
+
+    assert len(s.traps) >= 1                  # the legacy view sees them
+    assert pending_for(s, "ice") == 0         # none of them can act on ice
+
+
+def test_school_aware_matches_or_beats_blade_stack_on_the_live_decks():
+    """It is the live default, so it must not be a regression on the
+    school-coherent decks the published tables use."""
+    import random
+
+    from data_full import LIVE_DECKS, load_spells_full
+    from w101_sim import Boss, Sim, evaluate_paired, make_blade_stack
+
+    from deimos_bridge.policies import school_aware_blade_stack
+
+    cards = load_spells_full()
+    pols = {"old": make_blade_stack(3), "new": school_aware_blade_stack(3)}
+    for school, variants in LIVE_DECKS.items():
+        for label, deck in variants.items():
+            sim = Sim(cards, deck, school,
+                      Boss(name="d", hp=2500, school="ice", dmg=140),
+                      rng=random.Random(1), player_hp=2500)
+            r = evaluate_paired(sim, pols, n=200)
+            assert r["new"]["win_rate"] >= r["old"]["win_rate"] - 0.03, \
+                f"{school}/{label}: {r['new']['win_rate']} < {r['old']['win_rate']}"

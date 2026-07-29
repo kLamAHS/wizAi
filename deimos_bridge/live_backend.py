@@ -28,6 +28,31 @@ import random
 from .live_state import NameResolver, WIKI_TO_GAME, read_state
 
 
+#: op kinds that carry the cast's real target, in the order they decide
+#: it. A card whose first op is a self-charm is a self-cast even if a
+#: later op mentions an enemy (Feint places a ward on both sides).
+_TARGET_OPS = ("hit", "dot", "drain", "charm", "ward", "prism", "heal",
+               "absorb", "dispel", "stun", "aura")
+
+
+def _primary_target(card):
+    """'self' | 'enemy' | 'enemies' | 'ally' | 'allies' | 'global' | None.
+
+    Reads it off the card's own ops rather than guessing from its kind,
+    because the data already carries it and the kinds do not map cleanly
+    -- a 'trap' goes on an enemy, a 'blade' on the caster, and both are
+    charms.
+    """
+    ops = getattr(card, "ops", None) or []
+    if not ops:
+        return None
+    for want in _TARGET_OPS:
+        for op in ops:
+            if op.get("op") == want:
+                return op.get("tgt")
+    return ops[0].get("tgt")
+
+
 class PolicyDecision:
     """What the policy decided, before it becomes a wizsprinter move.
 
@@ -324,7 +349,9 @@ class WizAiCombatHandler:
                 await self.pass_button()
                 return
 
-            target = await self._resolve_target(read, decision.target_index)
+            target = await self._resolve_target(
+                read, decision.target_index,
+                self.backend.cards.get(decision.card_name))
             try:
                 await card.cast(target)
             except Exception:
@@ -336,13 +363,31 @@ class WizAiCombatHandler:
         cards = read.hand_cards.get(name) or []
         return cards[0] if cards else None
 
-    async def _resolve_target(self, read, index):
-        """Map the policy's enemy index onto a live member.
+    async def _resolve_target(self, read, index, card=None):
+        """What to click after clicking the card.
 
-        `read.enemy_members` is recorded in the same order as
-        `read.state.enemies`, so index i here is the same mob the policy
-        was looking at.
+        Not always an enemy, which is what the first version assumed. A
+        blade is `tgt: 'self'` and has to be clicked on the *caster* --
+        wizsprinter resolves `type_self` to `get_client_member()`
+        (sprinty_combat.py:746-747) -- and aiming it at a mob simply
+        fails, silently, wasting the round. The wizAi card already
+        records this: `Card.ops[i]['tgt']` is one of self / enemy /
+        enemies / ally / allies / global.
+
+        AoE and global spells take no target at all; `CombatCard.cast`
+        treats `None` as "just click the card" (card.py:24-30).
         """
+        tgt = _primary_target(card)
+
+        if tgt == "self":
+            return read.client_member
+        if tgt in ("enemies", "allies", "global"):
+            return None                      # no target click
+        if tgt == "ally":
+            allies = [m for m in read.members
+                      if m is not read.client_member]
+            return allies[0] if allies else read.client_member
+
         foes = read.enemy_members
         if not foes:
             return None
