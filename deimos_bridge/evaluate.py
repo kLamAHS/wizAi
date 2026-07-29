@@ -57,11 +57,21 @@ def _edge(arms):
     return (arms["trained"]["win_rate"] - arms[scripted]["win_rate"]) * 100, scripted
 
 
-def _sim_kwargs(stats, comps):
-    return dict(player_hp=stats["player_hp"], rules=LIVE_RULES,
+def _fight_kwargs(stats, comps):
+    """Shared by `Sim`, `build_deck` and `fine_tune`.
+
+    Deliberately excludes `rules`: the two pipeline functions take it as
+    their fourth positional argument, so passing it here as well is a
+    duplicate-argument TypeError.
+    """
+    return dict(player_hp=stats["player_hp"],
                 player_stats=stats["player_stats"],
                 power_pip=stats["power_pip"],
                 enemies=[copy.copy(c) for c in comps] or None)
+
+
+def _sim_kwargs(stats, comps):
+    return dict(_fight_kwargs(stats, comps), rules=LIVE_RULES)
 
 
 def run_level(level, school, cards, bosses, registry, args, log):
@@ -86,7 +96,7 @@ def run_level(level, school, cards, bosses, registry, args, log):
     decklist, *_ = build_deck(
         cards, school, copy.copy(boss), LIVE_RULES,
         n_candidates=args.candidates, top_k=args.top_k, seed=7, level=level,
-        enchants=True, log=None, **_sim_kwargs(stats, comps))
+        enchants=True, log=None, **_fight_kwargs(stats, comps))
     log(f"  deck        {len(decklist)} cards ({time.time() - t:.0f}s)")
 
     probe = Sim(dict(full), decklist, school, copy.copy(boss),
@@ -100,7 +110,7 @@ def run_level(level, school, cards, bosses, registry, args, log):
     _w, _ttk, agent = fine_tune(
         full, decklist, school, copy.copy(boss), LIVE_RULES,
         episodes=args.episodes, seed=11, advisor=SCRIPTED[advisor],
-        **_sim_kwargs(stats, comps))
+        **_fight_kwargs(stats, comps))
     log(f"  trained     {time.time() - t:.0f}s")
 
     policies = {**SCRIPTED, "trained": agent.policy()}
@@ -160,10 +170,10 @@ def sweep_curve(level, school, cards, bosses, registry, args, log,
     decklist, *_ = build_deck(
         cards, school, copy.copy(boss), LIVE_RULES,
         n_candidates=args.candidates, top_k=args.top_k, seed=7, level=level,
-        enchants=True, log=None, **_sim_kwargs(stats, comps))
+        enchants=True, log=None, **_fight_kwargs(stats, comps))
     _w, _ttk, agent = fine_tune(
         full, decklist, school, copy.copy(boss), LIVE_RULES,
-        episodes=args.episodes, seed=11, **_sim_kwargs(stats, comps))
+        episodes=args.episodes, seed=11, **_fight_kwargs(stats, comps))
     policies = {**SCRIPTED, "trained": agent.policy()}
 
     rows = []
