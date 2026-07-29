@@ -7,14 +7,16 @@ win32, and there is no replay or offline mode anywhere in the Deimos tree
 to stand in for a live duel. Everything else in `deimos_bridge` runs
 anywhere; this does not.
 
-Setup, once:
+Setup, once. Only wizwalker is needed -- this goes through
+`WizAiCombatHandler`, which subclasses `wizwalker.combat.CombatHandler`,
+so wizsprinter (and its 3.13 floor, and wizlaunch's Rust extension) never
+enter the picture:
 
-    cd Deimos
-    uv sync                       # or: pip install -e libs/wizwalker
-                                  #     pip install -e libs/wizsprinter
-    # start Wizard101, log in, and walk into a fight
+    python -m venv .venv
+    .venv\\Scripts\\python.exe -m pip install -e Deimos\\libs\\wizwalker numpy
+    # start Wizard101 and log in
 
-Then, from the repo root:
+See RUNNING_LIVE.md for the full walkthrough. Then, from the repo root:
 
     python -m deimos_bridge.run_live --school fire
     python -m deimos_bridge.run_live --school fire --policy trained \\
@@ -92,11 +94,15 @@ async def run(args):
         from wizwalker import ClientHandler
     except Exception as exc:
         raise SystemExit(
-            f"wizwalker/wizsprinter did not import ({exc}).\n"
+            f"wizwalker did not import ({exc}).\n\n"
+            "  install it:  python -m venv .venv\n"
+            "               .venv\\Scripts\\python.exe -m pip install "
+            "-e Deimos\\libs\\wizwalker numpy\n\n"
             "This entry point needs Windows and a running Wizard101 client. "
             "Everything else in deimos_bridge -- the differential harness, "
-            "the effect audit, the backend tests against mock_client -- runs "
-            "without either."
+            "the effect audit, the GUI's --demo mode, the tests against "
+            "mock_client -- runs without either. See "
+            "deimos_bridge/RUNNING_LIVE.md."
         )
 
     from .live_backend import WizAiBackend, make_combat_handler
@@ -118,7 +124,23 @@ async def run(args):
         if not clients:
             raise SystemExit("no Wizard101 client found -- is the game running?")
         client = clients[0]
-        await client.activate_hooks()
+        try:
+            await client.activate_hooks()
+        except Exception as exc:
+            # PatternFailed here has two causes with one message, and the
+            # message's advice ("restart the client") only fixes one of
+            # them. Rather than reprint it, hand over to the diagnostic
+            # that can actually tell them apart.
+            if "PatternFailed" in type(exc).__name__ or "Pattern" in str(exc):
+                raise SystemExit(
+                    "wizwalker could not install its hooks: the autobot "
+                    "signature was not found in the running client.\n\n"
+                    "That has two causes and the built-in advice only "
+                    "covers one. Run this to find out which:\n\n"
+                    "    .venv\\Scripts\\python.exe -m "
+                    "deimos_bridge.diagnose_hooks\n"
+                ) from exc
+            raise
 
         backend = WizAiBackend(policy=policy, cards=cards, school=args.school,
                                decklist=deck, on_decision=_log_decision(log),
@@ -130,10 +152,13 @@ async def run(args):
 
         print(f"wizAi policy {args.policy!r} taking over combat "
               f"({args.school} wizard)")
+        print("walk into a fight — waiting for combat…")
         for fight in range(args.fights):
             print(f"\nfight {fight + 1}/{args.fights}")
+            # `wait_for_combat` blocks until a duel starts and then runs
+            # `handle_combat` itself (handler.py:64-73). Calling
+            # handle_combat again here would be a second, empty pass.
             await combat.wait_for_combat()
-            await combat.handle_combat()
             print("  fight over")
     finally:
         await handler.close()

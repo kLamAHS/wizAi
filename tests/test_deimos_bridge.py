@@ -465,8 +465,9 @@ class _Handler:
 
     def __new__(cls, combat, backend):
         from deimos_bridge.live_backend import WizAiCombatHandler
+        from deimos_bridge.mock_client import MockClient
         h = object.__new__(WizAiCombatHandler)
-        h.client = None
+        h.client = MockClient()
         h.backend = backend
         h._last_read = None
         h.pass_button = combat.pass_button
@@ -492,6 +493,21 @@ def test_handler_casts_exactly_once_per_round():
     casts = sum(len(c.cast_log) for c in combat._cards)
     assert casts == 1, f"one decision produced {casts} casts"
     assert combat.passed == 0
+
+
+def test_handler_enters_the_mouse_handler():
+    """Casting is mouse clicks -- wizwalker has no memory API for it --
+    and entering client.mouse_handler is what activates the mouseless
+    cursor hook. A round that skips it clicks nothing, silently."""
+    be = _backend(policy=lambda sim, s: "Fireblade")
+    combat = MockCombat(
+        [MockMember("Wizard", 2000, client=True, normal_pips=4, team_id=0),
+         MockMember("Lost Soul", 900, monster=True, team_id=1)],
+        [MockCard("Fireblade")])
+    h = _Handler(combat, be)
+    run(h.handle_round())
+    assert h.client.mouse_handler.entered == 1
+    assert h.client.mouse_handler.depth == 0     # and exited cleanly
 
 
 def test_handler_passes_when_the_policy_passes():
@@ -534,6 +550,63 @@ def test_handler_falls_back_to_pass_when_the_cast_throws():
     h = _Handler(combat, be)
     run(h.handle_round())
     assert combat.passed == 1
+
+
+# ------------------------------------------------------------- diagnostics
+def test_autobot_pattern_matches_the_one_wizwalker_ships():
+    """The diagnostic duplicates the signature rather than importing it,
+    because the import is exactly what may be broken when you need it. So
+    the copy has to be checked against the original."""
+    import re as _stdre
+
+    src = open("Deimos/libs/wizwalker/wizwalker/memory/handler.py",
+               encoding="utf-8").read()
+    body = _stdre.search(r"AUTOBOT_PATTERN = \((.*?)\n    \)", src, _stdre.S)
+    assert body, "AUTOBOT_PATTERN not found in wizwalker"
+    theirs = "".join(_stdre.findall(r'rb"([^"]*)"', body.group(1)))
+
+    from deimos_bridge.diagnose_hooks import AUTOBOT_PATTERN
+    ours = AUTOBOT_PATTERN.decode("latin-1")
+    assert ours == theirs, "the diagnostic's copy has drifted from wizwalker"
+
+
+def test_scanner_finds_the_signature_and_does_not_invent_one(tmp_path):
+    """Both directions matter: a false negative would send someone off to
+    update wizwalker for nothing, and a false positive would send them
+    restarting a client that will never work."""
+    import random
+
+    from deimos_bridge.diagnose_hooks import scan_file
+
+    random.seed(1)
+    noise = bytes(random.randrange(256) for _ in range(120_000))
+    signature = (
+        b"\x48\x8B\xC4\x55\x41\x54\x41\x55\x41\x56\x41\x57" + b"\xAA" * 7 +
+        b"\x48" + b"\xAA" * 6 + b"\x48" + b"\xAA" * 7 +
+        b"\x48\x89\x58\x10\x48\x89\x70\x18\x48\x89\x78\x20" + b"\xAA" * 7 +
+        b"\x48\x33\xC4" + b"\xAA" * 7 + b"\x4C\x8B\xE9" + b"\xAA" * 7 +
+        b"\x80" + b"\xAA" * 6 + b"\x0F")
+
+    has = tmp_path / "has.bin"
+    has.write_bytes(noise[:4000] + signature + noise[4000:])
+    lacks = tmp_path / "lacks.bin"
+    lacks.write_bytes(noise)
+
+    assert scan_file(str(has)) == [4000]
+    assert scan_file(str(lacks)) == []
+
+
+def test_scanner_sees_a_zeroed_autobot_region_as_absent():
+    """The failure mode the diagnostic exists to identify: a previous
+    attach zeroed the region, so the bytes are gone from memory while the
+    file on disk still has them."""
+    import tempfile
+
+    from deimos_bridge.diagnose_hooks import scan_file
+    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
+        f.write(b"\x00" * 8000)
+        path = f.name
+    assert scan_file(path) == []
 
 
 # --------------------------------------------------------------- enum audit
