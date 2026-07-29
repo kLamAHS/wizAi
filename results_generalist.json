@@ -1,0 +1,159 @@
+{
+ "held_out": [
+  {
+   "school": "fire",
+   "boss": "held0-myth-2100",
+   "deck": [
+    "Balanceblade",
+    "Efreet",
+    "Fire Dragon",
+    "Fire Prism",
+    "Fireblade",
+    "Heck Hound",
+    "Helephant",
+    "Rain of Fire",
+    "Spirit Blade"
+   ],
+   "heuristic": [
+    0.9795,
+    11.216436957631444
+   ],
+   "generalist": [
+    0.9625,
+    10.067012987012987
+   ],
+   "finetune": [
+    0.904,
+    11.073561946902656
+   ],
+   "finetune_s": 7.1
+  },
+  {
+   "school": "storm",
+   "boss": "held1-life-3400",
+   "deck": [
+    "Balanceblade",
+    "Feint",
+    "Spirit Trap",
+    "Storm Owl",
+    "Storm Prism",
+    "Stormblade",
+    "Tri Blade"
+   ],
+   "heuristic": [
+    0.966,
+    8.762422360248447
+   ],
+   "generalist": [
+    0.9725,
+    8.797943444730077
+   ],
+   "finetune": [
+    0.9715,
+    8.399382398353062
+   ],
+   "finetune_s": 7.2
+  },
+  {
+   "school": "death",
+   "boss": "held2-myth-4000",
+   "deck": [
+    "Avenging Fossil",
+    "Balanceblade",
+    "Skeletal Dragon",
+    "Wraith"
+   ],
+   "heuristic": [
+    0.504,
+    22.231150793650794
+   ],
+   "generalist": [
+    0.4835,
+    21.00517063081696
+   ],
+   "finetune": [
+    0.4825,
+    23.594818652849742
+   ],
+   "finetune_s": 6.2
+  },
+  {
+   "school": "ice",
+   "boss": "held3-myth-7400",
+   "deck": [
+    "Feint",
+    "Frost Giant",
+    "Frostbite",
+    "Hex",
+    "Ice Prism",
+    "Lord of Winter",
+    "Snow Angel",
+    "Snowball Barrage",
+    "Spirit Trap"
+   ],
+   "heuristic": [
+    0.0,
+    NaN
+   ],
+   "generalist": [
+    0.0,
+    NaN
+   ],
+   "finetune": [
+    0.0,
+    NaN
+   ],
+   "finetune_s": 15.2
+  },
+  {
+   "school": "life",
+   "boss": "held4-ice-5900",
+   "deck": [
+    "Balanceblade",
+    "Life Prism",
+    "Lifeblade",
+    "Spinysaur",
+    "Tri Blade",
+    "Unicorn"
+   ],
+   "heuristic": [
+    0.0,
+    NaN
+   ],
+   "generalist": [
+    0.0,
+    NaN
+   ],
+   "finetune": [
+    0.0,
+    NaN
+   ],
+   "finetune_s": 11.3
+  },
+  {
+   "school": "balance",
+   "boss": "held5-ice-3100",
+   "deck": [
+    "Balanceblade",
+    "Chimera",
+    "Hex",
+    "Hydra",
+    "Judgement",
+    "Power Nova"
+   ],
+   "heuristic": [
+    0.5955,
+    20.670025188916878
+   ],
+   "generalist": [
+    0.534,
+    17.916666666666668
+   ],
+   "finetune": [
+    0.851,
+    16.698002350176264
+   ],
+   "finetune_s": 5.9
+  }
+ ]
+}

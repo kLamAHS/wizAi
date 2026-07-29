@@ -1,0 +1,38 @@
+{
+ "boss_hp": 1200,
+ "school": "storm",
+ "picks": {
+  "mean": {
+   "deck": [
+    "Storm Owl",
+    "Storm Owl",
+    "Storm Owl",
+    "Sirens",
+    "Leviathan",
+    "Stormblade",
+    "Hex"
+   ],
+   "win_rate": 0.9956666666666667,
+   "mean_ttk": 4.922999665215936,
+   "median_ttk": 5,
+   "p90_ttk": 6,
+   "p99_ttk": 8
+  },
+  "p90": {
+   "deck": [
+    "Storm Owl",
+    "Storm Owl",
+    "Storm Owl",
+    "Sirens",
+    "Leviathan",
+    "Stormblade",
+    "Hex"
+   ],
+   "win_rate": 0.9956666666666667,
+   "mean_ttk": 4.922999665215936,
+   "median_ttk": 5,
+   "p90_ttk": 6,
+   "p99_ttk": 8
+  }
+ }
+}
