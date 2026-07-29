@@ -17,7 +17,8 @@ import asyncio
 import pytest
 
 from deimos_bridge import deimos_damage as dd
-from deimos_bridge.differential import EXPECTED, TOL, compare, deimos_ruleset
+from deimos_bridge.differential import (EXPECTED, TOL, compare,
+                                         legacy_ruleset)
 from deimos_bridge.live_backend import WizAiBackend
 from deimos_bridge.live_state import ALIASES, NameResolver, _normal, read_state
 from deimos_bridge.mock_client import (MockCard, MockCombat, MockEffect,
@@ -109,40 +110,53 @@ def test_plain_scenarios_agree_exactly():
         assert rows[name]["agree"], (name, rows[name])
 
 
-def test_adopting_deimos_flat_placement_closes_the_flat_divergences():
-    rows = {r["scenario"]: r for r in compare(rules=deimos_ruleset())}
-    for name in ("flat damage", "flat resist", "full stack (no pierce)"):
-        assert rows[name]["agree"], (name, rows[name])
+def test_only_the_guard_staging_row_still_diverges():
+    """After both fixes -- wizAi adopting Deimos's flat-stat placement and
+    Deimos's pierce units being corrected -- the two independently written
+    engines agree on every scenario except the one where they enforce the
+    same rule at different stages."""
+    diverging = {r["scenario"] for r in compare() if not r["agree"]}
+    assert diverging == {"duplicate blade"}, diverging
 
 
-def test_the_residual_gap_is_exactly_pierce():
-    """The matched pair. Same board twice, pierce the only difference: the
-    row without it agrees, the row with it does not. That localises the
-    entire remaining divergence to Deimos's pierce unit bug rather than
-    leaving it as an unexplained delta."""
-    rows = {r["scenario"]: r for r in compare(rules=deimos_ruleset())}
-    assert rows["full stack (no pierce)"]["agree"]
-    assert not rows["full stack"]["agree"]
+def test_legacy_rules_still_show_the_flat_divergence():
+    """The finding has to stay reproducible, or the fix is unfalsifiable."""
+    rows = {r["scenario"]: r for r in compare(rules=legacy_ruleset())}
+    for name in ("flat damage", "flat resist"):
+        assert not rows[name]["agree"], (name, rows[name])
 
 
-def test_every_divergence_is_either_a_finding_or_explained():
+def test_every_divergence_is_explained():
     """No silent disagreements: a row that differs must be listed in
-    EXPECTED with a reason, or be one of the two known findings."""
-    findings = {"flat damage", "flat resist", "full stack (no pierce)"}
+    EXPECTED with a reason."""
     for r in compare():
         if not r["agree"]:
-            assert r["scenario"] in EXPECTED or r["scenario"] in findings, \
-                f"unexplained divergence: {r}"
+            assert r["scenario"] in EXPECTED, f"unexplained divergence: {r}"
 
 
-def test_wizai_pierce_beats_deimos_on_shields():
-    """wizAi is the correct one here, and the test says so in numbers: a
-    20% pierce should move a -50 shield to -30, not to -49.8."""
+def test_pierce_shaves_a_shield_in_both_engines():
+    """The pierce unit fix, pinned in numbers. 20% pierce must move a -50
+    shield to -30 -- in wizAi, which always did, and now in Deimos, which
+    used to move it to -49.8 and leave the shield almost intact."""
     sc = Scenario("probe", 500, "fire",
                   caster=Side(pierce=0.20, is_player=True),
                   wards=[Buff("Tower Shield", -50, None)])
-    assert sc.wizai_damage() == pytest.approx(350.0)   # 500 * 0.70
-    assert sc.deimos_damage() == pytest.approx(251.0)  # 500 * 0.502
+    assert sc.wizai_damage() == pytest.approx(350.0)    # 500 * 0.70
+    assert sc.deimos_damage() == pytest.approx(350.0)
+
+
+def test_a_pierce_blade_is_worth_its_face_value():
+    """kModifyOutgoingArmorPiercing arrives in points. Folded into the
+    fraction-valued accumulator without conversion, a +10 pierce blade was
+    worth 1000% pierce and erased any shield outright."""
+    fire = dd.school_id("fire")
+    blade = dd.Effect(dd.SpellEffects.modify_outgoing_armor_piercing, 10,
+                      fire, 1)
+    shield = dd.Effect(dd.SpellEffects.modify_incoming_damage, -50, 80289, 2)
+    got = dd.deimos_damage(500, fire, dd.Stats(is_player=True), dd.Stats(),
+                           [blade], [shield])
+    # -50 shield, 10 points of pierce -> -40
+    assert got == pytest.approx(300.0)
 
 
 # ------------------------------------------------------------------ naming
@@ -173,6 +187,107 @@ def test_aliases_point_at_real_cards():
         assert stale not in cards, \
             f"{stale!r} is a real card; aliasing it would rewrite a good name"
         assert real in cards, f"alias target {real!r} is not in the card table"
+
+
+def test_langcode_resolves_a_card_whose_name_does_not():
+    """`display_name_code()` is the game's own stable identifier. It does
+    not move when a spell is renamed and it is identical on a non-English
+    client, so it is a better key than the display string -- and it
+    rescues a name lookup that misses."""
+    from deimos_bridge.live_state import build_catalog
+    cat = build_catalog()
+    r = NameResolver(cat["cards"], cat)
+    assert r.resolve("Renamed In A Later Patch",
+                     langcode="Spells_Fireblade") is cat["cards"]["Fireblade"]
+
+
+def test_a_shared_langcode_resolves_to_the_canonical_spell():
+    """"Spells_Fireblade" is shared by Fireblade, Fireblade - EM,
+    Fireblade - SIT, Fireblade - Tear, FirebladeBOSS01, FirebladeBOSS02
+    and a raid sigil. Resolving on the code alone could hand the policy a
+    boss variant; `base_spell` settles it, because the canonical record
+    is the one whose name IS its base spell."""
+    from deimos_bridge.live_state import build_catalog
+    cat = build_catalog()
+    assert cat["langcodes"]["Spells_Fireblade"].name == "Fireblade"
+
+
+def test_langcodes_with_no_single_canonical_are_dropped():
+    """Where `base_spell` cannot single one out, there is no answer, and
+    the catalog must leave the code out instead of picking."""
+    from deimos_bridge.live_state import build_catalog
+    cat = build_catalog()
+    assert cat["ambiguous_langcodes"], "expected some undecidable groups"
+    for code in cat["ambiguous_langcodes"]:
+        assert code not in cat["langcodes"]
+
+
+def test_misses_are_classified_by_cause():
+    """The two kinds need different fixes, so they must not look alike.
+    A name the game data knows but the decoder skipped is a gap in
+    _map_effect with a named cause; a name the data has never heard of is
+    a spelling problem."""
+    from deimos_bridge.live_state import (MISS_DECODER, MISS_UNKNOWN,
+                                          build_catalog)
+    cat = build_catalog()
+    r = NameResolver(cat["cards"], cat)
+
+    assert r.resolve("Summon589244") is None
+    kind, detail = r.classify("Summon589244")
+    assert kind == MISS_DECODER
+    assert "kSummonCreature" in detail
+
+    assert r.resolve("Not A Real Spell") is None
+    assert r.classify("Not A Real Spell")[0] == MISS_UNKNOWN
+
+
+def test_classification_degrades_honestly_without_a_catalog():
+    """A resolver built without a catalog genuinely cannot tell the two
+    apart, and must say unknown rather than invent a cause."""
+    from data_full import load_spells_full
+    from deimos_bridge.live_state import MISS_UNKNOWN
+    r = NameResolver(load_spells_full())
+    assert r.classify("Summon589244")[0] == MISS_UNKNOWN
+
+
+def test_hidden_cards_are_recorded_not_silently_dropped():
+    """An unresolvable card cannot enter the policy's hand -- there is no
+    wizAi Card for it -- but dropping it silently is how a run quietly
+    stops measuring anything: the policy plans a 2-card hand while
+    holding 4, and its scarcity feature counts the wrong nukes."""
+    from deimos_bridge.live_state import build_catalog
+    cat = build_catalog()
+    r = NameResolver(cat["cards"], cat)
+    combat = MockCombat(
+        [MockMember("Wizard", 2000, client=True, team_id=0),
+         MockMember("Lost Soul", 900, monster=True, team_id=1)],
+        [MockCard("Fireblade"), MockCard("Sunbird"),
+         MockCard("Not A Real Spell"), MockCard("Summon589244")])
+    read = run(read_state(combat, r, "fire"))
+    assert sorted(read.hidden) == ["Not A Real Spell", "Summon589244"]
+    assert sorted(c.name for c in read.state.hand) == ["Fireblade", "Sunbird"]
+    assert read.hand_visibility == pytest.approx(0.5)
+
+
+def test_full_visibility_when_everything_resolves():
+    from data_full import load_spells_full
+    r = NameResolver(load_spells_full())
+    read = run(read_state(simple_fight(hand=("Fireblade", "Sunbird")),
+                          r, "fire"))
+    assert read.hidden == []
+    assert read.hand_visibility == 1.0
+
+
+def test_report_separates_the_two_causes():
+    from deimos_bridge.live_state import build_catalog
+    cat = build_catalog()
+    r = NameResolver(cat["cards"], cat)
+    r.resolve("Summon589244")
+    r.resolve("Not A Real Spell")
+    text = r.report()
+    assert "decoder skipped these" in text
+    assert "kSummonCreature" in text
+    assert "not in the game data" in text
 
 
 def test_resolver_never_guesses():

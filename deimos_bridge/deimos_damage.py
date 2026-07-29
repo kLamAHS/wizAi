@@ -219,7 +219,7 @@ def deimos_damage(
         elif e.effect_type == SpellEffects.modify_outgoing_damage_flat:
             damage += e.effect_param
         elif e.effect_type == SpellEffects.modify_outgoing_armor_piercing:
-            caster_pierce += e.effect_param
+            caster_pierce += e.effect_param / 100      # points -> fraction
         elif e.effect_type == SpellEffects.modify_outgoing_damage_type:
             damage_type = e.effect_param
 
@@ -235,8 +235,9 @@ def deimos_damage(
         if e.effect_type == SpellEffects.modify_incoming_damage:
             ward_param = e.effect_param
             if ward_param < 0:
-                ward_param += caster_pierce
-                caster_pierce += e.effect_param
+                # ward params are POINTS, pierce is a FRACTION
+                ward_param += caster_pierce * 100
+                caster_pierce += e.effect_param / 100
                 if ward_param > 0:
                     ward_param = 0
                 if caster_pierce < 0:
@@ -249,7 +250,7 @@ def deimos_damage(
         elif e.effect_type == SpellEffects.absorb_damage:
             damage += e.effect_param
         elif e.effect_type == SpellEffects.modify_incoming_armor_piercing:
-            caster_pierce += e.effect_param
+            caster_pierce += e.effect_param / 100      # points -> fraction
         elif e.effect_type == SpellEffects.modify_incoming_damage_type:
             damage_type = e.effect_param
 

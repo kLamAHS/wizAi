@@ -23,8 +23,10 @@ the main constraint on the whole exercise:
 | `flat_stat_probe.py` | no | how much the divergences actually cost |
 | `effect_audit.py` | no | wizAi's effect coverage vs the client's own enum |
 | `live_state.py` | no (duck-typed) | live combat → a wizAi `State` |
-| `live_backend.py` | no (duck-typed) | a wizsprinter backend driven by a wizAi policy |
-| `mock_client.py` | no | fakes of the wizwalker objects, for testing the two above |
+| `live_backend.py` | no (duck-typed) | the policy → a cast |
+| `telemetry.py` | no | what a run records, and the damage-model residuals |
+| `gui/` | no (`--demo`) | the ML-facing window |
+| `mock_client.py` | no | fakes of the wizwalker objects, for testing the above |
 | `combat_api_shim.py` | no | wizsprinter's types, or equivalents off Windows |
 | **`run_live.py`** | **yes** | actually fights |
 
@@ -61,44 +63,35 @@ driven through the same call sequence a real cast uses
 (`_consume_damage_charms` → `_crit_mult` → `_strike`), so shields, traps
 and prisms resolve exactly as they do in a duel.
 
-On the current rules, **14 of 21 agree to the cent**. The seven that
-don't split three ways.
+**20 of 21 now agree to the cent.** The one that doesn't is the
+duplicate-effect guard firing at a different stage: Deimos dedupes during
+damage resolution via `spell_effect_stacking_id`, wizAi refuses the
+*cast* (`Sim.can_cast`), so a duplicate never reaches the board. Both are
+right; the scenario builds a board directly and walks past wizAi's guard.
 
-**Three are Deimos being wrong.** It keeps pierce as a fraction (`0.15`)
-but shield params in points (`-50`), then adds them —
-`ward_param += caster_pierce`, `combat_math.py:196`, and the same slip at
-`effect_simulation.py:271`. So 15% pierce moves a Tower Shield from −50
-to −49.85. wizAi converts first and is correct.
+Getting there took a fix on each side.
 
-**One is the duplicate-effect guard firing at a different stage.** Deimos
-dedupes during damage resolution via `spell_effect_stacking_id`; wizAi
-refuses the *cast* (`Sim.can_cast`), so a duplicate never reaches the
-board. Both are right; the scenario builds a board directly and walks
-past wizAi's guard.
-
-**Two are real wizAi findings**, and one is those two compounded:
-
-- **Flat damage is in the wrong place.** wizAi adds it after charms,
-  wards and crit. Deimos adds it right after the school damage %, so
-  charms multiply it and shields reduce it.
-- **Flat resist is in the wrong place.** wizAi subtracts it after the
-  percent-resist multiply; Deimos subtracts it before.
-
-Deimos does both of these in *two independently written code paths*
+**wizAi had flat damage and flat resist in the wrong place.** Flat damage
+was added after charms, wards and crit; Deimos adds it right after the
+school damage %, so charms multiply it and shields reduce it. Flat resist
+was subtracted after the percent-resist multiply; Deimos subtracts it
+before. Deimos does both in *two independently written code paths*
 (`combat_math.py:157,253` and `effect_simulation.py:397,441`), which is
-what makes it the better witness.
+what makes it the better witness. wizAi now matches, via
+`Rules.flat_damage_before_multipliers` / `flat_resist_before_resist`
+(default `True`; set either `False` to recover the old arithmetic, and
+`--legacy` re-runs the suite that way to show the gap the fix closes).
 
-Both are available as opt-in `Rules` flags, the pattern wizAi already
-uses for `fizzle_discards_card`:
+Adopting it cost nothing historically — see the flat-stat probe below.
 
-```python
-Rules(flat_damage_before_multipliers=True, flat_resist_before_resist=True)
-```
-
-Defaults preserve current behaviour, so no published table moves. With
-them on the suite goes to 17/21, and the matched pair pins the residue:
-`full stack (no pierce)` lands on **505.30 from both engines**, and the
-only thing separating it from the row that still differs is 10% pierce.
+**Deimos had pierce in the wrong units.** It keeps pierce as a fraction
+(`0.15`) but ward params in points (`-50`), and added them directly:
+`ward_param += caster_pierce` at `combat_math.py:196`, the same slip at
+`effect_simulation.py:271`, and `caster_pierce += effect_param` on a
+pierce *blade*, which made a `+10` blade worth 1000% pierce. So pierce
+did essentially nothing to shields and everything to nothing else. Fixed
+in both files; the file's own `pierce += param / 100` two cases down was
+already doing it correctly and settled which unit was intended.
 
 ### How much this costs
 
@@ -106,10 +99,11 @@ only thing separating it from the row that still differs is 10% pierce.
 python -m deimos_bridge.flat_stat_probe
 ```
 
-Currently: nothing. `gear.loadout()` returns no `flat_damage` or
-`flat_resist` at any level and `Actor` defaults both to `0.0`, so the two
-placements compute identical numbers on every table this project has
-published. The findings are real and dormant.
+Historically: nothing, which is why the fix could be adopted as the
+default. `gear.loadout()` returns no `flat_damage` or `flat_resist` at
+any level and `Actor` defaults both to `0.0`, so the two placements
+compute identical numbers on every table this project has published — no
+committed result moves.
 
 They wake up with real gear numbers — which is exactly what a live run
 supplies, since wizwalker reads `dmg_bonus_flat` and `dmg_reduce_flat`
@@ -205,12 +199,86 @@ tables already flag. `live_state` partitions on `team_id` instead, with
 
 ### The part most likely to break
 
-Naming. wizAi's card table is keyed on exact name and a miss is silent —
-the policy simply never sees the card. Resolution is layered (exact →
-alias → normalised) with **no fuzzy fallback**: Deimos ships `thefuzz`
-and uses it for UI convenience, but casting the wrong spell in a real
-fight is worse than passing. Misses are counted and
-`resolver.report()` prints them at the end of a run.
+Naming, and the failure is silent: wizAi's card table is keyed on exact
+name, so an unresolved card is not an error — it is simply a card the
+policy never had. Three things guard it.
+
+**A langcode layer.** `CombatCard.display_name_code()` returns the game's
+own stable identifier (`Spells_Fireblade`), which does not move when a
+spell is renamed and is identical on a non-English client. It is not
+unique, though: that code is shared by `Fireblade`, `Fireblade - EM`,
+`Fireblade - SIT`, `Fireblade - Tear`, `FirebladeBOSS01`,
+`FirebladeBOSS02` and a raid sigil. `base_spell` settles it without
+guessing — the canonical record is the one whose `name` *is* its
+`base_spell`, which is the player-facing spell by definition. Groups
+where that does not single one out are dropped rather than picked from.
+
+**No fuzzy matching, anywhere.** Deimos ships `thefuzz` and uses it for
+UI convenience; casting the wrong spell in a real fight is worse than
+passing.
+
+**Misses are classified, not just counted**, because the two kinds need
+opposite responses. Most names that fail are not misspellings at all —
+they are internal engine templates (`Summon589244`, `Kill1223126`,
+`Hydra - T04 - C`) that never reach a hand, or real cards the decoder
+skipped for a named reason. `build_catalog()` pays one pass over
+`spells_full.json` to tell them apart, so a miss reads as *"undecoded
+effect kSummonCreature — close the gap in `data_full._map_effect`"* or
+*"not in the game data under this name — check spelling, add to
+`ALIASES`"*.
+
+**And an unresolvable card is recorded, not silently dropped.** It still
+cannot enter the policy's hand — there is no wizAi `Card` to reason about
+— but `LiveRead.hidden` and `hand_visibility` say so. This is the failure
+that quietly voids a run: the policy plans a five-card hand while holding
+seven, and its scarcity feature counts the wrong number of nukes left.
+The GUI leads the Naming tab with hand visibility for exactly that
+reason, and says outright that a run below 90% is not measuring the
+policy you trained.
+
+## The GUI
+
+```
+python -m deimos_bridge.gui           # live
+python -m deimos_bridge.gui --demo    # canned fight, runs anywhere
+```
+
+Deimos's own window answers an operator's questions — is it questing, is
+it stuck, how long has it run. Training and evaluating a policy needs a
+different set, and getting them wrong is expensive in a way that is easy
+to miss: **a run where the policy never saw half its hand looks exactly
+like a run where the policy played badly.** Five tabs, in the order you
+need them:
+
+- **Board** — the board *as the policy saw it*: HP, pips, hand, and every
+  hanging effect rendered as arithmetic (`+35% fire`, `prism -> ice`)
+  rather than as the template ids the client actually hands over. Cards
+  that failed to resolve are called out in red here, because that failure
+  is otherwise completely silent.
+- **Decisions** — every planning phase: what was cast, at whom, why, and
+  what it *passed over*. A policy repeatedly declining a nuke it could
+  afford is the shape of a state-featurisation bug.
+- **Damage model** — the one number simulation alone cannot produce.
+  Before each cast wizAi predicts the damage; the next round's real HP
+  says what happened. Shows bias, mean absolute error, RMSE, and a
+  predicted-vs-actual scatter. Rounds where a DoT, an AoE or a kill could
+  have muddied the HP delta are marked and excluded from the headline
+  statistics, and blade rounds — which predict 0 and deliver 0 — are not
+  counted as observations at all, since including them would make a
+  buff-heavy deck look accurate purely for nuking less often.
+- **Naming** — unresolved card names with counts, and what to do about
+  each.
+- **Runs** — per-fight rounds, outcome, damage, passes; `Export run`
+  writes the whole thing to JSON.
+
+Training runs on a worker thread, so the window stays responsive through
+a Q-learning run, and the deck is validated against the card table before
+training starts — a decklist naming a card that does not resolve would
+otherwise train a policy whose action space does not exist.
+
+`telemetry.py` holds all of it and imports no Qt, so every judgement the
+GUI makes is testable headless. `--demo` drives the real window from
+`mock_client`, which is how it is tested off Windows.
 
 ## Tests
 

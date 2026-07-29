@@ -64,39 +64,116 @@ def _normal(name: str) -> str:
     return s.strip()
 
 
+#: Why a card name could not be turned into a wizAi `Card`. The
+#: distinction is the whole point: one of these is a decoder gap with a
+#: named cause and a known fix, the other is a card nobody has ever heard
+#: of, and they need completely different responses.
+MISS_DECODER = "decoder"     # in the game data; load_spells_full skipped it
+MISS_UNKNOWN = "unknown"     # not in the game data under that name at all
+
+
+def build_catalog(spells_path="spells_full.json", cards_path="cards_clean.json"):
+    """Every name the game data knows, and why the loader dropped it.
+
+    Costs one pass over `spells_full.json` (18k records), so it is opt-in
+    -- but without it a miss is just a string, and with it a miss is
+    "needs kSummonCreature" or "genuinely not a spell this build knows".
+    """
+    import json
+
+    from data_full import load_spells_full
+
+    report = {}
+    cards = load_spells_full(spells_path, cards_path, report=report)
+    reasons = dict(report.get("skipped") or [])
+
+    raw = json.load(open(spells_path, encoding="utf-8"))
+    known = {rec["name"] for rec in raw if rec.get("name")}
+
+    # A langcode is *not* unique. "Spells_Fireblade" is shared by
+    # Fireblade, Fireblade - EM, Fireblade - SIT, Fireblade - Tear,
+    # FirebladeBOSS01, FirebladeBOSS02 and a raid sigil -- same display
+    # text, different spells. Resolving on the code alone could hand the
+    # policy a boss variant.
+    #
+    # `base_spell` settles it without guessing: every one of those points
+    # at "Fireblade", and the canonical record is the one where
+    # `name == base_spell`. That is the player-facing spell by
+    # definition, so a group with exactly one canonical member has an
+    # unambiguous answer. Groups that do not are dropped.
+    groups = {}
+    for rec in raw:
+        if rec.get("variant") != "core":
+            continue
+        code = rec.get("display_name")
+        if code:
+            groups.setdefault(code, []).append(rec)
+
+    langcodes, clashes = {}, set()
+    for code, recs in groups.items():
+        canonical = [r for r in recs if r["name"] == r.get("base_spell")]
+        pick = (canonical[0] if len(canonical) == 1
+                else recs[0] if len(recs) == 1 else None)
+        card = cards.get(pick["name"]) if pick else None
+        if card is not None:
+            langcodes[code] = card
+        else:
+            clashes.add(code)
+
+    return {"cards": cards, "reasons": reasons, "known": known,
+            "langcodes": langcodes, "ambiguous_langcodes": clashes}
+
+
 class NameResolver:
     """Game card name -> wizAi `Card`.
 
     Layers, in order, stopping at the first hit:
       1. exact key
-      2. game-name alias table
-      3. normalized key
-      4. normalized alias
+      2. **langcode** (`Spells_Fireblade`), if the caller supplies one
+      3. stale-name alias table
+      4. normalized key, then normalized alias
 
-    Deliberately no fuzzy match. Deimos ships `thefuzz` and uses it for
-    UI convenience, but a wrong card here is a wrong *cast* in a real
-    fight -- silently playing Fire Elf because Fire Dragon was not in the
-    table is worse than passing. Misses are recorded instead.
+    The langcode layer matters more than it looks. wizwalker's
+    `CombatCard.name()` and this table's keys both come from the game
+    data, so they usually agree -- but `display_name_code()` is the
+    game's own stable identifier: it does not move when a spell is
+    renamed and it is identical on a non-English client, where the
+    localized display name is not. It is used only where a langcode maps
+    to exactly one card; `build_catalog` drops the ambiguous ones rather
+    than picking.
+
+    Deliberately no fuzzy match, anywhere. Deimos ships `thefuzz` and
+    uses it for UI convenience, but a wrong card here is a wrong *cast*
+    in a real fight -- silently playing Fire Elf because Fire Dragon was
+    not in the table is worse than passing.
     """
 
-    def __init__(self, cards: dict):
+    def __init__(self, cards: dict, catalog: dict = None):
         self.cards = cards
         self._norm = {}
         for key, card in cards.items():
             self._norm.setdefault(_normal(key), card)
         self.misses = {}          # game name -> times seen
+        catalog = catalog or {}
+        self._reasons = catalog.get("reasons", {})
+        self._known = catalog.get("known", set())
+        self._langcodes = catalog.get("langcodes", {})
 
-    def resolve(self, game_name: str, treasure: bool = False,
-                item: bool = False):
-        if not game_name:
+    # -- resolution -------------------------------------------------------
+    def resolve(self, game_name: str, langcode: str = None,
+                treasure: bool = False, item: bool = False):
+        if not game_name and not langcode:
             return None
         suffix = "@tc" if treasure else ("@item" if item else "")
 
         aliased = ALIASES.get(game_name)
-        for candidate in (game_name + suffix,
+        for candidate in ((game_name + suffix) if game_name else None,
                           (aliased + suffix) if aliased else None):
             if candidate and candidate in self.cards:
                 return self.cards[candidate]
+
+        if langcode and langcode in self._langcodes:
+            return self._langcodes[langcode]
 
         for base in (game_name, aliased):
             if not base:
@@ -108,19 +185,55 @@ class NameResolver:
         # A treasure/item copy the table only carries as a deck card is
         # still the right spell -- fall back rather than lose the action.
         if suffix:
-            base = self.resolve(game_name)
+            base = self.resolve(game_name, langcode)
             if base is not None:
                 return base
 
-        self.misses[game_name] = self.misses.get(game_name, 0) + 1
+        if game_name:
+            self.misses[game_name] = self.misses.get(game_name, 0) + 1
         return None
+
+    # -- triage -----------------------------------------------------------
+    def classify(self, game_name: str):
+        """(kind, detail) for a name that would not resolve.
+
+        Without a catalog everything reads as unknown, which is honest --
+        the resolver genuinely cannot tell the two apart without one.
+        """
+        reason = self._reasons.get(game_name)
+        if reason:
+            return MISS_DECODER, reason
+        if game_name in self._known:
+            return MISS_DECODER, "in the game data but not in the built table"
+        return MISS_UNKNOWN, None
+
+    def miss_report(self):
+        """Misses, each with its classification, worst first."""
+        out = []
+        for name, n in sorted(self.misses.items(), key=lambda kv: -kv[1]):
+            kind, detail = self.classify(name)
+            out.append({"name": name, "count": n, "kind": kind,
+                        "detail": detail or ""})
+        return out
 
     def report(self) -> str:
         if not self.misses:
             return "all card names resolved"
-        lines = ["unresolved card names (the policy never saw these):"]
-        for name, n in sorted(self.misses.items(), key=lambda kv: -kv[1]):
-            lines.append(f"  {n:>4}x  {name!r}")
+        rows = self.miss_report()
+        decoder = [r for r in rows if r["kind"] == MISS_DECODER]
+        unknown = [r for r in rows if r["kind"] == MISS_UNKNOWN]
+        lines = [f"{len(rows)} unresolved card names "
+                 f"(the policy never saw these):"]
+        if decoder:
+            lines.append("  the decoder skipped these -- close the gap in "
+                         "data_full._map_effect to get them:")
+            for r in decoder:
+                lines.append(f"    {r['count']:>4}x  {r['name']!r}  --  {r['detail']}")
+        if unknown:
+            lines.append("  not in the game data under this name -- check "
+                         "spelling, or add to deimos_bridge.live_state.ALIASES:")
+            for r in unknown:
+                lines.append(f"    {r['count']:>4}x  {r['name']!r}")
         return "\n".join(lines)
 
 
@@ -238,7 +351,7 @@ class LiveRead:
     that the client does not directly expose."""
 
     def __init__(self, state, hand_cards, resolver, members, client_member,
-                 round_number, enemy_members=()):
+                 round_number, enemy_members=(), hidden=()):
         self.state = state
         #: wizAi card name -> the live CombatCards that produced it.
         #: Populated only for cards that both resolved *and* are castable.
@@ -253,6 +366,17 @@ class LiveRead:
         #: separately-built enemy list would drift the moment something
         #: dies, and would fail silently as bad targeting.
         self.enemy_members = list(enemy_members)
+        #: Castable cards in hand this round that could NOT be turned into
+        #: a wizAi Card. The policy did not see them. A run with a high
+        #: `hand_visibility` deficit is not measuring the policy.
+        self.hidden = list(hidden)
+
+    @property
+    def hand_visibility(self) -> float:
+        """Fraction of the castable hand the policy could actually see."""
+        total = sum(len(v) for v in self.hand_cards.values()) + len(self.hidden)
+        return 1.0 if not total else \
+            (total - len(self.hidden)) / total
 
 
 async def read_state(combat, resolver: NameResolver, school: str,
@@ -304,7 +428,7 @@ async def read_state(combat, resolver: NameResolver, school: str,
         else:
             allies.append(actor)
 
-    hand, hand_cards = [], {}
+    hand, hand_cards, hidden = [], {}, []
     for c in await combat.get_cards():
         try:
             if not await c.is_castable():
@@ -312,12 +436,22 @@ async def read_state(combat, resolver: NameResolver, school: str,
         except Exception:
             pass
         game_name = await c.name()
+        try:
+            langcode = await c.display_name_code()
+        except Exception:
+            langcode = None       # older wizwalker, or a card mid-read
         card = resolver.resolve(
-            game_name,
+            game_name, langcode,
             treasure=bool(await c.is_treasure_card()),
             item=bool(await c.is_item_card()),
         )
         if card is None:
+            # The card stays out of the policy's hand -- there is no wizAi
+            # Card to reason about -- but it is *recorded*. Dropping it
+            # silently is how a run quietly becomes meaningless: the
+            # policy plans a five-card hand while holding seven, and its
+            # scarcity feature counts the wrong number of nukes left.
+            hidden.append(game_name)
             continue
         hand.append(card)
         hand_cards.setdefault(card.name, []).append(c)
@@ -328,4 +462,4 @@ async def read_state(combat, resolver: NameResolver, school: str,
     state = State(player, enemies or [Actor(name="none", school="ice", hp=0,
                                             max_hp=1, team=1)], allies)
     return LiveRead(state, hand_cards, resolver, members, me,
-                    await combat.round_number(), enemy_members)
+                    await combat.round_number(), enemy_members, hidden)
