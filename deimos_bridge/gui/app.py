@@ -36,19 +36,29 @@ class TrainWorker(QThread):
     finished_ok = pyqtSignal(object)
     failed = pyqtSignal(str)
 
-    def __init__(self, cards, deck, school, episodes):
+    def __init__(self, cards, deck, school, episodes, player_hp=800,
+                 boss_hp=1200):
         super().__init__()
         self.cards, self.deck = cards, deck
         self.school, self.episodes = school, episodes
+        self.player_hp = player_hp
+        self.boss_hp = boss_hp
 
     def run(self):
         try:
             from rl_agent import train_agent
             from w101_sim import Boss
+            # MORTAL, deliberately. train_agent defaults to
+            # player_hp=10**9, and Featurizer.key writes -1 into the
+            # health slot for an immortal fight and a real bucket
+            # otherwise -- so a policy trained on the default shares no
+            # state at all with a live wizard, its Q table reads zero
+            # everywhere, and greedy falls through to PASS every turn.
             agent, sim = train_agent(
                 self.cards, self.deck, self.school,
-                Boss(name="training dummy", hp=3000, school="ice", dmg=150),
-                episodes=self.episodes)
+                Boss(name="training dummy", hp=self.boss_hp, school="ice",
+                     dmg=max(30, self.player_hp // 12)),
+                episodes=self.episodes, player_hp=self.player_hp)
             from w101_sim import evaluate
             kill, ttk = evaluate(sim, agent.policy(), n=800)
             self.progress.emit(self.episodes, self.episodes, kill * 100, ttk)
@@ -129,6 +139,26 @@ class MainWindow(QMainWindow):
         self.episodes.setSingleStep(1000)
         self.episodes.setValue(8000)
         row.addWidget(self.episodes)
+
+        row.addWidget(QLabel("my HP"))
+        self.player_hp = QSpinBox()
+        self.player_hp.setRange(100, 20000)
+        self.player_hp.setSingleStep(100)
+        self.player_hp.setValue(800)
+        self.player_hp.setToolTip(
+            "Your wizard's max health. Training uses it so the learned "
+            "states match a live board — train immortal and the Q table "
+            "shares no state with the real game at all, and the policy "
+            "passes every turn.")
+        row.addWidget(self.player_hp)
+
+        row.addWidget(QLabel("mob HP"))
+        self.boss_hp = QSpinBox()
+        self.boss_hp.setRange(100, 60000)
+        self.boss_hp.setSingleStep(250)
+        self.boss_hp.setValue(1200)
+        self.boss_hp.setToolTip("Health of the enemy to train against.")
+        row.addWidget(self.boss_hp)
 
         row.addWidget(QLabel("fights"))
         self.fights = QSpinBox()
@@ -266,7 +296,9 @@ class MainWindow(QMainWindow):
             f"training {self.episodes.value():,} episodes on {len(deck)} cards…")
 
         self.worker = TrainWorker(cards, deck, self.school.currentText(),
-                                  self.episodes.value())
+                                  self.episodes.value(),
+                                  player_hp=self.player_hp.value(),
+                                  boss_hp=self.boss_hp.value())
         self.worker.progress.connect(self.on_progress)
         self.worker.finished_ok.connect(self.on_trained)
         self.worker.failed.connect(self.on_train_failed)
