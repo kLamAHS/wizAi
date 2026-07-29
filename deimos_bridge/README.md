@@ -296,3 +296,51 @@ a divergence disappear, they fail, which is the point. The plumbing tests
 drive the live read and the backend against `mock_client`, including a
 policy that raises (must cost one round, not the fight) and a policy that
 names a card not in hand (must pass, not guess).
+
+## Playing live: the school assumption
+
+wizAi's built-in heuristics were written against decks the builder
+produced, and every one of those is **school-coherent** — a fire deck
+holds fire blades and fire nukes. That assumption is invisible in the
+simulator and false the moment a real wizard opens a real hand: starter
+wands hand out Thunder Snake (storm), Imp (fire), Scarab (myth) and Dark
+Sprite (death) regardless of school.
+
+`make_blade_stack` picks the biggest buff and, separately, the biggest
+nuke, with nothing tying them together. On a live starter hand it will
+stack a **Mythblade** and then fire a **Thunder Snake** — and the blade
+does nothing, because `_consume_damage_charms` only applies charms where
+`h.matches(school)`.
+
+`policies.school_aware_blade_stack` decides the nuke first and only
+stacks buffs that can multiply it. It is the `run_live` default;
+`--policy blade-stack` still selects the original.
+
+It also fixes a counting bug that has nothing to do with mixed hands. A
+**Tri Trap** places three ward legs — fire, ice and storm. An ice
+wizard's hit consumes the ice leg and the other two stay on the enemy
+for the rest of the duel, because nothing in an ice deck will ever
+trigger them. `State.traps` counts all three, so `make_blade_stack`
+believes it has a full stack while holding one live multiplier and two
+corpses, and fires early. Measured over the project's own live decks,
+paired seeds, n=500:
+
+```
+deck                  blade-stack       school-aware    delta
+                     kill%    TTK      kill%    TTK
+fire/speed            0.0      nan      0.0      nan     +0.0
+fire/oneshot         88.8     8.78     88.8     8.78     +0.0
+ice/stack            23.6    15.73     40.8    15.74    +17.2
+ice/prism            71.8     9.07     72.2     9.12     +0.4
+death/oneshot        93.6     9.06     94.0     9.09     +0.4
+storm/oneshot        96.8     5.54     96.8     5.54     +0.0
+balance/oneshot      96.2     8.52     96.2     8.52     +0.0
+```
+
+Never worse, and +17 points where the stranded ward legs bite. A test
+pins that, since it is the live default.
+
+Prisms are deliberately *not* school-filtered: charms are consumed
+against the card's own school before the ward pass converts it, so an ice
+blade still multiplies an ice hit that a prism is about to turn into
+myth. Filtering them cost 24 points on `ice/prism` before that was fixed.
