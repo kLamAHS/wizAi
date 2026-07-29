@@ -106,11 +106,23 @@ def _map_effect(e, spell, avg_backfill):
     if nm == "kRemoveOverTime":
         return {"op": "remove", "what": "dot",
                 "tgt": "self" if self_tgt else "ally"}, None, None
+    # An ALL-ENEMIES removal is a board WIPE, not a single strip:
+    # Earthquake "completely wipes out all positive and negative charms
+    # and wards active on the enemy team". Without this case target 4
+    # fell through to the self/negative default, so the extracted
+    # Earthquake removed the CASTER's own weaknesses and shields — the
+    # opposite of the spell.
     if nm == "kRemoveWard":
+        if e["target"] in ENEMY_ALL:
+            return {"op": "remove", "what": "ward_all",
+                    "tgt": "enemies"}, None, None
         return {"op": "remove",
                 "what": "ward_pos" if e["target"] == 8 else "ward_neg",
                 "tgt": "enemy" if e["target"] == 8 else "self"}, None, None
     if nm == "kRemoveCharm":
+        if e["target"] in ENEMY_ALL:
+            return {"op": "remove", "what": "charm_all",
+                    "tgt": "enemies"}, None, None
         return {"op": "remove",
                 "what": "charm_pos" if e["target"] == 8 else "charm_neg",
                 "tgt": "enemy" if e["target"] == 8 else "self"}, None, None

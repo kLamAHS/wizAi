@@ -1295,6 +1295,19 @@ class Sim:
 
             elif kind in ("remove", "steal"):
                 what = o["what"]
+                if what in ("charm_all", "ward_all"):
+                    # board wipe (Earthquake): EVERY charm or ward on the
+                    # target side goes, positive and negative alike.
+                    # Aegis/Indemnity-protected hangings survive, which
+                    # is what `protected` was added for.
+                    for t in targets:
+                        lst = t.charms if what == "charm_all" else t.wards
+                        for h in list(lst):
+                            if not h.protected:
+                                lst.remove(h)
+                                self._ev(s, "hanging_wiped", target=t.name,
+                                         effect=h.name, by=card_name)
+                    continue
                 for t in targets:
                     h = _pick_removable(t, what)
                     if h is None:
