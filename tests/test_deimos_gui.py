@@ -1240,3 +1240,164 @@ def test_upkeep_toggles_reach_the_worker(qapp):
                         collect_wisps=False, use_potions=False)
     assert worker.collect_wisps is False
     assert worker.use_potions is False
+
+
+# ------------------------------------------------------------ ttk policy
+def _ice_board(deck, hand, pips, hp):
+    import random
+
+    from data_full import load_spells_full
+    from w101_sim import Actor, Boss, Sim, State
+
+    cards = load_spells_full()
+    sim = Sim(cards, deck, "ice",
+              Boss(name="mob", hp=hp, school="fire", dmg=40),
+              rng=random.Random(0), player_hp=800)
+    p = Actor(name="W", school="ice", hp=800, max_hp=800, team=0,
+              norm_pips=pips)
+    p.hand = [cards[n] for n in hand]
+    p.deck = [cards[n] for n in deck]
+    return sim, State(p, [Actor(name="mob", school="fire", hp=hp,
+                                max_hp=hp, team=1)])
+
+
+def _name(action):
+    return getattr(action, "name", action) if action is not None else "PASS"
+
+
+def test_heuristic_no_longer_passes_on_an_affordable_hit():
+    """A level-6 ice wizard with one pip, a 1-pip Frost Beetle and a
+    2-pip Snow Serpent used to pass the turn away: it picked Serpent as
+    the nuke to build toward, could not afford it, found no buffs, and
+    returned None."""
+    from deimos_bridge.policies import school_aware_blade_stack
+
+    sim, s = _ice_board(["Frost Beetle"] * 3 + ["Snow Serpent"] * 3,
+                        ["Frost Beetle", "Snow Serpent"], 1, 400)
+    assert _name(school_aware_blade_stack(3)(sim, s)) == "Frost Beetle"
+
+
+def test_ttk_banks_a_pip_when_that_kills_sooner():
+    """The calculation the heuristic could not make: with one pip against
+    a 400hp mob, waiting a turn for Snow Serpent beats firing Frost
+    Beetle now."""
+    from deimos_bridge.policies import greedy_ttk
+
+    sim, s = _ice_board(["Frost Beetle"] * 3 + ["Snow Serpent"] * 3,
+                        ["Frost Beetle", "Snow Serpent"], 1, 400)
+    assert _name(greedy_ttk()(sim, s)) == "PASS"
+
+
+def test_ttk_hits_when_the_mob_dies_this_turn_anyway():
+    """Banking a pip must not become a reflex -- against 170hp the beetle
+    line kills just as fast, and ties go to acting."""
+    from deimos_bridge.policies import greedy_ttk
+
+    sim, s = _ice_board(["Frost Beetle"] * 3 + ["Snow Serpent"] * 3,
+                        ["Frost Beetle", "Snow Serpent"], 1, 170)
+    assert _name(greedy_ttk()(sim, s)) == "Frost Beetle"
+
+
+def test_ttk_skips_traps_that_do_not_pay_off():
+    """Three Ice Traps in the deck meant three Ice Traps on the boss
+    before a single hit, which against a weak mob is three wasted turns.
+    Traps should go down only when the fight is long enough to use them."""
+    from deimos_bridge.policies import greedy_ttk
+
+    deck = ["Ice Trap"] * 3 + ["Frost Beetle"] * 3
+    sim, s = _ice_board(deck, ["Ice Trap", "Frost Beetle"], 2, 200)
+    assert _name(greedy_ttk()(sim, s)) == "Frost Beetle"
+
+    sim, s = _ice_board(deck, ["Ice Trap", "Frost Beetle"], 2, 1500)
+    assert _name(greedy_ttk()(sim, s)) == "Ice Trap"
+
+
+def test_rollout_is_deterministic():
+    """Rollouts compare candidate moves, so the comparison must not turn
+    on whether a cast happened to fizzle."""
+    from deimos_bridge.policies import _rollout
+
+    scores = set()
+    for _ in range(5):
+        sim, s = _ice_board(["Frost Beetle"] * 4,
+                            ["Frost Beetle"], 2, 300)
+        card = s.hand[0]
+        scores.add(_rollout(sim, s, card, 12))
+    assert len(scores) == 1
+
+
+def test_rollout_does_not_mutate_the_live_state():
+    from deimos_bridge.policies import _rollout
+
+    sim, s = _ice_board(["Frost Beetle"] * 4, ["Frost Beetle"], 2, 300)
+    hp, pips, hand = s.enemies[0].hp, s.norm_pips, [c.name for c in s.hand]
+    _rollout(sim, s, s.hand[0], 12)
+    assert s.enemies[0].hp == hp
+    assert s.norm_pips == pips
+    assert [c.name for c in s.hand] == hand
+
+
+# ---------------------------------------------------------------- scripts
+def test_script_check_reports_why_it_cannot_compile():
+    from deimos_bridge.scripts import available, check
+
+    ok, _ = available()
+    if not ok:
+        good, reason = check("anything")
+        assert "pip install" in reason or "not importable" in reason
+        return
+    good, reason = check("this is not valid deimoslang @@@")
+    assert good is False and reason
+
+
+def test_script_runner_stops_cleanly():
+    import asyncio
+
+    from deimos_bridge.scripts import ScriptRunner
+
+    class _VM:
+        running = True
+        killed = False
+
+        async def step(self):
+            self.running = False
+
+        def kill(self):
+            self.killed = True
+
+    vm = _VM()
+    runner = ScriptRunner(vm, "src")
+    assert asyncio.run(runner.step()) is True
+    assert asyncio.run(runner.step()) is False
+    assert runner.finished
+    runner.stop()
+    assert vm.killed
+
+
+def test_script_runner_counts_failures():
+    import asyncio
+
+    from deimos_bridge.scripts import ScriptRunner
+
+    class _Boom:
+        running = True
+
+        async def step(self):
+            raise RuntimeError("bad instruction")
+
+        def kill(self):
+            pass
+
+    runner = ScriptRunner(_Boom(), "src")
+    assert asyncio.run(runner.step()) is False
+    assert runner.failures == 1
+    assert "bad instruction" in runner.last_error
+
+
+def test_script_dialog_round_trips(qapp):
+    from deimos_bridge.gui.scriptdialog import ScriptDialog
+
+    d = ScriptDialog("waitfor combat\n")
+    assert d.source() == "waitfor combat\n"
+    d.on_check()
+    assert d.result.text()          # says something either way
