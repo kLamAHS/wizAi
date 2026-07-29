@@ -49,6 +49,29 @@ AUTOBOT_PATTERN = (
     rb"..\x4C\x8B\xE9.......\x80......\x0F"
 )
 
+#: The signature LaurenzLikeThat's fork looks for. Wizard101 patched and
+#: the autobot function's prologue changed, so the vendored 1.8.2
+#: signature stopped matching; the fork tracks the current build (and
+#: grew AUTOBOT_SIZE from 3900 to 4100 with it).
+#:
+#: Knowing both turns a dead end into an instruction. "Not found" alone
+#: only says wizwalker is out of date; finding the *other* pattern in the
+#: same binary says exactly which wizwalker to install.
+FORK_PATTERN = (
+    rb"\x48\x89\x5C\x24.\x48\x89\x74\x24.\x48\x89\x7C\x24."
+    rb"\x55\x41\x54\x41\x55\x41\x56\x41\x57"
+    rb"\x48\x8D\xAC\x24....\x48\x81\xEC...."
+    rb"\x48\x8B\x05....\x48\x33\xC4\x48\x89\x85...."
+    rb"\x4C\x8B\xF1.......\x80......\x0F\x84...."
+)
+
+FORK_URL = "https://github.com/LaurenzLikeThat/wizwalker"
+
+KNOWN_PATTERNS = [
+    ("wizwalker 1.8.2 (the copy vendored in Deimos/libs)", AUTOBOT_PATTERN),
+    (f"LaurenzLikeThat's wizwalker fork ({FORK_URL})", FORK_PATTERN),
+]
+
 COMMON_PATHS = [
     r"C:\ProgramData\KingsIsle Entertainment\Wizard101\Bin\WizardGraphicalClient.exe",
     r"C:\Program Files (x86)\KingsIsle Entertainment\Wizard101\Bin\WizardGraphicalClient.exe",
@@ -104,11 +127,24 @@ def find_exe(explicit=None):
     return None
 
 
-def scan_file(path):
-    """How many times the autobot signature appears in the file."""
+def scan_file(path, pattern=AUTOBOT_PATTERN):
+    """Offsets where `pattern` appears in the file."""
     with open(path, "rb") as f:
         blob = f.read()
-    return [m.start() for m in _re.finditer(AUTOBOT_PATTERN, blob, _re.DOTALL)]
+    return [m.start() for m in _re.finditer(pattern, blob, _re.DOTALL)]
+
+
+def installed_pattern():
+    """The signature the *installed* wizwalker actually uses, if it loads.
+
+    Off Windows the import fails, which is fine -- the diagnostic then
+    reasons purely from the known patterns.
+    """
+    try:
+        from wizwalker.memory.handler import HookHandler
+        return HookHandler.AUTOBOT_PATTERN
+    except Exception:
+        return None
 
 
 def main():
@@ -140,17 +176,31 @@ def main():
               "with --exe.")
         return 2
 
-    try:
-        hits = scan_file(exe)
-    except Exception as exc:
-        print(f"     >> could not read it: {exc}")
-        return 2
+    print("\n3. autobot signatures in the on-disk binary")
+    found = {}
+    for label, pattern in KNOWN_PATTERNS:
+        try:
+            hits = scan_file(exe, pattern)
+        except Exception as exc:
+            print(f"     >> could not read it: {exc}")
+            return 2
+        found[label] = hits
+        mark = f"{len(hits)} match(es)" if hits else "not found"
+        print(f"     {label}\n         -> {mark}")
 
-    print(f"\n3. autobot signature in the on-disk binary: {len(hits)} match(es)")
+    mine = installed_pattern()
+    if mine is not None:
+        which = next((lbl for lbl, pat in KNOWN_PATTERNS if pat == mine), None)
+        print(f"\n4. the installed wizwalker uses: {which or 'an unrecognised signature'}")
+    else:
+        print("\n4. wizwalker is not importable here, so reasoning from the "
+              "known signatures alone")
+
+    matching = [lbl for lbl, hits in found.items() if hits]
     print("\n" + "=" * 60)
 
-    if len(hits) >= 1:
-        print("VERDICT: the signature IS in the binary.")
+    if mine is not None and which and found.get(which):
+        print("VERDICT: your installed wizwalker's signature IS in the binary.")
         print()
         print("So wizwalker is not out of date -- the failure is state in the")
         print("running process. A previous attach zeroed the autobot region")
@@ -165,20 +215,34 @@ def main():
         print("    two tools patching the same region will do this.")
         return 0
 
-    print("VERDICT: the signature is NOT in the binary.")
+    if matching:
+        print("VERDICT: wizwalker is out of date for this build of the game.")
+        print()
+        print("The binary does not contain the signature your wizwalker looks")
+        print("for, but it DOES contain this one:")
+        for label in matching:
+            print(f"    {label}")
+        print()
+        print("Restarting the client cannot fix this -- the built-in message")
+        print("saying so only anticipates the other cause.")
+        print()
+        if any("Laurenz" in lbl for lbl in matching):
+            print("Fix: install the fork, into whichever venv you run wizAi from:")
+            print("    .venv\\Scripts\\python.exe -m pip uninstall -y wizwalker")
+            print("    .venv\\Scripts\\python.exe -m pip install "
+                  f'"git+{FORK_URL}"')
+            print()
+            print("It is a drop-in wizwalker -- same package name, same")
+            print("Python floor (3.11+), same pure-Python dependencies, no")
+            print("Rust. Nothing in deimos_bridge changes.")
+        return 1
+
+    print("VERDICT: none of the signatures this tool knows are in the binary.")
     print()
-    print("The game has been patched since this wizwalker was written, so")
-    print("the byte pattern it looks for no longer exists. Restarting the")
-    print("client cannot fix this -- the message saying so is misleading")
-    print("here, because it only anticipates the other cause.")
-    print()
-    print("Fix: update wizwalker.")
-    print("  - Check for a newer Deimos release, which vendors a matching")
-    print("    wizwalker: https://github.com/Deimos-Wizard101/Deimos-Wizard101")
-    print("  - Or update the vendored copy in Deimos/libs/wizwalker and")
-    print("    reinstall:")
-    print("      .venv\\Scripts\\python.exe -m pip install -e "
-          "Deimos\\libs\\wizwalker")
+    print("The game has been patched past every wizwalker version listed")
+    print("above. Check for a newer Deimos release or a newer fork:")
+    print("    https://github.com/Deimos-Wizard101/Deimos-Wizard101")
+    print(f"    {FORK_URL}")
     print()
     print("Nothing else in deimos_bridge depends on this. The differential")
     print("harness, the effect audit and the GUI's --demo mode all still")
