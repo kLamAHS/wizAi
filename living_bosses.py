@@ -68,14 +68,20 @@ for LEVEL in (12, 16, 20):
                                 seed=12, player_hp=HP, power_pip=PP)
         sim = Sim(dict(cards), dl, "death", boss, player_hp=HP,
                   power_pip=PP, rules=LIVE_RULES)
+        # BOTH triage pilots. `build_deck`'s screen judges candidates
+        # with blade-stack(3) and its triage wrap, so bs3 is the pilot
+        # the deck was SELECTED for; reporting only bs2 grades a deck
+        # under a policy it was never optimized for, and the two can
+        # differ by twenty points on the same cards.
         st = evaluate_paired(sim, {
             "RL(8k)": agent.policy(),
-            "triage": make_survival(make_blade_stack(2))}, n=3000)
+            "triage(bs2)": make_survival(make_blade_stack(2)),
+            "triage(bs3)": make_survival(make_blade_stack(3))}, n=3000)
         row[name] = {"deck": dl, **{pilot: {k: s[k] for k in
                      ("win_rate", "mean_ttk", "p90_ttk",
                       "mean_hp_left")} for pilot, s in st.items()}}
         for pilot, s in st.items():
-            print(f"   {name:<7} [{pilot:<7}] win "
+            print(f"   {name:<7} [{pilot:<11}] win "
                   f"{s['win_rate']*100:5.1f}%  mean {s['mean_ttk']:5.2f}"
                   f"  p90 {s['p90_ttk']:3.0f}  "
                   f"deck {sorted(set(dl))}", flush=True)
@@ -102,13 +108,16 @@ print(f"\n   living+healer minion at 20: win {st['win_rate']*100:5.1f}%"
       f"  mean {st['mean_ttk']:5.2f}  p90 {st['p90_ttk']:3.0f}",
       flush=True)
 
-# pilot ladder on the living boss: the stochastic opponent INVERTS
-# the usual ranking. Tabular MC starves (sparse wins, wide visited-
-# state distribution — enemy-state features and a scripted-advisor
-# warm start were both tried and help only marginally), shallow
-# determinized search inherits rollout noise, and the fixed scripted
-# line is robust. Diagnosed, not assumed: the 2x2 (episodes x
-# enemy-state features) and advisor runs are in the commit history.
+# Pilot ladder on the living boss. This used to carry a comment saying
+# the stochastic opponent INVERTS the usual ranking — scripted lines on
+# top, learners at the bottom. That held while the builder was handing
+# this fight a deck with no heal and no shield: there was nothing for a
+# learner to learn, and every pilot collapsed to "stack, then swing".
+# With the lethality test fixed the deck carries a Pixie and a Tower
+# Shield and the ladder closes up; read the numbers, not this comment.
+# What has NOT changed is the diagnosis of why tabular MC struggles
+# here (sparse wins over a wide visited-state distribution) — the 2x2
+# (episodes x enemy-state features) and advisor runs are in the history.
 from search_policy import make_search_policy
 
 print("\n== pilot ladder on the living boss at 20 (same deck) ==",
@@ -116,10 +125,24 @@ print("\n== pilot ladder on the living boss at 20 (same deck) ==",
 w24, m24, agent24 = fine_tune(cards, dl, "death", living, LIVE_RULES,
                               seed=12, player_hp=HP, power_pip=PP,
                               episodes=24000,
-                              advisor=make_blade_stack(2))
+                              advisor=make_blade_stack(3))
 lsim = Sim(dict(cards), dl, "death", living, player_hp=HP,
            power_pip=PP, rules=LIVE_RULES)
+# The advisor moved from blade-stack(2) to blade-stack(3) for the same
+# reason main.py now picks its advisor by measurement: on this deck
+# bs2 scores 6.7% and bs3 scores 21.7%, so warm-starting off bs2 was
+# imitating a line three times worse than the baseline the agent is
+# then scored against.
+#
+# The TRIAGE-WRAPPED lines belong on this ladder. Leaving them off
+# compared the learners against bare blade-stack while the best
+# scripted line on the same deck was the wrapped one — on a deck that
+# carries a Pixie and a Tower Shield that is a 16-point handicap, and
+# the ladder read "RL on top" purely because its competition had been
+# told to ignore half the deck.
 ladder = evaluate_paired(lsim, {
+    "triage(bs3)": make_survival(make_blade_stack(3)),
+    "triage(bs2)": make_survival(make_blade_stack(2)),
     "blade-stack(3)": make_blade_stack(3),
     "blade-stack(2)": make_blade_stack(2),
     "search(k=5)": make_search_policy(k=5),

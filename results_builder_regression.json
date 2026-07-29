@@ -1,55 +1,92 @@
 {
  "level": 20,
  "player_hp": 915,
- "old_deck": [
-  "Banshee",
-  "Banshee",
-  "Sacrifice",
-  "Ghoul",
-  "Deathblade",
-  "Deathblade",
-  "Balanceblade",
-  "Hex",
-  "Curse",
-  "Pixie"
- ],
- "new_deck": [
-  "Banshee",
-  "Banshee",
-  "Banshee",
-  "Sacrifice",
-  "Deathblade",
-  "Deathblade",
-  "Hex",
-  "Hex"
- ],
  "report_n": 3000,
+ "census": {
+  "bosses": 1909,
+  "pool_casters": 1795,
+  "flat_damage": 114,
+  "pool_casters_dmg_zero": 1795
+ },
+ "defensive_candidates_per_200": {
+  "lethal=False": 45,
+  "lethal=True": 189
+ },
+ "decks": {
+  "old": [
+   "Banshee",
+   "Banshee",
+   "Sacrifice",
+   "Ghoul",
+   "Deathblade",
+   "Deathblade",
+   "Balanceblade",
+   "Hex",
+   "Curse",
+   "Pixie"
+  ],
+  "broken": [
+   "Banshee",
+   "Banshee",
+   "Banshee",
+   "Sacrifice",
+   "Deathblade",
+   "Deathblade",
+   "Hex",
+   "Hex"
+  ],
+  "built_now": [
+   "Banshee",
+   "Banshee",
+   "Banshee",
+   "Deathblade",
+   "Curse",
+   "Death Trap",
+   "Tower Shield",
+   "Pixie",
+   "Pixie"
+  ]
+ },
+ "budget_sweep": {
+  "60": {
+   "triage(bs3)": 0.37366666666666665,
+   "triage(bs2)": 0.155,
+   "size": 9,
+   "defense": [
+    "Pixie",
+    "Tower Shield"
+   ]
+  },
+  "240": {
+   "triage(bs3)": 0.5213333333333333,
+   "triage(bs2)": 0.425,
+   "size": 10,
+   "defense": [
+    "Death Shield",
+    "Pixie",
+    "Tower Shield"
+   ]
+  }
+ },
  "report": {
-  "old": {
-   "triage": 0.25266666666666665,
+  "old (10, Pixie)": {
+   "triage(bs3)": 0.25266666666666665,
+   "triage(bs2)": 0.24,
    "bs3": 0.12933333333333333
   },
-  "new": {
-   "triage": 0.21133333333333335,
+  "broken ( 8, no heal)": {
+   "triage(bs3)": 0.21133333333333335,
+   "triage(bs2)": 0.21133333333333335,
+   "bs3": 0.21133333333333335
+  },
+  "built now ( 9)": {
+   "triage(bs3)": 0.37366666666666665,
+   "triage(bs2)": 0.155,
    "bs3": 0.21133333333333335
   }
  },
  "screen_n250": {
   "old": 0.292,
-  "new": 0.18
- },
- "budget_sweep": {
-  "60": {
-   "triage": 0.21133333333333335,
-   "size": 8,
-   "heals": []
-  },
-  "240": {
-   "triage": 0.21533333333333332,
-   "size": 9,
-   "heals": [
-    "Sprite"
-   ]
-  }
+  "broken": 0.18
  }
 }

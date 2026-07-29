@@ -236,8 +236,35 @@ def legal_pool(cards, school, level=None, mastery=None, enchants=False):
     return pool
 
 
-def sample_deck(pool, school, boss, rng, capacity=16, copy_limit=3):
-    """One legal candidate from a role template with sampled counts."""
+def can_hurt(b):
+    """Can this opponent deal damage at all?
+
+    The template used to ask `boss.dmg > 0`, which is the flat
+    per-round number legacy bosses carry. A LIVING boss deals its
+    damage out of a spell pool and carries `dmg = 0` — and that is not
+    an edge case: 1,795 of the 1,909 bosses in the live data are pool
+    casters, i.e. the test was False for 94% of the game and for every
+    boss `main.py` fights. The template therefore offered shields and
+    heals to legacy flat bosses only and treated every living boss as
+    harmless, which is the opposite of the truth.
+    """
+    # `cheat` is in the test for completeness rather than for effect:
+    # no boss in the live data has a cheat script without also having
+    # flat damage or a pool, so it changes nothing today. It errs
+    # toward offering defense, and the screen prices whether it pays.
+    return bool(b) and (getattr(b, "dmg", 0) > 0 or
+                        bool(getattr(b, "pool", None)) or
+                        getattr(b, "cheat", None) is not None)
+
+
+def sample_deck(pool, school, boss, rng, capacity=16, copy_limit=3,
+                lethal=None):
+    """One legal candidate from a role template with sampled counts.
+
+    `lethal` says whether the ENCOUNTER can hurt the player, which is
+    not always a property of the boss alone (a harmless boss can be
+    escorted by a minion that hits). Left None it is derived from the
+    boss, so a direct call behaves as before."""
     hits = sorted((c for c in pool.values()
                    if c.kind in ("damage", "drain") and not c.x_pips),
                   key=lambda c: -c.damage)[:4]
@@ -294,7 +321,9 @@ def sample_deck(pool, school, boss, rng, capacity=16, copy_limit=3):
     if prisms and rng.random() < 0.8:
         add(prisms[0], rng.randint(1, 2))
     heals = [c for c in pool.values() if c.kind == "heal"]
-    if boss.dmg > 0:
+    if lethal is None:
+        lethal = can_hurt(boss)
+    if lethal:
         # lethal opponent: the template offers defensive roles and the
         # screen prices whether they pay for their slots
         shields = [c for c in pool.values() if c.kind == "shield"]
@@ -416,10 +445,14 @@ def build_deck(cards, school, boss, rules=None, n_candidates=150,
     if enchants:
         cards = {**cards, **pool}
     seen, cands = set(), []
+    # the ENCOUNTER is what has to be survivable, not the boss: a
+    # zero-damage boss escorted by a hitter still kills you
+    lethal = can_hurt(boss) or any(can_hurt(e) for e in (enemies or []))
     tries = 0                       # a level-1 pool may only support a
     while len(cands) < n_candidates and tries < n_candidates * 40:
         tries += 1                  # handful of distinct decks — cap it
-        dl = sample_deck(pool, school, boss, rng, capacity, copy_limit)
+        dl = sample_deck(pool, school, boss, rng, capacity, copy_limit,
+                         lethal=lethal)
         if dl is None:
             break
         key = tuple(sorted(dl))
