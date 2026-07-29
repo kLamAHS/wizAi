@@ -295,37 +295,51 @@ whichever policy actually won, because the learner does not always win.
 `--full`, every world boundary:
 
 ```
-lvl  world        encounter               +  deck  trained  scripted   ship
-10   Wizard City  Norton                  1   6     51.7%     48.7%   trained
-20   Krokotopia   Frost Colossus          2   9     15.5%     69.8%   race(2)
-30   Marleybone   Seething Wraith         1   6     95.1%     95.7%   race(1)
-40   MooShu       Plague Oni              1   6     72.9%     89.2%   race(1)
-50   Dragonspyre  The Collector           2   6     96.5%     96.7%   race(1)
-60   Celestia     Cuthalla                0   7     63.8%     60.3%   trained
-70   Zafaria      Razorjack               1   6     91.5%     92.1%   race(1)
-80   Avalon       Kayla White Talon       1   6     90.5%     90.8%   race(1)
-90   Azteca       Huemac Spear Wreath     1  11     93.9%     97.7%   race(1)
-100  Khrysalis    Shadow of the Land      1  11     98.4%     99.9%   race(1)
-110  Polaris      Captain Loranzo         1  11     99.4%    100.0%   race(1)
-120  Mirage       Mother Ghulture         2   6    100.0%    100.0%   trained
+lvl  world        encounter               +  deck  trained  scripted   edge   ship
+10   Wizard City  Roberto                 0   6     93.3%     90.2%    +3.1   trained
+20   Krokotopia   Frost Colossus          2  10      0.0%     61.5%   -61.5   focus(1)
+30   Marleybone   Gibson O'Leary          0   7    100.0%    100.0%    +0.0   trained
+40   MooShu       Plague Oni              1  14     27.6%     88.5%   -60.9   race(3)
+50   Dragonspyre  Vault Protector         0   7     99.0%     99.7%    -0.7   race(1)
+60   Celestia     Karolak Nightspinner    1   7     89.9%     99.2%    -9.3   focus(1)
+70   Zafaria      Mokompo Storm Growler   0   5     73.3%     71.7%    +1.6   trained
+80   Avalon       Kayla White Talon       1  12     48.1%     99.3%   -51.3   race(3)
+90   Azteca       Stone of Echoes         0  13     99.9%     98.6%    +1.3   trained
+100  Khrysalis    Shadow of the Land      1  12     45.0%     99.8%   -54.8   race(1)
+110  Polaris      Clovis                  0   7     99.4%     99.6%    -0.2   race(1)
+120  Mirage       Mother Ghulture         2  10    100.0%    100.0%    +0.0   trained
 ```
 
-The learner wins outright twice (Wizard City +3.0, Celestia +3.5), ties
-at Mirage, and otherwise trails by under a point wherever the fight is
-decided. Where it fails it fails hard: **−54 points at Krokotopia** and
-−16 at MooShu, both multi-enemy boards. The tabular learner ranks CARDS,
-not targets, so it cannot commit to killing one thing first — the
-representation deficit `mob_generalist.py` isolated, reproduced by the
-end-to-end run rather than argued for. Advisor-guided training moves the
-worst case 4.7% to 6.2%, which is to say barely.
+The sample is now balanced by construction — six solo bosses and six
+boards with companions, alternating by level. The previous version of
+this table was eleven multi-enemy boards and one solo, which is why its
+per-arm means were reported as unreadable (n=1 and n=11). They are
+readable now: **+0.9 points on solo bosses, −39.6 on multi-enemy
+boards**, six each.
 
-The per-arm means (+3.5 solo, −6.8 multi-enemy) are printed with their
-`n`, and here that is n=1 and n=11 — read the rows, not the means.
+On solo bosses the learner wins outright three times (+3.1 Wizard City,
++1.6 Zafaria, +1.3 Azteca), ties twice, and trails by under a point at
+Dragonspyre and Polaris. On boards with companions it does not trail,
+it collapses — 0.0% at Krokotopia against a scripted 61.5%.
+
+**That collapse got worse when the decks got better, and the direction
+is informative.** Comparing the two boards common to both runs: MooShu
+went from 72.9% (scripted 89.2%) to 27.6% (scripted 88.5%), and
+Krokotopia from 15.5% to 0.0%. The scripted lines held or improved; the
+learner fell. The decks in between changed in one specific way — they
+now carry shields and heals, because the builder stopped thinking
+living bosses were harmless — which widens the action space the tabular
+learner has to explore without widening the reward signal at all. That
+is the exploration-failure hypothesis making a prediction and the
+prediction landing: more legal actions per turn, same single terminal
+reward, deeper collapse. It is one comparison across two boards, so it
+is suggestive rather than established, and it is the first thing the
+next attempt should try to break.
 
 The deck chart below is the clearest single picture of the enchant
 result: plain blue through Dragonspyre, purple appearing exactly at
-Celestia 51 where Sun enchants unlock, and dominating every world after
-— six castable cards spending twelve real slots at Zafaria.
+Celestia 60 where Sun enchants unlock, and dominating every world after
+— thirteen castable cards spending twenty-two real slots at Azteca.
 
 ![End-to-end progression](plots/main_progression.png)
 

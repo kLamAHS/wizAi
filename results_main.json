@@ -1,22 +1,290 @@
 {
  "setup": {
-  "school": "storm",
+  "school": "fire",
   "levels": [
-   40
+   10,
+   20,
+   30,
+   40,
+   50,
+   60,
+   70,
+   80,
+   90,
+   100,
+   110,
+   120
   ],
   "pet": "triple-double",
-  "candidates": 30,
+  "candidates": 60,
   "episodes": 12000,
-  "eval_n": 600,
+  "eval_n": 1500,
   "ruleset": "w101-pve-live-scrape",
   "boss_model": "spell pools (casting)",
-  "seconds": 86
+  "seconds": 1123
  },
  "levels": [
   {
+   "level": 10,
+   "world": "Wizard City",
+   "school": "fire",
+   "boss": "Roberto",
+   "boss_hp": 350,
+   "boss_rank": 2,
+   "boss_pool": [
+    "Sunbird",
+    "Fire Elf",
+    "Fire Cat"
+   ],
+   "companions": [],
+   "player_hp": 711,
+   "power_pip": 0.0,
+   "deck": [
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Fire Elf",
+    "Fire Shield",
+    "Pixie"
+   ],
+   "deck_cards": 6,
+   "deck_slots": 6,
+   "enchanted": 0,
+   "n_companions": 0,
+   "best": "trained",
+   "trained": {
+    "win": 0.9333333333333333,
+    "ttk": 5.785714285714286,
+    "p90": 7
+   },
+   "scripted": {
+    "policy": "race(1)",
+    "win": 0.902,
+    "ttk": 6.222468588322247,
+    "p90": 7
+   },
+   "all_policies": {
+    "race(1)": {
+     "win": 0.902,
+     "ttk": 6.222468588322247
+    },
+    "race(2)": {
+     "win": 0.902,
+     "ttk": 6.222468588322247
+    },
+    "race(3)": {
+     "win": 0.902,
+     "ttk": 6.222468588322247
+    },
+    "race(4)": {
+     "win": 0.902,
+     "ttk": 6.222468588322247
+    },
+    "race(5)": {
+     "win": 0.902,
+     "ttk": 6.222468588322247
+    },
+    "race(6)": {
+     "win": 0.902,
+     "ttk": 6.222468588322247
+    },
+    "focus(1)": {
+     "win": 0.902,
+     "ttk": 6.222468588322247
+    },
+    "focus(2)": {
+     "win": 0.902,
+     "ttk": 6.222468588322247
+    },
+    "focus(3)": {
+     "win": 0.902,
+     "ttk": 6.222468588322247
+    },
+    "trained": {
+     "win": 0.9333333333333333,
+     "ttk": 5.785714285714286
+    }
+   }
+  },
+  {
+   "level": 20,
+   "world": "Krokotopia",
+   "school": "fire",
+   "boss": "Frost Colossus",
+   "boss_hp": 510,
+   "boss_rank": 3,
+   "boss_pool": [
+    "Evil Snowman",
+    "Snow Serpent",
+    "Frost Beetle",
+    "Iceblade"
+   ],
+   "companions": [
+    "Ice Colossus (inferred)",
+    "Vault Haunter (inferred)"
+   ],
+   "player_hp": 1086,
+   "power_pip": 0.1,
+   "deck": [
+    "Sunbird",
+    "Heck Hound",
+    "Fire Cat",
+    "Fire Elf",
+    "Link",
+    "Fireblade",
+    "Fireblade",
+    "Balanceblade",
+    "Pixie",
+    "Pixie"
+   ],
+   "deck_cards": 10,
+   "deck_slots": 10,
+   "enchanted": 0,
+   "n_companions": 2,
+   "best": "focus(1)",
+   "trained": {
+    "win": 0.0,
+    "ttk": NaN,
+    "p90": NaN
+   },
+   "scripted": {
+    "policy": "focus(1)",
+    "win": 0.6146666666666667,
+    "ttk": 7.579175704989154,
+    "p90": 11
+   },
+   "all_policies": {
+    "race(1)": {
+     "win": 0.594,
+     "ttk": 5.499438832772166
+    },
+    "race(2)": {
+     "win": 0.558,
+     "ttk": 5.58183990442055
+    },
+    "race(3)": {
+     "win": 0.558,
+     "ttk": 5.58183990442055
+    },
+    "race(4)": {
+     "win": 0.558,
+     "ttk": 5.58183990442055
+    },
+    "race(5)": {
+     "win": 0.558,
+     "ttk": 5.58183990442055
+    },
+    "race(6)": {
+     "win": 0.558,
+     "ttk": 5.58183990442055
+    },
+    "focus(1)": {
+     "win": 0.6146666666666667,
+     "ttk": 7.579175704989154
+    },
+    "focus(2)": {
+     "win": 0.566,
+     "ttk": 7.306242638398116
+    },
+    "focus(3)": {
+     "win": 0.566,
+     "ttk": 7.306242638398116
+    },
+    "trained": {
+     "win": 0.0,
+     "ttk": NaN
+    }
+   }
+  },
+  {
+   "level": 30,
+   "world": "Marleybone",
+   "school": "fire",
+   "boss": "Gibson O'Leary",
+   "boss_hp": 800,
+   "boss_rank": 5,
+   "boss_pool": [
+    "Immolate",
+    "Helephant",
+    "Scald",
+    "Sunbird",
+    "Fireblade"
+   ],
+   "companions": [],
+   "player_hp": 1693,
+   "power_pip": 0.35,
+   "deck": [
+    "Scald",
+    "Fire Elf",
+    "Meteor Strike",
+    "Fireblade",
+    "Fire Prism",
+    "Fire Shield",
+    "Tower Shield"
+   ],
+   "deck_cards": 7,
+   "deck_slots": 7,
+   "enchanted": 0,
+   "n_companions": 0,
+   "best": "trained",
+   "trained": {
+    "win": 1.0,
+    "ttk": 2.8446666666666665,
+    "p90": 4
+   },
+   "scripted": {
+    "policy": "race(1)",
+    "win": 1.0,
+    "ttk": 3.267333333333333,
+    "p90": 5
+   },
+   "all_policies": {
+    "race(1)": {
+     "win": 1.0,
+     "ttk": 3.267333333333333
+    },
+    "race(2)": {
+     "win": 1.0,
+     "ttk": 3.267333333333333
+    },
+    "race(3)": {
+     "win": 1.0,
+     "ttk": 3.267333333333333
+    },
+    "race(4)": {
+     "win": 1.0,
+     "ttk": 3.267333333333333
+    },
+    "race(5)": {
+     "win": 1.0,
+     "ttk": 3.267333333333333
+    },
+    "race(6)": {
+     "win": 1.0,
+     "ttk": 3.267333333333333
+    },
+    "focus(1)": {
+     "win": 1.0,
+     "ttk": 3.267333333333333
+    },
+    "focus(2)": {
+     "win": 1.0,
+     "ttk": 3.267333333333333
+    },
+    "focus(3)": {
+     "win": 1.0,
+     "ttk": 3.267333333333333
+    },
+    "trained": {
+     "win": 1.0,
+     "ttk": 2.8446666666666665
+    }
+   }
+  },
+  {
    "level": 40,
    "world": "MooShu",
-   "school": "storm",
+   "school": "fire",
    "boss": "Plague Oni",
    "boss_hp": 1760,
    "boss_rank": 7,
@@ -30,76 +298,784 @@
    "companions": [
     "Imitsu Defouler (inferred)"
    ],
-   "player_hp": 1892,
+   "player_hp": 2149,
    "power_pip": 0.42,
    "deck": [
-    "Stormzilla",
-    "Stormzilla",
-    "Storm Shark",
-    "Tempest",
-    "Kraken",
-    "Spirit Blade",
-    "Spirit Blade",
+    "Phoenix",
+    "Phoenix",
+    "Phoenix",
+    "Meteor Strike",
     "Balanceblade",
-    "Hex",
-    "Pixie"
+    "Balanceblade",
+    "Tri Blade",
+    "Tri Blade",
+    "Fireblade",
+    "Fireblade",
+    "Fire Shield",
+    "Tower Shield",
+    "Tower Shield",
+    "Sprite"
    ],
-   "deck_cards": 10,
-   "deck_slots": 10,
+   "deck_cards": 14,
+   "deck_slots": 14,
    "enchanted": 0,
    "n_companions": 1,
    "best": "race(3)",
    "trained": {
-    "win": 0.015,
-    "ttk": 12.11111111111111,
-    "p90": 33
+    "win": 0.276,
+    "ttk": 13.31400966183575,
+    "p90": 19
    },
    "scripted": {
     "policy": "race(3)",
+    "win": 0.8853333333333333,
+    "ttk": 9.179969879518072,
+    "p90": 12
+   },
+   "all_policies": {
+    "race(1)": {
+     "win": 0.808,
+     "ttk": 9.106435643564357
+    },
+    "race(2)": {
+     "win": 0.8493333333333334,
+     "ttk": 9.099686028257457
+    },
+    "race(3)": {
+     "win": 0.8853333333333333,
+     "ttk": 9.179969879518072
+    },
+    "race(4)": {
+     "win": 0.8853333333333333,
+     "ttk": 9.179969879518072
+    },
+    "race(5)": {
+     "win": 0.8853333333333333,
+     "ttk": 9.179969879518072
+    },
+    "race(6)": {
+     "win": 0.8853333333333333,
+     "ttk": 9.179969879518072
+    },
+    "focus(1)": {
+     "win": 0.658,
+     "ttk": 11.47112462006079
+    },
+    "focus(2)": {
+     "win": 0.6946666666666667,
+     "ttk": 11.480806142034549
+    },
+    "focus(3)": {
+     "win": 0.734,
+     "ttk": 11.436875567665759
+    },
+    "trained": {
+     "win": 0.276,
+     "ttk": 13.31400966183575
+    }
+   }
+  },
+  {
+   "level": 50,
+   "world": "Dragonspyre",
+   "school": "fire",
+   "boss": "Vault Protector",
+   "boss_hp": 2800,
+   "boss_rank": 8,
+   "boss_pool": [
+    "Spectral Blast",
+    "Hydra",
+    "Power Nova",
+    "Locust Swarm",
+    "Tri Blade"
+   ],
+   "companions": [],
+   "player_hp": 2748,
+   "power_pip": 0.52,
+   "deck": [
+    "Fire Dragon",
+    "Fire Dragon",
+    "Heck Hound",
+    "Balanceblade",
+    "Fireblade",
+    "Fire Trap",
+    "Sprite"
+   ],
+   "deck_cards": 7,
+   "deck_slots": 7,
+   "enchanted": 0,
+   "n_companions": 0,
+   "best": "race(1)",
+   "trained": {
+    "win": 0.99,
+    "ttk": 6.352861952861953,
+    "p90": 8
+   },
+   "scripted": {
+    "policy": "race(1)",
+    "win": 0.9966666666666667,
+    "ttk": 5.962541806020067,
+    "p90": 7
+   },
+   "all_policies": {
+    "race(1)": {
+     "win": 0.9966666666666667,
+     "ttk": 5.962541806020067
+    },
+    "race(2)": {
+     "win": 0.9966666666666667,
+     "ttk": 5.962541806020067
+    },
+    "race(3)": {
+     "win": 0.9966666666666667,
+     "ttk": 5.962541806020067
+    },
+    "race(4)": {
+     "win": 0.9966666666666667,
+     "ttk": 5.962541806020067
+    },
+    "race(5)": {
+     "win": 0.9966666666666667,
+     "ttk": 5.962541806020067
+    },
+    "race(6)": {
+     "win": 0.9966666666666667,
+     "ttk": 5.962541806020067
+    },
+    "focus(1)": {
+     "win": 0.9966666666666667,
+     "ttk": 5.962541806020067
+    },
+    "focus(2)": {
+     "win": 0.9966666666666667,
+     "ttk": 5.962541806020067
+    },
+    "focus(3)": {
+     "win": 0.9966666666666667,
+     "ttk": 5.962541806020067
+    },
+    "trained": {
+     "win": 0.99,
+     "ttk": 6.352861952861953
+    }
+   }
+  },
+  {
+   "level": 60,
+   "world": "Celestia",
+   "school": "fire",
+   "boss": "Karolak Nightspinner",
+   "boss_hp": 3350,
+   "boss_rank": 10,
+   "boss_pool": [
+    "Immolate",
+    "Fire Dragon",
+    "Efreet",
+    "Helephant",
+    "Fireblade"
+   ],
+   "companions": [
+    "Shadow-Web Conscript (inferred)"
+   ],
+   "player_hp": 3916,
+   "power_pip": 0.76,
+   "deck": [
+    "Fire Dragon+gargantuan",
+    "Fire Dragon+gargantuan",
+    "Efreet+gargantuan",
+    "Fireblade+sharp",
+    "Fireblade+sharp",
+    "Tower Shield",
+    "Fire Shield"
+   ],
+   "deck_cards": 7,
+   "deck_slots": 12,
+   "enchanted": 5,
+   "n_companions": 1,
+   "best": "focus(1)",
+   "trained": {
+    "win": 0.8993333333333333,
+    "ttk": 7.453669384729429,
+    "p90": 9
+   },
+   "scripted": {
+    "policy": "focus(1)",
+    "win": 0.992,
+    "ttk": 7.557123655913978,
+    "p90": 9
+   },
+   "all_policies": {
+    "race(1)": {
+     "win": 0.984,
+     "ttk": 7.477642276422764
+    },
+    "race(2)": {
+     "win": 0.984,
+     "ttk": 7.477642276422764
+    },
+    "race(3)": {
+     "win": 0.984,
+     "ttk": 7.477642276422764
+    },
+    "race(4)": {
+     "win": 0.984,
+     "ttk": 7.477642276422764
+    },
+    "race(5)": {
+     "win": 0.984,
+     "ttk": 7.477642276422764
+    },
+    "race(6)": {
+     "win": 0.984,
+     "ttk": 7.477642276422764
+    },
+    "focus(1)": {
+     "win": 0.992,
+     "ttk": 7.557123655913978
+    },
+    "focus(2)": {
+     "win": 0.992,
+     "ttk": 7.557123655913978
+    },
+    "focus(3)": {
+     "win": 0.992,
+     "ttk": 7.557123655913978
+    },
+    "trained": {
+     "win": 0.8993333333333333,
+     "ttk": 7.453669384729429
+    }
+   }
+  },
+  {
+   "level": 70,
+   "world": "Zafaria",
+   "school": "fire",
+   "boss": "Mokompo Storm Growler",
+   "boss_hp": 1280,
+   "boss_rank": 7,
+   "boss_pool": [
+    "Leviathan",
+    "Insane Bolt",
+    "Sirens",
+    "Triton",
+    "Supercharge"
+   ],
+   "companions": [],
+   "player_hp": 4597,
+   "power_pip": 0.84,
+   "deck": [
+    "Fire Dragon+colossal",
+    "Fire Dragon+colossal",
+    "Fireblade+sharp",
+    "Tower Shield",
+    "Fire Shield"
+   ],
+   "deck_cards": 5,
+   "deck_slots": 8,
+   "enchanted": 3,
+   "n_companions": 0,
+   "best": "trained",
+   "trained": {
+    "win": 0.7326666666666667,
+    "ttk": 4.143767060964513,
+    "p90": 5
+   },
+   "scripted": {
+    "policy": "race(1)",
     "win": 0.7166666666666667,
-    "ttk": 11.418604651162791,
+    "ttk": 4.135813953488372,
+    "p90": 5
+   },
+   "all_policies": {
+    "race(1)": {
+     "win": 0.7166666666666667,
+     "ttk": 4.135813953488372
+    },
+    "race(2)": {
+     "win": 0.7166666666666667,
+     "ttk": 4.135813953488372
+    },
+    "race(3)": {
+     "win": 0.7166666666666667,
+     "ttk": 4.135813953488372
+    },
+    "race(4)": {
+     "win": 0.7166666666666667,
+     "ttk": 4.135813953488372
+    },
+    "race(5)": {
+     "win": 0.7166666666666667,
+     "ttk": 4.135813953488372
+    },
+    "race(6)": {
+     "win": 0.7166666666666667,
+     "ttk": 4.135813953488372
+    },
+    "focus(1)": {
+     "win": 0.7166666666666667,
+     "ttk": 4.135813953488372
+    },
+    "focus(2)": {
+     "win": 0.7166666666666667,
+     "ttk": 4.135813953488372
+    },
+    "focus(3)": {
+     "win": 0.7166666666666667,
+     "ttk": 4.135813953488372
+    },
+    "trained": {
+     "win": 0.7326666666666667,
+     "ttk": 4.143767060964513
+    }
+   }
+  },
+  {
+   "level": 80,
+   "world": "Avalon",
+   "school": "fire",
+   "boss": "Kayla White Talon",
+   "boss_hp": 8600,
+   "boss_rank": 11,
+   "boss_pool": [
+    "Spectral Blast",
+    "Availing Hands",
+    "Chimera",
+    "Hydra",
+    "Tri Blade"
+   ],
+   "companions": [
+    "Hobgoblin Plunderer (inferred)"
+   ],
+   "player_hp": 5368,
+   "power_pip": 0.9,
+   "deck": [
+    "Fire Dragon+colossal",
+    "Fire Dragon+colossal",
+    "Fire Dragon+colossal",
+    "Heck Hound",
+    "Rain of Fire+colossal",
+    "Tri Blade+sharp",
+    "Spirit Blade+sharp",
+    "Fireblade+sharp",
+    "Fireblade+sharp",
+    "Tower Shield",
+    "Pixie",
+    "Pixie"
+   ],
+   "deck_cards": 12,
+   "deck_slots": 20,
+   "enchanted": 8,
+   "n_companions": 1,
+   "best": "race(3)",
+   "trained": {
+    "win": 0.4806666666666667,
+    "ttk": 18.83911234396671,
+    "p90": 23
+   },
+   "scripted": {
+    "policy": "race(3)",
+    "win": 0.9933333333333333,
+    "ttk": 13.733557046979866,
     "p90": 15
    },
    "all_policies": {
     "race(1)": {
-     "win": 0.7083333333333334,
-     "ttk": 11.4
+     "win": 0.9933333333333333,
+     "ttk": 13.748322147651006
     },
     "race(2)": {
-     "win": 0.7033333333333334,
-     "ttk": 11.421800947867299
+     "win": 0.9933333333333333,
+     "ttk": 13.746308724832215
     },
     "race(3)": {
-     "win": 0.7166666666666667,
-     "ttk": 11.418604651162791
+     "win": 0.9933333333333333,
+     "ttk": 13.733557046979866
     },
     "race(4)": {
-     "win": 0.7166666666666667,
-     "ttk": 11.418604651162791
+     "win": 0.9933333333333333,
+     "ttk": 13.733557046979866
     },
     "race(5)": {
-     "win": 0.7166666666666667,
-     "ttk": 11.418604651162791
+     "win": 0.9933333333333333,
+     "ttk": 13.733557046979866
     },
     "race(6)": {
-     "win": 0.7166666666666667,
-     "ttk": 11.418604651162791
+     "win": 0.9933333333333333,
+     "ttk": 13.733557046979866
     },
     "focus(1)": {
-     "win": 0.6116666666666667,
-     "ttk": 12.128065395095367
+     "win": 0.9933333333333333,
+     "ttk": 13.748322147651006
     },
     "focus(2)": {
-     "win": 0.6083333333333333,
-     "ttk": 12.153424657534247
+     "win": 0.9933333333333333,
+     "ttk": 13.746308724832215
     },
     "focus(3)": {
-     "win": 0.61,
-     "ttk": 12.153005464480874
+     "win": 0.9933333333333333,
+     "ttk": 13.733557046979866
     },
     "trained": {
-     "win": 0.015,
-     "ttk": 12.11111111111111
+     "win": 0.4806666666666667,
+     "ttk": 18.83911234396671
+    }
+   }
+  },
+  {
+   "level": 90,
+   "world": "Azteca",
+   "school": "fire",
+   "boss": "Stone of Echoes",
+   "boss_hp": 7585,
+   "boss_rank": 13,
+   "boss_pool": [
+    "Spectral Blast",
+    "Availing Hands",
+    "Chimera",
+    "Hydra",
+    "Tri Blade"
+   ],
+   "companions": [],
+   "player_hp": 6226,
+   "power_pip": 0.95,
+   "deck": [
+    "Fire Dragon+colossal",
+    "Efreet+colossal",
+    "Fireblade+sharp",
+    "Fire Trap+potent",
+    "Fire Trap+potent",
+    "Fuel+potent",
+    "Fuel+potent",
+    "Feint+potent",
+    "Feint+potent",
+    "Fire Shield",
+    "Fire Shield",
+    "Tower Shield",
+    "Sprite"
+   ],
+   "deck_cards": 13,
+   "deck_slots": 22,
+   "enchanted": 9,
+   "n_companions": 0,
+   "best": "trained",
+   "trained": {
+    "win": 0.9986666666666667,
+    "ttk": 6.214953271028038,
+    "p90": 7
+   },
+   "scripted": {
+    "policy": "race(4)",
+    "win": 0.986,
+    "ttk": 6.573360378634212,
+    "p90": 8
+   },
+   "all_policies": {
+    "race(1)": {
+     "win": 0.87,
+     "ttk": 6.578544061302682
+    },
+    "race(2)": {
+     "win": 0.92,
+     "ttk": 6.5746376811594205
+    },
+    "race(3)": {
+     "win": 0.9593333333333334,
+     "ttk": 6.580264072272412
+    },
+    "race(4)": {
+     "win": 0.986,
+     "ttk": 6.573360378634212
+    },
+    "race(5)": {
+     "win": 0.986,
+     "ttk": 6.573360378634212
+    },
+    "race(6)": {
+     "win": 0.986,
+     "ttk": 6.573360378634212
+    },
+    "focus(1)": {
+     "win": 0.87,
+     "ttk": 6.578544061302682
+    },
+    "focus(2)": {
+     "win": 0.92,
+     "ttk": 6.5746376811594205
+    },
+    "focus(3)": {
+     "win": 0.9593333333333334,
+     "ttk": 6.580264072272412
+    },
+    "trained": {
+     "win": 0.9986666666666667,
+     "ttk": 6.214953271028038
+    }
+   }
+  },
+  {
+   "level": 100,
+   "world": "Khrysalis",
+   "school": "fire",
+   "boss": "Shadow of the Land",
+   "boss_hp": 13070,
+   "boss_rank": 12,
+   "boss_pool": [
+    "Spectral Blast",
+    "Availing Hands",
+    "Chimera",
+    "Gaze of Fate",
+    "Tri Blade"
+   ],
+   "companions": [
+    "Laughing Calaca (inferred)"
+   ],
+   "player_hp": 7265,
+   "power_pip": 0.99,
+   "deck": [
+    "Fire Dragon+colossal",
+    "Fire Dragon+colossal",
+    "Fire Dragon+colossal",
+    "Heck Hound",
+    "Rain of Fire+colossal",
+    "Tri Blade+sharp",
+    "Spirit Blade+sharp",
+    "Fireblade+sharp",
+    "Fireblade+sharp",
+    "Tower Shield",
+    "Pixie",
+    "Pixie"
+   ],
+   "deck_cards": 12,
+   "deck_slots": 20,
+   "enchanted": 8,
+   "n_companions": 1,
+   "best": "race(1)",
+   "trained": {
+    "win": 0.45,
+    "ttk": 22.254814814814814,
+    "p90": 26
+   },
+   "scripted": {
+    "policy": "race(1)",
+    "win": 0.998,
+    "ttk": 18.50367401469606,
+    "p90": 21
+   },
+   "all_policies": {
+    "race(1)": {
+     "win": 0.998,
+     "ttk": 18.50367401469606
+    },
+    "race(2)": {
+     "win": 0.998,
+     "ttk": 18.50367401469606
+    },
+    "race(3)": {
+     "win": 0.998,
+     "ttk": 18.50367401469606
+    },
+    "race(4)": {
+     "win": 0.998,
+     "ttk": 18.50367401469606
+    },
+    "race(5)": {
+     "win": 0.998,
+     "ttk": 18.50367401469606
+    },
+    "race(6)": {
+     "win": 0.998,
+     "ttk": 18.50367401469606
+    },
+    "focus(1)": {
+     "win": 0.998,
+     "ttk": 18.50367401469606
+    },
+    "focus(2)": {
+     "win": 0.998,
+     "ttk": 18.50367401469606
+    },
+    "focus(3)": {
+     "win": 0.998,
+     "ttk": 18.50367401469606
+    },
+    "trained": {
+     "win": 0.45,
+     "ttk": 22.254814814814814
+    }
+   }
+  },
+  {
+   "level": 110,
+   "world": "Polaris",
+   "school": "fire",
+   "boss": "Clovis",
+   "boss_hp": 7320,
+   "boss_rank": 15,
+   "boss_pool": [
+    "Smoke Screen",
+    "Fireblade",
+    "Choke"
+   ],
+   "companions": [],
+   "player_hp": 8201,
+   "power_pip": 1.0,
+   "deck": [
+    "Fire Dragon+epic",
+    "Efreet+epic",
+    "Fireblade+sharp",
+    "Feint+potent",
+    "Feint+potent",
+    "Feint",
+    "Fire Trap+potent"
+   ],
+   "deck_cards": 7,
+   "deck_slots": 13,
+   "enchanted": 6,
+   "n_companions": 0,
+   "best": "race(1)",
+   "trained": {
+    "win": 0.994,
+    "ttk": 5.441985244802146,
+    "p90": 7
+   },
+   "scripted": {
+    "policy": "race(1)",
+    "win": 0.996,
+    "ttk": 6.133868808567604,
+    "p90": 7
+   },
+   "all_policies": {
+    "race(1)": {
+     "win": 0.996,
+     "ttk": 6.133868808567604
+    },
+    "race(2)": {
+     "win": 0.996,
+     "ttk": 6.133868808567604
+    },
+    "race(3)": {
+     "win": 0.996,
+     "ttk": 6.133868808567604
+    },
+    "race(4)": {
+     "win": 0.996,
+     "ttk": 6.133868808567604
+    },
+    "race(5)": {
+     "win": 0.996,
+     "ttk": 6.133868808567604
+    },
+    "race(6)": {
+     "win": 0.996,
+     "ttk": 6.133868808567604
+    },
+    "focus(1)": {
+     "win": 0.996,
+     "ttk": 6.133868808567604
+    },
+    "focus(2)": {
+     "win": 0.996,
+     "ttk": 6.133868808567604
+    },
+    "focus(3)": {
+     "win": 0.996,
+     "ttk": 6.133868808567604
+    },
+    "trained": {
+     "win": 0.994,
+     "ttk": 5.441985244802146
+    }
+   }
+  },
+  {
+   "level": 120,
+   "world": "Mirage",
+   "school": "fire",
+   "boss": "Mother Ghulture",
+   "boss_hp": 4560,
+   "boss_rank": 15,
+   "boss_pool": [
+    "Spinysaur",
+    "Gnomes",
+    "Forest Lord",
+    "Centaur",
+    "Lifeblade"
+   ],
+   "companions": [
+    "Ghulture (Death) (Ghulture Nest) (inferred)",
+    "Ghulture (Myth) (Ghulture Nest) (inferred)"
+   ],
+   "player_hp": 9131,
+   "power_pip": 1.0,
+   "deck": [
+    "Fire Dragon+epic",
+    "Fire Dragon+epic",
+    "Rain of Fire+epic",
+    "Tri Blade+sharp",
+    "Tri Blade+sharp",
+    "Fireblade+sharp",
+    "Fireblade+sharp",
+    "Fire Shield",
+    "Pixie",
+    "Pixie"
+   ],
+   "deck_cards": 10,
+   "deck_slots": 17,
+   "enchanted": 7,
+   "n_companions": 2,
+   "best": "trained",
+   "trained": {
+    "win": 1.0,
+    "ttk": 5.0,
+    "p90": 5
+   },
+   "scripted": {
+    "policy": "race(1)",
+    "win": 1.0,
+    "ttk": 5.070666666666667,
+    "p90": 5
+   },
+   "all_policies": {
+    "race(1)": {
+     "win": 1.0,
+     "ttk": 5.070666666666667
+    },
+    "race(2)": {
+     "win": 1.0,
+     "ttk": 5.070666666666667
+    },
+    "race(3)": {
+     "win": 1.0,
+     "ttk": 5.070666666666667
+    },
+    "race(4)": {
+     "win": 1.0,
+     "ttk": 5.070666666666667
+    },
+    "race(5)": {
+     "win": 1.0,
+     "ttk": 5.070666666666667
+    },
+    "race(6)": {
+     "win": 1.0,
+     "ttk": 5.070666666666667
+    },
+    "focus(1)": {
+     "win": 1.0,
+     "ttk": 5.070666666666667
+    },
+    "focus(2)": {
+     "win": 1.0,
+     "ttk": 5.070666666666667
+    },
+    "focus(3)": {
+     "win": 1.0,
+     "ttk": 5.070666666666667
+    },
+    "trained": {
+     "win": 1.0,
+     "ttk": 5.0
     }
    }
   }
