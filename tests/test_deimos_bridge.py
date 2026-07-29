@@ -435,6 +435,60 @@ def test_backend_refuses_a_card_that_is_not_in_hand():
     assert "not a castable card in hand" in d.reason
 
 
+def test_provenance_suffix_is_not_mistaken_for_a_target_index():
+    """Two encodings collide on "@": rl_agent writes a target as
+    "Fireblade@1", data_full writes provenance as "Imp@item". Splitting
+    unconditionally turned "Thunder Snake - Starter Wand@item" into a
+    name that is not a card, so every wand, treasure and pet card became
+    unplayable and the policy passed every round."""
+    be = _backend(policy=lambda sim, s: "Thunder Snake - Starter Wand@item")
+    combat = MockCombat(
+        [MockMember("Wizard", 1000, client=True, normal_pips=2, team_id=0),
+         MockMember("Lost Soul", 450, monster=True, team_id=1)],
+        [MockCard("Thunder Snake - Starter Wand", item=True)])
+    be.attach_combat(combat)
+    d = run(be.decide())
+    assert not d.passing, d.reason
+    assert d.card_name == "Thunder Snake - Starter Wand@item"
+    assert d.target_index is None
+
+
+def test_a_targeted_item_card_splits_on_the_index_only():
+    """The awkward case both encodings produce together: rl_agent appends
+    its index to a name that already carries a provenance suffix."""
+    be = _backend(policy=lambda sim, s: "Imp - Starter Wand@item@1")
+    me = MockMember("Wizard", 1000, client=True, normal_pips=2, team_id=0)
+    foes = [MockMember("A", 300, monster=True, team_id=1),
+            MockMember("B", 400, monster=True, team_id=1)]
+    be.attach_combat(MockCombat(
+        [me] + foes, [MockCard("Imp - Starter Wand", item=True)]))
+    d = run(be.decide())
+    assert d.card_name == "Imp - Starter Wand@item"
+    assert d.target_index == 1
+
+
+def test_a_real_starter_hand_produces_a_cast():
+    """End to end over the hand that exposed this: an ice wizard holding
+    one deck card and four starter-wand item cards must play something."""
+    from deimos_bridge.live_state import build_catalog
+    from w101_sim import make_blade_stack
+
+    cat = build_catalog()
+    be = WizAiBackend.from_trained(
+        school="ice", deck=["Frost Beetle"] * 4, cards=cat["cards"],
+        policy=make_blade_stack(3), catalog=cat)
+    hand = [MockCard("Frost Beetle")] + [
+        MockCard(n, item=True) for n in
+        ("Dark Sprite - Starter Wand", "Imp - Starter Wand",
+         "Scarab - Starter Wand", "Thunder Snake - Starter Wand")]
+    be.attach_combat(MockCombat(
+        [MockMember("Wizard", 1000, client=True, normal_pips=1, team_id=0),
+         MockMember("Lost Soul", 450, monster=True, team_id=1)], hand))
+    d = run(be.decide())
+    assert not d.passing, d.reason
+    assert d.card_name in be.last_read.hand_cards
+
+
 def test_backend_understands_a_targeted_action():
     """`rl_agent` emits 'name@i' on a multi-enemy board."""
     be = _backend(policy=lambda sim, s: "Fireblade@1")
@@ -579,6 +633,22 @@ def test_handler_targets_the_mob_the_policy_meant():
     card = combat._cards[0]
     assert card.cast_log == [summon], \
         f"aimed at {card.cast_log} instead of the summon"
+
+
+def test_handler_survives_a_board_read_that_fails():
+    """Memory reads fail mid-round when a duel ends under them. That
+    costs a round; it must not end the fight."""
+    be = _backend()
+
+    async def boom():
+        raise RuntimeError("MemoryReadError")
+
+    combat = simple_fight()
+    h = _Handler(combat, be)
+    be.decide = boom
+    run(h.handle_round())
+    assert combat.passed == 1
+    assert h._read_failures == 1
 
 
 def test_handler_falls_back_to_pass_when_the_cast_throws():

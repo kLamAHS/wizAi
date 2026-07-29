@@ -139,13 +139,21 @@ class WizAiBackend:
             return PolicyDecision(passing=True,
                                   reason=f"policy returned {choice!r}")
 
+        # Two different things put an "@" in a card name and they collide:
+        #   rl_agent encodes a target as "Fireblade@1"   (index)
+        #   data_full encodes provenance as "Imp@item"   (source tier)
+        # Splitting on "@" unconditionally turns "Thunder Snake - Starter
+        # Wand@item" into "Thunder Snake - Starter Wand", which is not a
+        # card, so every wand and treasure card became unplayable.
+        #
+        # Only a trailing *integer* is a target index. rpartition takes the
+        # last "@", so a targeted item card ("Imp@item@0") still splits
+        # correctly into ("Imp@item", 0).
         target_index = None
         if "@" in name:
-            name, _, idx = name.rpartition("@")
-            try:
-                target_index = int(idx)
-            except ValueError:
-                target_index = None
+            head, _, idx = name.rpartition("@")
+            if idx.isdigit():
+                name, target_index = head, int(idx)
 
         if name in ("__pass__", "pass"):
             return PolicyDecision(passing=True, reason="policy chose to pass")
@@ -277,6 +285,8 @@ class WizAiCombatHandler:
         self.client = client
         self.backend = backend
         self._last_read = None
+        #: rounds lost to a failed board read, surfaced at the end of a run
+        self._read_failures = 0
         backend.attach_combat(self)
 
     # `CombatHandler` supplies get_members/get_cards/round_number/
@@ -291,7 +301,17 @@ class WizAiCombatHandler:
         # wraps its whole round the same way (sprinty_combat.py:1783).
         # Without this the first cast silently does nothing.
         async with self.client.mouse_handler:
-            decision = await self.backend.decide()
+            try:
+                decision = await self.backend.decide()
+            except Exception as exc:
+                # A memory read can fail mid-round -- the duel ends, a
+                # participant is freed, the client hiccups. `decide()`
+                # already contains policy errors; this contains the read.
+                # Losing a round is recoverable, crashing out of a live
+                # fight is not.
+                self._read_failures += 1
+                await self.pass_button()
+                return
             read = self.backend.last_read
             self._last_read = read
 

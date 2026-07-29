@@ -155,11 +155,27 @@ async def run(args):
         print("walk into a fight — waiting for combat…")
         for fight in range(args.fights):
             print(f"\nfight {fight + 1}/{args.fights}")
-            # `wait_for_combat` blocks until a duel starts and then runs
-            # `handle_combat` itself (handler.py:64-73). Calling
-            # handle_combat again here would be a second, empty pass.
-            await combat.wait_for_combat()
-            print("  fight over")
+            try:
+                # `wait_for_combat` blocks until a duel starts and then
+                # runs `handle_combat` itself (handler.py:64-73). Calling
+                # handle_combat again here would be a second, empty pass.
+                await combat.wait_for_combat()
+                print("  fight over")
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                # A duel ending is a normal event that wizwalker often
+                # signals by a read failing -- the participant list is
+                # freed under it. Reporting that as a traceback makes a
+                # finished fight look like a crash.
+                name = type(exc).__name__
+                if any(k in name for k in ("Memory", "ClientClosed",
+                                           "ReadingEnum", "Invalidated")):
+                    print(f"  fight ended ({name})")
+                else:
+                    print(f"  fight aborted: {name}: {exc}")
+                    if fight == 0:
+                        raise
     finally:
         await handler.close()
         if args.out:
