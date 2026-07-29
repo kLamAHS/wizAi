@@ -137,16 +137,19 @@ effects exist and what they are called.
 
 ## Fighting real enemies
 
-Needs Windows, Python 3.13+, and the game running and logged in.
+Needs Windows, Python 3.11+, and the game running and logged in.
 **[RUNNING_LIVE.md](RUNNING_LIVE.md) is the step-by-step guide**, including
 the install, what to look at afterwards, and troubleshooting.
 
-The short version, from the repository root:
+The short version, from the repository root. Only wizwalker is required —
+the live path goes through `WizAiCombatHandler`, not wizsprinter, so
+neither wizsprinter's 3.13 floor nor wizlaunch's Rust extension applies,
+and `uv` is not needed:
 
 ```
-cd Deimos && uv sync && cd ..                        # once
-Deimos\.venv\Scripts\python.exe -m pip install numpy # once, for --policy trained
-Deimos\.venv\Scripts\python.exe -m deimos_bridge.run_live --school fire
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -e Deimos\libs\wizwalker numpy
+.venv\Scripts\python.exe -m deimos_bridge.run_live --school fire
 ```
 
 then walk into a fight.

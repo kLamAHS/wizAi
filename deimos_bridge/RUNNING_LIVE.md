@@ -12,49 +12,65 @@ a fight.
 | | |
 |---|---|
 | OS | Windows. Not negotiable — see "Why not Linux/Wine" at the bottom. |
-| Python | **3.13 or newer.** `Deimos/pyproject.toml` and `libs/wizsprinter/pyproject.toml` both declare `requires-python = ">=3.13"`. (wizwalker alone is happy with 3.11, but you need all three.) |
+| Python | **3.11 or newer.** That is wizwalker's floor (`libs/wizwalker/pyproject.toml`), and wizwalker is all this needs. |
 | Game | Wizard101 installed, running, and **logged in to the wizard you want to play**. |
 | Repo | This repository, with `Deimos/` present — it is a subtree, not a submodule, so a normal clone already has it. |
 
-You do **not** need `Deimos.exe`, and you do not launch the Deimos GUI.
-This runs from source and takes over combat directly.
+You do **not** need `Deimos.exe`, you do not launch the Deimos GUI, and
+you do not need `uv`. This runs from source and takes over combat
+directly.
 
 ---
 
 ## 1. Install
 
-Deimos uses [uv](https://docs.astral.sh/uv/) and declares a workspace
-covering `libs/wizwalker`, `libs/wizsprinter` and `libs/wizlaunch`. One
-sync gets all three.
+Only **wizwalker** is required. `run_live.py` goes through
+`WizAiCombatHandler`, which subclasses `wizwalker.combat.CombatHandler`;
+wizsprinter is used only by the alternate backend path, and
+`combat_api_shim.py` falls back to local stand-ins when it is absent.
+
+That matters, because wizwalker is the cheap one: pure Python, `>=3.11`,
+no Rust. Installing all of Deimos would drag in wizsprinter (`>=3.13`)
+and wizlaunch (a Rust extension) for nothing.
 
 ```powershell
 # from the repository root
-cd Deimos
-uv sync
-cd ..
+python --version                     # must be 3.11+
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -e Deimos\libs\wizwalker numpy
 ```
 
-That creates `Deimos\.venv` with wizwalker and wizsprinter installed —
-and, because Deimos itself depends on it, PyQt6, so the GUI needs nothing
-extra.
-
-wizAi's own code adds **one** dependency, and only for the trained
-policy (`rl_agent` → `dp_solver` → numpy). The scripted policies and the
-GUI run on the standard library plus what is already there:
-
-```powershell
-Deimos\.venv\Scripts\python.exe -m pip install numpy
-```
+`numpy` is wizAi's only extra dependency, and only for `--policy
+trained` (`rl_agent` → `dp_solver`). Add `PyQt6` if you want the GUI.
 
 Check it took:
 
 ```powershell
-Deimos\.venv\Scripts\python.exe -c "import wizwalker, wizsprinter; print('ok')"
+.venv\Scripts\python.exe -c "import wizwalker; print('ok')"
 ```
 
 If that raises `AttributeError` on `windll`, you are not on Windows. If it
-raises `ModuleNotFoundError: pymem`, the sync did not complete — `pymem`
-is declared `sys_platform == 'win32'`, so it only installs on Windows.
+raises `ModuleNotFoundError: pymem`, the install did not complete —
+`pymem` is declared `sys_platform == 'win32'`, so it only installs there.
+
+<details>
+<summary>Or install the whole Deimos workspace with uv</summary>
+
+Heavier, and only worth it if you also want Deimos's own bot. Needs
+Python 3.13+ and [uv](https://docs.astral.sh/uv/):
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+# then CLOSE AND REOPEN the terminal -- the installer edits PATH
+cd Deimos
+uv sync
+cd ..
+Deimos\.venv\Scripts\python.exe -m pip install numpy
+```
+
+Substitute `Deimos\.venv\Scripts\python.exe` for `.venv\Scripts\python.exe`
+everywhere below. PyQt6 comes along for free, since Deimos depends on it.
+</details>
 
 ---
 
@@ -76,7 +92,7 @@ From the **repository root** (not from `Deimos/`), so that `data_full`,
 `w101_sim` and `deimos_bridge` are importable:
 
 ```powershell
-Deimos\.venv\Scripts\python.exe -m deimos_bridge.run_live --school fire
+.venv\Scripts\python.exe -m deimos_bridge.run_live --school fire
 ```
 
 You should see:
@@ -129,7 +145,7 @@ then plays the live fight with the resulting table. It deliberately does
 ## 4. Watch it with the GUI instead
 
 ```powershell
-Deimos\.venv\Scripts\python.exe -m deimos_bridge.gui
+.venv\Scripts\python.exe -m deimos_bridge.gui
 ```
 
 Same run, with the board, the decisions, the damage-model residuals and
@@ -193,6 +209,15 @@ backend.
 
 **`ModuleNotFoundError: data_full`**
 You are not in the repository root. Run from there, not from `Deimos/`.
+
+**`'uv' is not recognized as an internal or external command`**
+You do not need uv — use the venv install in step 1. If you do want it,
+install it and then **close and reopen the terminal**; the installer edits
+PATH and your current session will not see it.
+
+**`ModuleNotFoundError: wizwalker`**
+The venv install did not happen, or you are running the system `python`
+instead of `.venv\Scripts\python.exe`.
 
 ---
 
