@@ -76,19 +76,29 @@ column is the best "stack k buffs → nuke" that clears 95% kill):
 
 ```
 matchup                      DP-LB       RL (kill%)   best heuristic
-fire  vs Rattlebones          2.57     3.86 ( 99%)      2.78
-fire  vs Krokopatra           5.33     6.74 ( 98%)      6.75
-fire  vs Jade Oni             7.33     9.03 ( 94%)        —
-fire  vs Ervin Flamerender   11.00    12.77 ( 84%)        —
-fire  vs Malistaire          11.00    12.70 ( 84%)        —
-ice   vs Ervin Flamerender    7.50    11.48 ( 88%)     11.36
-ice   vs Prince Gobblestone  10.50*    7.64 ( 94%)      7.01
-myth  vs Krokopatra           5.25*   12.55 ( 88%)        —
-storm vs Jade Oni             7.03    10.89 ( 81%)        —
-death vs Jade Oni             8.35    10.48 ( 93%)        —
-balance vs Krokopatra         5.19     6.29 ( 97%)      8.75
-life  vs Lord Nightshade      4.17     5.91 (100%)      5.05
+fire  vs Rattlebones          2.57     3.96 (100%)      2.84
+fire  vs Krokopatra           5.33     6.65 ( 98%)      6.83
+fire  vs Jade Oni             7.33     9.32 ( 93%)        —
+fire  vs Ervin Flamerender   11.00    12.93 ( 84%)        —
+fire  vs Malistaire          11.00    12.67 ( 83%)        —
+ice   vs Ervin Flamerender    7.50    10.76 ( 90%)     11.38
+ice   vs Prince Gobblestone  10.50*    7.87 ( 95%)        †
+myth  vs Krokopatra           5.25*   11.71 ( 89%)        —
+storm vs Jade Oni             7.03    11.59 ( 83%)        —
+death vs Jade Oni             8.35    10.22 ( 93%)        —
+balance vs Krokopatra         5.19     6.67 ( 98%)      9.65
+life  vs Lord Nightshade      4.17     5.22 (100%)      5.09
 ```
+
+`†` = the prism heuristic is sitting exactly on the gate. The column
+admits a heuristic only if it clears **>95%** kill, and blade-stack(5)
+on the prism deck measures 95.2% in an independent 2,500-fight sample
+while the sample behind this table fell just under (it printed 95% and
+failed a `> 0.95` test, so it was in [94.5%, 95.0%]). Whether this cell
+prints `7.0` or `—` is a coin flip at the threshold, not a change in
+the policy — it read 7.01 in the previous regeneration. Reported rather
+than nudged: widening the gate to rescue one cell would silently
+re-admit every other borderline arm.
 
 `*` = the DP abstraction doesn't cover the deck's key mechanic, and it
 shows — in both directions:
@@ -113,16 +123,22 @@ Survival objective (real boss damage, era-appropriate player HP):
 
 ```
 matchup (deck)                 HP vs dmg/rd   plain heur   +triage wrap        RL
-death vs Jade Oni (oneshot)    3100 vs 300    94% / 11.4    94% / 11.4    93% /  9.6
-life  vs Krokopatra (sustain)  3200 vs 220    43% / 11.3    65% / 13.7    63% / 14.8
+death vs Jade Oni (oneshot)    3100 vs 300    93% / 11.4    94% / 11.4    91% / 11.5
+life  vs Krokopatra (sustain)  3200 vs 220    45% / 11.3    64% / 13.6    63% / 14.2
 fire  vs Malistaire (oneshot)  2900 vs 400     0% /   —      0% /   —      0% /   —
 ```
 
-- **Drains are free sustain**: death's survival kill% matches its immortal
-  kill% and the RL agent is *faster* than the immortal-player heuristic
-  line because Wraith heals while it nukes.
-- **Life buys kill% with tempo**: shield/heal triage lifts 43% → 65% at
-  +2.4 turns.
+- **Drains are free sustain**: death takes 300/round for eleven rounds
+  on 3,100 HP and still kills 91–94% of the time, because Wraith heals
+  while it nukes — its survival kill% is within a couple of points of
+  its immortal kill% (93%).
+  RETRACTED: this bullet used to add "and the RL agent is *faster* than
+  the heuristic line", off a 9.6 vs 11.4 reading. Regenerated, the RL
+  agent takes 11.5 against the heuristic's 11.4 — no speed edge, and
+  slightly fewer kills. The sustain claim survives; the tempo claim
+  does not.
+- **Life buys kill% with tempo**: shield/heal triage lifts 45% → 64% at
+  +2.3 turns.
 - **Fire vs Malistaire is a lost race without heals** (400/rd kills in ~8
   rounds; the kill needs ~13): the right fix is Fairy treasure cards, and
   the sideboard mechanic is implemented — wiring it into the action space
@@ -144,15 +160,35 @@ Search baseline (determinized rollouts, paired seeds, n=400, no training):
 
 ```
                               blade-stack(3)      search(k=6)
-fire vs Jade Oni [oneshot]    87.2% / 9.72        91.2% / 9.30
-ice vs Gobblestone [prism]    73.0% / 9.01        87.0% / 9.68
+fire vs Jade Oni [oneshot]    87.8% / 9.66        94.0% / 9.42
+ice vs Gobblestone [prism]    74.2% / 9.03        87.8% / 9.35
 ```
 
 Search closes most of the heuristic→RL gap without any training (RL:
-94.3% / 7.64 on the prism matchup after 36k episodes) — the remaining RL
+94.6% / 7.87 on the prism matchup after 36k episodes) — the remaining RL
 edge is draw-distribution knowledge, not mechanics. Search also trades
 mean speed for reliability on the prism line, which is what a
 risk-sensitive objective would ask for.
+
+These two rows moved by about a point when the blade/trap short-circuit
+was fixed (87.2/91.2 and 73.0/87.0 before), and that turns out to be
+the general pattern rather than a quirk of this table. **The commit
+that fixed the short-circuit claimed it "shifts every scripted-baseline
+number in the repo". Measured, it does not.** Two direct A/B runs — the
+old selector and the new one, same decks, same seeds — put it at
+nothing much: on the live storm row 53.5% pre-fix vs 53.8% post (n=800,
+best of `k = 1..4`), and on the living-Krokopatra solo 24.6% vs 24.7%
+at `n_buffs=3`, where it IS worth +3.4 points at `n_buffs=2`. Part of
+the reason is visible right here:
+at `n_buffs=3` with only two distinct blades in the deck, the buggy
+code exhausted its blades, found `castable(blade)` empty, and fell
+through to the trap on its own.
+
+Where the fix genuinely mattered is not a win rate at all — it is deck
+SELECTION. The screen scored Feint-carrying candidates as if the Feint
+were dead weight, so the builder stopped packing them, which is the
+symptom that started that investigation. That effect stands; the
+sweeping claim about every number in the repo is withdrawn.
 
 ## Known failure: the learner on multi-enemy boards
 
@@ -177,6 +213,23 @@ What is established:
   than assumption (see below) does not rescue it either: with a
   race(3) advisor scoring 68% on that exact deck, the learner still
   finishes at 1.5%.
+- It is not reward shaping. The natural suspicion was the `-1` per turn:
+  with a terminal `-FAIL_PENALTY` waiting either way, a *fast* loss
+  scores better than a slow one, so buffing forever would be the
+  rational cowardice. `QAgent.turn_cost` is now a knob, and sweeping it
+  changes nothing:
+
+  ```
+  board                    scripted   tc=1.0   tc=0.25   tc=0.0
+  Plague Oni  +1 add          85.5%      0.0%     0.0%     0.0%
+  Frost Colossus +2 adds      11.0%      0.0%     0.0%     0.0%
+  ```
+
+  At `tc=0` the only signal left is win/lose, and the agent still scores
+  zero — which means it never wins during TRAINING either, on a board
+  where a one-blade race wins 85.5%. Nothing is being mis-valued,
+  because nothing good is being *seen*. The knob stays in because it
+  made the question decidable.
 - The state space is a real part of it, but not the whole answer. The
   multi-enemy key produces ~41,000 Q entries from 12,000 episodes —
   roughly three visits each, which cannot rank an action. Swapping the
@@ -206,6 +259,18 @@ where the BOSS is the threat is actively wrong. Measured on Plague Oni
 points worse than the baseline the agent was scored against. `main.py`
 now measures every scripted line on the actual deck and imitates the
 winner, and prints which one it chose.
+
+Where that leaves the defect: four candidate causes have been tested
+and eliminated (targeting, episode budget, advisor absence, reward
+shaping), and one — tabulation — is confirmed as a contributing but
+insufficient cause. What remains is EXPLORATION. The agent has to
+assemble a specific multi-turn sequence before a single reward
+distinguishes it from any other line, and on a board with companions
+the odds of stumbling into that sequence under ε-greedy are small
+enough that it never happens in 40k episodes. That is the hypothesis
+the next attempt should attack — seeded episodes that start mid-line,
+or search-guided rollouts as the behaviour policy — and it is stated
+here as an untested hypothesis, not a diagnosis.
 
 ## Run it
 
@@ -307,45 +372,83 @@ balance vs Krokopatra (960)             3.45    99%/ 6.93    98%/ 4.25    94%/ 5
 ice [prism] vs Krokopatra (960)         4.31    98%/ 5.29    95%/ 4.91    98%/ 5.16    98%/ 6.13
 ```
 
-> **Regenerated after the blade/trap fix, and the storm row changed
-> completely.** `make_blade_stack` selected buffs with
-> `castable(blade) or castable(trap)`, which short-circuits, so a trap
-> was only ever considered when no blade was in hand — Feint, the
-> biggest multiplier a deck can carry, went uncast whenever any 35%
-> blade was available. The storm row previously read **0% for both the
-> heuristic and the search**, and the paragraph below built a story on
-> that. It now reads 52% and 71%. The old numbers measured a bug.
+> **Correction, twice over — and the second one is mine.** The storm
+> row used to read 0% for both the heuristic and the search, and the
+> paragraph below built a story on it. (1) That row was actually fixed
+> on 2026-07-26 by putting the real Triton (795-875) in the storm deck
+> in place of a placeholder Kraken; the commit moved it to 53.5% / 72%
+> and updated `results_live.json` **without** updating this prose, so
+> the paragraph went stale where nobody would see it. (2) When I
+> regenerated the table after the blade/trap short-circuit fix, I read
+> the delta off the stale prose instead of off the previous results
+> file and credited the whole move to that fix. It earns none of it:
+> rerun the pre-fix `buffs()` on the current storm deck, best of
+> `k = 1..4`, and it scores **53.5%** (n=800) against the fixed
+> selector's 53.8% — and 53.5% is exactly what the previous results
+> file published, which is the confirmation that that number was
+> already measuring the fixed deck with the buggy selector. The deck
+> was the cause. The short-circuit fix is real and it moves other
+> tables; it does not move this one.
 
 *(`results_live.json` + `plots/` are regenerated per data drop and are
 canonical. Under exact roll tables the notable shift: damage variance
 costs the scarcity-blind DP transfer ~10 points on the fire matchups —
 82% -> 70-74% — while heuristic/search/RL barely move.)*
 
-The storm row was the headline, and it was wrong. It read "no scripted
-policy wins at all", with the blade-stack heuristic and the search both
-at 0% — and the explanation offered was that the heuristic cannot
-sequence the fight and the search inherits its blindness through its
-rollout base policy. That explanation was plausible and the numbers
-were an artifact: the heuristic could not cast the Feint in its own
-deck. With the short-circuit fixed the heuristic wins 52% and the
-search 71%, so the sequencing bar was never as high as claimed. What
-survives is the ordering — search still beats the heuristic by 19
-points here, and RL beats both. The DP transfer wins because the
-abstraction actually knows the Tempest pip math, and the RL agent reaches
-59% by learning X-pip patience on top of draw adaptation. Debugging this
-table also caught two real defects (a drain-only-hand stall in the DP
-transfer and multi-school buffs invisible to the abstraction) — the
-baseline ladder keeps earning its keep.
+The storm row was the headline, and the headline is retracted. It read
+"no scripted policy wins at all", with the blade-stack heuristic and
+the search both at 0%, and the explanation offered was that the
+heuristic cannot sequence the fight and the search inherits its
+blindness through its rollout base policy. The explanation was
+plausible and the number was mostly DECK QUALITY: storm's nuke was a
+placeholder Kraken, and no scripted line closes 6,000 HP with it inside
+the turn limit. With the real Triton the heuristic wins 52% and the
+search 71%, so the sequencing bar was never as high as claimed.
 
-**Hybrid search — an honest negative result** (`hybrid_search.py`,
-`results_hybrid.json`, paired seeds n=250 on storm vs Jade Oni): swapping
-the search's rollout base from the heuristic to the trained RL policy
-restores the gradient exactly as predicted (0% → 56%), but the hybrid
-**does not beat plain RL** (67.2%). One-ply argmax over k=5 noisy rollouts
-adds enough variance on a ~13-turn horizon to override good learned
-decisions. The fix directions are classic: more rollouts per candidate,
-or search over the RL agent's value estimates instead of raw returns —
-logged in the roadmap rather than pretended away. Under live rules,
+Two more claims from that paragraph go with it. "The DP transfer wins
+because the abstraction actually knows the Tempest pip math" — the DP
+transfer is now LAST on this row at 39%, below every policy it used to
+beat; it won a field where everything else scored zero. And "the RL
+agent reaches 59%" is simply out of date: it reaches 81%. What survives
+is the ordering — search beats the heuristic by 19 points, RL beats
+both — and the standing verdict that this is the hardest live matchup
+on the board. Debugging this table did catch two real defects along the
+way (a drain-only-hand stall in the DP transfer, and multi-school buffs
+invisible to the abstraction), so the baseline ladder still earns its
+keep; it just did not earn what it was credited with here.
+
+**Hybrid search — still a negative result, for a different reason**
+(`hybrid_search.py`, `results_hybrid.json`, paired seeds n=250 on storm
+vs Jade Oni):
+
+```
+                     now      as first published
+heuristic           49.6%           0.0%
+search(heur-base)   70.4%           0.0%
+RL(20k)             80.8%          67.2%
+search(RL-base)     79.6%          56.0%
+```
+
+The old reading of this table was: the heuristic base gives search a
+dead gradient (0%), swapping in the trained RL policy as rollout base
+**restores** it (0% → 56%), and yet the hybrid still loses to plain RL
+(67.2%) because one-ply argmax over k=5 noisy rollouts adds enough
+variance on a ~13-turn horizon to override good learned decisions.
+
+Both halves of that are retracted. This is the same storm deck as the
+live table above, so it inherits the same cause: the zeros were the
+placeholder Kraken, not a property of search. There was no dead
+gradient to restore — with the real Triton the heuristic base scores
+70.4%, twenty-one points above the heuristic it rolls out. And the
+variance story was invented to explain an eleven-point deficit that no
+longer exists: search(RL-base) and plain RL now finish 1.2 points apart
+at n=250, inside the ±2.5 noise band. What survives is the headline,
+and only the headline:
+the hybrid **does not beat plain RL**. It now ties it, which is a
+cheaper way of saying the same thing — decision-time search buys back
+most of training's advantage but adds nothing on top of it. The fix
+directions are unchanged: more rollouts per candidate, or search over
+the RL agent's value estimates instead of raw returns. Under live rules,
 damage RANGES are now sampled too (`Rules.damage_ranges`; parsed from the
 classic descriptions), so win rates price in damage variance, not just
 fizzle variance.
@@ -379,28 +482,77 @@ evidence (exact weights, enemy pip odds) is tagged `modeled`.
 `results_living.json`; base-stat death wizard, no gear/wand, vs
 Krokopatra under each model): at level 12 both models say no (719 HP
 soloing 4-person content should fail); at level 20 the flat model
-calls the solo trivial (**98.6%**) while the living boss still wins
-most fights (**33.4%** best pilot — heal-aware triage on a
-Pixie-carrying deck) — chip damage understates a hitter that blades
-into Storm Shark spikes and shields your kill turns.
-Two riders. First, the stochastic opponent INVERTS the baseline
-ladder (`pilot_ladder_at_20` in the results): triage 33.4% >
-search(k=5) 24.1% > blade-stack(3) 20.1% > per-deck RL 3.8–7.9%.
-Diagnosed, not assumed — the blade-blindness hypothesis was tested
-and falsified (enemy blade/shield state was ADDED to the tabular
-featurizer and made 8k-episode RL worse by fragmenting visits; 24k +
-a scripted-advisor warm start still trails every scripted pilot).
-The real cause is sample starvation: opponent stochasticity
-(discipline, enemy fizzles, spell choice) widens the visited-state
-distribution and drowns sparse win credit, exactly where tabular MC
-and shallow determinized rollouts are weakest — the concrete
-motivation for the sequence-model rung. The enemy-state features and
-the `fine_tune(advisor=...)` warm start both ship (correct
-representation and a 2x improvement at 24k, honestly short of the
-prior). Second, one 300-HP healer acolyte (which really heals its
-boss — enemy heals route to the neediest teammate) drops the fight
-to **0%** without target switching: the report's role-segmentation
-pattern, quantified.
+calls the solo nearly free (**92.7%**) while the living boss holds
+the same wizard to **22.5%** — chip damage understates a hitter that
+blades into Storm Shark spikes and shields your kill turns. Both
+numbers have drifted with the engine (98.6% and 33.4% when first
+published), but the VERDICT they disagree on has not: the flat model
+has called this solo nearly free and the living model has called it
+hard in every regeneration, and that disagreement is the whole point
+of the layer.
+
+Two riders. First, the stochastic opponent puts SCRIPTED pilots above
+LEARNED ones (`pilot_ladder_at_20` in the results):
+
+```
+pilot at level 20        now      as first published
+blade-stack(3)          22.5%          20.1%
+blade-stack(2)          22.5%          18.0%
+triage                  21.1%          33.4%
+RL(24k)+advisor         17.1%           7.9%
+search(k=5)             11.4%          24.1%
+per-deck RL(8k)          4.4%           3.8%
+```
+
+**This is not a like-for-like update, and two of the old claims do not
+survive it.** Two things moved under it. The ladder is played on
+whatever deck the builder returns for level 20, and that deck changed:
+it used to be ten cards including a Pixie, and it is now eight cards
+with no heal and no shield. The engine moved as well — replay triage on
+the OLD deck today and it reads 25.3%, not the 33.4% it published — so
+the right-hand column is history, not a control.
+
+- RETRACTED: "triage 33.4% — the stochastic opponent INVERTS the
+  baseline ladder." Triage's first place was a property of the DECK,
+  not of the pilot. `make_survival` on a deck with no heal and no
+  shield is the identity wrapper — triage and blade-stack are now
+  literally the same policy, and the 21.1%/22.5% split is two readings
+  of one line at different sample sizes (n=3000 and n=1500), not a
+  difference between pilots. The old ladder measured "the deck with the
+  Pixie in it" and attributed it to triage.
+- RETRACTED: "search(k=5) 24.1%, second place." On the current deck
+  search finishes last among the untrained pilots at 11.4%. Whether that
+  is the deck or the search is untested; it is reported as unexplained
+  rather than re-narrated.
+- SURVIVES: scripted beats learned on a stochastic opponent, and the
+  `fine_tune(advisor=...)` warm start is a large improvement that still
+  does not close the gap — now 4.4% → 17.1%, a wider margin than the
+  2x first reported, and still short of 22.5%. The blade-blindness
+  hypothesis stays falsified (enemy blade/shield state was ADDED to the
+  tabular featurizer and made 8k-episode RL worse by fragmenting
+  visits). Sample starvation stays the diagnosis: opponent
+  stochasticity widens the visited-state distribution and drowns sparse
+  win credit, where tabular MC and shallow determinized rollouts are
+  weakest.
+
+A builder defect fell out of the regeneration and is recorded, not
+fixed (`builder_regression_probe.py`,
+`results_builder_regression.json`): the level-20 deck the builder now
+returns is measurably worse than one it used to return. Under the
+current engine the old Pixie-carrying deck scores 25.3% and the new one
+21.1% (triage, n=3000, ±0.8). It is not a scoring failure — offer the
+screen both and
+it ranks the old deck first by eleven points on its own n=250 protocol
+(29.2% vs 18.0%) — it is CANDIDATE GENERATION: the templates changed
+(the blade guarantee, the enchanted-twin offers) and no longer emit
+that mix. Quadrupling the candidate budget to 240 recovers 0.4 points
+(21.5%, and it does find a Sprite), so it is not sampling thinness
+either.
+
+Second, one 300-HP healer acolyte (which really heals its boss — enemy
+heals route to the neediest teammate) drops the fight to **0%** without
+target switching: the report's role-segmentation pattern, quantified,
+and unchanged at 0.0% across every regeneration since.
 
 This diff was adversarially reviewed by a 30-agent workflow before
 merge; it caught a boss pip-livelock, self-only enemy healing, X-pip
@@ -420,17 +572,32 @@ acolyte):
 
 ```
                               mortal      immortal (tempo view)
-boss alone, triage             38.1%        72.1%
+boss alone, triage             22.1%        80.3%
 +healer, target-blind           0.0%         0.0%   <- the cliff
 +healer, focus, solo deck       0.0%         0.0%   <- out of ammo
-+healer, focus, ammo deck       0.1%        46.4%   <- both needed
++healer, focus, mob deck        0.1%         8.9%   <- built for the fight
++healer, focus, ammo deck       0.0%        46.4%   <- both needed
 +healer, BLIND, ammo deck        —           0.0%   <- focus necessary
-+2 healers, focus, ammo         0.0%         2.1%   <- sustain scales
++2 healers, focus, ammo         0.0%         1.8%   <- sustain scales
 ```
+
+(Regenerated. Only the `boss alone` row moved materially — 38.1%/72.1%
+before — and the blade/trap fix accounts for none of it: replay the old
+selector on the old deck and the mortal cell reads 24.6% against the
+new selector's 24.7%. Two other things did move it. Most of the drop is
+ENGINE DRIFT: the same deck that scored 38.1% at publication scores
+24.7% today, after a long run of living-boss changes (enemy pip
+economy, damage ranges, caster behaviour) that this row was never
+re-measured against. The rest is the DECK — that row plays the solo
+deck, which `mob_fights.py` reads out of `results_living.json`, and the
+builder now hands it a different one, taking 24.7% to 22.1%. Every row
+below it either plays the hand-built ammo magazine or is pinned at 0%,
+so the load-bearing comparison — 46.4% focus vs 0.0% blind on identical
+cards — is unchanged to the decimal.)
 
 Three lessons. TARGETING is necessary but not sufficient: with
 identical ammunition, blind play stays at 0% while focus reaches
-46.4%. AMMUNITION binds next: the solo-built 10-card deck (4 hits)
+46.4%. AMMUNITION binds next: the solo-built deck (8 cards, 4 hits)
 runs dry at boss=388 even after a perfect healer kill — mob fights
 re-price deck size, and the builder's size penalty is exactly wrong
 for them. And the MORTAL verdict is game-accurate: at base stats a

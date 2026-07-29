@@ -3,39 +3,43 @@
  "matchup": "storm vs Jade Oni",
  "paired": {
   "heuristic": {
-   "win_rate": 0.0,
-   "mean_ttk": NaN,
-   "median_ttk": NaN,
-   "p90_ttk": NaN,
-   "p99_ttk": NaN,
-   "mean_hp_left": 0.0,
+   "win_rate": 0.496,
+   "mean_ttk": 11.14516129032258,
+   "median_ttk": 11,
+   "p90_ttk": 14,
+   "p99_ttk": 15,
+   "mean_hp_left": 1000000000.0,
+   "mean_tc_casts": 0.0,
    "ruleset": "w101-pve-live-scrape"
   },
   "search(heur-base)": {
-   "win_rate": 0.0,
-   "mean_ttk": NaN,
-   "median_ttk": NaN,
-   "p90_ttk": NaN,
-   "p99_ttk": NaN,
-   "mean_hp_left": 0.0,
+   "win_rate": 0.704,
+   "mean_ttk": 11.977272727272727,
+   "median_ttk": 12,
+   "p90_ttk": 14,
+   "p99_ttk": 16,
+   "mean_hp_left": 1000000000.0,
+   "mean_tc_casts": 0.0,
    "ruleset": "w101-pve-live-scrape"
   },
   "RL(20k)": {
-   "win_rate": 0.672,
-   "mean_ttk": 12.43452380952381,
-   "median_ttk": 12,
-   "p90_ttk": 15,
-   "p99_ttk": 18,
+   "win_rate": 0.808,
+   "mean_ttk": 12.950495049504951,
+   "median_ttk": 13,
+   "p90_ttk": 14,
+   "p99_ttk": 16,
    "mean_hp_left": 1000000000.0,
+   "mean_tc_casts": 0.0,
    "ruleset": "w101-pve-live-scrape"
   },
   "search(RL-base)": {
-   "win_rate": 0.56,
-   "mean_ttk": 12.992857142857142,
+   "win_rate": 0.796,
+   "mean_ttk": 12.753768844221106,
    "median_ttk": 13,
    "p90_ttk": 16,
-   "p99_ttk": 20,
+   "p99_ttk": 18,
    "mean_hp_left": 1000000000.0,
+   "mean_tc_casts": 0.0,
    "ruleset": "w101-pve-live-scrape"
   }
  }
