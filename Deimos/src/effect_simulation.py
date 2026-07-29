@@ -2,9 +2,9 @@ from wizwalker.memory.memory_objects.enums import SpellEffects, MagicSchool, Han
 from typing import Dict, Any, List, Tuple, Union, Set
 
 from src.combat_cache import *
-from src.combat_math import curve_stat
+from src.combat_math import curve_stat, spell_effect_stacking_id
 
-from enum import Enum
+from enum import Enum, EnumMeta, IntEnum
 import random
 from math import trunc
 
@@ -53,29 +53,62 @@ hot_effect_types = {
 }
 
 
-class MagicSchoolID(MagicSchool):
-    '''WizWalker MagicSchool enum extended for universal schools.'''
-    universal = 80289
+#: MagicSchool plus the pseudo-school the game uses for "any school".
+#: Declared with the functional API because an Enum that already has
+#: members cannot be subclassed -- `class MagicSchoolID(MagicSchool)`
+#: raises TypeError at import. IntEnum so that the raw integer school ids
+#: read out of the client compare equal to these members, which is what
+#: the `damage_type != MagicSchoolID.universal` guards below rely on.
+MagicSchoolID = IntEnum(
+    "MagicSchoolID",
+    [(school.name, school.value) for school in MagicSchool] + [("universal", 80289)],
+)
+MagicSchoolID.__doc__ = "WizWalker MagicSchool enum extended for universal schools."
 
 
-class MagicSchoolIndex(Enum):
+class _MagicSchoolIndexMeta(EnumMeta):
+    """Lets `MagicSchoolIndex[...]` be keyed by school id, member, or name.
+
+    Every call site indexes with a `damage_type` taken straight off a
+    spell effect, which is an integer school id. Enum's own `__getitem__`
+    only accepts member names, so widen it here rather than edit each
+    call site.
+    """
+
+    def __getitem__(cls, key):
+        if isinstance(key, Enum):
+            key = key.value
+        if isinstance(key, int):
+            try:
+                key = MagicSchoolID(key).name
+            except ValueError:
+                raise KeyError(f"no magic school with id {key}") from None
+        return super().__getitem__(key)
+
+
+class MagicSchoolIndex(Enum, metaclass=_MagicSchoolIndexMeta):
     '''Converts the name of a magic school to a list index for a list of stats.'''
-    MagicSchool.fire = 0
-    MagicSchool.ice = 1
-    MagicSchool.storm = 2
-    MagicSchool.myth = 3
-    MagicSchool.life = 4
-    MagicSchool.death = 5
-    MagicSchool.balance = 6
-    MagicSchool.star = 7
-    MagicSchool.sun = 8
-    MagicSchool.moon = 9
-    MagicSchool.gardening = 10
-    MagicSchool.shadow = 11
-    MagicSchool.fishing = 12
-    MagicSchool.cantrips = 13
-    MagicSchool.castle_magic = 14
-    MagicSchool.whirly_burly = 15
+    # These were written as `MagicSchool.fire = 0`, which is an attribute
+    # assignment on the MagicSchool class rather than a member definition:
+    # it defines no members and raises AttributeError on an Enum. The
+    # order is unchanged, and matches `combat_objects.school_ids`, which
+    # is the layout of the per-school stat lists these index into.
+    fire = 0
+    ice = 1
+    storm = 2
+    myth = 3
+    life = 4
+    death = 5
+    balance = 6
+    star = 7
+    sun = 8
+    moon = 9
+    gardening = 10
+    shadow = 11
+    fishing = 12
+    cantrips = 13
+    castle_magic = 14
+    whirly_burly = 15
 
 
 # class OppositeMagicSchool(Enum):
@@ -101,7 +134,7 @@ def clamp(num: Number, min_value: Number, max_value: Number) -> Number:
     return max(min(num, max_value), min_value)
 
 
-def collapse_effect(subeffects: List[Cache], type_name: str, caster: Cache, target: Cache) -> Cache:
+def collapse_effect(subeffects: List[Cache], type_name: str, caster: Cache, target: Cache, pips: int = 0) -> Cache:
     effect: Cache = None
 
     match type_name:
@@ -109,6 +142,9 @@ def collapse_effect(subeffects: List[Cache], type_name: str, caster: Cache, targ
             effect = random.choice(subeffects)
 
         case "VariableSpellEffect": #Handles per pip spells, like Tempest.
+            # `pips` was read without ever being defined or passed in, so
+            # this branch raised NameError for every X-pip spell. It is
+            # now a parameter, defaulted so existing callers still work.
             pip_values = [subeffect["pip_num"] for subeffect in subeffects]
             min_pips = min(pip_values)
             max_pips = max(pip_values)
@@ -161,7 +197,7 @@ def remove_used_effects(cache: Cache, effect_list_index: int, used_effect_indexe
 def sim_outgoing_dmg_effects(cache: Cache, damage_type: int, damage: float, pierce: float) -> Tuple[Cache, int, float, float]:
 
     member_effects: List[Cache] = cache_get_multi(cache, hanging_effect_paths[:4])
-    result_cache = Cache
+    result_cache = cache  # was `= Cache`, the type alias, so nothing was recorded
 
     damage_type_index = MagicSchoolIndex[damage_type].value
 
@@ -170,12 +206,19 @@ def sim_outgoing_dmg_effects(cache: Cache, damage_type: int, damage: float, pier
         used_indexes: List[int] = []
         used_ids: List[Tuple[int, int]] = []
         for m_i, m_effect in enumerate(m_effects):
+            # Hoisted above the guard that reads it -- it used to be
+            # assigned below, so the first effect raised NameError. The
+            # enumerate index is no longer part of the key: including it
+            # made every id unique, which silently disabled the
+            # dedup this guard exists to perform.
+            ids = spell_effect_stacking_id(
+                m_effect["spell_template_id"], m_effect["enchantment_spell_template_id"]
+            )
             if (m_effect["damage_type"] != MagicSchoolID.universal and m_effect["damage_type"] != damage_type) or ids in used_ids:
                 continue
 
             damage = clamp(damage, 0.0, 2000000.0)
 
-            ids = (m_i, m_effect["spell_template_id"], m_effect["enchantment_spell_template_id"])
             param = m_effect["effect_param"]
 
             match m_effect["effect_type"]: #Keep in mind these effects are reused for auras/shadow, they're not strictly charms
@@ -210,18 +253,20 @@ def sim_outgoing_dmg_effects(cache: Cache, damage_type: int, damage: float, pier
 
 def sim_outgoing_heal_effects(cache: Cache, heal_type: int, heal: float) -> Tuple[Cache, float]:
     member_effects: List[Cache] = cache_get_multi(cache, hanging_effect_paths[:4])
-    result_cache = Cache
+    result_cache = cache  # was `= Cache`, the type alias, so nothing was recorded
 
     for i, m_effects in enumerate(member_effects):
         used_indexes: List[int] = []
         used_ids: List[Tuple[int, int]] = []
         for m_i, m_effect in enumerate(m_effects):
+            ids = spell_effect_stacking_id(
+                m_effect["spell_template_id"], m_effect["enchantment_spell_template_id"]
+            )
             if (m_effect["damage_type"] != MagicSchoolID.universal and m_effect["damage_type"] != heal_type) or ids in used_ids:
                 continue
 
             heal = clamp(heal, 0.0, 2000000.0)
 
-            ids = (m_i, m_effect["spell_template_id"], m_effect["enchantment_spell_template_id"])
             param = m_effect["effect_param"]
 
             match m_effect["effect_type"]: #Keep in mind these effects are reused for auras/shadow, they're not strictly charms
@@ -243,6 +288,8 @@ def sim_outgoing_heal_effects(cache: Cache, heal_type: int, heal: float) -> Tupl
 
         remove_used_effects(result_cache, i, used_indexes)
 
+    return result_cache, heal  # the declared return was missing entirely
+
 
 # #TODO: Add global effects
 def sim_incoming_dmg_effects(cache: Cache, damage_type: int, damage: float, pierce: float) -> Tuple[Cache, int, float, float]:
@@ -256,12 +303,14 @@ def sim_incoming_dmg_effects(cache: Cache, damage_type: int, damage: float, pier
         used_indexes: List[int] = []
         used_ids: List[Tuple[int, int]] = []
         for m_i, m_effect in enumerate(m_effects):
+            ids = spell_effect_stacking_id(
+                m_effect["spell_template_id"], m_effect["enchantment_spell_template_id"]
+            )
             if (m_effect["damage_type"] != MagicSchoolID.universal and m_effect["damage_type"] != damage_type) or ids in used_ids:
                 continue
 
             damage = clamp(damage, 0.0, 2000000.0)
 
-            ids = (m_i, m_effect["spell_template_id"], m_effect["enchantment_spell_template_id"])
             param = m_effect["effect_param"]
             max_pierce = pierce
 
@@ -285,7 +334,7 @@ def sim_incoming_dmg_effects(cache: Cache, damage_type: int, damage: float, pier
                         damage = 0
                         continue
 
-                    damage += param
+                    damage -= param  # absorb soaks damage; `+=` had it healing the attack
 
                 case SpellEffects.modify_incoming_armor_piercing: #Pierce traps?
                     pierce += param / 100
@@ -320,12 +369,14 @@ def sim_incoming_heal_effects(cache: Cache, heal_type: float, heal: float) -> Tu
         used_indexes: List[int] = []
         used_ids: List[Tuple[int, int]] = []
         for m_i, m_effect in enumerate(m_effects):
+            ids = spell_effect_stacking_id(
+                m_effect["spell_template_id"], m_effect["enchantment_spell_template_id"]
+            )
             if (m_effect["damage_type"] != MagicSchoolID.universal and m_effect["damage_type"] != heal_type) or ids in used_ids:
                 continue
 
             heal = clamp(heal, 0.0, 2000000.0)
 
-            ids = (m_i, m_effect["spell_template_id"], m_effect["enchantment_spell_template_id"])
             param = m_effect["effect_param"]
 
             match m_effect["effect_type"]:
@@ -359,6 +410,13 @@ def sim_incoming_heal_effects(cache: Cache, heal_type: float, heal: float) -> Tu
 
 
 def calc_crit(crit_rating: float, block_rating: float, caster_level: int, target_level: int, is_pvp: bool = False) -> Tuple[float]:
+    # A caster with no crit rating cannot crit, and every ratio below is
+    # 0/0 when the target also has no block -- the ordinary case for a
+    # low-level wizard fighting a mob, which used to raise
+    # ZeroDivisionError here.
+    if crit_rating <= 0:
+        return 1.0, 0.0, 0.0
+
     if is_pvp: #PVP specific calculation
         m_b = 5 * block_rating
         crit_multiplier = 2 - (m_b / (crit_rating + m_b))
@@ -411,7 +469,7 @@ def sim_damage(duel: Cache, caster: Cache, target: Cache, effect: Cache, crit_th
     caster_crit = cache_get(caster, "get_stats.critical_hit_rating_by_school")[damage_type_index]
     caster_crit += cache_get(caster, "get_stats.critical_hit_rating_all")
     target_level = target["level"]
-    target_block = cache_get(target, "get_stat.block_rating_by_school")[damage_type_index]
+    target_block = cache_get(target, "get_stats.block_rating_by_school")[damage_type_index]
     target_block += cache_get(target, "get_stats.block_rating_all")
 
     #Critical and block calculation
@@ -466,7 +524,7 @@ def sim_incoming_damage(duel: Cache, target: Cache, damage_type: int, damage: fl
     '''Simulates pure damage on a member cache, only on the target side. Useful for effect handling.'''
     target_result = target
 
-    damage_type_index = MagicSchoolIndex[damage].value
+    damage_type_index = MagicSchoolIndex[damage_type].value
 
     #Get and curve target resist
     resist = cache_get(target, "get_stats.dmg_reduce_percent")[damage_type_index] + cache_get(target, "get_stats.dmg_reduce_percent_all")
@@ -544,7 +602,7 @@ def sim_heal(duel: Cache, caster: Cache, target: Cache, effect: Cache, crit_thre
     caster_crit = cache_get(caster, "get_stats.critical_hit_rating_by_school")[heal_type_index]
     caster_crit += cache_get(caster, "get_stats.critical_hit_rating_all")
     target_level = target["level"]
-    target_block = cache_get(target, "get_stat.block_rating_by_school")[heal_type_index]
+    target_block = cache_get(target, "get_stats.block_rating_by_school")[heal_type_index]
     target_block += cache_get(target, "get_stats.block_rating_all")
 
     #Critical and block calculation
