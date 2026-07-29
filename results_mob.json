@@ -4,25 +4,26 @@
  "solo_deck": [
   "Banshee",
   "Banshee",
-  "Sacrifice",
-  "Ghoul",
+  "Banshee",
   "Deathblade",
-  "Deathblade",
-  "Balanceblade",
-  "Hex",
   "Curse",
+  "Death Trap",
+  "Tower Shield",
+  "Pixie",
   "Pixie"
  ],
  "mob_deck": [
   "Banshee",
   "Banshee",
   "Banshee",
-  "Ghoul",
+  "Sacrifice",
   "Deathblade",
   "Deathblade",
-  "Balanceblade",
-  "Balanceblade",
   "Curse",
+  "Death Trap",
+  "Death Trap",
+  "Hex",
+  "Sprite",
   "Sprite"
  ],
  "ammo_deck": [
@@ -43,41 +44,41 @@
  ],
  "arms": {
   "boss alone": {
-   "deck_size": 10,
+   "deck_size": 9,
    "mortal": {
     "triage": {
-     "win_rate": 0.381,
-     "mean_ttk": 7.939632545931759,
-     "p90_ttk": 8
+     "win_rate": 0.3755,
+     "mean_ttk": 8.40479360852197,
+     "p90_ttk": 11
     }
    },
    "immortal": {
     "triage": {
-     "win_rate": 0.721,
-     "mean_ttk": 7.002773925104022,
-     "p90_ttk": 7
+     "win_rate": 0.7685,
+     "mean_ttk": 7.176968119713728,
+     "p90_ttk": 9
     }
    }
   },
   "+healer, blind": {
-   "deck_size": 10,
+   "deck_size": 9,
    "mortal": {
     "triage": {
-     "win_rate": 0.0,
-     "mean_ttk": null,
-     "p90_ttk": null
+     "win_rate": 0.0095,
+     "mean_ttk": 9.263157894736842,
+     "p90_ttk": 11
     }
    },
    "immortal": {
     "triage": {
-     "win_rate": 0.0,
-     "mean_ttk": null,
-     "p90_ttk": null
+     "win_rate": 0.0165,
+     "mean_ttk": 8.333333333333334,
+     "p90_ttk": 9
     }
    }
   },
   "+healer, solo deck": {
-   "deck_size": 10,
+   "deck_size": 9,
    "mortal": {
     "focus(triage)": {
      "win_rate": 0.0,
@@ -94,29 +95,29 @@
    }
   },
   "+healer, mob deck": {
-   "deck_size": 10,
+   "deck_size": 12,
    "mortal": {
     "focus(triage)": {
-     "win_rate": 0.002,
-     "mean_ttk": 9.75,
-     "p90_ttk": 10
+     "win_rate": 0.0005,
+     "mean_ttk": 11.0,
+     "p90_ttk": 11
     },
     "focus(bs3)": {
-     "win_rate": 0.002,
-     "mean_ttk": 9.75,
-     "p90_ttk": 11
+     "win_rate": 0.0,
+     "mean_ttk": null,
+     "p90_ttk": null
     }
    },
    "immortal": {
     "focus(triage)": {
-     "win_rate": 0.0675,
-     "mean_ttk": 10.022222222222222,
-     "p90_ttk": 11
+     "win_rate": 0.0255,
+     "mean_ttk": 9.058823529411764,
+     "p90_ttk": 9
     },
     "focus(bs3)": {
-     "win_rate": 0.0675,
-     "mean_ttk": 10.022222222222222,
-     "p90_ttk": 11
+     "win_rate": 0.0255,
+     "mean_ttk": 9.058823529411764,
+     "p90_ttk": 9
     }
    }
   },
@@ -124,9 +125,9 @@
    "deck_size": 14,
    "mortal": {
     "focus(bs2)": {
-     "win_rate": 0.0015,
-     "mean_ttk": 19.666666666666668,
-     "p90_ttk": 21
+     "win_rate": 0.0,
+     "mean_ttk": null,
+     "p90_ttk": null
     },
     "blind(bs2)": {
      "win_rate": 0.0,
@@ -136,8 +137,8 @@
    },
    "immortal": {
     "focus(bs2)": {
-     "win_rate": 0.464,
-     "mean_ttk": 20.14008620689655,
+     "win_rate": 0.4635,
+     "mean_ttk": 20.266450916936353,
      "p90_ttk": 23
     },
     "blind(bs2)": {
@@ -158,8 +159,8 @@
    },
    "immortal": {
     "focus(bs2)": {
-     "win_rate": 0.021,
-     "mean_ttk": 22.476190476190474,
+     "win_rate": 0.018,
+     "mean_ttk": 22.38888888888889,
      "p90_ttk": 25
     }
    }

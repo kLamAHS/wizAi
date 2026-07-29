@@ -121,8 +121,13 @@ def storm_curve():
     ax.set_ylabel("win rate (%)")
     ax.set_ylim(0, 100)
     ax.set_axisbelow(True)
+    # the title used to hardcode "(scripted heuristics: 0%)", which was
+    # true of a storm deck whose nuke was a placeholder Kraken and has
+    # been false since the real Triton went in. Read it from the data.
     ax.set_title("Storm vs Jade Oni: learning the X-pip line "
-                 "(scripted heuristics: 0%)", fontsize=11, loc="left")
+                 f"(blade-stack heuristic: "
+                 f"{hyb['heuristic']['win_rate']*100:.0f}%)",
+                 fontsize=11, loc="left")
     fig.tight_layout()
     fig.savefig(OUT / "storm_curve.png")
     plt.close(fig)

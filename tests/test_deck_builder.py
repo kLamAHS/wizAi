@@ -189,6 +189,45 @@ def test_sample_deck_offers_defense_only_when_lethal():
     assert "shield" not in kinds_immortal
 
 
+def test_living_boss_counts_as_lethal():
+    """A pool caster carries dmg=0 and is still deadly.
+
+    `boss.dmg > 0` was the whole lethality test, and it is False for
+    1,795 of the 1,909 bosses in the live data — every living boss —
+    so the template offered no shields and almost no heals against the
+    only opponents `main.py` ever fights."""
+    pool = legal_pool(CARDS, "death")
+    living = Boss("krok", 2000, "storm", 0,
+                  pool=["Thunder Snake", "Storm Shark"],
+                  archetype="hitter")
+    inert = Boss("dummy", 2000, "storm", 0)
+    kinds_living, kinds_inert = set(), set()
+    for i in range(30):
+        kinds_living |= {CARDS[n].kind
+                         for n in sample_deck(pool, "death", living,
+                                              random.Random(i))}
+        kinds_inert |= {CARDS[n].kind
+                        for n in sample_deck(pool, "death", inert,
+                                             random.Random(i))}
+    assert "shield" in kinds_living
+    assert "shield" not in kinds_inert
+
+
+def test_lethality_is_a_property_of_the_encounter():
+    """A harmless boss escorted by a hitter still kills you."""
+    pool = legal_pool(CARDS, "death")
+    inert = Boss("dummy", 2000, "storm", 0)
+    add = Boss("acolyte", 300, "fire", 120)
+    kinds = set()
+    for i in range(30):
+        kinds |= {CARDS[n].kind
+                  for n in sample_deck(pool, "death", inert,
+                                       random.Random(i), lethal=True)}
+    assert "shield" in kinds
+    from deck_builder import can_hurt
+    assert not can_hurt(inert) and can_hurt(add)
+
+
 def test_build_deck_survival_arm():
     """player_hp= switches the whole pipeline to the lethal objective."""
     boss = Boss("dummy", 800, "death", 150)

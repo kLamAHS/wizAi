@@ -13,7 +13,7 @@
    "flat": {
     "deck": [
      "Banshee",
-     "Banshee"
+     "Dark Sprite"
     ],
     "RL(8k)": {
      "win_rate": 0.0,
@@ -21,7 +21,13 @@
      "p90_ttk": null,
      "mean_hp_left": 0.0
     },
-    "triage": {
+    "triage(bs2)": {
+     "win_rate": 0.0,
+     "mean_ttk": null,
+     "p90_ttk": null,
+     "mean_hp_left": 0.0
+    },
+    "triage(bs3)": {
      "win_rate": 0.0,
      "mean_ttk": null,
      "p90_ttk": null,
@@ -33,19 +39,26 @@
      "Banshee",
      "Banshee",
      "Banshee",
-     "Ghoul"
+     "Dark Sprite",
+     "Death Shield"
     ],
     "RL(8k)": {
-     "win_rate": 0.002,
-     "mean_ttk": 10.5,
+     "win_rate": 0.0006666666666666666,
+     "mean_ttk": 10.0,
      "p90_ttk": 11,
-     "mean_hp_left": 191.66666666666666
+     "mean_hp_left": 72.5
     },
-    "triage": {
+    "triage(bs2)": {
      "win_rate": 0.0016666666666666668,
-     "mean_ttk": 10.6,
-     "p90_ttk": 11,
-     "mean_hp_left": 284.65
+     "mean_ttk": 9.6,
+     "p90_ttk": 10,
+     "mean_hp_left": 104.4
+    },
+    "triage(bs3)": {
+     "win_rate": 0.0016666666666666668,
+     "mean_ttk": 9.6,
+     "p90_ttk": 10,
+     "mean_hp_left": 104.4
     }
    }
   },
@@ -60,20 +73,26 @@
      "Ghoul",
      "Death Trap",
      "Death Trap",
-     "Pixie",
-     "Pixie"
+     "Death Shield",
+     "Sprite"
     ],
     "RL(8k)": {
-     "win_rate": 0.048,
-     "mean_ttk": 10.895833333333334,
-     "p90_ttk": 12,
-     "mean_hp_left": 179.69444444444446
+     "win_rate": 0.010666666666666666,
+     "mean_ttk": 8.96875,
+     "p90_ttk": 9,
+     "mean_hp_left": 71.375
     },
-    "triage": {
-     "win_rate": 0.505,
-     "mean_ttk": 12.135313531353136,
-     "p90_ttk": 13,
-     "mean_hp_left": 130.13531353135315
+    "triage(bs2)": {
+     "win_rate": 0.183,
+     "mean_ttk": 8.571948998178506,
+     "p90_ttk": 9,
+     "mean_hp_left": 116.47176684881603
+    },
+    "triage(bs3)": {
+     "win_rate": 0.183,
+     "mean_ttk": 8.571948998178506,
+     "p90_ttk": 9,
+     "mean_hp_left": 116.47176684881603
     }
    },
    "living": {
@@ -81,22 +100,26 @@
      "Banshee",
      "Banshee",
      "Banshee",
-     "Ghoul",
-     "Dark Sprite",
      "Death Trap",
      "Death Trap"
     ],
     "RL(8k)": {
-     "win_rate": 0.017666666666666667,
-     "mean_ttk": 8.735849056603774,
-     "p90_ttk": 11,
-     "mean_hp_left": 178.96226415094338
-    },
-    "triage": {
-     "win_rate": 0.06166666666666667,
-     "mean_ttk": 8.162162162162161,
+     "win_rate": 0.024666666666666667,
+     "mean_ttk": 8.337837837837839,
      "p90_ttk": 9,
-     "mean_hp_left": 232.54864864864865
+     "mean_hp_left": 158.8783783783784
+    },
+    "triage(bs2)": {
+     "win_rate": 0.03233333333333333,
+     "mean_ttk": 8.278350515463918,
+     "p90_ttk": 9,
+     "mean_hp_left": 192.6958762886598
+    },
+    "triage(bs3)": {
+     "win_rate": 0.03233333333333333,
+     "mean_ttk": 8.278350515463918,
+     "p90_ttk": 9,
+     "mean_hp_left": 192.6958762886598
     }
    }
   },
@@ -108,51 +131,65 @@
      "Banshee",
      "Banshee",
      "Banshee",
-     "Deathblade",
      "Balanceblade",
-     "Curse",
+     "Balanceblade",
      "Hex",
+     "Curse",
      "Death Trap",
+     "Death Trap",
+     "Tower Shield",
+     "Tower Shield",
      "Pixie",
      "Pixie"
     ],
     "RL(8k)": {
-     "win_rate": 0.9856666666666667,
-     "mean_ttk": 6.9299966181941155,
-     "p90_ttk": 8,
-     "mean_hp_left": 304.73283733513694
+     "win_rate": 0.9273333333333333,
+     "mean_ttk": 8.186915887850468,
+     "p90_ttk": 10,
+     "mean_hp_left": 243.75988497483826
     },
-    "triage": {
-     "win_rate": 0.8886666666666667,
-     "mean_ttk": 9.445986496624156,
-     "p90_ttk": 11,
-     "mean_hp_left": 449.59114778694675
+    "triage(bs2)": {
+     "win_rate": 0.866,
+     "mean_ttk": 10.637413394919168,
+     "p90_ttk": 12,
+     "mean_hp_left": 505.7621247113164
+    },
+    "triage(bs3)": {
+     "win_rate": 0.9386666666666666,
+     "mean_ttk": 11.546164772727273,
+     "p90_ttk": 12,
+     "mean_hp_left": 378.5369318181818
     }
    },
    "living": {
     "deck": [
      "Banshee",
      "Banshee",
-     "Sacrifice",
-     "Ghoul",
+     "Banshee",
      "Deathblade",
-     "Deathblade",
-     "Balanceblade",
-     "Hex",
      "Curse",
+     "Death Trap",
+     "Tower Shield",
+     "Pixie",
      "Pixie"
     ],
     "RL(8k)": {
-     "win_rate": 0.038,
-     "mean_ttk": 9.842105263157896,
-     "p90_ttk": 12,
-     "mean_hp_left": 225.74096491228067
+     "win_rate": 0.19733333333333333,
+     "mean_ttk": 8.116554054054054,
+     "p90_ttk": 11,
+     "mean_hp_left": 272.35430743243245
     },
-    "triage": {
-     "win_rate": 0.3343333333333333,
-     "mean_ttk": 7.8943170488534395,
-     "p90_ttk": 8,
-     "mean_hp_left": 360.3696410767697
+    "triage(bs2)": {
+     "win_rate": 0.155,
+     "mean_ttk": 10.21505376344086,
+     "p90_ttk": 13,
+     "mean_hp_left": 388.94301075268817
+    },
+    "triage(bs3)": {
+     "win_rate": 0.37366666666666665,
+     "mean_ttk": 8.415700267618199,
+     "p90_ttk": 11,
+     "mean_hp_left": 450.0129348795718
     }
    }
   }
@@ -163,39 +200,50 @@
   "p90_ttk": null
  },
  "pilot_ladder_at_20": {
+  "triage(bs3)": {
+   "win_rate": 0.38333333333333336,
+   "mean_ttk": 8.380869565217392,
+   "p90_ttk": 11
+  },
+  "triage(bs2)": {
+   "win_rate": 0.156,
+   "mean_ttk": 10.158119658119658,
+   "p90_ttk": 13
+  },
   "blade-stack(3)": {
-   "win_rate": 0.20133333333333334,
-   "mean_ttk": 7.0,
+   "win_rate": 0.21733333333333332,
+   "mean_ttk": 5.861963190184049,
    "p90_ttk": 7
   },
   "blade-stack(2)": {
-   "win_rate": 0.18,
-   "mean_ttk": 6.566666666666666,
+   "win_rate": 0.06733333333333333,
+   "mean_ttk": 7.198019801980198,
    "p90_ttk": 9
   },
   "search(k=5)": {
-   "win_rate": 0.24133333333333334,
-   "mean_ttk": 8.48342541436464,
+   "win_rate": 0.232,
+   "mean_ttk": 8.85632183908046,
    "p90_ttk": 11
   },
   "RL(24k)+advisor": {
-   "win_rate": 0.07866666666666666,
-   "mean_ttk": 8.338983050847459,
-   "p90_ttk": 12
+   "win_rate": 0.29333333333333333,
+   "mean_ttk": 7.359090909090909,
+   "p90_ttk": 10
   }
  },
  "sample_trace": [
   {
    "actor": "Krokopatra",
-   "card": "Stormblade",
-   "pips_spent": 0,
+   "card": "Lightning Bats",
+   "pips_spent": 2,
    "type": "enemy_cast",
    "turn": 1
   },
   {
    "actor": "Krokopatra",
-   "pips": 2,
-   "type": "enemy_pass",
+   "card": "Stormblade",
+   "pips_spent": 0,
+   "type": "enemy_cast",
    "turn": 2
   },
   {
@@ -214,8 +262,8 @@
   },
   {
    "actor": "Krokopatra",
-   "card": "Storm Shark",
-   "pips_spent": 3,
+   "card": "Lightning Bats",
+   "pips_spent": 2,
    "type": "enemy_cast",
    "turn": 5
   },
@@ -228,10 +276,29 @@
   },
   {
    "actor": "Krokopatra",
-   "card": "Lightning Bats",
-   "pips_spent": 2,
-   "type": "enemy_cast",
+   "card": "Storm Shark",
+   "type": "enemy_fizzle",
    "turn": 7
+  },
+  {
+   "actor": "Krokopatra",
+   "card": "Storm Shark",
+   "pips_spent": 3,
+   "type": "enemy_cast",
+   "turn": 8
+  },
+  {
+   "actor": "Krokopatra",
+   "card": "Thunder Snake",
+   "type": "enemy_fizzle",
+   "turn": 9
+  },
+  {
+   "actor": "Krokopatra",
+   "card": "Thunder Snake",
+   "pips_spent": 1,
+   "type": "enemy_cast",
+   "turn": 10
   }
  ]
 }

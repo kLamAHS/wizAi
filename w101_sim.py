@@ -283,10 +283,41 @@ def enchanted_deck_size(decklist):
     return sum(2 if is_enchanted(n) else 1 for n in decklist)
 
 
+# How many unprotected hangings a living boss wants to see on its target
+# before spending a turn on a board wipe. `modeled` — the game publishes
+# no such threshold. 1 would make Earthquake a 6-pip answer to a single
+# blade; 3 is roughly where a player would pull the trigger. It is a
+# module constant rather than a `Rules` field on purpose: adding a field
+# would change every ruleset id and invalidate results that have nothing
+# to do with wipes.
+ENEMY_WIPE_AT = 3
+
+
+def _is_board_wipe(card):
+    return any(o["op"] == "remove" and
+               o.get("what") in ("charm_all", "ward_all")
+               for o in card.ops)
+
+
+def _live_aura(actor):
+    """The actor's aura if it is still running, else None."""
+    a = getattr(actor, "aura", None)
+    return a if (a is not None and a.rounds > 0) else None
+
+
+def _aura_pierce(actor):
+    """Gear pierce plus the aura's (Infallible). One helper so every
+    ward pass agrees; there is more than one call site."""
+    a = _live_aura(actor)
+    return actor.pierce + (a.pierce if a else 0.0)
+
+
 def _kind_from_ops(ops):
     """Primary kind of a curated card, by scanning its ops in priority
     order (drives DP/RL feature spaces & the scripted heuristics)."""
     kinds = [o["op"] for o in ops]
+    if "aura" in kinds:        # first: an aura spell carries nothing else
+        return "aura"
     if "hit" in kinds or "dot" in kinds:
         return "damage"
     if "drain" in kinds:
@@ -524,6 +555,52 @@ class Bubble:
     percent: float = 0.0
 
 
+@dataclass
+class Aura:
+    """A Star-school self-buff holding its own single slot.
+
+    An aura is NOT a charm and NOT a ward, and that is the entire point
+    of the card type. Earthquake — and every other board wipe — strips
+    charms and wards and leaves auras standing, so when a myth mob is
+    about to erase four turns of blades, the multiplier that survives is
+    the one in the aura slot. That is the counterplay this models.
+
+    ONE at a time: casting a second aura replaces the first, exactly as
+    in the game. Fields carry the game's own signs, taken from the
+    extracted spell data rather than restated:
+
+      outgoing     kModifyOutgoingDamage, ADDITIVE with the gear damage
+                   stat (Amplify's +15% on a 150% wizard is 165%, not
+                   172.5% — the repo owner's rule for the damage stat)
+      incoming     kModifyIncomingDamage, signed as the game signs it:
+                   Fortify is -15 (take 15% LESS), Berserk is +40 (take
+                   40% MORE). Additive with gear resist.
+      accuracy     kModifyAccuracy, added to the fizzle roll
+      pierce       kModifyOutgoingArmorPiercing
+      crit_rating  kCritBoost — a RATING, not a probability, so it is
+                   applied ONLY under a rating resolver. Under classic
+                   rules `Actor.crit_chance` holds a probability and
+                   adding a rating to it is a category error; the
+                   rating is dropped there and the drop is tested.
+      pip_chance   kModifyPowerPipChance
+
+    `rounds` counts down at the START of the owner's turn, so an aura
+    cast on turn T with rounds=4 is live on T, T+1, T+2 and T+3 — the
+    cast turn plus three attacks. The game's exact tick point is not
+    publicly documented; this reading is `modeled`, and the alternative
+    (the cast turn not counting) is one line away in `_tick_aura`.
+    """
+    name: str
+    rounds: int
+    outgoing: float = 0.0
+    incoming: float = 0.0
+    accuracy: float = 0.0
+    pierce: float = 0.0
+    crit_rating: float = 0.0
+    pip_chance: float = 0.0
+    schools: object = None     # None = any school
+
+
 # ---------------------------------------------------------------- cheats
 
 @dataclass
@@ -584,6 +661,9 @@ class Actor:
     heal_in: float = 0.0
     charms: list = field(default_factory=list)         # outgoing Hangings
     wards: list = field(default_factory=list)          # incoming Hangings
+    aura: object = None        # ONE Aura, or None. Deliberately not in
+                               # charms/wards: board wipes clear those
+                               # two lists and must not touch this slot.
     over_time: list = field(default_factory=list)
     stunned: int = 0
     stun_blocks: int = 0
@@ -903,6 +983,9 @@ class Sim:
         chance = a.power_pip_chance
         if s.bubble and s.bubble.fld == "pip_chance":
             chance = min(1.0, chance + s.bubble.percent)
+        _a = _live_aura(a)
+        if _a and _a.pip_chance:
+            chance = min(1.0, chance + _a.pip_chance)
         if self.rules.archmastery and \
                 self.rng.random() < self.rules.archmastery:
             a.school_pips += 1          # locked to the wizard's school
@@ -1051,6 +1134,12 @@ class Sim:
 
     def _resist_mult(self, target, school, pierce):
         res = target.resist.get(school, 0.0) + target.resist.get("*", 0.0)
+        # a defensive aura is additive with gear resist, and it is signed
+        # the way the game signs it: Fortify -15 adds 15 points of
+        # resist, Berserk +40 removes 40
+        a = _live_aura(target)
+        if a and (a.schools is None or school in a.schools):
+            res -= a.incoming
         res = max(res - pierce, 0.0) if res > 0 else res
         mult = 1 - res
         mult *= 1 + target.boost.get(school, 0.0)
@@ -1058,6 +1147,20 @@ class Sim:
 
     def _crit_mult(self, caster, target):
         if self.rules.crit_resolver is not None:
+            # Vengeance grants a crit RATING. `crit_chance` only holds a
+            # rating when a rating resolver is installed; under classic
+            # rules it is a probability and adding 20 to it would read as
+            # +2000%. So the aura's rating is applied here and nowhere
+            # else — same gate the gear layer uses.
+            a = _live_aura(caster)
+            if a and a.crit_rating:
+                saved = caster.crit_chance
+                caster.crit_chance = saved + a.crit_rating
+                try:
+                    return self.rules.crit_resolver(caster, target,
+                                                    self.rng, self.rules)
+                finally:
+                    caster.crit_chance = saved
             return self.rules.crit_resolver(caster, target, self.rng,
                                             self.rules)
         if caster.crit_chance <= 0 or self.rng.random() >= caster.crit_chance:
@@ -1067,8 +1170,13 @@ class Sim:
         return self.rules.crit_multiplier
 
     def _damage_bonus(self, caster, school):
+        # the aura's damage % is ADDITIVE with the gear stat, not a
+        # second multiplier: Amplify on a 150% wizard makes 165%
+        a = _live_aura(caster)
+        extra = a.outgoing if (a and (a.schools is None or
+                                      school in a.schools)) else 0.0
         return 1 + caster.damage_bonus.get(school, 0.0) + \
-            caster.damage_bonus.get("*", 0.0)
+            caster.damage_bonus.get("*", 0.0) + extra
 
     def _bubble_damage(self, s, school):
         b = s.bubble
@@ -1087,7 +1195,8 @@ class Sim:
         dmg *= self._bubble_damage(s, school)
         dmg *= crit_mult
         if ward is None:
-            ward = self._ward_pass(s, target, school, caster.pierce)
+            ward = self._ward_pass(s, target, school,
+                                   _aura_pierce(caster))
         wmult, fschool, pierce = ward
         dmg *= wmult
         if dmg > 0 and caster.flat_damage:
@@ -1182,11 +1291,13 @@ class Sim:
         total = 0.0
         group_state = {}        # group id -> (charm_mult, crit_mult)
         ward_state = {}         # (group id, target id) -> ward pass result
+        aura_cast = set()       # actor ids this cast already re-aura'd
 
         def wards_for(g, t, school):
             k = (g, id(t))
             if k not in ward_state:
-                ward_state[k] = self._ward_pass(s, t, school, caster.pierce)
+                ward_state[k] = self._ward_pass(s, t, school,
+                                                _aura_pierce(caster))
             return ward_state[k]
 
         for op in ops:
@@ -1295,6 +1406,19 @@ class Sim:
 
             elif kind in ("remove", "steal"):
                 what = o["what"]
+                if what in ("charm_all", "ward_all"):
+                    # board wipe (Earthquake): EVERY charm or ward on the
+                    # target side goes, positive and negative alike.
+                    # Aegis/Indemnity-protected hangings survive, which
+                    # is what `protected` was added for.
+                    for t in targets:
+                        lst = t.charms if what == "charm_all" else t.wards
+                        for h in list(lst):
+                            if not h.protected:
+                                lst.remove(h)
+                                self._ev(s, "hanging_wiped", target=t.name,
+                                         effect=h.name, by=card_name)
+                    continue
                 for t in targets:
                     h = _pick_removable(t, what)
                     if h is None:
@@ -1307,6 +1431,31 @@ class Sim:
                     if kind == "steal" and not caster.has_stack(h.stack_key):
                         (caster.charms if h.slot == "charm"
                          else caster.wards).append(h)
+
+            elif kind == "aura":
+                # A multi-effect aura (Berserk is +30% out / +40% in,
+                # Punishment is five effects) arrives as several ops from
+                # ONE cast, so they merge into one Aura instead of each
+                # replacing the last. `aura_cast` records which actors
+                # this cast has already started an aura on.
+                for t in targets:
+                    if id(t) not in aura_cast:
+                        aura_cast.add(id(t))
+                        prev = t.aura
+                        t.aura = Aura(card_name,
+                                      int(o.get("rounds") or 4),
+                                      schools=_op_schools_resolved(
+                                          o, school))
+                        if prev is not None and prev.rounds > 0:
+                            self._ev(s, "aura_replaced", target=t.name,
+                                     effect=prev.name, by=card_name)
+                    fld = o["field"]
+                    setattr(t.aura, fld,
+                            getattr(t.aura, fld) + o["percent"])
+                    self._ev(s, "aura_applied", target=t.name,
+                             effect=card_name, field=fld,
+                             amount=round(o["percent"], 3),
+                             rounds=t.aura.rounds)
 
             elif kind == "global":
                 s.bubble = Bubble(card_name, o["field"],
@@ -1378,7 +1527,9 @@ class Sim:
             caster.graveyard.append(card)
             self.spend(s, card)
             return 0.0
-        acc = card.accuracy + caster.accuracy_bonus
+        _a = _live_aura(caster)
+        acc = card.accuracy + caster.accuracy_bonus + \
+            (_a.accuracy if _a else 0.0)
         acc += self._consume_accuracy_charms(s, caster, card.school)
         if self.rng.random() > min(max(acc, 0.0), 1.0):
             self._ev(s, "fizzled", actor=caster.name, card=card.name,
@@ -1479,6 +1630,17 @@ class Sim:
         self.draw(s)
         return s
 
+    def _tick_aura(self, s, actor):
+        """Count the aura down at the START of the owner's turn, so a
+        4-round aura cast on turn T is live on T..T+3 (see Aura)."""
+        a = actor.aura
+        if a is None:
+            return
+        a.rounds -= 1
+        if a.rounds <= 0:
+            actor.aura = None
+            self._ev(s, "aura_expired", target=actor.name, effect=a.name)
+
     def _tick_over_time(self, s, actor):
         for e in list(actor.over_time):
             if e.kind == "dot":
@@ -1498,6 +1660,7 @@ class Sim:
 
     def _enemy_turn(self, s, enemy):
         self._tick_over_time(s, enemy)
+        self._tick_aura(s, enemy)
         if not enemy.alive:
             return
         if enemy.spell_pool is not None:
@@ -1533,6 +1696,9 @@ class Sim:
         chance = enemy.power_pip_chance
         if s.bubble and s.bubble.fld == "pip_chance":
             chance = min(1.0, chance + s.bubble.percent)
+        _a = _live_aura(enemy)
+        if _a and _a.pip_chance:
+            chance = min(1.0, chance + _a.pip_chance)
         if enemy.norm_pips + enemy.pow_pips >= self.rules.max_pip_slots:
             # full rack: white pips upgrade to power (the game's escape
             # hatch; modeled) — without it a saver whose own-school nuke
@@ -1676,14 +1842,35 @@ class Sim:
                 return shields[0], -1
             return (min(hits, key=cost), -1) if hits else (None, -1)
 
-        # hitter (default): kill shot > setup while saving for the top
-        # nuke > fire the top nuke when ready > don't waste a full rack
+        # hitter (default): kill shot > board wipe when there is a board
+        # worth wiping > setup while saving for the top nuke > fire the
+        # top nuke when ready > don't waste a full rack
         if tgt is not None and hits:
             kill = [c for c in hits if self._enemy_immediate(enemy, c) *
-                    self._resist_mult(tgt, c.school, enemy.pierce)
+                    self._resist_mult(tgt, c.school,
+                                      _aura_pierce(enemy))
                     >= tgt.hp]
             if kill:
                 return min(kill, key=cost), -1
+        # A wipe is valued by what it ERASES, not by what it hits.
+        # Earthquake is a 370-damage 6-pip myth spell, so ranking it as
+        # a nuke buries it forever behind Minotaur — instrumented over
+        # 25 turns with Earthquake in the pool and a full rack, it was
+        # cast zero times. Nobody plays it for the 370. This is the
+        # report's layer-2 "state-aware but imperfect" AI, so the rule
+        # is deliberately crude: fire it once the target is carrying
+        # ENEMY_WIPE_AT unprotected hangings, and never before.
+        wipes = [c for c in legal if _is_board_wipe(c)]
+        if wipes and tgt is not None:
+            # DISTINCT NAMES, not hangings. Tri Blade is one card and one
+            # icon on screen, but the game data gives it three charm
+            # effects (ice/storm/fire, one consumed per hit), so counting
+            # hangings made a single opening blade look like a full stack
+            # and the boss opened the fight with a 6-pip Earthquake.
+            standing = {h.name for h in tgt.charms + tgt.wards
+                        if not h.protected}
+            if len(standing) >= ENEMY_WIPE_AT:
+                return min(wipes, key=cost), -1
         full = enemy.norm_pips + enemy.pow_pips >= \
             self.rules.max_pip_slots
         top_ready = top is not None and (
@@ -1711,7 +1898,9 @@ class Sim:
             self._ev(s, "enemy_dispelled", actor=enemy.name,
                      card=card.name)
             return
+        _a = _live_aura(enemy)
         acc = min(1.0, card.accuracy + enemy.accuracy_bonus +
+                  (_a.accuracy if _a else 0.0) +
                   self._consume_accuracy_charms(s, enemy, card.school))
         if self.rng.random() > acc:
             self._ev(s, "enemy_fizzle", actor=enemy.name, card=card.name)
@@ -1730,6 +1919,7 @@ class Sim:
 
     def _minion_turn(self, s, minion):
         self._tick_over_time(s, minion)
+        self._tick_aura(s, minion)
         if not minion.alive:
             return
         if minion.stunned > 0:
@@ -1777,6 +1967,7 @@ class Sim:
         self.last_state = s
         while s.turn < max_turns:
             self._tick_over_time(s, s.player)
+            self._tick_aura(s, s.player)
             if s.player.hp <= 0:
                 return s.turn, False, 0
             if not any(e.alive for e in s.enemies):
@@ -1862,10 +2053,22 @@ def make_blade_stack(n_buffs):
         # were filtered out, which is why built decks carried almost no
         # traps. Prisms stay last so the FIFO ward pass counts traps
         # pre-conversion.
-        return (castable(sim, s, "blade") + castable(sim, s, "trap")
-                or castable(sim, s, "prism"))
+        b = castable(sim, s, "blade") + castable(sim, s, "trap")
+        if s.player.aura is None:
+            # An aura is a buff too, and the only one a board wipe
+            # cannot take away. It is offered here rather than left out
+            # for a concrete reason: the deck screen scores candidates
+            # with THIS policy, so a buff the policy never casts makes
+            # every deck holding it look worse and gets it filtered out
+            # of the builder's output. That is exactly how Feint went
+            # missing; auras are not repeating it.
+            #
+            # Skipped while one is already up: re-casting replaces
+            # rather than stacks, so a second copy is a wasted turn.
+            b = b + castable(sim, s, "aura")
+        return b or castable(sim, s, "prism")
     def strat(sim, s):
-        pend = len(s.blades) + len(s.traps)
+        pend = len(s.blades) + len(s.traps) + (1 if s.player.aura else 0)
         if pend < n_buffs:
             b = buffs(sim, s)
             if b:
