@@ -138,13 +138,18 @@ effects exist and what they are called.
 ## Fighting real enemies
 
 Needs Windows, Python 3.13+, and the game running and logged in.
+**[RUNNING_LIVE.md](RUNNING_LIVE.md) is the step-by-step guide**, including
+the install, what to look at afterwards, and troubleshooting.
+
+The short version, from the repository root:
 
 ```
-cd Deimos && uv sync          # once
-python -m deimos_bridge.run_live --school fire --policy blade-stack
-python -m deimos_bridge.run_live --school fire --policy trained \
-    --deck "Fireblade,Fireblade,Sunbird,Sunbird,Sunbird,Tri Blade"
+cd Deimos && uv sync && cd ..                        # once
+Deimos\.venv\Scripts\python.exe -m pip install numpy # once, for --policy trained
+Deimos\.venv\Scripts\python.exe -m deimos_bridge.run_live --school fire
 ```
+
+then walk into a fight.
 
 `--policy trained` trains a `QAgent` against the simulator first and then
 plays the live fight with the resulting table, rather than exploring in

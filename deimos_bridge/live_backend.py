@@ -282,26 +282,33 @@ class WizAiCombatHandler:
     # valid `combat` for the backend.
 
     async def handle_round(self):
-        decision = await self.backend.decide()
-        read = self.backend.last_read
-        self._last_read = read
+        # Every action here is a mouse click -- wizwalker has no memory
+        # API for casting -- and `MouseHandler.__aenter__` is what
+        # activates the mouseless cursor hook that makes those clicks land
+        # without stealing the real cursor. `SprintyCombat.handle_round`
+        # wraps its whole round the same way (sprinty_combat.py:1783).
+        # Without this the first cast silently does nothing.
+        async with self.client.mouse_handler:
+            decision = await self.backend.decide()
+            read = self.backend.last_read
+            self._last_read = read
 
-        if decision.passing or read is None:
-            await self.pass_button()
-            return
+            if decision.passing or read is None:
+                await self.pass_button()
+                return
 
-        card = self._pick_card(read, decision.card_name)
-        if card is None:
-            await self.pass_button()
-            return
+            card = self._pick_card(read, decision.card_name)
+            if card is None:
+                await self.pass_button()
+                return
 
-        target = await self._resolve_target(read, decision.target_index)
-        try:
-            await card.cast(target)
-        except Exception:
-            # A misclick or a board that moved under us costs this round,
-            # not the fight.
-            await self.pass_button()
+            target = await self._resolve_target(read, decision.target_index)
+            try:
+                await card.cast(target)
+            except Exception:
+                # A misclick or a board that moved under us costs this
+                # round, not the fight.
+                await self.pass_button()
 
     def _pick_card(self, read, name):
         cards = read.hand_cards.get(name) or []

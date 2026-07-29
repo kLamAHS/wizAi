@@ -465,8 +465,9 @@ class _Handler:
 
     def __new__(cls, combat, backend):
         from deimos_bridge.live_backend import WizAiCombatHandler
+        from deimos_bridge.mock_client import MockClient
         h = object.__new__(WizAiCombatHandler)
-        h.client = None
+        h.client = MockClient()
         h.backend = backend
         h._last_read = None
         h.pass_button = combat.pass_button
@@ -492,6 +493,21 @@ def test_handler_casts_exactly_once_per_round():
     casts = sum(len(c.cast_log) for c in combat._cards)
     assert casts == 1, f"one decision produced {casts} casts"
     assert combat.passed == 0
+
+
+def test_handler_enters_the_mouse_handler():
+    """Casting is mouse clicks -- wizwalker has no memory API for it --
+    and entering client.mouse_handler is what activates the mouseless
+    cursor hook. A round that skips it clicks nothing, silently."""
+    be = _backend(policy=lambda sim, s: "Fireblade")
+    combat = MockCombat(
+        [MockMember("Wizard", 2000, client=True, normal_pips=4, team_id=0),
+         MockMember("Lost Soul", 900, monster=True, team_id=1)],
+        [MockCard("Fireblade")])
+    h = _Handler(combat, be)
+    run(h.handle_round())
+    assert h.client.mouse_handler.entered == 1
+    assert h.client.mouse_handler.depth == 0     # and exited cleanly
 
 
 def test_handler_passes_when_the_policy_passes():

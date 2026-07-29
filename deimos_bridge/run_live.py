@@ -130,10 +130,13 @@ async def run(args):
 
         print(f"wizAi policy {args.policy!r} taking over combat "
               f"({args.school} wizard)")
+        print("walk into a fight — waiting for combat…")
         for fight in range(args.fights):
             print(f"\nfight {fight + 1}/{args.fights}")
+            # `wait_for_combat` blocks until a duel starts and then runs
+            # `handle_combat` itself (handler.py:64-73). Calling
+            # handle_combat again here would be a second, empty pass.
             await combat.wait_for_combat()
-            await combat.handle_combat()
             print("  fight over")
     finally:
         await handler.close()

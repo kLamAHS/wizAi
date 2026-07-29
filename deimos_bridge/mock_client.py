@@ -109,6 +109,34 @@ class MockCard:
         return True
 
 
+class MockMouseHandler:
+    """`client.mouse_handler`, which is an async context manager.
+
+    Entering it is what activates wizwalker's mouseless cursor hook, and
+    every cast is a mouse click, so a code path that forgets the `async
+    with` does nothing at all in a real fight. `entered` records that it
+    was used so a test can assert on it.
+    """
+
+    def __init__(self):
+        self.entered = 0
+        self.depth = 0
+
+    async def __aenter__(self):
+        self.entered += 1
+        self.depth += 1
+        return self
+
+    async def __aexit__(self, *exc):
+        self.depth -= 1
+        return False
+
+
+class MockClient:
+    def __init__(self):
+        self.mouse_handler = MockMouseHandler()
+
+
 class MockCombat:
     """Stands in for `CombatHandler` / `SprintyCombat`."""
     def __init__(self, members, cards, round_number=1, client_index=0):
