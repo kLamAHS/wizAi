@@ -87,6 +87,26 @@ class Rules:
                                          # probability is the tractable
                                          # abstraction of that rate.
 
+    # -- flat-stat placement, contested ------------------------------------
+    # Where the flat damage and flat resist stats sit in the pipeline was
+    # taken from community description. Deimos -- a bot that reads the live
+    # client, so its math was checked against real numbers on screen -- puts
+    # both somewhere else, and puts them there in *two* independently
+    # written code paths (`src/combat_math.py:157,253` and
+    # `src/effect_simulation.py:397,441`). See
+    # `deimos_bridge/differential.py`, which reproduces the gap.
+    #
+    # Defaults keep the old behaviour so every published table stays valid.
+    # Flip these to adopt Deimos's placement.
+    flat_damage_before_multipliers: bool = False
+    # False: flat damage is added after charms, wards and crit (v0.3).
+    # True:  added right after the school damage %, so charms and crit
+    #        multiply it and shields reduce it. This is what Deimos does.
+    flat_resist_before_resist: bool = False
+    # False: flat resist is subtracted after the percent-resist multiply.
+    # True:  subtracted before it, so percent resist applies to the
+    #        already-reduced number. This is what Deimos does.
+
 
 # ---------------------------------------------------------------- card model
 
@@ -1190,8 +1210,19 @@ class Sim:
         `ward` carries a precomputed _ward_pass result so ops in the same
         link group share ONE ward consumption (Fire Elf's hit + DoT are a
         single strike; a shield reduces both)."""
-        dmg = base * charm_mult
-        dmg *= self._damage_bonus(caster, school)
+        dmg = base
+        early_flat = self.rules.flat_damage_before_multipliers
+        if early_flat:
+            # Deimos's placement: the school damage % lands, then flat
+            # damage joins the base, so everything downstream -- charms,
+            # crit, wards -- acts on the sum.
+            dmg *= self._damage_bonus(caster, school)
+            if dmg > 0 and caster.flat_damage:
+                dmg += caster.flat_damage
+            dmg *= charm_mult
+        else:
+            dmg *= charm_mult
+            dmg *= self._damage_bonus(caster, school)
         dmg *= self._bubble_damage(s, school)
         dmg *= crit_mult
         if ward is None:
@@ -1199,10 +1230,15 @@ class Sim:
                                    _aura_pierce(caster))
         wmult, fschool, pierce = ward
         dmg *= wmult
-        if dmg > 0 and caster.flat_damage:
+        if not early_flat and dmg > 0 and caster.flat_damage:
             dmg += caster.flat_damage           # post-%: community-described
-        dmg *= self._resist_mult(target, fschool, pierce)
-        dmg -= target.flat_resist
+        if self.rules.flat_resist_before_resist:
+            dmg -= target.flat_resist
+            dmg = max(dmg, 0.0)
+            dmg *= self._resist_mult(target, fschool, pierce)
+        else:
+            dmg *= self._resist_mult(target, fschool, pierce)
+            dmg -= target.flat_resist
         dmg = max(dmg, 0.0)
         dmg = self._absorb_pass(s, target, dmg)
         target.hp -= dmg

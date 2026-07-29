@@ -1,0 +1,157 @@
+{
+ "n_decisions": 21254,
+ "pct_from_wins": 0.7609861673096829,
+ "held_out": [
+  {
+   "boss": "held2-storm-1800",
+   "school": "storm",
+   "old_bc_filtered": 0.0,
+   "old_online": 0.176,
+   "BC-filt(search)": [
+    0.0,
+    NaN
+   ],
+   "CQL-lite(search)": [
+    0.052,
+    18.91025641025641
+   ],
+   "BC-filt(union)": [
+    0.0,
+    NaN
+   ]
+  },
+  {
+   "boss": "held7-storm-2300",
+   "school": "balance",
+   "old_bc_filtered": 0.6606666666666666,
+   "old_online": 0.7193333333333334,
+   "BC-filt(search)": [
+    0.684,
+    14.450292397660819
+   ],
+   "CQL-lite(search)": [
+    0.726,
+    13.081726354453627
+   ],
+   "BC-filt(union)": [
+    0.674,
+    14.552917903066271
+   ]
+  },
+  {
+   "boss": "held10-storm-2500",
+   "school": "death",
+   "old_bc_filtered": 0.9906666666666667,
+   "old_online": 0.9893333333333333,
+   "BC-filt(search)": [
+    0.9826666666666667,
+    10.449796472184532
+   ],
+   "CQL-lite(search)": [
+    0.788,
+    14.587140439932318
+   ],
+   "BC-filt(union)": [
+    0.9613333333333334,
+    11.142163661581137
+   ]
+  },
+  {
+   "boss": "held13-ice-2400",
+   "school": "myth",
+   "old_bc_filtered": 0.9533333333333334,
+   "old_online": 0.95,
+   "BC-filt(search)": [
+    0.9266666666666666,
+    9.241726618705036
+   ],
+   "CQL-lite(search)": [
+    0.5286666666666666,
+    11.138713745271122
+   ],
+   "BC-filt(union)": [
+    0.9606666666666667,
+    9.026370575988897
+   ]
+  },
+  {
+   "boss": "held14-fire-2100",
+   "school": "balance",
+   "old_bc_filtered": 0.9693333333333334,
+   "old_online": 0.8993333333333333,
+   "BC-filt(search)": [
+    0.9813333333333333,
+    8.292798913043478
+   ],
+   "CQL-lite(search)": [
+    0.9033333333333333,
+    12.829520295202952
+   ],
+   "BC-filt(union)": [
+    0.9706666666666667,
+    8.914835164835164
+   ]
+  },
+  {
+   "boss": "held15-ice-3900",
+   "school": "fire",
+   "old_bc_filtered": 0.9506666666666667,
+   "old_online": 0.9173333333333333,
+   "BC-filt(search)": [
+    0.786,
+    11.476675148430873
+   ],
+   "CQL-lite(search)": [
+    0.368,
+    15.148550724637682
+   ],
+   "BC-filt(union)": [
+    0.9073333333333333,
+    9.260837619397503
+   ]
+  },
+  {
+   "boss": "held17-fire-600",
+   "school": "death",
+   "old_bc_filtered": 0.9973333333333333,
+   "old_online": 0.9993333333333333,
+   "BC-filt(search)": [
+    1.0,
+    7.518666666666666
+   ],
+   "CQL-lite(search)": [
+    1.0,
+    5.586666666666667
+   ],
+   "BC-filt(union)": [
+    0.9953333333333333,
+    7.655726724715338
+   ]
+  },
+  {
+   "boss": "held23-death-3500",
+   "school": "storm",
+   "old_bc_filtered": 0.458,
+   "old_online": 0.48533333333333334,
+   "BC-filt(search)": [
+    0.04733333333333333,
+    12.549295774647888
+   ],
+   "CQL-lite(search)": [
+    0.17466666666666666,
+    12.374045801526718
+   ],
+   "BC-filt(union)": [
+    0.37933333333333336,
+    12.746924428822496
+   ]
+  }
+ ],
+ "means": {
+  "BC-filt(search)": 0.676,
+  "CQL-lite(search)": 0.5675833333333333,
+  "BC-filt(union)": 0.7310833333333333,
+  "old BC-filtered": 0.7475,
+  "old online-RL": 0.7669999999999999
+ }
+}

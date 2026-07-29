@@ -1,0 +1,169 @@
+{
+ "ruleset_id": "w101-pve-live-scrape",
+ "school": "fire",
+ "levels": [
+  {
+   "level": 1,
+   "boss_hp": 100,
+   "pool": 1,
+   "capacity": 10,
+   "power_pip": 0.0,
+   "deck_size": 3,
+   "win": 0.946,
+   "ttk": 2.0924947145877377,
+   "deck": [
+    "Fire Cat"
+   ],
+   "player_hp_base": 425
+  },
+  {
+   "level": 5,
+   "boss_hp": 320,
+   "pool": 3,
+   "capacity": 10,
+   "power_pip": 0.0,
+   "deck_size": 4,
+   "win": 0.9525,
+   "ttk": 4.5149606299212595,
+   "deck": [
+    "Fire Cat",
+    "Fire Elf"
+   ],
+   "player_hp_base": 512
+  },
+  {
+   "level": 10,
+   "boss_hp": 595,
+   "pool": 6,
+   "capacity": 12,
+   "power_pip": 0.0,
+   "deck_size": 6,
+   "win": 0.958,
+   "ttk": 6.676409185803758,
+   "deck": [
+    "Fire Cat",
+    "Fire Elf",
+    "Pixie",
+    "Sunbird"
+   ],
+   "player_hp_base": 622
+  },
+  {
+   "level": 15,
+   "boss_hp": 870,
+   "pool": 6,
+   "capacity": 12,
+   "power_pip": 0.05,
+   "deck_size": 5,
+   "win": 0.74,
+   "ttk": 9.681756756756757,
+   "deck": [
+    "Fire Elf",
+    "Sprite",
+    "Sunbird"
+   ],
+   "player_hp_base": 731
+  },
+  {
+   "level": 20,
+   "boss_hp": 1145,
+   "pool": 15,
+   "capacity": 14,
+   "power_pip": 0.1,
+   "deck_size": 11,
+   "win": 0.9095,
+   "ttk": 8.91478834524464,
+   "deck": [
+    "Curse",
+    "Fire Cat",
+    "Fire Elf",
+    "Fire Trap",
+    "Heck Hound",
+    "Hex",
+    "Sprite",
+    "Sunbird"
+   ],
+   "player_hp_base": 840
+  },
+  {
+   "level": 25,
+   "boss_hp": 1420,
+   "pool": 15,
+   "capacity": 14,
+   "power_pip": 0.15,
+   "deck_size": 12,
+   "win": 0.926,
+   "ttk": 8.039416846652268,
+   "deck": [
+    "Balanceblade",
+    "Curse",
+    "Fire Trap",
+    "Fireblade",
+    "Heck Hound",
+    "Hex",
+    "Sunbird"
+   ],
+   "player_hp_base": 950
+  },
+  {
+   "level": 30,
+   "boss_hp": 1695,
+   "pool": 23,
+   "capacity": 16,
+   "power_pip": 0.2,
+   "deck_size": 13,
+   "win": 0.9855,
+   "ttk": 8.873160832064942,
+   "deck": [
+    "Balanceblade",
+    "Feint",
+    "Fire Trap",
+    "Heck Hound",
+    "Hex",
+    "Pixie",
+    "Scald",
+    "Spirit Blade"
+   ],
+   "player_hp_base": 1059
+  },
+  {
+   "level": 40,
+   "boss_hp": 2245,
+   "pool": 25,
+   "capacity": 16,
+   "power_pip": 0.3,
+   "deck_size": 10,
+   "win": 0.994,
+   "ttk": 8.297786720321932,
+   "deck": [
+    "Feint",
+    "Fire Trap",
+    "Fuel",
+    "Phoenix",
+    "Scald",
+    "Tri Blade"
+   ],
+   "player_hp_base": 1277
+  },
+  {
+   "level": 50,
+   "boss_hp": 2795,
+   "pool": 27,
+   "capacity": 16,
+   "power_pip": 0.4,
+   "deck_size": 12,
+   "win": 0.984,
+   "ttk": 9.112804878048781,
+   "deck": [
+    "Feint",
+    "Fire Dragon",
+    "Fire Trap",
+    "Heck Hound",
+    "Hex",
+    "Spirit Blade",
+    "Tri Blade"
+   ],
+   "player_hp_base": 1496
+  }
+ ]
+}
