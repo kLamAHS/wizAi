@@ -122,6 +122,16 @@ UNIVERSAL_BUFFS = {
     "Tri Blade": 30, "Tri Trap": 30, "Spirit Blade": 30, "Spirit Trap": 30,
     "Hex": 20, "Curse": 20, "Feint": 30, "Balanceblade": 20,
     "Bladestorm": 30,
+    # Star-school AURAS. Cross-trained with training points like the rest
+    # of this list, so every school can pack them, and their floors come
+    # from the dump's own `level_restriction` (see `legal_pool`, which
+    # takes max(floor, card level) — 1 here defers entirely to the data).
+    # They matter for one reason above all: a board wipe strips charms
+    # and wards and cannot touch an aura, so this is the answer to a
+    # myth mob holding Earthquake.
+    "Amplify": 1, "Fortify": 1, "Vengeance": 1, "Infallible": 1,
+    "Berserk": 1, "Cosmic Charge": 1, "Brace": 1, "Magnify": 1,
+    "Flawless": 1, "Frenzy": 1,
 }
 
 # defense in depth behind the whitelist: catches a whitelisted name being
@@ -229,7 +239,7 @@ def legal_pool(cards, school, level=None, mastery=None, enchants=False):
         if c.school == school or name in UNIVERSAL_BUFFS or \
                 (mastery and c.school == mastery):
             if c.kind in ("damage", "drain", "blade", "trap", "prism",
-                          "shield", "heal", "weakness"):
+                          "shield", "heal", "weakness", "aura"):
                 pool[name] = c
     if enchants:
         pool = add_enchanted(pool, level)
@@ -318,6 +328,11 @@ def sample_deck(pool, school, boss, rng, capacity=16, copy_limit=3,
         twin = pool.get(f"{c.name}+potent")
         if twin is not None and rng.random() < 0.6:
             add(twin, 1)
+    auras = [c for c in pool.values() if c.kind == "aura"]
+    if auras and rng.random() < 0.5:
+        # ONE aura is up at a time, so extra copies are re-casts rather
+        # than a stack — one or two, never a pile
+        add(rng.choice(auras), rng.randint(1, 2))
     if prisms and rng.random() < 0.8:
         add(prisms[0], rng.randint(1, 2))
     heals = [c for c in pool.values() if c.kind == "heal"]

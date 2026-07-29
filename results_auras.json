@@ -1,0 +1,129 @@
+{
+ "level": 60,
+ "school": "storm",
+ "n": 4000,
+ "player_hp": 3504,
+ "power_pip": 0.76,
+ "myth_pool": [
+  "Minotaur",
+  "Humongofrog",
+  "Mythblade",
+  "Myth Trap"
+ ],
+ "mob_hp": 7000,
+ "decks": {
+  "blades only": [
+   "Storm Lord",
+   "Tempest",
+   "Stormzilla",
+   "Storm Lord",
+   "Tempest",
+   "Stormzilla",
+   "Stormblade",
+   "Stormblade",
+   "Tri Blade",
+   "Tri Blade",
+   "Spirit Blade"
+  ],
+  "blades + Amplify": [
+   "Storm Lord",
+   "Tempest",
+   "Stormzilla",
+   "Storm Lord",
+   "Tempest",
+   "Stormzilla",
+   "Stormblade",
+   "Stormblade",
+   "Tri Blade",
+   "Tri Blade",
+   "Spirit Blade",
+   "Amplify",
+   "Amplify"
+  ],
+  "blades + Fortify": [
+   "Storm Lord",
+   "Tempest",
+   "Stormzilla",
+   "Storm Lord",
+   "Tempest",
+   "Stormzilla",
+   "Stormblade",
+   "Stormblade",
+   "Tri Blade",
+   "Tri Blade",
+   "Spirit Blade",
+   "Fortify",
+   "Fortify"
+  ]
+ },
+ "hp_sweep": {
+  "5000": {
+   "quake": {
+    "win_rate": 0.98625,
+    "mean_ttk": 14.958174904942966
+   },
+   "no quake": {
+    "win_rate": 0.99225,
+    "mean_ttk": 13.299319727891156
+   }
+  },
+  "7000": {
+   "quake": {
+    "win_rate": 0.75275,
+    "mean_ttk": 21.944204583194953
+   },
+   "no quake": {
+    "win_rate": 0.8395,
+    "mean_ttk": 20.920488385944015
+   }
+  },
+  "9000": {
+   "quake": {
+    "win_rate": 0.0625,
+    "mean_ttk": 25.948
+   },
+   "no quake": {
+    "win_rate": 0.0,
+    "mean_ttk": NaN
+   }
+  }
+ },
+ "arms": {
+  "blades only": {
+   "quake": {
+    "win_rate": 0.75275,
+    "mean_ttk": 21.944204583194953,
+    "p90_ttk": 24
+   },
+   "no quake": {
+    "win_rate": 0.8395,
+    "mean_ttk": 20.920488385944015,
+    "p90_ttk": 22
+   }
+  },
+  "blades + Amplify": {
+   "quake": {
+    "win_rate": 0.817,
+    "mean_ttk": 20.7937576499388,
+    "p90_ttk": 23
+   },
+   "no quake": {
+    "win_rate": 0.83025,
+    "mean_ttk": 20.89039445950015,
+    "p90_ttk": 22
+   }
+  },
+  "blades + Fortify": {
+   "quake": {
+    "win_rate": 0.7425,
+    "mean_ttk": 21.92053872053872,
+    "p90_ttk": 24
+   },
+   "no quake": {
+    "win_rate": 0.82425,
+    "mean_ttk": 20.91932059447983,
+    "p90_ttk": 22
+   }
+  }
+ }
+}

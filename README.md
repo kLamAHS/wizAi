@@ -712,6 +712,93 @@ which keeps the learned-sequence-model rung motivated for what
 remains. Cost profile is the mirror of RL's: no training, ~1s of
 inference per fight.
 
+## Star auras, and the Earthquake they answer
+
+The repo owner asked for these by name: *"I like star school auras for
+fights with myth mobs since I hate losing blades to an earthquake."*
+Earthquake already worked — it wipes every charm and ward on the enemy
+team, damage first. Auras did not exist. Now they do, and the
+preference turns out to be measurably right.
+
+**Auras are their own card type, not a charm** (`Aura` in `w101_sim.py`,
+`tests/test_auras.py`). That distinction is the whole point: a board
+wipe clears `charms` and `wards`, and the aura slot is neither, so it
+is the one multiplier that survives. One is up at a time and a second
+replaces the first. Values come from the extracted spell data rather
+than from memory — Amplify +15% damage at level 60, Fortify -15%
+incoming, Vengeance +20 crit, Infallible +15 accuracy / +15 pierce,
+Berserk +30% out and +40% IN at 70, Brace -20% at 110 — all 0 pips,
+4 rounds.
+
+Three details worth stating because each is a place this could have
+been quietly wrong:
+
+- **They share effect ids with blades.** `kModifyOutgoingDamage` is
+  what Amplify and Fireblade both use; only the spell's own type
+  separates them. Getting that wrong would have filed Amplify as a
+  blade, which a wipe would then strip — the exact failure auras exist
+  to avoid.
+- **The damage % is additive with gear**, per the owner's rule: Amplify
+  on a 150% wizard is 165%, not 172.5%. Regression-tested as a ratio.
+- **Vengeance's +20 is a RATING**, so it is applied only under a rating
+  resolver. Under classic rules `crit_chance` is a probability and
+  adding 20 to it would read as +2000%. Same gate the gear layer uses,
+  tested in both directions.
+
+Cards the engine cannot express are skipped and listed rather than
+approximated: Conviction (stun resist + crit block) and Empowerment
+(pip conversion) have no engine field, and Punishment's five legs span
+Balance damage plus Death/Life/Myth resist while one `Aura` carries one
+school scope.
+
+**Fixing Earthquake was not enough to make it happen.** With Earthquake
+in a myth boss's pool and a full pip rack, an instrumented 25-turn
+fight cast it **zero times**: the hitter archetype ranks damage cards
+by damage, and Earthquake is a 370-damage 6-pip spell permanently
+behind Minotaur. Nobody plays it for the 370. A wipe now gets valued by
+what it ERASES — the boss fires one once the target carries three
+distinct unprotected hangings (`ENEMY_WIPE_AT`, `modeled`, and counting
+distinct NAMES because the data gives Tri Blade three charm effects and
+counting hangings made one opening blade look like a full stack).
+
+**The measurement** (`aura_probe.py`, `results_auras.json`; level-60
+storm, geared, paired seeds n=4000). What the wipe costs, swept across
+difficulty so the operating point is visible rather than chosen:
+
+```
+mob HP    with quake   without   costs
+ 5000        98.6%      99.2%     +0.6
+ 7000        75.3%      84.0%     +8.7
+ 9000         6.2%       0.0%     -6.2   <- floor: both arms pinned
+```
+
+The 9,000 row is reported because it is instructive, not because it
+means anything: both arms sit on the floor, and the sign flips only
+because the boss burns a 6-pip turn on a 370-damage spell. At the
+contested point:
+
+```
+deck                 vs quake      no quake     aura's edge
+blades only          75.3% / 21.9  84.0% / 20.9        —
+blades + Amplify     81.7% / 20.8  83.0% / 20.9   +6.4 / -0.9
+blades + Fortify     74.2% / 21.9  82.4% / 20.9   -1.0 / -1.5
+```
+
+**Amplify recovers 6.4 of the 8.7 points the wipe costs, and is worth
+-0.9 against a boss that never wipes.** That is the difference between
+insurance and a buff, and it is why the probe runs the no-quake control
+at all: +15% damage helps in both worlds, so an arm that only beat the
+Earthquake caster would prove nothing. Fortify does not help (-1.0),
+which is the right answer for a race — a defensive aura buys survival
+in a fight this deck was already surviving.
+
+One pipeline note, learned the hard way earlier in this repo: the deck
+screen scores candidates with `make_blade_stack`, so a buff that policy
+never casts makes every deck holding it score WORSE and gets it
+filtered out of the builder's output. That is exactly how Feint went
+missing for months. `make_blade_stack` casts auras, skips them while
+one is live, and has a test pinning both.
+
 ## Scope of the current claims
 
 This is an **Arc-1-style, single-enemy PvE optimization laboratory**, not

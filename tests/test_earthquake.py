@@ -68,6 +68,39 @@ def test_protected_hangings_survive_the_wipe():
     assert [h.name for h in foe.charms] == ["Aegis Blade"]
 
 
+def test_a_living_boss_will_actually_cast_the_wipe():
+    """Fixing Earthquake's effects was not enough to make it happen.
+
+    The hitter archetype ranks damage cards by damage, and Earthquake is
+    a 370-damage 6-pip myth spell — permanently behind Minotaur. With
+    Earthquake in the pool and a full rack, an instrumented 25-turn
+    fight cast it ZERO times. A wipe has to be valued by what it erases,
+    so the AI now fires one once the target is carrying ENEMY_WIPE_AT
+    unprotected hangings.
+    """
+    from w101_sim import ENEMY_WIPE_AT, make_blade_stack
+    boss = Boss("myth mob", 40000, "myth", 0, archetype="hitter",
+                pool=["Minotaur", "Mythblade", "Earthquake"],
+                discipline=1.0)
+    boss.resist_map = {}
+    boss.boost_map = {}
+    boss.start_pips = 6
+    # three DISTINCT blades, because the trigger counts distinct names
+    deck = ["Storm Lord"] * 2 + ["Stormblade", "Tri Blade", "Spirit Blade"]
+    sim = Sim(dict(CARDS), deck, "storm", boss, player_hp=10**6,
+              power_pip=0.9, rules=LIVE_RULES, log_events=True)
+    sim.rng = random.Random(3)
+    sim.run(make_blade_stack(3), max_turns=25)
+    ev = sim.last_state.events
+    assert any(e["type"] == "enemy_cast" and e.get("card") == "Earthquake"
+               for e in ev)
+    wiped = [e for e in ev if e["type"] == "hanging_wiped"]
+    assert wiped and all(e["target"] == "player" for e in wiped)
+    # and it waits for a board worth wiping rather than opening with it
+    first = next(e for e in ev if e.get("card") == "Earthquake")
+    assert first["turn"] >= ENEMY_WIPE_AT
+
+
 def test_damage_lands_before_the_board_is_stripped():
     """Order of operations: it "calculates and applies the damage first
     (including factoring in any existing blades/traps before they are

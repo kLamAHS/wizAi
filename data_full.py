@@ -84,6 +84,45 @@ def _schools(damage_type):
     return [damage_type.lower()]
 
 
+AURA_FIELDS = {28: "outgoing",      # kModifyOutgoingDamage
+               23: "incoming",      # kModifyIncomingDamage (game sign)
+               40: "accuracy",      # kModifyAccuracy
+               31: "pierce",        # kModifyOutgoingArmorPiercing
+               47: "crit_rating",   # kCritBoost — a RATING
+               78: "pip_chance"}    # kModifyPowerPipChance
+
+
+def _map_aura(e, spell):
+    """One effect of a Star-school aura -> an `aura` op.
+
+    Rejects two things rather than approximating them. An effect this
+    engine has no field for (kStunResist, kCritBlock, kPipConversion —
+    Conviction and Empowerment are made entirely of those) fails the
+    card, and so does an aura whose legs disagree about SCHOOL: the
+    engine's Aura carries one school scope, and Punishment's five legs
+    span Balance damage plus Death/Life/Myth resist. Both land in the
+    loader's skip report with a reason instead of being flattened into
+    something that would read as a stronger card than it is.
+    """
+    i = e["effect_type_id"]
+    fld = AURA_FIELDS.get(i)
+    if fld is None:
+        return None, f"aura effect {e.get('effect_type') or i} not modeled", \
+            None
+    if e.get("param") is None:
+        return None, f"aura effect {i} missing param", None
+    scopes = {(x.get("damage_type") or "All") for x in spell["effects"]
+              if x["effect_type_id"] in AURA_FIELDS}
+    if len(scopes) > 1:
+        return None, ("aura legs disagree on school: "
+                      + "/".join(sorted(scopes))), None
+    if e["target"] not in (9, 11):
+        return None, f"aura on a non-self target ({e['target']})", None
+    return {"op": "aura", "field": fld, "percent": e["param"] / 100.0,
+            "rounds": int(e.get("rounds") or 4),
+            "schools": _schools(e.get("damage_type"))}, None, None
+
+
 def _map_effect(e, spell, avg_backfill):
     """One scraped effect -> (op dict or None, error or None, note)."""
     i, p = e["effect_type_id"], e.get("param")
@@ -98,6 +137,15 @@ def _map_effect(e, spell, avg_backfill):
     # truth); these have no id in the numeric table but map onto existing
     # engine ops
     nm = e.get("effect_type")
+
+    # AURAS come first, because the effect ids they use (28 outgoing
+    # damage, 23 incoming damage, 40 accuracy) are the SAME ids blades,
+    # shields and mantles use. The spell's own type is what separates
+    # them — `type_name == "Aura"` is stamped in the dump — and getting
+    # it wrong would file Amplify as a blade, which a board wipe would
+    # then strip. That is the exact behavior auras exist to avoid.
+    if (spell.get("type_name") or "").lower() == "aura":
+        return _map_aura(e, spell)
     self_tgt = e["target"] in (9, 11)
     if nm == "kStunBlock":
         return {"op": "stun_block", "n": max(int(p or 1), 1),
