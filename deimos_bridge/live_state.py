@@ -205,20 +205,54 @@ async def read_hangings(member, slot: str) -> list:
 # --------------------------------------------------------------------------
 # the read
 # --------------------------------------------------------------------------
+async def _team_id(member):
+    """`CombatParticipant.team_id` (offset 144), or None if unreadable."""
+    try:
+        return int(await (await member.get_participant()).team_id())
+    except Exception:
+        return None
+
+
+async def _is_hostile(member, my_team) -> bool:
+    """Is this member on the other side?
+
+    Not `is_monster()`. wizwalker derives that as "not a player and not a
+    minion" (`combat/member.py:84-88`), which is wrong for exactly the
+    case that matters most here: an **enemy minion** is `is_player=False,
+    is_minion=True`, so `is_monster()` returns False and the summon would
+    be filed as an ally. wizAi's weak spot is multi-enemy target
+    selection, so handing it a board with the summons missing would be a
+    quiet way to flatter the policy.
+
+    `team_id` is the real discriminator. It is only a fallback to
+    `is_monster()` when the participant will not read.
+    """
+    team = await _team_id(member)
+    if team is not None and my_team is not None:
+        return team != my_team
+    return bool(await member.is_monster())
+
+
 class LiveRead:
     """One planning-phase snapshot, plus the bookkeeping the policy needs
     that the client does not directly expose."""
 
     def __init__(self, state, hand_cards, resolver, members, client_member,
-                 round_number):
+                 round_number, enemy_members=()):
         self.state = state
-        #: wizAi Card -> the live CombatCard to click. Populated only for
-        #: cards that both resolved *and* are castable.
+        #: wizAi card name -> the live CombatCards that produced it.
+        #: Populated only for cards that both resolved *and* are castable.
         self.hand_cards = hand_cards
         self.resolver = resolver
         self.members = members
         self.client_member = client_member
         self.round_number = round_number
+        #: The live members behind `state.enemies`, **in the same order**.
+        #: This is what makes a policy's "name@i" mean the same mob to the
+        #: game as it did to the policy. Deriving the target from a
+        #: separately-built enemy list would drift the moment something
+        #: dies, and would fail silently as bad targeting.
+        self.enemy_members = list(enemy_members)
 
 
 async def read_state(combat, resolver: NameResolver, school: str,
@@ -251,17 +285,24 @@ async def read_state(combat, resolver: NameResolver, school: str,
     player.charms = await read_hangings(me, "charm")
     player.wards = await read_hangings(me, "ward")
 
-    enemies, allies = [], []
+    enemies, allies, enemy_members = [], [], []
     me_name = await me.name()
+    my_team = await _team_id(me)
     for m in members:
         if await m.is_dead():
             continue
         if await m.name() == me_name and await m.is_client():
             continue
-        actor = await _mk_actor(m, 1 if await m.is_monster() else 0)
+        hostile = await _is_hostile(m, my_team)
+        actor = await _mk_actor(m, 1 if hostile else 0)
         actor.charms = await read_hangings(m, "charm")
         actor.wards = await read_hangings(m, "ward")
-        (enemies if await m.is_monster() else allies).append(actor)
+        actor.is_minion = bool(await m.is_minion())
+        if hostile:
+            enemies.append(actor)
+            enemy_members.append(m)      # kept index-aligned with `enemies`
+        else:
+            allies.append(actor)
 
     hand, hand_cards = [], {}
     for c in await combat.get_cards():
@@ -287,4 +328,4 @@ async def read_state(combat, resolver: NameResolver, school: str,
     state = State(player, enemies or [Actor(name="none", school="ice", hp=0,
                                             max_hp=1, team=1)], allies)
     return LiveRead(state, hand_cards, resolver, members, me,
-                    await combat.round_number())
+                    await combat.round_number(), enemy_members)

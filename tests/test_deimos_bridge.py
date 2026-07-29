@@ -225,6 +225,37 @@ def test_read_state_reads_enemy_hanging_effects():
     assert wards[0].percent == pytest.approx(-0.5)
 
 
+def test_enemy_minion_counts_as_an_enemy():
+    """The trap in wizwalker's API. `is_monster()` is "not a player and
+    not a minion", so an enemy summon answers False and a reader that
+    trusts it files the summon as an ally -- leaving the policy planning
+    against a board that is missing a target it will actually be hit by.
+    `team_id` is what settles it."""
+    from data_full import load_spells_full
+    r = NameResolver(load_spells_full())
+    me = MockMember("Wizard", 2000, client=True, team_id=0)
+    boss = MockMember("Krokopatra", 3000, monster=True, team_id=1)
+    summon = MockMember("Scarab", 400, monster=True, minion=True, team_id=1)
+    assert run(summon.is_monster()) is False        # the trap, in the mock
+
+    read = run(read_state(MockCombat([me, boss, summon], [MockCard("Sunbird")]),
+                          r, "fire"))
+    assert sorted(e.name for e in read.state.enemies) == ["Krokopatra", "Scarab"]
+    assert read.state.allies == []
+
+
+def test_friendly_minion_counts_as_an_ally():
+    from data_full import load_spells_full
+    r = NameResolver(load_spells_full())
+    me = MockMember("Wizard", 2000, client=True, team_id=0)
+    pet = MockMember("Golem", 500, minion=True, team_id=0)
+    foe = MockMember("Lost Soul", 600, monster=True, team_id=1)
+    read = run(read_state(MockCombat([me, pet, foe], [MockCard("Sunbird")]),
+                          r, "fire"))
+    assert [e.name for e in read.state.enemies] == ["Lost Soul"]
+    assert [a.name for a in read.state.allies] == ["Golem"]
+
+
 def test_read_state_survives_a_participant_that_will_not_read():
     """Memory reads fail mid-fight; a bad read must not end the duel."""
     from data_full import load_spells_full
@@ -306,6 +337,88 @@ def test_backend_records_history():
     run(be.decide())
     run(be.decide())
     assert len(be.history) == 2
+
+
+# ------------------------------------------------------------- the handler
+class _Handler:
+    """`WizAiCombatHandler` with the mock standing in for CombatHandler.
+
+    `make_combat_handler` splices the real base class in at call time,
+    which cannot happen off Windows -- so the test wires the same two
+    attributes by hand and borrows the mock's pass_button/get_members.
+    """
+
+    def __new__(cls, combat, backend):
+        from deimos_bridge.live_backend import WizAiCombatHandler
+        h = object.__new__(WizAiCombatHandler)
+        h.client = None
+        h.backend = backend
+        h._last_read = None
+        h.pass_button = combat.pass_button
+        h.get_members = combat.get_members
+        h.get_cards = combat.get_cards
+        h.get_client_member = combat.get_client_member
+        h.round_number = combat.round_number
+        backend.attach_combat(combat)
+        return h
+
+
+def test_handler_casts_exactly_once_per_round():
+    """The whole reason this class exists. SprintyCombat would re-query a
+    NamedSpell and play every duplicate in hand; three Fireblades must be
+    one cast, not three."""
+    be = _backend(policy=lambda sim, s: "Fireblade")
+    combat = MockCombat(
+        [MockMember("Wizard", 2000, client=True, normal_pips=4, team_id=0),
+         MockMember("Lost Soul", 900, monster=True, team_id=1)],
+        [MockCard("Fireblade"), MockCard("Fireblade"), MockCard("Fireblade")])
+    h = _Handler(combat, be)
+    run(h.handle_round())
+    casts = sum(len(c.cast_log) for c in combat._cards)
+    assert casts == 1, f"one decision produced {casts} casts"
+    assert combat.passed == 0
+
+
+def test_handler_passes_when_the_policy_passes():
+    be = _backend(policy=lambda sim, s: None)
+    combat = simple_fight()
+    h = _Handler(combat, be)
+    run(h.handle_round())
+    assert combat.passed == 1
+    assert sum(len(c.cast_log) for c in combat._cards) == 0
+
+
+def test_handler_targets_the_mob_the_policy_meant():
+    """'name@1' has to hit the second enemy *the policy was shown*, not
+    the second entry of some other list."""
+    be = _backend(policy=lambda sim, s: "Sunbird@1")
+    boss = MockMember("Krokopatra", 3000, monster=True, team_id=1)
+    summon = MockMember("Scarab", 400, monster=True, minion=True, team_id=1)
+    combat = MockCombat(
+        [MockMember("Wizard", 2000, client=True, normal_pips=6, team_id=0),
+         boss, summon],
+        [MockCard("Sunbird")])
+    h = _Handler(combat, be)
+    run(h.handle_round())
+    card = combat._cards[0]
+    assert card.cast_log == [summon], \
+        f"aimed at {card.cast_log} instead of the summon"
+
+
+def test_handler_falls_back_to_pass_when_the_cast_throws():
+    be = _backend(policy=lambda sim, s: "Fireblade")
+
+    class Angry(MockCard):
+        async def cast(self, target=None, **kw):
+            raise RuntimeError("window vanished")
+
+    combat = MockCombat(
+        [MockMember("Wizard", 2000, client=True, normal_pips=4, team_id=0),
+         MockMember("Lost Soul", 900, monster=True, team_id=1)],
+        [Angry("Fireblade")])
+    h = _Handler(combat, be)
+    run(h.handle_round())
+    assert combat.passed == 1
 
 
 # --------------------------------------------------------------- enum audit

@@ -80,6 +80,10 @@ class WizAiBackend:
         self.resolver = NameResolver(cards)
         self.history = []          # PolicyDecision, in order
         self._seen = []            # card names observed in hand so far
+        #: the `LiveRead` behind the most recent decision. The handler
+        #: casts from this, so the card it clicks and the target it picks
+        #: come from the same snapshot the policy saw.
+        self.last_read = None
 
     # -- BaseCombatBackend ------------------------------------------------
     def attach_combat(self, combat):
@@ -109,6 +113,7 @@ class WizAiBackend:
             if name not in self._seen:
                 self._seen.append(name)
         read.state.player.deck = self._deck_remaining(read.hand_cards)
+        self.last_read = read
 
         sim = self._sim_for(read)
         try:
@@ -190,6 +195,20 @@ class WizAiBackend:
         )
 
     # -- translation to wizsprinter ---------------------------------------
+    #
+    # WARNING, and the reason `WizAiCombatHandler` below exists.
+    #
+    # `SprintyCombat`'s cast loop re-queries the same spec after each cast
+    # and only stops when `needs_post_filter` is set
+    # (`sprinty_combat.py:1554,1758-1763`). That flag requires
+    # `isinstance(move.card, TemplateSpell)`, so a `NamedSpell` can never
+    # set it -- and the loop therefore keeps casting while another copy of
+    # that card remains in hand. Three Fireblades in hand become three
+    # Fireblades cast, from one policy decision.
+    #
+    # For a config-driven bot that is a feature. For measuring a policy it
+    # is fatal: the thing that played the fight is not the thing you
+    # loaded. Use `WizAiCombatHandler` for any run whose numbers matter.
     def _to_priority_line(self, decision):
         from .combat_api_shim import (Move, MoveConfig, NamedSpell,
                                       PriorityLine, TargetData, TargetType)
@@ -228,6 +247,95 @@ class WizAiBackend:
             policy = make_blade_stack(3)
         return cls(policy=policy, cards=cards, school=school,
                    decklist=deck or [], **kw)
+
+
+class WizAiCombatHandler:
+    """One policy decision, one cast. The path to use when the numbers matter.
+
+    Subclasses wizwalker's `CombatHandler` (resolved lazily, see
+    `make_combat_handler`), whose documented extension point is a single
+    `handle_round()` per planning phase. That is exactly the contract a
+    wizAi policy is written against, and going straight to it avoids two
+    problems that `SprintyCombat` introduces:
+
+      * **Multi-casting.** `SprintyCombat` re-queries a `NamedSpell` after
+        every cast and plays every duplicate in hand (see the note on
+        `WizAiBackend._to_priority_line`). Here, one decision issues one
+        `CombatCard.cast` and the round ends.
+
+      * **Target indices meaning different things.** wizAi's `"name@i"`
+        indexes *its own* enemy list -- alive, hostile, in read order --
+        while `SprintyCombat.get_enemies()` partitions by team and keeps
+        the dead, so after the first kill the two disagree and the policy
+        quietly hits the wrong mob. Here the index is resolved against
+        the very list the policy was shown, because this class built it.
+    """
+
+    def __init__(self, client, backend):
+        self.client = client
+        self.backend = backend
+        self._last_read = None
+        backend.attach_combat(self)
+
+    # `CombatHandler` supplies get_members/get_cards/round_number/
+    # pass_button/in_combat; `read_state` only needs those, so `self` is a
+    # valid `combat` for the backend.
+
+    async def handle_round(self):
+        decision = await self.backend.decide()
+        read = self.backend.last_read
+        self._last_read = read
+
+        if decision.passing or read is None:
+            await self.pass_button()
+            return
+
+        card = self._pick_card(read, decision.card_name)
+        if card is None:
+            await self.pass_button()
+            return
+
+        target = await self._resolve_target(read, decision.target_index)
+        try:
+            await card.cast(target)
+        except Exception:
+            # A misclick or a board that moved under us costs this round,
+            # not the fight.
+            await self.pass_button()
+
+    def _pick_card(self, read, name):
+        cards = read.hand_cards.get(name) or []
+        return cards[0] if cards else None
+
+    async def _resolve_target(self, read, index):
+        """Map the policy's enemy index onto a live member.
+
+        `read.enemy_members` is recorded in the same order as
+        `read.state.enemies`, so index i here is the same mob the policy
+        was looking at.
+        """
+        foes = read.enemy_members
+        if not foes:
+            return None
+        if index is None or not (0 <= index < len(foes)):
+            index = 0
+        return foes[index]
+
+
+def make_combat_handler(client, backend):
+    """Build a `WizAiCombatHandler` that really is a `CombatHandler`.
+
+    Done at call time so importing this module never touches wizwalker.
+    """
+    from wizwalker.combat import CombatHandler
+
+    if CombatHandler not in WizAiCombatHandler.__bases__:
+        WizAiCombatHandler.__bases__ = (CombatHandler,)
+    handler = WizAiCombatHandler(client, backend)
+    CombatHandler.__init__(handler, client)
+    handler.backend = backend
+    backend.attach_combat(handler)
+    return handler
 
 
 def _install_base():
