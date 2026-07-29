@@ -247,9 +247,21 @@ policy you trained.
 ## The GUI
 
 ```
-python -m deimos_bridge.gui           # live
+python -m deimos_bridge.gui           # press "Play live" to fight
 python -m deimos_bridge.gui --demo    # canned fight, runs anywhere
 ```
+
+**Play live** connects to the client, installs the hooks and takes over
+combat from the window — same engine as `run_live`, with the panels
+filling in as the fight happens. School, policy, deck and how many fights
+come from the controls at the top; `fights = 0` means keep going until
+you press Stop. A trained policy has to be trained first (the Train
+button) and needs its deck, since the Q table is keyed on that deck's own
+blade and nuke positions.
+
+The fight runs on its own thread with its own asyncio loop, so a slow
+memory read cannot freeze the window, and nothing on that thread touches
+a widget — the worker emits signals and the GUI thread draws.
 
 Deimos's own window answers an operator's questions — is it questing, is
 it stuck, how long has it run. Training and evaluating a policy needs a

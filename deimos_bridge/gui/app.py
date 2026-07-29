@@ -18,12 +18,14 @@ from PyQt6.QtWidgets import (QApplication, QComboBox, QFileDialog, QGroupBox,
                              QTabWidget, QVBoxLayout, QWidget)
 
 from ..telemetry import Telemetry
+from .live import LiveWorker
 from .panels import (BoardPanel, DecisionsPanel, ModelPanel, NamingPanel,
                      RunPanel, _label)
 from .theme import PALETTE, stylesheet
 
 SCHOOLS = ["fire", "ice", "storm", "myth", "life", "death", "balance"]
-POLICIES = ["blade-stack(3)", "blade-stack(2)", "nuke-asap", "trained (Q)"]
+POLICIES = ["school-aware", "blade-stack(3)", "blade-stack(2)",
+            "nuke-asap", "trained (Q)"]
 
 
 class TrainWorker(QThread):
@@ -61,7 +63,8 @@ class MainWindow(QMainWindow):
         self.resize(1180, 800)
         self.tel = telemetry or Telemetry()
         self.agent = None
-        self.worker = None
+        self.worker = None      # training
+        self.live = None        # the live fight
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -79,11 +82,30 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.model, "Damage model")
         tabs.addTab(self.naming, "Naming")
         tabs.addTab(self.runs, "Runs")
+        self.tabs = tabs
         root.addWidget(tabs)
 
-        self.status = _label("idle", PALETTE["muted"])
+        self.status = _label("idle — press Play live, or start with --demo",
+                             PALETTE["muted"])
         root.addWidget(self.status)
         self.setStyleSheet(stylesheet())
+        self.refresh_all()
+
+    # -- panel updates all happen here, on the GUI thread -----------------
+    def refresh_all(self):
+        """Redraw every panel from the telemetry.
+
+        Panels do not subscribe to the telemetry themselves: a live run
+        fills it from a worker thread, and touching a widget from there
+        is undefined behaviour in Qt. Everything funnels through this,
+        called on the GUI thread via `LiveWorker`'s queued signals.
+        """
+        for panel in (self.board, self.decisions, self.model, self.naming,
+                      self.runs):
+            try:
+                panel.refresh()
+            except Exception:
+                pass          # a panel must never take down a live fight
 
     def _build_config(self):
         box = QGroupBox("run")
@@ -107,9 +129,25 @@ class MainWindow(QMainWindow):
         self.episodes.setValue(8000)
         row.addWidget(self.episodes)
 
+        row.addWidget(QLabel("fights"))
+        self.fights = QSpinBox()
+        self.fights.setRange(0, 999)
+        self.fights.setValue(0)
+        self.fights.setToolTip("0 = keep playing until you press Stop")
+        row.addWidget(self.fights)
+
         self.train_btn = QPushButton("Train")
         self.train_btn.clicked.connect(self.on_train)
         row.addWidget(self.train_btn)
+
+        self.start_btn = QPushButton("Play live")
+        self.start_btn.clicked.connect(self.on_start_live)
+        row.addWidget(self.start_btn)
+
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.clicked.connect(self.on_stop_live)
+        row.addWidget(self.stop_btn)
 
         self.export_btn = QPushButton("Export run")
         self.export_btn.clicked.connect(self.on_export)
@@ -187,6 +225,68 @@ class MainWindow(QMainWindow):
         self.status.setText("training failed")
         QMessageBox.critical(self, "wizAi", message)
 
+    # -- live ------------------------------------------------------------
+    def on_start_live(self):
+        if self.live is not None and self.live.isRunning():
+            return
+        deck = self.decklist()
+        policy = self.policy.currentText()
+        if policy.startswith("trained") and self.agent is None:
+            QMessageBox.warning(
+                self, "wizAi",
+                "No trained policy yet. Press Train first, or pick another "
+                "policy from the list.")
+            return
+        if policy.startswith("trained") and not deck:
+            QMessageBox.warning(self, "wizAi", "A trained policy needs its deck.")
+            return
+
+        self.live = LiveWorker(self.tel, self.school.currentText(), deck,
+                               policy, self.fights.value(), agent=self.agent)
+        self.live.status.connect(self.on_live_status)
+        self.live.round_done.connect(self.on_round)
+        self.live.fight_done.connect(lambda n: self.refresh_all())
+        self.live.failed.connect(self.on_live_failed)
+        self.live.finished_ok.connect(self.on_live_finished)
+        self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.train_btn.setEnabled(False)
+        self.live.start()
+
+    def on_stop_live(self):
+        if self.live is not None:
+            self.live.stop()
+            self.status.setText("stopping after this fight…")
+        self.stop_btn.setEnabled(False)
+
+    def on_live_status(self, message):
+        self.status.setText(message)
+
+    def on_round(self, _rec):
+        # Queued from the worker thread, so this runs on the GUI thread.
+        self.refresh_all()
+
+    def on_live_failed(self, message):
+        self._live_over()
+        self.status.setText("live run failed")
+        QMessageBox.critical(self, "wizAi", message)
+
+    def on_live_finished(self):
+        self._live_over()
+        self.status.setText("live run finished")
+
+    def _live_over(self):
+        self.start_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        self.train_btn.setEnabled(True)
+        self.refresh_all()
+
+    def closeEvent(self, event):
+        if self.live is not None and self.live.isRunning():
+            self.live.stop()
+            self.live.wait(3000)
+        super().closeEvent(event)
+
     def on_export(self):
         path, _ = QFileDialog.getSaveFileName(
             self, "Export run", "results_live_run.json", "JSON (*.json)")
@@ -253,12 +353,7 @@ def main(argv=None):
     app = QApplication(sys.argv[:1])
     win = MainWindow(demo_telemetry() if args.demo else None)
     if args.demo:
-        for panel in (win.model, win.naming, win.runs):
-            panel.refresh()
-        if win.tel.rounds:
-            win.board.render(win.tel.rounds[-1])
-            for rec in win.tel.rounds:
-                win.decisions.append(rec)
+        win.status.setText("demo data — press Play live to use the real game")
     win.show()
     return app.exec()
 

@@ -257,13 +257,7 @@ def test_demo_run_populates_every_panel(qapp):
     tel = demo_telemetry()
     assert tel.rounds, "the demo produced no rounds"
 
-    win = MainWindow(tel)
-    for panel in (win.model, win.naming, win.runs):
-        panel.refresh()
-    win.board.render(tel.rounds[-1])
-    for rec in tel.rounds:
-        win.decisions.append(rec)
-
+    win = MainWindow(tel)          # populates itself; see refresh_all
     assert win.decisions.table.rowCount() == len(tel.rounds)
     assert win.model.table.rowCount() == len(
         tel.damage_observations(clean_only=False))
@@ -345,3 +339,82 @@ def test_train_button_rejects_a_deck_the_table_cannot_build(qapp, monkeypatch):
     win.on_train()
     assert "hit" in warned
     assert win.worker is None
+
+
+# ----------------------------------------------------------------- live tab
+def test_window_populates_itself_without_manual_wiring(qapp):
+    """The blank-window bug: the panels only ever drew because `main()`
+    hand-called them for `--demo`. Constructed with data, the window has
+    to show it."""
+    from deimos_bridge.gui.app import MainWindow, demo_telemetry
+    tel = demo_telemetry()
+    win = MainWindow(tel)
+    assert win.decisions.table.rowCount() == len(tel.rounds)
+    assert win.runs.table.rowCount() == len(tel.fights)
+    assert win.naming.table.rowCount() >= 1
+    assert "round" in win.board.round_lab.text()
+
+
+def test_panels_do_not_subscribe_to_the_telemetry(qapp):
+    """Thread safety, structurally. A live run fills the telemetry from a
+    worker thread; a panel that updated widgets from its callback would be
+    touching Qt off the GUI thread. Updates must arrive only through
+    MainWindow.refresh_all, which the worker reaches by queued signal."""
+    from deimos_bridge.gui.app import MainWindow
+    tel = Telemetry()
+    MainWindow(tel)
+    assert tel._listeners == [], \
+        "a panel subscribed directly; live updates would cross threads"
+
+
+def test_live_worker_builds_each_policy(qapp):
+    from deimos_bridge.gui.live import LiveWorker
+
+    def worker(name, agent=None):
+        return LiveWorker(Telemetry(), "ice", ["Frost Beetle"], name, 1,
+                          agent=agent)
+
+    assert callable(worker("school-aware")._build_policy({}))
+    assert callable(worker("blade-stack(3)")._build_policy({}))
+    assert callable(worker("blade-stack(2)")._build_policy({}))
+    assert callable(worker("nuke-asap")._build_policy({}))
+
+
+def test_live_worker_refuses_a_trained_policy_with_no_agent(qapp):
+    """Silently falling back to a heuristic would report a heuristic's
+    numbers under the trained policy's name."""
+    from deimos_bridge.gui.live import LiveWorker
+    w = LiveWorker(Telemetry(), "ice", ["Frost Beetle"], "trained (Q)", 1)
+    with pytest.raises(RuntimeError, match="No trained policy"):
+        w._build_policy({})
+
+
+def test_live_worker_reports_a_missing_wizwalker_clearly(qapp):
+    """Off Windows this is the expected path, and it must arrive as a
+    readable message on the `failed` signal rather than a crash."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+    w = LiveWorker(Telemetry(), "ice", ["Frost Beetle"], "school-aware", 1)
+    try:
+        import wizwalker  # noqa: F401
+        pytest.skip("wizwalker present; this is the off-Windows path")
+    except ImportError:
+        pass
+    with pytest.raises(RuntimeError, match="wizwalker did not import"):
+        asyncio.run(w._go())
+
+
+def test_start_live_blocks_a_trained_run_with_no_agent(qapp, monkeypatch):
+    from deimos_bridge.gui import app as app_mod
+    from deimos_bridge.gui.app import MainWindow
+
+    warned = {}
+    monkeypatch.setattr(app_mod.QMessageBox, "warning",
+                        lambda *a, **k: warned.setdefault("hit", a))
+    win = MainWindow(Telemetry())
+    win.policy.setCurrentText("trained (Q)")
+    win.on_start_live()
+    assert "hit" in warned
+    assert win.live is None
+    assert win.start_btn.isEnabled()
