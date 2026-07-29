@@ -180,6 +180,14 @@ class MainWindow(QMainWindow):
             "policy fights without babysitting it.")
         quest_row.addWidget(self.auto_quest)
 
+        self.auto_dialogue = QCheckBox("Auto-dialogue")
+        self.auto_dialogue.setChecked(True)
+        self.auto_dialogue.setToolTip(
+            "Watch for dialogue and click through it as it appears, for the "
+            "whole run — not just when you press the button. Paused during "
+            "combat, so it cannot fight the card clicks.")
+        quest_row.addWidget(self.auto_dialogue)
+
         self.tp_btn = QPushButton("Teleport to quest")
         self.tp_btn.clicked.connect(self.on_teleport)
         quest_row.addWidget(self.tp_btn)
@@ -311,7 +319,8 @@ class MainWindow(QMainWindow):
 
         self.live = LiveWorker(self.tel, self.school.currentText(), deck,
                                policy, self.fights.value(), agent=self.agent,
-                               auto_quest=self.auto_quest.isChecked())
+                               auto_quest=self.auto_quest.isChecked(),
+                               auto_dialogue=self.auto_dialogue.isChecked())
         self.live.status.connect(self.on_live_status)
         self.live.round_done.connect(self.on_round)
         self.live.fight_done.connect(lambda n: self.refresh_all())

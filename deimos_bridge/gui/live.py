@@ -33,7 +33,7 @@ class LiveWorker(QThread):
     finished_ok = pyqtSignal()
 
     def __init__(self, telemetry, school, deck, policy_name, fights,
-                 agent=None, auto_quest=False):
+                 agent=None, auto_quest=False, auto_dialogue=True):
         super().__init__()
         self.tel = telemetry
         self.school = school
@@ -42,6 +42,7 @@ class LiveWorker(QThread):
         self.fights = fights
         self.agent = agent
         self.auto_quest = auto_quest
+        self.auto_dialogue = auto_dialogue
         self._stop = False
         #: one-shot questing requests from the GUI thread. A plain list
         #: rather than a queue: the GUI appends, the loop drains between
@@ -61,20 +62,52 @@ class LiveWorker(QThread):
         """
         self._requests.append(action)
 
-    async def _drain_requests(self):
+    async def _service_loop(self, client):
+        """Handle requests and auto-dialogue *while* the fight loop runs.
+
+        This is the fix for "Teleport to quest says it is teleporting and
+        nothing happens". Requests used to be drained at the top of the
+        fight loop, but that loop spends nearly all its time blocked
+        inside `wait_for_combat`, so a request queued while waiting sat
+        there until a fight had started AND finished. Servicing them on a
+        concurrent task means a button press acts within a second.
+
+        Anything that clicks is skipped while a duel is on: the combat
+        handler is clicking cards then, and two coroutines driving the
+        mouse at once produce misclicks.
+        """
         from .. import questing
 
-        while self._requests:
-            action = self._requests.pop(0)
-            if self._client is None:
-                continue
-            if action == "teleport":
-                ok = await questing.teleport_to_quest(self._client)
-                self.status.emit("teleported" if ok else
-                                 "no quest position to teleport to")
-            elif action == "dialogue":
-                n = await questing.advance_dialogue(self._client)
-                self.status.emit(f"advanced {n} dialogue window(s)")
+        while not self._stop:
+            try:
+                if await questing.in_battle(client):
+                    await asyncio.sleep(0.5)
+                    continue
+
+                while self._requests:
+                    action = self._requests.pop(0)
+                    if action == "teleport":
+                        ok, reason = await questing.teleport_to_quest(client)
+                        self.status.emit("teleported to the quest marker"
+                                         if ok else reason)
+                    elif action == "dialogue":
+                        n = await questing.advance_dialogue(client)
+                        self.status.emit(
+                            f"advanced {n} dialogue window(s)" if n
+                            else "no dialogue open")
+
+                if self.auto_dialogue and await questing.in_dialogue(client):
+                    n = await questing.advance_dialogue(client)
+                    if n:
+                        self.status.emit(f"auto-dialogue: {n} window(s)")
+
+                await asyncio.sleep(0.5)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # The service task must outlive a bad read; the fight
+                # loop is the thing that matters.
+                await asyncio.sleep(1.0)
 
     # -- worker thread ----------------------------------------------------
     def run(self):
@@ -132,6 +165,7 @@ class LiveWorker(QThread):
         self.status.emit("looking for the game…")
         handler = ClientHandler()
         backend = None
+        servicer = None
         try:
             clients = handler.get_new_clients()
             if not clients:
@@ -171,15 +205,16 @@ class LiveWorker(QThread):
             self.status.emit(
                 "connected — hunting for fights" if self.auto_quest
                 else "connected — walk into a fight")
+            servicer = asyncio.ensure_future(self._service_loop(client))
             fought = 0
             while not self._stop and (self.fights <= 0 or fought < self.fights):
-                await self._drain_requests()
-                if self._stop:
-                    break
                 if self.auto_quest:
                     from .. import questing
                     await questing.hop_to_next_fight(
-                        client, on_status=self.status.emit)
+                        client, on_status=self.status.emit,
+                        should_stop=lambda: self._stop)
+                    if self._stop:
+                        break
                 self.tel.start_fight()
                 try:
                     # blocks until a duel starts, then plays it out
@@ -197,6 +232,12 @@ class LiveWorker(QThread):
                     if not self._stop else "stopping…")
             self.finished_ok.emit()
         finally:
+            if servicer is not None:
+                servicer.cancel()
+                try:
+                    await servicer
+                except BaseException:
+                    pass
             try:
                 await handler.close()
             except Exception:

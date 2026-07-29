@@ -460,13 +460,28 @@ class _Mouse:
             window._visible = False
 
 
+class _XYZ:
+    def __init__(self, x, y, z):
+        self.x, self.y, self.z = x, y, z
+
+    def __eq__(self, other):
+        return (self.x, self.y, self.z) == (other.x, other.y, other.z)
+
+    def __repr__(self):
+        return f"XYZ({self.x}, {self.y}, {self.z})"
+
+
 class _QuestClient:
-    def __init__(self, root, position=(1.0, 2.0, 3.0), in_battle=False):
+    def __init__(self, root, position=_XYZ(1.0, 2.0, 3.0), in_battle=False,
+                 loading=0, zone="Wizard City"):
         self.root_window = root
         self.mouse_handler = _Mouse()
         self.teleported = []
+        self.keys = []
         self._position = position
         self._in_battle = in_battle
+        self._loading = loading          # rounds of loading left
+        self._zone = zone
 
         client = self
 
@@ -485,7 +500,16 @@ class _QuestClient:
         return self._in_battle
 
     async def is_loading(self):
+        if self._loading > 0:
+            self._loading -= 1
+            return True
         return False
+
+    async def zone_name(self):
+        return self._zone
+
+    async def send_key(self, key, seconds=0):
+        self.keys.append(key)
 
 
 def _dialogue_root(visible=True):
@@ -550,11 +574,14 @@ def test_teleport_to_quest_reports_failure_rather_than_raising():
     root, _ = _dialogue_root()
 
     ok_client = _QuestClient(root)
-    assert asyncio.run(teleport_to_quest(ok_client)) is True
-    assert ok_client.teleported == [(1.0, 2.0, 3.0)]
+    ok, reason = asyncio.run(teleport_to_quest(ok_client))
+    assert ok is True and reason == ""
+    assert ok_client.teleported == [_XYZ(1.0, 2.0, 3.0)]
 
     no_quest = _QuestClient(root, position=None)
-    assert asyncio.run(teleport_to_quest(no_quest)) is False
+    ok, reason = asyncio.run(teleport_to_quest(no_quest))
+    assert ok is False
+    assert "quest arrow" in reason      # the actual cause, not a bare False
     assert no_quest.teleported == []
 
 
@@ -580,7 +607,93 @@ def test_hop_to_next_fight_gives_up_rather_than_spinning():
     assert asyncio.run(hop_to_next_fight(client, max_hops=3, settle=0,
                                          on_status=said.append)) is False
     assert len(client.teleported) == 3
-    assert "gave up" in said[-1]
+    assert "no fight after" in said[-1]
+
+
+def test_hop_keeps_going_through_a_zone_change():
+    """The bug behind "it teleported to another zone and then stopped".
+    A zone change makes several reads fail in a row, and the first
+    version returned on the first failure -- ending the hunt and leaving
+    the run waiting for a fight that would never start."""
+    import asyncio
+
+    from deimos_bridge.questing import hop_to_next_fight
+    root, _ = _dialogue_root(visible=False)
+    client = _QuestClient(root, in_battle=False, loading=3)
+
+    fights = {"after": 3}
+    real_in_battle = client.in_battle
+
+    async def in_battle():
+        fights["after"] -= 1
+        return fights["after"] <= 0
+
+    client.in_battle = in_battle
+    said = []
+    assert asyncio.run(hop_to_next_fight(client, max_hops=8, settle=0,
+                                         on_status=said.append)) is True
+
+
+def test_hop_presses_x_to_interact(monkeypatch):
+    """Arriving at the marker is often not enough -- sigils, dungeon
+    doors and quest NPCs need an interact."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    monkeypatch.setattr(questing, "keycode_x", lambda: "X")
+    root, _ = _dialogue_root(visible=False)
+    client = _QuestClient(root, in_battle=False)
+    asyncio.run(questing.hop_to_next_fight(client, max_hops=2, settle=0))
+    assert client.keys == ["X", "X"], "never pressed X"
+
+
+def test_press_x_is_a_no_op_without_wizwalker(monkeypatch):
+    """Off Windows there is no Keycode to send; that must not raise."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    monkeypatch.setattr(questing, "keycode_x", lambda: None)
+    root, _ = _dialogue_root(visible=False)
+    client = _QuestClient(root)
+    assert asyncio.run(questing.press_x(client)) is False
+    assert client.keys == []
+
+
+def test_hop_stops_early_when_asked():
+    import asyncio
+
+    from deimos_bridge.questing import hop_to_next_fight
+    root, _ = _dialogue_root(visible=False)
+    client = _QuestClient(root, in_battle=False)
+    assert asyncio.run(hop_to_next_fight(
+        client, max_hops=20, settle=0, should_stop=lambda: True)) is False
+    assert client.teleported == []
+
+
+def test_a_zeroed_quest_position_is_reported_as_the_arrow_being_off():
+    """activate_all_hooks warns the quest hook is not written when the
+    in-game quest arrow is off (memory/handler.py:187). That reads as
+    the origin, and is the commonest cause of a teleport doing nothing."""
+    import asyncio
+
+    from deimos_bridge.questing import read_quest_position
+    root, _ = _dialogue_root(visible=False)
+    client = _QuestClient(root, position=_XYZ(0.0, 0.0, 0.0))
+    position, reason = asyncio.run(read_quest_position(client))
+    assert position is None
+    assert "quest arrow" in reason
+
+
+def test_wait_until_ready_rides_out_a_loading_screen():
+    import asyncio
+
+    from deimos_bridge.questing import wait_until_ready
+    root, _ = _dialogue_root(visible=False)
+    client = _QuestClient(root, loading=3)
+    assert asyncio.run(wait_until_ready(client, timeout=5, poll=0)) is True
+    assert asyncio.run(client.is_loading()) is False
 
 
 # ----------------------------------------------------------- deck picker
@@ -680,3 +793,104 @@ def test_picker_hides_boss_and_event_variants(qapp):
     d.refilter()
     names = [d.results.item(i).data(0x0100) for i in range(d.results.count())]
     assert any("BOSS" in n for n in names)
+
+
+def test_service_loop_runs_requests_while_the_fight_loop_waits(qapp):
+    """The bug behind "TP to quest says teleporting and nothing happens".
+
+    Requests used to drain at the top of the fight loop, which spends
+    nearly all its time blocked inside wait_for_combat -- so a request
+    queued while waiting sat there until a fight had started AND
+    finished. The service loop is concurrent, so it acts in about a
+    second.
+    """
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    root, _ = _dialogue_root(visible=False)
+    client = _QuestClient(root, in_battle=False)
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    worker.auto_dialogue = False
+    said = []
+    worker.status = type("S", (), {"emit": staticmethod(said.append)})()
+
+    async def drive():
+        task = asyncio.ensure_future(worker._service_loop(client))
+        worker.request("teleport")
+        for _ in range(40):                 # ~2s of 50ms ticks
+            await asyncio.sleep(0.05)
+            if client.teleported:
+                break
+        worker._stop = True
+        task.cancel()
+        try:
+            await task
+        except BaseException:
+            pass
+
+    asyncio.run(drive())
+    assert client.teleported, "the request never ran"
+    assert any("teleported" in m for m in said)
+
+
+def test_service_loop_leaves_the_mouse_alone_during_combat(qapp):
+    """Two coroutines clicking at once produce misclicks, so anything
+    that clicks is skipped while a duel is on."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    root, button = _dialogue_root(visible=True)
+    client = _QuestClient(root, in_battle=True)
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1,
+                        auto_dialogue=True)
+    worker.status = type("S", (), {"emit": staticmethod(lambda *_: None)})()
+
+    async def drive():
+        task = asyncio.ensure_future(worker._service_loop(client))
+        worker.request("teleport")
+        await asyncio.sleep(0.3)
+        worker._stop = True
+        task.cancel()
+        try:
+            await task
+        except BaseException:
+            pass
+
+    asyncio.run(drive())
+    assert client.teleported == []
+    assert client.mouse_handler.clicks == []
+
+
+def test_auto_dialogue_clicks_without_being_asked(qapp):
+    """The feature: watch and click as dialogue appears, for the whole
+    run, not only when the button is pressed."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    root, _ = _dialogue_root(visible=True)
+    client = _QuestClient(root, in_battle=False)
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1,
+                        auto_dialogue=True)
+    worker.status = type("S", (), {"emit": staticmethod(lambda *_: None)})()
+
+    async def drive():
+        task = asyncio.ensure_future(worker._service_loop(client))
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            if client.mouse_handler.clicks:
+                break
+        worker._stop = True
+        task.cancel()
+        try:
+            await task
+        except BaseException:
+            pass
+
+    asyncio.run(drive())
+    assert client.mouse_handler.clicks, "auto-dialogue never fired"
