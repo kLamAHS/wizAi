@@ -200,17 +200,20 @@ def demo_telemetry():
     exercisable -- and testable -- with no game and no Windows."""
     import asyncio
 
-    from data_full import load_spells_full
     from w101_sim import make_blade_stack
 
     from ..live_backend import WizAiBackend
+    from ..live_state import build_catalog
     from ..mock_client import MockCard, MockCombat, MockEffect, MockMember
 
-    cards = load_spells_full()
+    catalog = build_catalog()
+    cards = catalog["cards"]
     deck = ["Fireblade"] * 3 + ["Sunbird"] * 4
     tel = Telemetry(policy_name="blade-stack(2)", school="fire", deck=deck)
     be = WizAiBackend.from_trained(school="fire", deck=deck, cards=cards,
-                                   policy=make_blade_stack(2))
+                                   policy=make_blade_stack(2),
+                                   catalog=catalog)
+    tel.resolver = be.resolver
     be.on_decision = lambda d, r: tel.observe(d, r, sim=be._sim_for(r),
                                               cards=cards)
     tel.start_fight()
@@ -220,10 +223,13 @@ def demo_telemetry():
         me = MockMember("Wizard", 3000 - rnd * 90, client=True, team_id=0,
                         normal_pips=min(rnd + 1, 7), hangings=list(blades))
         foe = MockMember("Krokopatra", hp, monster=True, team_id=1)
-        combat = MockCombat([me, foe],
-                            [MockCard("Fireblade"), MockCard("Sunbird"),
-                             MockCard("Not A Real Spell")],
-                            round_number=rnd)
+        combat = MockCombat(
+            [me, foe],
+            [MockCard("Fireblade"), MockCard("Sunbird"),
+             # one of each miss kind, so the Naming panel shows the split
+             MockCard("Not A Real Spell"),      # no such card anywhere
+             MockCard("Summon589244")],         # real, but decoder-skipped
+            round_number=rnd)
         be.attach_combat(combat)
         decision = asyncio.run(be.decide())
         if decision.card_name == "Fireblade":

@@ -45,6 +45,8 @@ def _log_decision(log):
             "player_hp": s.player_hp,
             "pips": [s.norm_pips, s.pow_pips],
             "hand": [c.name for c in s.hand],
+            "hidden": list(getattr(read, "hidden", [])),
+            "hand_visibility": getattr(read, "hand_visibility", 1.0),
             "enemies": [(e.name, e.hp) for e in s.enemies],
             "player_charms": [h.name for h in s.player.charms],
             "enemy_wards": [h.name for h in s.enemies[0].wards] if s.enemies else [],
@@ -97,10 +99,14 @@ async def run(args):
             "without either."
         )
 
-    from data_full import load_spells_full
     from .live_backend import WizAiBackend, make_combat_handler
+    from .live_state import build_catalog
 
-    cards = load_spells_full()
+    # One extra pass over spells_full.json buys the difference between
+    # "3 unresolved names" and "these 2 need a decoder gap closed, this 1
+    # is a spelling problem" -- worth it once per run.
+    catalog = build_catalog()
+    cards = catalog["cards"]
     deck = [d.strip() for d in args.deck.split(",")] if args.deck else []
     policy = build_policy(args.policy, cards, args.school, deck)
 
@@ -115,7 +121,8 @@ async def run(args):
         await client.activate_hooks()
 
         backend = WizAiBackend(policy=policy, cards=cards, school=args.school,
-                               decklist=deck, on_decision=_log_decision(log))
+                               decklist=deck, on_decision=_log_decision(log),
+                               catalog=catalog)
         # WizAiCombatHandler, not SprintyCombat: one decision must be one
         # cast, or the fight is played by a different policy than the one
         # being measured. See live_backend.WizAiCombatHandler.

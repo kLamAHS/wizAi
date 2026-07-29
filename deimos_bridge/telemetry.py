@@ -142,6 +142,9 @@ class RoundRecord:
     pow_pips: int = 0
     player_charms: list = field(default_factory=list)
     enemies: list = field(default_factory=list)
+    #: castable cards this round the policy could not see at all
+    hidden: list = field(default_factory=list)
+    hand_visibility: float = 1.0
     predicted_damage: float = None
     actual_damage: float = None
     clean: bool = True
@@ -176,10 +179,14 @@ class FightRecord:
 class Telemetry:
     """Everything a live run produced. The GUI is a view over this."""
 
-    def __init__(self, policy_name="", school="", deck=None):
+    def __init__(self, policy_name="", school="", deck=None, resolver=None):
         self.policy_name = policy_name
         self.school = school
         self.deck = list(deck or [])
+        #: the run's NameResolver, if there is one. Only used so the GUI
+        #: can classify a miss as "the decoder skipped it" vs "no such
+        #: card"; everything else here works without it.
+        self.resolver = resolver
         self.rounds = []
         self.fights = []
         self._fight = 0
@@ -232,6 +239,8 @@ class Telemetry:
             hand=sorted(read.hand_cards),
             alternatives=sorted(set(read.hand_cards) - {decision.card_name}),
             unresolved=sorted(read.resolver.misses),
+            hidden=sorted(getattr(read, "hidden", []) or []),
+            hand_visibility=getattr(read, "hand_visibility", 1.0),
             player_hp=s.player_hp,
             player_max_hp=s.player.max_hp,
             norm_pips=s.norm_pips,
@@ -341,6 +350,24 @@ class Telemetry:
                 counts[n] = counts.get(n, 0) + 1
         return dict(sorted(counts.items(), key=lambda kv: -kv[1]))
 
+    def hand_visibility(self):
+        """How much of the hand the policy could see, averaged over rounds.
+
+        The single number that says whether a run is worth analysing. A
+        policy shown 70% of its hand is not the policy you trained, and
+        no amount of care in the other panels recovers that.
+        """
+        if not self.rounds:
+            return 1.0
+        return statistics.fmean(r.hand_visibility for r in self.rounds)
+
+    def hidden_cards(self):
+        counts = {}
+        for r in self.rounds:
+            for n in r.hidden:
+                counts[n] = counts.get(n, 0) + 1
+        return dict(sorted(counts.items(), key=lambda kv: -kv[1]))
+
     def summary(self):
         st = self.error_stats()
         return {
@@ -352,6 +379,8 @@ class Telemetry:
             "wins": sum(1 for f in self.fights if f.won),
             "damage_model": st,
             "unresolved": self.unresolved_names(),
+            "hand_visibility": self.hand_visibility(),
+            "hidden_cards": self.hidden_cards(),
         }
 
     def to_json(self, path):

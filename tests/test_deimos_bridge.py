@@ -189,6 +189,107 @@ def test_aliases_point_at_real_cards():
         assert real in cards, f"alias target {real!r} is not in the card table"
 
 
+def test_langcode_resolves_a_card_whose_name_does_not():
+    """`display_name_code()` is the game's own stable identifier. It does
+    not move when a spell is renamed and it is identical on a non-English
+    client, so it is a better key than the display string -- and it
+    rescues a name lookup that misses."""
+    from deimos_bridge.live_state import build_catalog
+    cat = build_catalog()
+    r = NameResolver(cat["cards"], cat)
+    assert r.resolve("Renamed In A Later Patch",
+                     langcode="Spells_Fireblade") is cat["cards"]["Fireblade"]
+
+
+def test_a_shared_langcode_resolves_to_the_canonical_spell():
+    """"Spells_Fireblade" is shared by Fireblade, Fireblade - EM,
+    Fireblade - SIT, Fireblade - Tear, FirebladeBOSS01, FirebladeBOSS02
+    and a raid sigil. Resolving on the code alone could hand the policy a
+    boss variant; `base_spell` settles it, because the canonical record
+    is the one whose name IS its base spell."""
+    from deimos_bridge.live_state import build_catalog
+    cat = build_catalog()
+    assert cat["langcodes"]["Spells_Fireblade"].name == "Fireblade"
+
+
+def test_langcodes_with_no_single_canonical_are_dropped():
+    """Where `base_spell` cannot single one out, there is no answer, and
+    the catalog must leave the code out instead of picking."""
+    from deimos_bridge.live_state import build_catalog
+    cat = build_catalog()
+    assert cat["ambiguous_langcodes"], "expected some undecidable groups"
+    for code in cat["ambiguous_langcodes"]:
+        assert code not in cat["langcodes"]
+
+
+def test_misses_are_classified_by_cause():
+    """The two kinds need different fixes, so they must not look alike.
+    A name the game data knows but the decoder skipped is a gap in
+    _map_effect with a named cause; a name the data has never heard of is
+    a spelling problem."""
+    from deimos_bridge.live_state import (MISS_DECODER, MISS_UNKNOWN,
+                                          build_catalog)
+    cat = build_catalog()
+    r = NameResolver(cat["cards"], cat)
+
+    assert r.resolve("Summon589244") is None
+    kind, detail = r.classify("Summon589244")
+    assert kind == MISS_DECODER
+    assert "kSummonCreature" in detail
+
+    assert r.resolve("Not A Real Spell") is None
+    assert r.classify("Not A Real Spell")[0] == MISS_UNKNOWN
+
+
+def test_classification_degrades_honestly_without_a_catalog():
+    """A resolver built without a catalog genuinely cannot tell the two
+    apart, and must say unknown rather than invent a cause."""
+    from data_full import load_spells_full
+    from deimos_bridge.live_state import MISS_UNKNOWN
+    r = NameResolver(load_spells_full())
+    assert r.classify("Summon589244")[0] == MISS_UNKNOWN
+
+
+def test_hidden_cards_are_recorded_not_silently_dropped():
+    """An unresolvable card cannot enter the policy's hand -- there is no
+    wizAi Card for it -- but dropping it silently is how a run quietly
+    stops measuring anything: the policy plans a 2-card hand while
+    holding 4, and its scarcity feature counts the wrong nukes."""
+    from deimos_bridge.live_state import build_catalog
+    cat = build_catalog()
+    r = NameResolver(cat["cards"], cat)
+    combat = MockCombat(
+        [MockMember("Wizard", 2000, client=True, team_id=0),
+         MockMember("Lost Soul", 900, monster=True, team_id=1)],
+        [MockCard("Fireblade"), MockCard("Sunbird"),
+         MockCard("Not A Real Spell"), MockCard("Summon589244")])
+    read = run(read_state(combat, r, "fire"))
+    assert sorted(read.hidden) == ["Not A Real Spell", "Summon589244"]
+    assert sorted(c.name for c in read.state.hand) == ["Fireblade", "Sunbird"]
+    assert read.hand_visibility == pytest.approx(0.5)
+
+
+def test_full_visibility_when_everything_resolves():
+    from data_full import load_spells_full
+    r = NameResolver(load_spells_full())
+    read = run(read_state(simple_fight(hand=("Fireblade", "Sunbird")),
+                          r, "fire"))
+    assert read.hidden == []
+    assert read.hand_visibility == 1.0
+
+
+def test_report_separates_the_two_causes():
+    from deimos_bridge.live_state import build_catalog
+    cat = build_catalog()
+    r = NameResolver(cat["cards"], cat)
+    r.resolve("Summon589244")
+    r.resolve("Not A Real Spell")
+    text = r.report()
+    assert "decoder skipped these" in text
+    assert "kSummonCreature" in text
+    assert "not in the game data" in text
+
+
 def test_resolver_never_guesses():
     """A near-miss must fail rather than resolve to a neighbour. Casting
     the wrong spell in a real fight is worse than passing."""

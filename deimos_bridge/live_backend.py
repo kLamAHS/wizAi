@@ -57,7 +57,7 @@ class WizAiBackend:
     _base_installed = False
 
     def __init__(self, policy, cards, school, decklist=None, cast_time=0.3,
-                 on_decision=None, rules=None):
+                 on_decision=None, rules=None, catalog=None):
         """
         Args:
             policy:   `policy(sim, state) -> Card | str | None`, wizAi's
@@ -77,7 +77,7 @@ class WizAiBackend:
         self.combat = None
         self.on_decision = on_decision
         self.rules = rules
-        self.resolver = NameResolver(cards)
+        self.resolver = NameResolver(cards, catalog)
         self.history = []          # PolicyDecision, in order
         self._seen = []            # card names observed in hand so far
         #: the `LiveRead` behind the most recent decision. The handler

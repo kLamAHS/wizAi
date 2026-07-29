@@ -301,11 +301,19 @@ class ModelPanel(QWidget):
 
 
 class NamingPanel(QWidget):
-    """Card names the resolver could not place.
+    """Cards the policy could not see, and what to do about each.
 
-    Its own panel because the failure is silent. wizAi's card table is
-    keyed on exact name; an unresolved card is not an error, it is simply
-    a card the policy never had.
+    Its own panel because the failure is silent: wizAi's card table is
+    keyed on exact name, so an unresolved card is not an error, it is
+    simply a card the policy never had. The headline is hand visibility
+    rather than a miss count, because that is the number that decides
+    whether the rest of the run means anything -- a policy shown 70% of
+    its hand is not the policy you trained.
+
+    Misses are split by cause, because they have different fixes. A name
+    the game data knows but the decoder skipped is a gap in
+    `data_full._map_effect` with a named cause. A name the game data has
+    never heard of is a spelling problem, and belongs in `ALIASES`.
     """
 
     def __init__(self, telemetry):
@@ -314,12 +322,10 @@ class NamingPanel(QWidget):
         root = QVBoxLayout(self)
         self.headline = _label("—", size=13, bold=True)
         root.addWidget(self.headline)
-        root.addWidget(_label(
-            "Every name here is a spell the policy was never offered. Add it "
-            "to deimos_bridge.live_state.ALIASES if the game and the card "
-            "table simply disagree on spelling, or to the scrape if the card "
-            "is genuinely missing.", PALETTE["muted"]))
-        self.table = _table(["game name", "times seen"])
+        self.detail = _label("", PALETTE["muted"])
+        self.detail.setWordWrap(True)
+        root.addWidget(self.detail)
+        self.table = _table(["card", "times seen", "cause", "what to do"])
         root.addWidget(self.table)
         telemetry.subscribe(self._on_event)
 
@@ -327,20 +333,63 @@ class NamingPanel(QWidget):
         if event == "round":
             self.refresh()
 
+    def _rows(self):
+        """Miss rows, classified. Falls back to a flat list when no
+        resolver catalog was built -- the classification is genuinely
+        unavailable then, and inventing one would be worse than saying so."""
+        seen = {}
+        for rec in self.tel.rounds:
+            for name in rec.hidden or rec.unresolved:
+                seen[name] = seen.get(name, 0) + 1
+        resolver = getattr(self.tel, "resolver", None)
+        rows = []
+        for name, n in sorted(seen.items(), key=lambda kv: -kv[1]):
+            kind, detail = (resolver.classify(name) if resolver
+                            else ("unknown", None))
+            rows.append((name, n, kind, detail))
+        return rows
+
     def refresh(self):
-        misses = self.tel.unresolved_names()
-        if misses:
-            self.headline.setText(f"{len(misses)} unresolved card names")
-            self.headline.setStyleSheet(
-                f"color: {PALETTE['bad']}; font-size: 13pt; font-weight: 600")
+        vis = self.tel.hand_visibility()
+        colour = (PALETTE["good"] if vis > 0.995 else
+                  PALETTE["warn"] if vis > 0.9 else PALETTE["bad"])
+        if vis > 0.995:
+            self.headline.setText("the policy saw its whole hand")
         else:
-            self.headline.setText("every card name resolved")
-            self.headline.setStyleSheet(
-                f"color: {PALETTE['good']}; font-size: 13pt; font-weight: 600")
-        self.table.setRowCount(len(misses))
-        for i, (name, n) in enumerate(misses.items()):
-            self.table.setItem(i, 0, _cell(name, PALETTE["bad"]))
+            self.headline.setText(
+                f"the policy saw {vis * 100:.0f}% of its hand")
+        self.headline.setStyleSheet(
+            f"color: {colour}; font-size: 13pt; font-weight: 600")
+
+        rows = self._rows()
+        if not rows:
+            self.detail.setText("")
+        elif vis <= 0.9:
+            self.detail.setText(
+                "This run is not measuring the policy you trained — it was "
+                "planning against a hand it could only partly see. Fix the "
+                "rows below before reading anything into the other tabs.")
+            self.detail.setStyleSheet(f"color: {PALETTE['bad']}")
+        else:
+            self.detail.setText(
+                "Each row is a spell the policy was never offered.")
+            self.detail.setStyleSheet(f"color: {PALETTE['muted']}")
+
+        self.table.setRowCount(len(rows))
+        for i, (name, n, kind, detail) in enumerate(rows):
+            if kind == "decoder":
+                cause = detail or "skipped by the decoder"
+                todo = ("close the gap in data_full._map_effect, "
+                        "or accept the card is unmodellable")
+                tint = PALETTE["warn"]
+            else:
+                cause = "not in the game data under this name"
+                todo = "check spelling; add to live_state.ALIASES"
+                tint = PALETTE["bad"]
+            self.table.setItem(i, 0, _cell(name, tint))
             self.table.setItem(i, 1, _cell(n))
+            self.table.setItem(i, 2, _cell(cause, PALETTE["muted"]))
+            self.table.setItem(i, 3, _cell(todo, PALETTE["muted"]))
 
 
 class RunPanel(QWidget):

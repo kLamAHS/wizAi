@@ -90,11 +90,13 @@ class MockMember:
 class MockCard:
     """Records what it was asked to do, so a test can assert on the cast."""
     def __init__(self, name, *, castable=True, treasure=False, item=False,
-                 enchanted=False):
+                 enchanted=False, langcode=None):
         self.cast_log = []
         _attrs(self, {
             "name": name,
             "display_name": name,
+            # the game's stable identifier, e.g. "Spells_Fireblade"
+            "display_name_code": langcode or f"Spells_{name.replace(' ', '')}",
             "is_castable": castable,
             "is_treasure_card": treasure,
             "is_item_card": item,

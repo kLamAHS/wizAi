@@ -274,14 +274,51 @@ def test_demo_run_populates_every_panel(qapp):
 
 
 def test_naming_panel_surfaces_the_unresolvable_card(qapp):
-    """The demo hand contains a card that is not in the table; it has to
-    show up, because in a real run that is a silent failure."""
+    """The demo hand contains cards that are not in the table; they have
+    to show up, because in a real run that is a silent failure."""
     from deimos_bridge.gui.app import MainWindow, demo_telemetry
     tel = demo_telemetry()
     win = MainWindow(tel)
     win.naming.refresh()
-    assert "Not A Real Spell" in tel.unresolved_names()
-    assert win.naming.table.rowCount() >= 1
+    assert "Not A Real Spell" in tel.hidden_cards()
+    assert win.naming.table.rowCount() >= 2
+
+
+def test_naming_panel_separates_the_two_miss_causes(qapp):
+    """A decoder gap and a nonexistent card look identical in a plain
+    miss list and need opposite responses, so the panel must not merge
+    them."""
+    from deimos_bridge.gui.app import MainWindow, demo_telemetry
+    tel = demo_telemetry()
+    win = MainWindow(tel)
+    win.naming.refresh()
+    causes = {win.naming.table.item(i, 0).text():
+              win.naming.table.item(i, 2).text()
+              for i in range(win.naming.table.rowCount())}
+    assert "kSummonCreature" in causes["Summon589244"]
+    assert "not in the game data" in causes["Not A Real Spell"]
+
+
+def test_naming_panel_leads_with_hand_visibility(qapp):
+    """The miss count is not the number that matters -- how much of the
+    hand the policy actually saw is, because a low figure invalidates
+    every other panel."""
+    from deimos_bridge.gui.app import MainWindow, demo_telemetry
+    tel = demo_telemetry()
+    assert tel.hand_visibility() < 0.9
+    win = MainWindow(tel)
+    win.naming.refresh()
+    assert "% of its hand" in win.naming.headline.text()
+    assert "not measuring the policy you trained" in win.naming.detail.text()
+
+
+def test_hand_visibility_is_perfect_when_nothing_is_hidden(qapp):
+    tel = Telemetry()
+    assert tel.hand_visibility() == 1.0
+    from deimos_bridge.gui.app import MainWindow
+    win = MainWindow(tel)
+    win.naming.refresh()
+    assert "whole hand" in win.naming.headline.text()
 
 
 def test_board_panel_shows_hangings_as_arithmetic(qapp):

@@ -199,12 +199,42 @@ tables already flag. `live_state` partitions on `team_id` instead, with
 
 ### The part most likely to break
 
-Naming. wizAi's card table is keyed on exact name and a miss is silent —
-the policy simply never sees the card. Resolution is layered (exact →
-alias → normalised) with **no fuzzy fallback**: Deimos ships `thefuzz`
-and uses it for UI convenience, but casting the wrong spell in a real
-fight is worse than passing. Misses are counted and
-`resolver.report()` prints them at the end of a run.
+Naming, and the failure is silent: wizAi's card table is keyed on exact
+name, so an unresolved card is not an error — it is simply a card the
+policy never had. Three things guard it.
+
+**A langcode layer.** `CombatCard.display_name_code()` returns the game's
+own stable identifier (`Spells_Fireblade`), which does not move when a
+spell is renamed and is identical on a non-English client. It is not
+unique, though: that code is shared by `Fireblade`, `Fireblade - EM`,
+`Fireblade - SIT`, `Fireblade - Tear`, `FirebladeBOSS01`,
+`FirebladeBOSS02` and a raid sigil. `base_spell` settles it without
+guessing — the canonical record is the one whose `name` *is* its
+`base_spell`, which is the player-facing spell by definition. Groups
+where that does not single one out are dropped rather than picked from.
+
+**No fuzzy matching, anywhere.** Deimos ships `thefuzz` and uses it for
+UI convenience; casting the wrong spell in a real fight is worse than
+passing.
+
+**Misses are classified, not just counted**, because the two kinds need
+opposite responses. Most names that fail are not misspellings at all —
+they are internal engine templates (`Summon589244`, `Kill1223126`,
+`Hydra - T04 - C`) that never reach a hand, or real cards the decoder
+skipped for a named reason. `build_catalog()` pays one pass over
+`spells_full.json` to tell them apart, so a miss reads as *"undecoded
+effect kSummonCreature — close the gap in `data_full._map_effect`"* or
+*"not in the game data under this name — check spelling, add to
+`ALIASES`"*.
+
+**And an unresolvable card is recorded, not silently dropped.** It still
+cannot enter the policy's hand — there is no wizAi `Card` to reason about
+— but `LiveRead.hidden` and `hand_visibility` say so. This is the failure
+that quietly voids a run: the policy plans a five-card hand while holding
+seven, and its scarcity feature counts the wrong number of nukes left.
+The GUI leads the Naming tab with hand visibility for exactly that
+reason, and says outright that a run below 90% is not measuring the
+policy you trained.
 
 ## The GUI
 
