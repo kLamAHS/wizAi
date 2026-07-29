@@ -64,6 +64,24 @@ if errorlevel 1 (
 )
 
 echo.
+echo Installing Deimos's questing requirements ...
+REM Deimos/src/questing.py is the real navigator -- navmap teleports,
+REM spiral doors, dungeon entry, NPC talking -- and composes with the
+REM combat policy because auto_quest_solo no-ops during a duel. It needs
+REM src.utils, which imports wizwalker.extensions.wizsprinter, hence
+REM wizsprinter and its Python 3.13 floor. If this fails the bridge falls
+REM back to its own lighter questing and everything else still works.
+"%PY%" -m pip install --quiet "%~dp0Deimos\libs\wizsprinter" thefuzz loguru pyyaml requests pypresence pyperclip
+if errorlevel 1 (
+    echo.
+    echo NOTE: Deimos's questing requirements did not install. That is not
+    echo       fatal -- the bridge will use its own lighter questing, which
+    echo       teleports and clicks dialogue but cannot navigate zones.
+    echo       Everything else works. Python 3.13+ is required for this part.
+    echo.
+)
+
+echo.
 "%PY%" -c "import wizwalker, numpy, PyQt6; print('all imports OK')"
 if errorlevel 1 (
     echo ERROR: something did not install cleanly.

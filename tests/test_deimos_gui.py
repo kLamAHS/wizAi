@@ -894,3 +894,147 @@ def test_auto_dialogue_clicks_without_being_asked(qapp):
 
     asyncio.run(drive())
     assert client.mouse_handler.clicks, "auto-dialogue never fired"
+
+
+# ------------------------------------------------- Deimos's own questing
+def test_deimos_questing_reports_why_it_is_unavailable():
+    """Off Windows wizsprinter cannot import, and the fallback has to say
+    so with the install line rather than failing silently."""
+    from deimos_bridge import deimos_questing
+
+    ok, reason = deimos_questing.available()
+    if ok:
+        pytest.skip("Deimos's questing is importable here")
+    assert "pip install" in reason
+    assert "wizsprinter" in reason
+    assert "light questing" in reason
+
+
+def test_init_client_supplies_every_attribute_quester_reads():
+    """Quester reads attributes Deimos sets in _init_client_attrs and
+    wizwalker's Client has none of them, so the first read would raise
+    AttributeError. This pins the ones the questing path touches."""
+    import asyncio
+
+    from deimos_bridge import deimos_questing
+
+    class _Stats:
+        async def reference_level(self):
+            return 42
+
+    class _Client:
+        stats = _Stats()
+
+    client = asyncio.run(deimos_questing.init_client(_Client()))
+    for attr in ("questing_status", "use_potions", "buy_potions",
+                 "auto_pet_status", "entity_detect_combat_status",
+                 "character_level", "title", "helper_clients",
+                 "in_solo_zone", "duel_circle_joinable"):
+        assert hasattr(client, attr), attr
+    assert client.character_level == 42
+    assert client.questing_status is True     # Deimos's loop flag
+    assert client.auto_pet_status is False    # no pet training on a data run
+    assert client.helper_clients == []
+
+
+def test_init_client_takes_overrides():
+    import asyncio
+
+    from deimos_bridge import deimos_questing
+
+    class _Client:
+        class stats:
+            @staticmethod
+            async def reference_level():
+                return 1
+
+    client = asyncio.run(
+        deimos_questing.init_client(_Client(), buy_potions=True))
+    assert client.buy_potions is True
+
+
+def test_quester_step_survives_a_failed_read():
+    """Deimos's questing reads a lot of memory and a failed read during a
+    zone change is routine. A raise is a skipped tick, not a dead run --
+    but it is counted, so a permanently broken setup is visible."""
+    import asyncio
+
+    from deimos_bridge.deimos_questing import DeimosQuester
+
+    class _Boom:
+        async def auto_quest_solo(self, **kw):
+            raise RuntimeError("MemoryReadError")
+
+    q = DeimosQuester(object(), _Boom())
+    assert asyncio.run(q.step()) is False
+    assert q.failures == 1
+    assert "MemoryReadError" in q.last_error
+
+    class _Fine:
+        def __init__(self):
+            self.calls = 0
+
+        async def auto_quest_solo(self, **kw):
+            self.calls += 1
+
+    fine = _Fine()
+    q = DeimosQuester(object(), fine)
+    assert asyncio.run(q.step()) is True
+    assert q.failures == 0
+    assert fine.calls == 1
+
+
+def test_worker_prefers_deimos_questing_then_falls_back(qapp):
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1,
+                        auto_quest=True)
+    said = []
+    worker.status = type("S", (), {"emit": staticmethod(said.append)})()
+
+    asyncio.run(worker._setup_questing(object()))
+    # Either it wired Deimos's in, or it said why it did not.
+    if worker.quester is None:
+        assert any("light questing" in m for m in said)
+    else:
+        assert any("Deimos" in m for m in said)
+
+
+def test_only_one_dialogue_clicker_runs(qapp):
+    """Deimos's questing does its own dialogue handling; a second clicker
+    would race it for the same button."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    root, _ = _dialogue_root(visible=True)
+    client = _QuestClient(root, in_battle=False)
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1,
+                        auto_quest=True, auto_dialogue=True)
+    worker.status = type("S", (), {"emit": staticmethod(lambda *_: None)})()
+
+    class _Quester:
+        failures = 0
+        last_error = ""
+
+        async def step(self, **kw):
+            return True
+
+    worker.quester = _Quester()
+
+    async def drive():
+        task = asyncio.ensure_future(worker._service_loop(client))
+        await asyncio.sleep(0.3)
+        worker._stop = True
+        task.cancel()
+        try:
+            await task
+        except BaseException:
+            pass
+
+    asyncio.run(drive())
+    assert client.mouse_handler.clicks == [], \
+        "our dialogue clicker ran while Deimos's questing was driving"
