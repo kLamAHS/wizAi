@@ -54,7 +54,13 @@ def _normal(name: str) -> str:
     'krokopatras curse' land on the same key."""
     s = unicodedata.normalize("NFKD", name)
     s = "".join(c for c in s if not unicodedata.combining(c))
-    s = re.sub(r"[^a-z0-9]+", " ", s.lower())
+    s = s.lower()
+    # Apostrophes are dropped, not turned into separators: the game and
+    # the wiki disagree about them ("Krokopatra's Curse" / "Krokopatras
+    # Curse"), and splitting on one would leave a stray "s" token that
+    # matches neither spelling.
+    s = re.sub(r"[’']", "", s)
+    s = re.sub(r"[^a-z0-9]+", " ", s)
     return s.strip()
 
 
