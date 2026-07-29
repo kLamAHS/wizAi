@@ -19,8 +19,8 @@ and only the second needs Windows and a running game:
   `effect_audit`    the real game's SpellEffects enum vs. what wizAi's
                     simulator actually implements.
   `live_state`      live wizwalker combat -> wizAi `State`.
-  `live_backend`    a wizsprinter combat backend that asks a wizAi policy
-                    what to cast. This is the piece that fights real
+  `live_backend`    the decision loop, and the CombatHandler that asks a
+                    wizAi policy what to cast. The piece that fights real
                     enemies.
   `mock_client`     fakes of the wizwalker objects, so `live_state` and
                     `live_backend` are testable without the game.

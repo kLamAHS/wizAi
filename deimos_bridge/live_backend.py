@@ -50,11 +50,13 @@ class PolicyDecision:
 
 
 class WizAiBackend:
-    """`BaseCombatBackend` subclass. The base class is resolved lazily so
-    importing this module does not drag in wizwalker."""
+    """The decision loop: live board -> wizAi policy -> a chosen card.
 
-    #: set by `_install_base` on first construction
-    _base_installed = False
+    Standalone by design -- `WizAiCombatHandler` drives it, and
+    `make_sprinty_backend()` wraps it into a real `BaseCombatBackend`
+    when wizsprinter is present. Neither the base class nor wizwalker is
+    imported here, so `mock_client` can exercise this on any machine.
+    """
 
     def __init__(self, policy, cards, school, decklist=None, cast_time=0.3,
                  on_decision=None, rules=None, catalog=None):
@@ -329,32 +331,78 @@ class WizAiCombatHandler:
         return foes[index]
 
 
+# --------------------------------------------------------------------------
+# Attaching the real base classes.
+#
+# Both classes above have to work without wizwalker installed -- that is
+# what lets `mock_client` exercise them anywhere -- but must be genuine
+# subclasses of wizwalker's types at runtime, because `SprintyCombat` and
+# `CombatHandler.handle_combat` both rely on inheritance.
+#
+# The obvious trick, assigning `__bases__` after the fact, does not work:
+#
+#     >>> class Mine: pass
+#     >>> Mine.__bases__ = (SomeBase,)
+#     TypeError: __bases__ assignment: 'SomeBase' deallocator differs
+#                from 'object'
+#
+# CPython refuses whenever the current base is exactly `object`, because
+# `object` uses `object_dealloc` and a heap type uses `subtype_dealloc`.
+# That is long-standing behaviour, not a 3.13 change.
+#
+# So the subclass is *built* at call time instead, and cached. The class
+# construction is factored out so a test can drive it with a stub base
+# and cover this path without wizwalker present -- the earlier version of
+# these helpers was never executed by a test, which is exactly how the
+# broken `__bases__` assignment survived.
+# --------------------------------------------------------------------------
+_handler_class = None
+_backend_class = None
+
+
+def _build_handler_class(combat_handler_cls):
+    class LiveWizAiCombatHandler(WizAiCombatHandler, combat_handler_cls):
+        """`WizAiCombatHandler`, but really a `CombatHandler`."""
+
+        def __init__(self, client, backend):
+            # wizwalker's first: it sets up the window cache that
+            # get_members()/get_cards() read.
+            combat_handler_cls.__init__(self, client)
+            WizAiCombatHandler.__init__(self, client, backend)
+
+    return LiveWizAiCombatHandler
+
+
 def make_combat_handler(client, backend):
-    """Build a `WizAiCombatHandler` that really is a `CombatHandler`.
+    """A handler that is both a wizAi decision loop and a `CombatHandler`.
 
-    Done at call time so importing this module never touches wizwalker.
+    This is the path `run_live` uses, and the one to use for any run whose
+    numbers matter -- see `WizAiCombatHandler`.
     """
-    from wizwalker.combat import CombatHandler
-
-    if CombatHandler not in WizAiCombatHandler.__bases__:
-        WizAiCombatHandler.__bases__ = (CombatHandler,)
-    handler = WizAiCombatHandler(client, backend)
-    CombatHandler.__init__(handler, client)
-    handler.backend = backend
-    backend.attach_combat(handler)
-    return handler
+    global _handler_class
+    if _handler_class is None:
+        from wizwalker.combat import CombatHandler
+        _handler_class = _build_handler_class(CombatHandler)
+    return _handler_class(client, backend)
 
 
-def _install_base():
-    """Make `WizAiBackend` a real `BaseCombatBackend` subclass when
-    wizsprinter is importable. Called by `SprintyCombat` users on
-    Windows; a no-op (and harmless) elsewhere, because `SprintyCombat`
-    only ever calls the three methods defined above."""
-    try:
+def _build_backend_class(base_backend_cls):
+    class LiveWizAiBackend(WizAiBackend, base_backend_cls):
+        """`WizAiBackend`, but really a `BaseCombatBackend`."""
+
+    return LiveWizAiBackend
+
+
+def make_sprinty_backend(*args, **kwargs):
+    """A `WizAiBackend` that `SprintyCombat` will accept.
+
+    Only for driving wizAi inside an existing Deimos setup. Do not
+    measure a policy through it: `SprintyCombat` re-queries a
+    `NamedSpell` after every cast and plays every duplicate in hand.
+    """
+    global _backend_class
+    if _backend_class is None:
         from wizwalker.extensions.wizsprinter.combat_backends.backend_base \
             import BaseCombatBackend
-    except Exception:
-        return False
-    if BaseCombatBackend not in WizAiBackend.__bases__:
-        WizAiBackend.__bases__ = (BaseCombatBackend,)
-    return True
+        _backend_class = _build_backend_class(BaseCombatBackend)
+    return _backend_class(*args, **kwargs)
