@@ -268,8 +268,12 @@ def sim_incoming_dmg_effects(cache: Cache, damage_type: int, damage: float, pier
             match m_effect["effect_type"]:
                 case SpellEffects.modify_incoming_damage: #Shields + traps
                     if param < 0:
-                        param += pierce
-                        pierce += m_effect["effect_param"]
+                        # param is in POINTS, pierce is a FRACTION -- the
+                        # same convention this file already uses two cases
+                        # down (`pierce += param / 100`). Adding them raw
+                        # made pierce almost worthless against shields.
+                        param += pierce * 100
+                        pierce += m_effect["effect_param"] / 100
                         pierce = round(pierce, 2)
                         clamp(pierce, 0, max_pierce)
                         clamp(param, m_effect["effect_param"], 0)

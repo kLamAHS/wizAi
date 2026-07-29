@@ -87,25 +87,30 @@ class Rules:
                                          # probability is the tractable
                                          # abstraction of that rate.
 
-    # -- flat-stat placement, contested ------------------------------------
+    # -- flat-stat placement -----------------------------------------------
     # Where the flat damage and flat resist stats sit in the pipeline was
-    # taken from community description. Deimos -- a bot that reads the live
-    # client, so its math was checked against real numbers on screen -- puts
-    # both somewhere else, and puts them there in *two* independently
-    # written code paths (`src/combat_math.py:157,253` and
-    # `src/effect_simulation.py:397,441`). See
-    # `deimos_bridge/differential.py`, which reproduces the gap.
+    # originally taken from community description. Deimos reads the live
+    # client, so its math was checked against real numbers on screen, and
+    # it puts both somewhere else -- in *two* independently written code
+    # paths (`src/combat_math.py:157,253` and
+    # `src/effect_simulation.py:397,441`). `deimos_bridge/differential.py`
+    # reproduces the gap and closes it.
     #
-    # Defaults keep the old behaviour so every published table stays valid.
-    # Flip these to adopt Deimos's placement.
-    flat_damage_before_multipliers: bool = False
-    # False: flat damage is added after charms, wards and crit (v0.3).
-    # True:  added right after the school damage %, so charms and crit
-    #        multiply it and shields reduce it. This is what Deimos does.
-    flat_resist_before_resist: bool = False
-    # False: flat resist is subtracted after the percent-resist multiply.
-    # True:  subtracted before it, so percent resist applies to the
-    #        already-reduced number. This is what Deimos does.
+    # Defaulting to Deimos's placement costs nothing historically: no
+    # published table moves, because nothing in this project sets a flat
+    # stat. `gear.loadout()` emits no flat_damage or flat_resist at any
+    # level and `Actor` defaults both to 0.0, so the two orderings compute
+    # identical numbers on every result committed so far -- see
+    # `deimos_bridge/flat_stat_probe.py`, whose flat=0 column is all
+    # zeroes. Set either flag False to recover the pre-0.4 arithmetic.
+    flat_damage_before_multipliers: bool = True
+    # True:  flat damage joins the base right after the school damage %,
+    #        so charms and crit multiply it and shields reduce it (game).
+    # False: added after charms, wards and crit (v0.3 and earlier).
+    flat_resist_before_resist: bool = True
+    # True:  flat resist is subtracted before the percent-resist multiply,
+    #        so percent resist also applies to the reduced number (game).
+    # False: subtracted after it (v0.3 and earlier).
 
 
 # ---------------------------------------------------------------- card model

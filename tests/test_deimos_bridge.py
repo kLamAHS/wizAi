@@ -17,7 +17,8 @@ import asyncio
 import pytest
 
 from deimos_bridge import deimos_damage as dd
-from deimos_bridge.differential import EXPECTED, TOL, compare, deimos_ruleset
+from deimos_bridge.differential import (EXPECTED, TOL, compare,
+                                         legacy_ruleset)
 from deimos_bridge.live_backend import WizAiBackend
 from deimos_bridge.live_state import ALIASES, NameResolver, _normal, read_state
 from deimos_bridge.mock_client import (MockCard, MockCombat, MockEffect,
@@ -109,40 +110,53 @@ def test_plain_scenarios_agree_exactly():
         assert rows[name]["agree"], (name, rows[name])
 
 
-def test_adopting_deimos_flat_placement_closes_the_flat_divergences():
-    rows = {r["scenario"]: r for r in compare(rules=deimos_ruleset())}
-    for name in ("flat damage", "flat resist", "full stack (no pierce)"):
-        assert rows[name]["agree"], (name, rows[name])
+def test_only_the_guard_staging_row_still_diverges():
+    """After both fixes -- wizAi adopting Deimos's flat-stat placement and
+    Deimos's pierce units being corrected -- the two independently written
+    engines agree on every scenario except the one where they enforce the
+    same rule at different stages."""
+    diverging = {r["scenario"] for r in compare() if not r["agree"]}
+    assert diverging == {"duplicate blade"}, diverging
 
 
-def test_the_residual_gap_is_exactly_pierce():
-    """The matched pair. Same board twice, pierce the only difference: the
-    row without it agrees, the row with it does not. That localises the
-    entire remaining divergence to Deimos's pierce unit bug rather than
-    leaving it as an unexplained delta."""
-    rows = {r["scenario"]: r for r in compare(rules=deimos_ruleset())}
-    assert rows["full stack (no pierce)"]["agree"]
-    assert not rows["full stack"]["agree"]
+def test_legacy_rules_still_show_the_flat_divergence():
+    """The finding has to stay reproducible, or the fix is unfalsifiable."""
+    rows = {r["scenario"]: r for r in compare(rules=legacy_ruleset())}
+    for name in ("flat damage", "flat resist"):
+        assert not rows[name]["agree"], (name, rows[name])
 
 
-def test_every_divergence_is_either_a_finding_or_explained():
+def test_every_divergence_is_explained():
     """No silent disagreements: a row that differs must be listed in
-    EXPECTED with a reason, or be one of the two known findings."""
-    findings = {"flat damage", "flat resist", "full stack (no pierce)"}
+    EXPECTED with a reason."""
     for r in compare():
         if not r["agree"]:
-            assert r["scenario"] in EXPECTED or r["scenario"] in findings, \
-                f"unexplained divergence: {r}"
+            assert r["scenario"] in EXPECTED, f"unexplained divergence: {r}"
 
 
-def test_wizai_pierce_beats_deimos_on_shields():
-    """wizAi is the correct one here, and the test says so in numbers: a
-    20% pierce should move a -50 shield to -30, not to -49.8."""
+def test_pierce_shaves_a_shield_in_both_engines():
+    """The pierce unit fix, pinned in numbers. 20% pierce must move a -50
+    shield to -30 -- in wizAi, which always did, and now in Deimos, which
+    used to move it to -49.8 and leave the shield almost intact."""
     sc = Scenario("probe", 500, "fire",
                   caster=Side(pierce=0.20, is_player=True),
                   wards=[Buff("Tower Shield", -50, None)])
-    assert sc.wizai_damage() == pytest.approx(350.0)   # 500 * 0.70
-    assert sc.deimos_damage() == pytest.approx(251.0)  # 500 * 0.502
+    assert sc.wizai_damage() == pytest.approx(350.0)    # 500 * 0.70
+    assert sc.deimos_damage() == pytest.approx(350.0)
+
+
+def test_a_pierce_blade_is_worth_its_face_value():
+    """kModifyOutgoingArmorPiercing arrives in points. Folded into the
+    fraction-valued accumulator without conversion, a +10 pierce blade was
+    worth 1000% pierce and erased any shield outright."""
+    fire = dd.school_id("fire")
+    blade = dd.Effect(dd.SpellEffects.modify_outgoing_armor_piercing, 10,
+                      fire, 1)
+    shield = dd.Effect(dd.SpellEffects.modify_incoming_damage, -50, 80289, 2)
+    got = dd.deimos_damage(500, fire, dd.Stats(is_player=True), dd.Stats(),
+                           [blade], [shield])
+    # -50 shield, 10 points of pierce -> -40
+    assert got == pytest.approx(300.0)
 
 
 # ------------------------------------------------------------------ naming

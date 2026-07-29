@@ -173,7 +173,11 @@ async def base_damage_calculation_from_id(client: Client, members: List[CombatMe
                     damage += effect_atr.effect_param
 
                 case SpellEffects.modify_outgoing_armor_piercing:
-                    caster_pierce += effect_atr.effect_param
+                    # effect params are POINTS, caster_pierce is a FRACTION
+                    # (it comes from ap_bonus_percent, which stat_viewer
+                    # renders through to_percent()). Mixing them made a
+                    # +10 pierce blade worth 1000% pierce.
+                    caster_pierce += effect_atr.effect_param / 100
 
                 case SpellEffects.modify_outgoing_damage_type:
                     damage_type = effect_atr.effect_param
@@ -193,8 +197,12 @@ async def base_damage_calculation_from_id(client: Client, members: List[CombatMe
                 case SpellEffects.modify_incoming_damage:
                     ward_param = effect_atr.effect_param
                     if ward_param < 0:
-                        ward_param += caster_pierce
-                        caster_pierce += effect_atr.effect_param
+                        # ward_param is in POINTS (-50 for a Tower Shield),
+                        # caster_pierce is a FRACTION. Adding them raw made
+                        # 15% pierce move a -50 shield to -49.85 -- pierce
+                        # did essentially nothing to shields.
+                        ward_param += caster_pierce * 100
+                        caster_pierce += effect_atr.effect_param / 100
                         if ward_param > 0:
                             ward_param = 0
                         if caster_pierce < 0:
@@ -211,7 +219,7 @@ async def base_damage_calculation_from_id(client: Client, members: List[CombatMe
                     damage += effect_atr.effect_param
 
                 case SpellEffects.modify_incoming_armor_piercing:
-                    caster_pierce += effect_atr.effect_param
+                    caster_pierce += effect_atr.effect_param / 100   # points -> fraction
 
                 # prism handling (final damage type is the effect param)
                 case SpellEffects.modify_incoming_damage_type:

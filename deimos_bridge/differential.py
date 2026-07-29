@@ -30,34 +30,39 @@ EXPECTED = {
         "scenario builds the board directly and so walks past wizAi's "
         "guard. The two only observably differ if something other than a "
         "player cast places a duplicate.",
+}
 
-    "shield vs pierce":
-        "wizAi is right and Deimos is wrong here. Deimos keeps pierce as a "
-        "fraction (0.15) but shield params in points (-50), then adds them: "
-        "`ward_param += caster_pierce` (combat_math.py:196, and the same in "
-        "effect_simulation.py:271). 0.15 against -50 is nearly a no-op, so "
-        "pierce in Deimos barely dents a shield. wizAi converts first "
-        "(w101_sim.py:1099-1103) and shaves the shield properly.",
-
-    "pierce exceeds shield":
-        "Same Deimos unit bug as 'shield vs pierce'.",
-
-    "full stack":
-        "Same Deimos unit bug again, now inside a busy board. The matched "
-        "'full stack (no pierce)' row is this exact scenario with pierce "
-        "held out; it agrees to the cent, which localises the whole gap to "
-        "pierce-vs-shield.",
+#: Divergences that used to be listed above and are now fixed on one side
+#: or the other. Kept as a record of what the harness was for, and as a
+#: reminder that the pierce rows are load-bearing tests rather than
+#: decoration -- if a future edit reintroduces the unit confusion, those
+#: three rows are what catches it.
+RESOLVED = {
+    "shield vs pierce": "Deimos's pierce/ward unit bug, fixed in "
+                        "combat_math.py and effect_simulation.py",
+    "pierce exceeds shield": "same fix",
+    "full stack": "same fix",
+    "flat damage": "wizAi adopted Deimos's flat-damage placement",
+    "flat resist": "wizAi adopted Deimos's flat-resist placement",
+    "full stack (no pierce)": "both of the above",
 }
 
 TOL = 0.5   # absolute damage; both engines work in floats
 
 
-def deimos_ruleset():
-    """wizAi's rules with Deimos's flat-stat placement adopted."""
+def legacy_ruleset():
+    """The pre-0.4 flat-stat placement, for reproducing the old numbers."""
     from w101_sim import Rules
-    return Rules(ruleset_id="w101-pve-classic-0.3+deimos-flat",
-                 flat_damage_before_multipliers=True,
-                 flat_resist_before_resist=True)
+    return Rules(ruleset_id="w101-pve-classic-0.3-legacy-flat",
+                 flat_damage_before_multipliers=False,
+                 flat_resist_before_resist=False)
+
+
+#: Kept under the old name so anything that imported it still works; the
+#: flat placement it used to switch on is now the default.
+def deimos_ruleset():
+    from w101_sim import Rules
+    return Rules()
 
 
 def compare(scenarios=None, rules=None):
@@ -109,21 +114,18 @@ def render(rows) -> str:
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--json", help="also write the rows here")
-    ap.add_argument("--adopt-deimos", action="store_true",
-                    help="re-run with Deimos's flat-stat placement enabled "
-                         "in wizAi (Rules.flat_damage_before_multipliers / "
-                         "flat_resist_before_resist)")
+    ap.add_argument("--legacy", action="store_true",
+                    help="re-run with the pre-0.4 flat-stat placement, to "
+                         "see the divergence the current default fixes")
     ap.add_argument("--both", action="store_true",
-                    help="run the suite under both rulesets")
+                    help="run the suite under current and legacy rules")
     a = ap.parse_args()
 
-    runs = []
     if a.both:
-        runs = [("v0.3 defaults", None),
-                ("Deimos flat placement", deimos_ruleset())]
+        runs = [("current rules", None), ("legacy flat placement", legacy_ruleset())]
     else:
-        runs = [("Deimos flat placement" if a.adopt_deimos else "v0.3 defaults",
-                 deimos_ruleset() if a.adopt_deimos else None)]
+        runs = [("legacy flat placement", legacy_ruleset())] if a.legacy \
+            else [("current rules", None)]
 
     payload = {}
     for label, rules in runs:
