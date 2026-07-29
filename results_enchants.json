@@ -1,0 +1,259 @@
+{
+ "setup": {
+  "level": 100,
+  "slots": 30,
+  "decks": {
+   "plain": [
+    "Fireblade",
+    "Fireblade",
+    "Fireblade",
+    "Balanceblade",
+    "Balanceblade",
+    "Fire Trap",
+    "Fire Trap",
+    "Fire Trap",
+    "Feint",
+    "Feint",
+    "Fire Dragon",
+    "Fire Dragon",
+    "Fire Dragon",
+    "Fire Dragon",
+    "Fire Elf",
+    "Fire Elf",
+    "Reshuffle",
+    "Reshuffle",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird"
+   ],
+   "sharp": [
+    "Fireblade+sharp",
+    "Fireblade+sharp",
+    "Fireblade",
+    "Balanceblade+sharp",
+    "Balanceblade",
+    "Fire Trap",
+    "Fire Trap",
+    "Fire Trap",
+    "Feint",
+    "Feint",
+    "Fire Dragon",
+    "Fire Dragon",
+    "Fire Dragon",
+    "Fire Dragon",
+    "Fire Elf",
+    "Fire Elf",
+    "Reshuffle",
+    "Reshuffle",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird"
+   ],
+   "potent": [
+    "Fireblade",
+    "Fireblade",
+    "Fireblade",
+    "Balanceblade",
+    "Balanceblade",
+    "Fire Trap+potent",
+    "Fire Trap+potent",
+    "Fire Trap",
+    "Feint+potent",
+    "Feint",
+    "Fire Dragon",
+    "Fire Dragon",
+    "Fire Dragon",
+    "Fire Dragon",
+    "Fire Elf",
+    "Fire Elf",
+    "Reshuffle",
+    "Reshuffle",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird"
+   ],
+   "colossal": [
+    "Fireblade",
+    "Fireblade",
+    "Fireblade",
+    "Balanceblade",
+    "Balanceblade",
+    "Fire Trap",
+    "Fire Trap",
+    "Fire Trap",
+    "Feint",
+    "Feint",
+    "Fire Dragon+colossal",
+    "Fire Dragon+colossal",
+    "Fire Dragon",
+    "Fire Dragon",
+    "Fire Elf",
+    "Fire Elf",
+    "Reshuffle",
+    "Reshuffle",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird"
+   ],
+   "all": [
+    "Fireblade+sharp",
+    "Fireblade+sharp",
+    "Fireblade",
+    "Balanceblade+sharp",
+    "Balanceblade",
+    "Fire Trap+potent",
+    "Fire Trap+potent",
+    "Fire Trap",
+    "Feint+potent",
+    "Feint",
+    "Fire Dragon+colossal",
+    "Fire Dragon+colossal",
+    "Fire Dragon",
+    "Fire Dragon",
+    "Fire Elf",
+    "Fire Elf",
+    "Reshuffle",
+    "Reshuffle",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird",
+    "Sunbird"
+   ]
+  },
+  "note": "every arm matched at the same real deck slot count; enchants are paid for in filler cards, so each arm is ONE substitution against plain",
+  "confidence": "+10% and the stacking rule as reported by the repo owner; which ops the bonus lands on is MODELED; enchanting is assumed to cost deck slots but not tempo"
+ },
+ "endgame": {
+  "Annoushka": {
+   "plain": {
+    "win": 0.13,
+    "ttk": 42.743589743589745,
+    "policy": "blade-stack(4)"
+   },
+   "sharp": {
+    "win": 0.1,
+    "ttk": 35.7,
+    "policy": "blade-stack(4)"
+   },
+   "potent": {
+    "win": 0.16666666666666666,
+    "ttk": 32.74,
+    "policy": "blade-stack(1)"
+   },
+   "colossal": {
+    "win": 0.25,
+    "ttk": 36.93333333333333,
+    "policy": "blade-stack(4)"
+   },
+   "all": {
+    "win": 0.6733333333333333,
+    "ttk": 21.61881188118812,
+    "policy": "blade-stack(4)"
+   },
+   "hp": 17240,
+   "resist": {
+    "*": 0.4
+   },
+   "block": 622.0
+  },
+  "Were-Bear Brute (Standard)": {
+   "plain": {
+    "win": 1.0,
+    "ttk": 23.013333333333332,
+    "policy": "blade-stack(4)"
+   },
+   "sharp": {
+    "win": 1.0,
+    "ttk": 19.2,
+    "policy": "blade-stack(4)"
+   },
+   "potent": {
+    "win": 1.0,
+    "ttk": 18.796666666666667,
+    "policy": "blade-stack(4)"
+   },
+   "colossal": {
+    "win": 1.0,
+    "ttk": 18.916666666666668,
+    "policy": "blade-stack(4)"
+   },
+   "all": {
+    "win": 1.0,
+    "ttk": 10.573333333333334,
+    "policy": "blade-stack(4)"
+   },
+   "hp": 14475,
+   "resist": {
+    "storm": 0.36
+   },
+   "block": 570.0
+  },
+  "High Priest Ixta": {
+   "plain": {
+    "win": 0.53,
+    "ttk": 41.0377358490566,
+    "policy": "blade-stack(4)"
+   },
+   "sharp": {
+    "win": 0.4666666666666667,
+    "ttk": 34.77142857142857,
+    "policy": "blade-stack(4)"
+   },
+   "potent": {
+    "win": 0.5,
+    "ttk": 32.873333333333335,
+    "policy": "blade-stack(1)"
+   },
+   "colossal": {
+    "win": 0.72,
+    "ttk": 35.80555555555556,
+    "policy": "blade-stack(1)"
+   },
+   "all": {
+    "win": 0.89,
+    "ttk": 19.426966292134832,
+    "policy": "blade-stack(4)"
+   },
+   "hp": 13675,
+   "resist": {
+    "*": 0.45
+   },
+   "block": 932.0
+  }
+ },
+ "ordinary_mean_ttk": {
+  "plain": 13.79646037735849,
+  "sharp": 11.660817582417582,
+  "potent": 11.697643478260868,
+  "colossal": 11.885952293577981,
+  "all": 7.932655793991417
+ }
+}
