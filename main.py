@@ -40,6 +40,7 @@ from deck_builder import build_deck, fine_tune, legal_pool
 from gear import loadout
 from w101_sim import (Sim, evaluate_paired, is_enchanted, make_blade_stack,
                       enchanted_deck_size)
+from enemy_ranks import normal_hp
 from worlds import world_for
 
 SCHOOLS = ("fire", "ice", "storm", "myth", "life", "death", "balance")
@@ -61,9 +62,11 @@ def pick_encounter(level, school, cards, bosses, registry, stats, rng,
     can actually contest is used."""
     world = world_for(level)
     pool = [b for b in bosses.values()
-            if registry[b.name].get("world") == world and b.rank]
+            if registry[b.name].get("world") == world and b.rank
+            and plausible_encounter(b)]
     if not pool:
-        pool = [b for b in bosses.values() if b.rank]
+        pool = [b for b in bosses.values() if b.rank
+                and plausible_encounter(b)]
     # Alternate the FIGHT TYPE by level instead of always preferring
     # company. Sorting mob boards first meant a twelve-level sweep never
     # once saw a solo boss, and the two want different decks: the repo
@@ -97,6 +100,30 @@ def pick_encounter(level, school, cards, bosses, registry, stats, rng,
         log(f"  screened  no contested encounter in {world}; using the "
             f"most winnable ({fallback[0].name}, {fallback[1]*100:.0f}%)")
     return fallback[0]
+
+
+# The seven wizard schools plus shadow are the ones creatures actually
+# FIGHT in. Moon/star/sun records are polymorphs, auras and props.
+COMBAT_SCHOOLS = frozenset(("fire", "ice", "storm", "myth", "life",
+                            "death", "balance", "shadow"))
+
+
+def plausible_encounter(boss):
+    """Reject degenerate records before they can be screened.
+
+    A storm --full run picked "Renegade Druid (Moon)" as the LEVEL 10
+    encounter: 1 HP, rank 18, school moon. It passed the contested
+    screen at 19% only because it one-shots a 636 HP wizard before
+    dying, so the screen — which asks "is this winnable sometimes?" —
+    said yes. Winnability was never the whole question; the record has
+    to be a real fight first."""
+    if boss.school not in COMBAT_SCHOOLS:
+        return False
+    if not boss.hp or boss.hp < 20:
+        return False
+    # health has to be in the same universe as the rank implies. A
+    # rank-18 creature with 1 HP is a prop, not an encounter.
+    return boss.hp >= 0.05 * normal_hp(boss.rank)
 
 
 def _probe_deck(school, cards, level):

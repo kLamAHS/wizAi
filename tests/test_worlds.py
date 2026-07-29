@@ -68,3 +68,23 @@ def test_gear_breakpoints_land_on_world_boundaries():
 def test_side_content_sits_inside_a_real_band():
     for name, lvl in SIDE_CONTENT.items():
         assert world_for(lvl) is not None, name
+
+
+def test_degenerate_records_are_not_encounters():
+    """A storm --full run picked "Renegade Druid (Moon)" as the LEVEL 10
+    encounter: 1 HP, rank 18, school moon. It passed the contested
+    screen at 19% only because it one-shots a 636 HP wizard before
+    dying. Winnability was never the whole question — the record has to
+    be a real fight first."""
+    from data_full import load_bosses_full
+    from main import plausible_encounter
+    bosses, _ = load_bosses_full(str(Path(__file__).resolve().parent.parent
+                                     / "bosses_clean.json"))
+    for name in ("Renegade Druid (Moon)", "Wally (Fake)",
+                 "Guardian of Life"):
+        if name in bosses:
+            assert not plausible_encounter(bosses[name]), name
+    real = [b for b in bosses.values() if plausible_encounter(b)]
+    assert len(real) > 1400
+    assert all(b.school in {"fire", "ice", "storm", "myth", "life",
+                            "death", "balance", "shadow"} for b in real)

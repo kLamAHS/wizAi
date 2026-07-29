@@ -2,172 +2,83 @@
  "setup": {
   "school": "storm",
   "levels": [
-   90,
-   100
+   10
   ],
   "pet": "triple-double",
-  "candidates": 30,
-  "episodes": 8000,
-  "eval_n": 800,
+  "candidates": 20,
+  "episodes": 6000,
+  "eval_n": 600,
   "ruleset": "w101-pve-live-scrape",
   "boss_model": "spell pools (casting)",
-  "seconds": 183
+  "seconds": 37
  },
  "levels": [
   {
-   "level": 90,
-   "world": "Azteca",
+   "level": 10,
+   "world": "Wizard City",
    "school": "storm",
-   "boss": "Acampi Reedfist",
-   "boss_hp": 14840,
-   "boss_rank": 13,
+   "boss": "Alicane Swiftarrow",
+   "boss_hp": 480,
+   "boss_rank": 3,
    "boss_pool": [
-    "Immolate",
-    "Fire Dragon",
-    "Rain of Fire",
-    "Efreet",
-    "Fireblade"
+    "Sunbird",
+    "Fire Elf",
+    "Fire Cat"
    ],
    "companions": [],
-   "player_hp": 5562,
-   "power_pip": 0.95,
+   "player_hp": 636,
+   "power_pip": 0.0,
    "deck": [
-    "Storm Owl+colossal",
-    "Storm Owl+colossal",
-    "Storm Owl+colossal",
-    "Sirens+colossal",
-    "Leviathan+colossal",
-    "Spirit Blade",
-    "Tri Blade+sharp",
-    "Stormblade+sharp",
-    "Storm Trap",
-    "Storm Trap",
-    "Storm Trap+potent",
-    "Feint",
-    "Feint+potent"
+    "Storm Shark",
+    "Storm Shark",
+    "Storm Shark",
+    "Lightning Bats",
+    "Pixie"
    ],
-   "deck_cards": 13,
-   "deck_slots": 22,
-   "enchanted": 9,
+   "deck_cards": 5,
+   "deck_slots": 5,
+   "enchanted": 0,
    "n_companions": 0,
-   "best": "race(1)",
+   "best": "trained",
    "trained": {
-    "win": 0.98375,
-    "ttk": 11.076238881829733,
-    "p90": 14
+    "win": 0.9033333333333333,
+    "ttk": 3.896678966789668,
+    "p90": 5
    },
    "scripted": {
     "policy": "race(1)",
-    "win": 1.0,
-    "ttk": 13.16,
-    "p90": 15
+    "win": 0.875,
+    "ttk": 3.5885714285714285,
+    "p90": 6
    },
    "all_policies": {
     "race(1)": {
-     "win": 1.0,
-     "ttk": 13.16
+     "win": 0.875,
+     "ttk": 3.5885714285714285
     },
     "race(2)": {
-     "win": 1.0,
-     "ttk": 13.16
+     "win": 0.875,
+     "ttk": 3.5885714285714285
     },
     "race(3)": {
-     "win": 1.0,
-     "ttk": 13.16
+     "win": 0.875,
+     "ttk": 3.5885714285714285
     },
     "race(4)": {
-     "win": 1.0,
-     "ttk": 13.16
+     "win": 0.875,
+     "ttk": 3.5885714285714285
     },
     "race(5)": {
-     "win": 1.0,
-     "ttk": 13.16
+     "win": 0.875,
+     "ttk": 3.5885714285714285
     },
     "race(6)": {
-     "win": 1.0,
-     "ttk": 13.16
+     "win": 0.875,
+     "ttk": 3.5885714285714285
     },
     "trained": {
-     "win": 0.98375,
-     "ttk": 11.076238881829733
-    }
-   }
-  },
-  {
-   "level": 100,
-   "world": "Khrysalis",
-   "school": "storm",
-   "boss": "King Alric FateSailor",
-   "boss_hp": 10560,
-   "boss_rank": 12,
-   "boss_pool": [
-    "Basilisk",
-    "Orthrus",
-    "Medusa",
-    "Minotaur",
-    "Mythblade"
-   ],
-   "companions": [
-    "Deer Mouse Revenant (Ice) (inferred)",
-    "Deer Mouse Revenant (inferred)"
-   ],
-   "player_hp": 6497,
-   "power_pip": 0.99,
-   "deck": [
-    "Storm Owl+colossal",
-    "Tempest+colossal",
-    "Tempest",
-    "Storm Owl",
-    "Sirens+colossal",
-    "Stormblade+sharp",
-    "Spirit Blade+sharp",
-    "Spirit Blade+sharp",
-    "Tri Blade+sharp"
-   ],
-   "deck_cards": 9,
-   "deck_slots": 16,
-   "enchanted": 7,
-   "n_companions": 2,
-   "best": "race(1)",
-   "trained": {
-    "win": 0.97125,
-    "ttk": 6.404118404118404,
-    "p90": 10
-   },
-   "scripted": {
-    "policy": "race(1)",
-    "win": 0.985,
-    "ttk": 16.774111675126903,
-    "p90": 17
-   },
-   "all_policies": {
-    "race(1)": {
-     "win": 0.985,
-     "ttk": 16.774111675126903
-    },
-    "race(2)": {
-     "win": 0.985,
-     "ttk": 16.774111675126903
-    },
-    "race(3)": {
-     "win": 0.985,
-     "ttk": 16.774111675126903
-    },
-    "race(4)": {
-     "win": 0.985,
-     "ttk": 16.774111675126903
-    },
-    "race(5)": {
-     "win": 0.985,
-     "ttk": 16.774111675126903
-    },
-    "race(6)": {
-     "win": 0.985,
-     "ttk": 16.774111675126903
-    },
-    "trained": {
-     "win": 0.97125,
-     "ttk": 6.404118404118404
+     "win": 0.9033333333333333,
+     "ttk": 3.896678966789668
     }
    }
   }
