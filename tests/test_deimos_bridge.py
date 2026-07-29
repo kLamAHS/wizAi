@@ -455,28 +455,73 @@ def test_backend_records_history():
 
 
 # ------------------------------------------------------------- the handler
-class _Handler:
-    """`WizAiCombatHandler` with the mock standing in for CombatHandler.
+class _StubCombatHandler:
+    """Stands in for `wizwalker.combat.CombatHandler`.
 
-    `make_combat_handler` splices the real base class in at call time,
-    which cannot happen off Windows -- so the test wires the same two
-    attributes by hand and borrows the mock's pass_button/get_members.
+    Same shape as the real one: constructed with a client, and supplies
+    the member/card/round accessors the handler reads. Going through
+    `_build_handler_class` with this means the tests exercise the actual
+    class-construction path rather than side-stepping it -- the previous
+    helper built the handler with `object.__new__`, which is exactly how
+    a broken `__bases__` assignment in `make_combat_handler` survived
+    every test and only failed on a real machine.
     """
 
-    def __new__(cls, combat, backend):
-        from deimos_bridge.live_backend import WizAiCombatHandler
-        from deimos_bridge.mock_client import MockClient
-        h = object.__new__(WizAiCombatHandler)
-        h.client = MockClient()
-        h.backend = backend
-        h._last_read = None
-        h.pass_button = combat.pass_button
-        h.get_members = combat.get_members
-        h.get_cards = combat.get_cards
-        h.get_client_member = combat.get_client_member
-        h.round_number = combat.round_number
-        backend.attach_combat(combat)
-        return h
+    def __init__(self, client):
+        self.client = client
+        self._spell_check_boxes = None
+
+    def _bind(self, combat):
+        self.pass_button = combat.pass_button
+        self.get_members = combat.get_members
+        self.get_cards = combat.get_cards
+        self.get_client_member = combat.get_client_member
+        self.round_number = combat.round_number
+
+
+def _Handler(combat, backend):
+    """A live handler built the real way, over the stub base."""
+    from deimos_bridge.live_backend import _build_handler_class
+    from deimos_bridge.mock_client import MockClient
+
+    cls = _build_handler_class(_StubCombatHandler)
+    h = cls(MockClient(), backend)
+    h._bind(combat)
+    backend.attach_combat(combat)
+    return h
+
+
+def test_the_live_handler_class_is_a_real_subclass():
+    """The bug this guards: `WizAiCombatHandler.__bases__ = (CombatHandler,)`
+    raises `TypeError: deallocator differs from 'object'` on every CPython,
+    because the current base is exactly `object`. Building the subclass
+    instead is the fix, and this asserts the result really inherits from
+    both sides."""
+    from deimos_bridge.live_backend import (WizAiCombatHandler,
+                                            _build_handler_class)
+    cls = _build_handler_class(_StubCombatHandler)
+    assert issubclass(cls, _StubCombatHandler)
+    assert issubclass(cls, WizAiCombatHandler)
+
+    from deimos_bridge.mock_client import MockClient
+    be = _backend()
+    h = cls(MockClient(), be)
+    # both __init__s ran
+    assert h._spell_check_boxes is None      # the stub base's
+    assert h.backend is be                   # wizAi's
+    assert be.combat is h                    # and it attached itself
+
+
+def test_the_backend_class_is_a_real_subclass():
+    """Same fix, same reason, for the wizsprinter backend path."""
+    from deimos_bridge.live_backend import WizAiBackend, _build_backend_class
+
+    class StubBase:
+        def __init__(self, cast_time=0.3):
+            self.cast_time = cast_time
+
+    cls = _build_backend_class(StubBase)
+    assert issubclass(cls, StubBase) and issubclass(cls, WizAiBackend)
 
 
 def test_handler_casts_exactly_once_per_round():
