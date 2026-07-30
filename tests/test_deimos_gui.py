@@ -2626,3 +2626,102 @@ def test_a_training_snapshot_lands_on_the_curve(qapp):
     assert win.tel.training_curve() == [(2000, pytest.approx(42.0)),
                                         (4000, pytest.approx(61.0))]
     assert win.tel.ttk_curve() == [(2000, 7.5), (4000, 6.1)]
+
+
+# --------------------------------------------------------------- it has to fit
+def test_every_tab_scrolls(qapp):
+    """A panel that stacks a chart, a second chart and a table is taller
+    than a laptop window, and Qt's answer to 'does not fit' is to squeeze
+    every child until none is readable."""
+    from PyQt6.QtWidgets import QScrollArea
+
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    assert win.tabs.count() == 6
+    for i in range(win.tabs.count()):
+        assert isinstance(win.tabs.widget(i), QScrollArea), i
+        assert win.tabs.widget(i).widgetResizable()
+
+
+def test_the_window_fits_a_laptop(qapp):
+    """It could not go narrower than 1577px, which does not fit a
+    1366-wide screen at all. Ten controls in one non-wrapping row were
+    setting the floor."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.show()
+    hint = win.minimumSizeHint()
+    assert hint.width() <= 1280, hint.width()
+    assert hint.height() <= 700, hint.height()
+
+
+def test_a_short_window_folds_the_options_away(qapp):
+    """Five rows of set-once controls is ~250px; on a 520px-tall window
+    that is half the screen spent on things nobody is looking at."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.show()
+    win.resize(1180, 800)
+    qapp.processEvents()
+    assert win.more_btn.isChecked()
+
+    win.resize(1000, 560)
+    qapp.processEvents()
+    assert not win.more_btn.isChecked()
+    assert not win.more.isVisible()
+
+
+def test_folding_by_hand_is_not_undone_by_a_resize(qapp):
+    """Adaptive layout that reverses what someone just did is worse than
+    no adaptive layout."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.show()
+    win.resize(1000, 560)
+    qapp.processEvents()
+    win.more_btn.setChecked(True)          # a deliberate choice
+    qapp.processEvents()
+
+    win.resize(1000, 500)                  # still short
+    qapp.processEvents()
+    assert win.more_btn.isChecked()
+
+
+def test_the_readout_stays_visible_when_the_options_fold(qapp):
+    """Coverage and gear answer 'is this working right now', so they are
+    not part of what folds away."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.show()
+    win.more_btn.setChecked(False)
+    qapp.processEvents()
+    assert win.policy_state.isVisible()
+    assert win.start_btn.isVisible()        # and so is Play live
+
+
+def test_description_labels_wrap(qapp):
+    """A non-wrapping QLabel reports its whole sentence as its minimum
+    width, so one paragraph sets a floor on the entire panel -- and in a
+    scroll area that floor becomes a horizontal scrollbar under charts
+    that would otherwise have fitted."""
+    from deimos_bridge.gui.panels import _label
+
+    assert _label("some long explanatory sentence").wordWrap()
+
+
+def test_a_panel_can_shrink_below_its_content(qapp):
+    """Otherwise the scroll area has nothing to scroll and clips
+    instead."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.show()
+    win.resize(900, 500)
+    qapp.processEvents()
+    area = win.tabs.widget(1)               # Decisions
+    assert area.height() < win.decisions.sizeHint().height()
