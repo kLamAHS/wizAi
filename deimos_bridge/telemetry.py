@@ -115,6 +115,30 @@ def describe_hanging(h) -> str:
     return f"{h.name} ({h.kind})"
 
 
+def _attr(obj, name, default=None):
+    """Field off a dataclass or a dict, whichever the caller has.
+
+    Candidates arrive as `policies.Candidate` live and as plain dicts
+    when a run is reloaded from JSON, and both have to render.
+    """
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def _move_label(cand) -> str:
+    """'Ice Trap → 1', the identity a decision matrix column needs.
+
+    The target is part of the move, not decoration: on a two-mob board
+    the same card aimed at each enemy scores differently, and collapsing
+    them into one column would average away the entire targeting
+    decision.
+    """
+    card = _attr(cand, "card", "?")
+    target = _attr(cand, "target")
+    return card if target is None else f"{card} → {target}"
+
+
 @dataclass
 class EnemyView:
     name: str
@@ -138,6 +162,11 @@ class RoundRecord:
     #: than per run because the policy can be swapped without
     #: disconnecting, so a single run is not a single policy.
     policy: str = ""
+    #: every move weighed this round and what the lookahead said, so a
+    #: decision can be read as a comparison rather than an assertion --
+    #: "it played the trap" and "the trap beat the nuke by half a turn"
+    #: are different facts, and only the second is diagnosable.
+    candidates: list = field(default_factory=list)
     hand: list = field(default_factory=list)
     alternatives: list = field(default_factory=list)
     unresolved: list = field(default_factory=list)
@@ -197,6 +226,8 @@ class Telemetry:
         self._fight = 0
         self._pending = None       # RoundRecord awaiting its actual damage
         self._listeners = []
+        self._curve = []           # [(episode, kill rate %)]
+        self._ttk = []             # [(episode, mean turns to kill)]
 
     # -- wiring -----------------------------------------------------------
     def subscribe(self, fn):
@@ -254,6 +285,7 @@ class Telemetry:
             passing=decision.passing,
             reason=decision.reason,
             policy=getattr(decision, "policy", "") or self.policy_name,
+            candidates=list(getattr(decision, "candidates", ()) or ()),
             hand=sorted(read.hand_cards),
             alternatives=sorted(set(read.hand_cards) - {decision.card_name}),
             unresolved=sorted(read.resolver.misses),
@@ -430,6 +462,93 @@ class Telemetry:
                 continue
             return len(rec.enemies), max(e.max_hp for e in rec.enemies)
         return None
+
+    #: how many moves the decision matrix shows before it stops adding
+    #: columns. Past roughly this many the cells are too narrow to carry
+    #: a number and the grid stops being readable; the count that was
+    #: dropped is reported rather than silently truncated.
+    MATRIX_COLUMNS = 9
+
+    def decision_matrix(self, rounds=14):
+        """(row list, column list, dropped) for the decision heatmap.
+
+        Rows are the most recent planning phases, columns the moves that
+        were weighed, cell values turns-to-clear on the lookahead's own
+        rollout. Only rounds that recorded a candidate set appear -- a
+        Q-table lookup produces no comparison, and inventing one would
+        misrepresent how that decision was made.
+
+        Columns are ordered by how often a move came up, so the ones that
+        actually recur sit together instead of the grid being shuffled by
+        whichever card was drawn first.
+        """
+        recs = [r for r in self.rounds if r.candidates][-rounds:]
+        if not recs:
+            return [], [], 0
+
+        counts = {}
+        for rec in recs:
+            for cand in rec.candidates:
+                key = _move_label(cand)
+                counts[key] = counts.get(key, 0) + 1
+        order = sorted(counts, key=lambda k: (-counts[k], k))
+        cols = order[:self.MATRIX_COLUMNS]
+        dropped = len(order) - len(cols)
+
+        rows = []
+        for rec in recs:
+            cells = {}
+            for cand in rec.candidates:
+                key = _move_label(cand)
+                if key not in cols:
+                    continue
+                cells[key] = (
+                    round(float(_attr(cand, "turns", 0.0)), 1),
+                    bool(_attr(cand, "chosen", False)),
+                    f"kills in {_attr(cand, 'turns', 0):g} turn(s), "
+                    f"{_attr(cand, 'damage', 0):,.0f} damage banked")
+            rows.append((f"r{rec.round}", cells))
+        return rows, cols, dropped
+
+    def candidate_bars(self, index):
+        """[(label, turns, chosen, note)] for one row of the matrix.
+
+        Ranked best-first, because the question a person asks of a single
+        decision is "what else was close" and a ranked list answers it
+        directly.
+        """
+        recs = [r for r in self.rounds if r.candidates]
+        if not recs or not (0 <= index < len(recs)):
+            return [], ""
+        rec = recs[index]
+        bars = sorted(
+            ((_move_label(c), round(float(_attr(c, "turns", 0.0)), 1),
+              bool(_attr(c, "chosen", False)),
+              f"{_attr(c, 'damage', 0):,.0f} damage banked, "
+              f"{_attr(c, 'pips', 0):g} pip(s)")
+             for c in rec.candidates),
+            key=lambda b: (b[1], -b[2]))
+        return bars, f"fight {rec.fight}, round {rec.round}"
+
+    def training_curve(self):
+        """[(episode, kill rate %)] recorded during the last training run."""
+        return list(self._curve)
+
+    def record_snapshot(self, episode, kill_rate, ttk):
+        self._curve.append((episode, kill_rate * 100.0))
+        self._ttk.append((episode, ttk))
+
+    def ttk_curve(self):
+        """[(episode, mean turns to kill)].
+
+        Kept apart from the kill-rate curve rather than sharing an axis
+        with it: two measures on two y-scales invent a correlation out of
+        the arbitrary alignment of the scales.
+        """
+        return list(self._ttk)
+
+    def clear_curve(self):
+        self._curve, self._ttk = [], []
 
     def policy_mix(self):
         """Rounds played, per policy and per path within it.

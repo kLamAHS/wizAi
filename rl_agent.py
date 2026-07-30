@@ -314,7 +314,7 @@ def make_board_sampler(school, hp_range, max_mobs=3, dmg=60):
 def train_agent(cards, decklist, school, boss, episodes=60000,
                 warm=True, seed=0, player_hp=10**9, log=None,
                 snap_every=5000, sideboard=None, player_stats=None,
-                enemies=None, board_sampler=None):
+                enemies=None, board_sampler=None, on_snapshot=None):
     """`player_stats` is the wizard's gear, as `Sim` takes it. Left out,
     training solves the fight for a wizard wearing nothing: every hit is
     priced below what it really lands for, so the table is optimal for a
@@ -362,6 +362,11 @@ def train_agent(cards, decklist, school, boss, episodes=60000,
         if (ep + 1) % snap_every == 0:
             use_eval_board()
             w, m = evaluate(sim, agent.policy(), n=2000)
+            if on_snapshot is not None:
+                try:
+                    on_snapshot(ep + 1, w, m)
+                except Exception:
+                    pass          # a watching view never breaks training
             score = w - m / 1000.0                  # kill% first, speed second
             if score > best[0] - best[1] / 1000.0:
                 best = (w, m, dict(agent.Q))

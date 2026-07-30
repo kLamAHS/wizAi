@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (QGroupBox, QHBoxLayout, QHeaderView, QLabel,
                              QTableWidget, QTableWidgetItem, QVBoxLayout,
                              QWidget)
 
+from .charts import Heatmap, LineChart, Meter, RankedBars, Scatter
 from .theme import PALETTE
 
 
@@ -123,24 +124,71 @@ class BoardPanel(QWidget):
 
 
 class DecisionsPanel(QWidget):
-    """Every decision, with what it passed over."""
+    """Every decision, with what it weighed and what it passed over.
+
+    The matrix is the point of this panel and the table is the backup.
+    A log that records only the chosen card can say *what* happened but
+    never *how close it was* -- and "it played the trap" and "the trap
+    beat the nuke by half a turn" are different facts, only the second of
+    which can be argued with.
+    """
 
     def __init__(self, telemetry):
         super().__init__()
         self.tel = telemetry
         root = QVBoxLayout(self)
         root.addWidget(_label(
-            "Each row is one planning phase. 'passed over' is what else was "
-            "castable — a policy that keeps declining a nuke it could afford "
-            "is the shape of a state-featurisation bug. 'policy' names which "
-            "one actually decided: a trained policy that says 'fallback' is "
-            "playing the heuristic, not the table you trained.",
-            PALETTE["muted"]))
+            "Every move the lookahead weighed, round by round. Darker is "
+            "better — the cell value is how many turns that move takes to "
+            "clear the board. The ringed cell is the one it played; click a "
+            "row to break it out below.", PALETTE["muted"]))
+
+        self.matrix = Heatmap(
+            "decision matrix",
+            "rounds down, moves across · turns to clear the board")
+        self.matrix.row_picked.connect(self.on_row)
+        root.addWidget(self.matrix)
+
+        self.detail = RankedBars(
+            "", "how far behind the best move each option came · turns",
+            height=180, lower_is_better=True)
+        root.addWidget(self.detail)
+
+        self.note = _label("", PALETTE["muted"])
+        root.addWidget(self.note)
+
+        root.addWidget(_label(
+            "'passed over' is what else was castable — a policy that keeps "
+            "declining a nuke it could afford is the shape of a "
+            "state-featurisation bug. 'policy' names which one actually "
+            "decided: a trained policy that says 'fallback' is playing the "
+            "heuristic, not the table you trained.", PALETTE["muted"]))
         self.table = _table(["fight", "round", "policy", "cast", "target",
                              "why", "passed over"])
         root.addWidget(self.table)
+        self._row = -1              # -1 = follow the latest round
+
+    def on_row(self, index):
+        self._row = index
+        self._draw_detail()
+
+    def _draw_detail(self):
+        bars, title = self.tel.candidate_bars(self._row)
+        self.detail.title = f"round detail — {title}" if title else "round detail"
+        self.detail.set_bars(bars, unit=" turns")
 
     def refresh(self):
+        rows, cols, dropped = self.tel.decision_matrix()
+        self.matrix.set_matrix(rows, cols, low_is_good=True)
+        # Never truncate silently: a grid that quietly dropped six moves
+        # reads as "these were all the options", which is a lie.
+        self.note.setText(
+            f"{dropped} rarer move(s) not shown — the table below has every one"
+            if dropped else "")
+        if self._row < 0 or self._row >= len(rows):
+            self._row = len(rows) - 1
+        self._draw_detail()
+
         self.table.setRowCount(0)
         for rec in self.tel.rounds:
             self.append(rec)
@@ -163,67 +211,6 @@ class DecisionsPanel(QWidget):
         self.table.setItem(r, 6, _cell(", ".join(rec.alternatives) or "—",
                                        PALETTE["muted"]))
         self.table.scrollToBottom()
-
-
-class ResidualPlot(QWidget):
-    """Predicted vs actual damage, per observation.
-
-    Deliberately a scatter of both series rather than a plot of the
-    error: seeing predicted and actual side by side makes a systematic
-    bias (every prediction low by the same factor) look different from
-    noise, and those two have completely different causes.
-    """
-
-    def __init__(self, telemetry):
-        super().__init__()
-        self.tel = telemetry
-        self.setMinimumHeight(190)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding,
-                           QSizePolicy.Policy.Expanding)
-
-    def paintEvent(self, _):
-        obs = self.tel.damage_observations(clean_only=False)
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        w, h = self.width(), self.height()
-        pad = 26
-        p.fillRect(0, 0, w, h, QColor(PALETTE["alt_bg"]))
-
-        if not obs:
-            p.setPen(QColor(PALETTE["muted"]))
-            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
-                       "no damage observations yet")
-            return
-
-        vals = [v for r in obs for v in (r.predicted_damage, r.actual_damage)]
-        top = max(vals) * 1.1 or 1.0
-
-        p.setPen(QPen(QColor(PALETTE["bg"]), 1))
-        for frac in (0.0, 0.5, 1.0):
-            y = h - pad - frac * (h - 2 * pad)
-            p.drawLine(pad, int(y), w - pad, int(y))
-
-        n = len(obs)
-        step = (w - 2 * pad) / max(n, 1)
-        for i, rec in enumerate(obs):
-            x = pad + step * (i + 0.5)
-            for value, key in ((rec.predicted_damage, "predicted"),
-                               (rec.actual_damage, "actual")):
-                y = h - pad - (value / top) * (h - 2 * pad)
-                p.setBrush(QColor(PALETTE[key]))
-                p.setPen(QPen(QColor(PALETTE[key]), 1))
-                p.drawEllipse(int(x) - 3, int(y) - 3, 6, 6)
-            y1 = h - pad - (rec.predicted_damage / top) * (h - 2 * pad)
-            y2 = h - pad - (rec.actual_damage / top) * (h - 2 * pad)
-            p.setPen(QPen(QColor(PALETTE["muted"]), 1, Qt.PenStyle.DotLine))
-            p.drawLine(int(x), int(y1), int(x), int(y2))
-
-        p.setPen(QColor(PALETTE["predicted"]))
-        p.drawText(pad, 16, "predicted")
-        p.setPen(QColor(PALETTE["actual"]))
-        p.drawText(pad + 80, 16, "actual")
-        p.setPen(QColor(PALETTE["muted"]))
-        p.drawText(w - pad - 60, 16, f"max {top:,.0f}")
 
 
 class ModelPanel(QWidget):
@@ -257,7 +244,9 @@ class ModelPanel(QWidget):
             self.stat_labels[key] = value
         root.addWidget(stats)
 
-        self.plot = ResidualPlot(telemetry)
+        self.plot = Scatter(
+            "predicted vs actual",
+            "x = predicted, y = actual · distance from the line is the error")
         root.addWidget(self.plot)
 
         self.table = _table(["round", "cast", "target", "predicted", "actual",
@@ -301,7 +290,96 @@ class ModelPanel(QWidget):
             self.table.setItem(i, 7, _cell(
                 "yes" if r.clean else "; ".join(r.confounds),
                 PALETTE["text"] if r.clean else PALETTE["muted"]))
-        self.plot.update()
+        self.plot.set_points([
+            (r.predicted_damage, r.actual_damage, r.clean,
+             f"round {r.round} — {r.chosen or 'pass'}")
+            for r in rows])
+
+
+class LearningPanel(QWidget):
+    """Whether the model learned anything, and whether it is being used.
+
+    Two questions with two different answers, and conflating them is how
+    a run gets misread. A table can be excellent in training and decide
+    nothing at all live, which is exactly what a 0% coverage run looks
+    like -- so the training curve and the live coverage sit side by side
+    rather than one standing in for the other.
+    """
+
+    def __init__(self, telemetry):
+        super().__init__()
+        self.tel = telemetry
+        root = QVBoxLayout(self)
+        root.addWidget(_label(
+            "Left: what training achieved against the simulator. Right: "
+            "whether that table is deciding anything in the real fight. "
+            "They are independent — a model can score well in training and "
+            "still recognise none of the boards it is played on.",
+            PALETTE["muted"]))
+
+        cols = QHBoxLayout()
+
+        learn = QGroupBox("training")
+        ll = QVBoxLayout(learn)
+        # Two charts rather than two y-axes. Kill rate is a percentage
+        # and TTK is a turn count; putting them on one plot would align
+        # two unrelated scales and invent a relationship between them.
+        self.kill = LineChart("kill rate", "% of simulated fights won",
+                              fmt=lambda v: f"{v:.0f}%", height=170)
+        self.ttk = LineChart("turns to kill", "mean, over won fights",
+                             fmt=lambda v: f"{v:.1f}", height=170)
+        ll.addWidget(self.kill)
+        ll.addWidget(self.ttk)
+        cols.addWidget(learn, 3)
+
+        live = QGroupBox("in the fight")
+        vl = QVBoxLayout(live)
+        self.coverage = Meter("of boards decided by the Q table")
+        vl.addWidget(self.coverage)
+        self.mix = RankedBars("who decided", "rounds played, per policy path",
+                              height=150)
+        self.mix.pad_l = 152
+        vl.addWidget(self.mix)
+        self.verdict = _label("", PALETTE["muted"])
+        self.verdict.setWordWrap(True)
+        vl.addWidget(self.verdict)
+        vl.addStretch()
+        cols.addWidget(live, 2)
+
+        root.addLayout(cols)
+
+    def refresh(self):
+        self.kill.set_points(self.tel.training_curve())
+        self.ttk.set_points(self.tel.ttk_curve())
+
+        mix = self.tel.policy_mix()
+        total = sum(mix.values())
+        # Shortened to the part that differs. The full string repeats the
+        # policy name on every row, which pushes the one word that
+        # actually distinguishes them off the end of the label.
+        self.mix.set_bars(
+            [(name.split("—")[-1].strip() or name, n,
+              "fallback" not in name, name)
+             for name, n in mix.items()], unit="")
+
+        decided = sum(n for name, n in mix.items()
+                      if "fallback" not in name and "trained" in name)
+        trained_rounds = sum(n for name, n in mix.items() if "trained" in name)
+        if not trained_rounds:
+            self.coverage.set_value(0.0, "no trained policy has played yet")
+            self.verdict.setText("")
+            return
+        frac = decided / trained_rounds
+        # Status colour beside a number, never instead of one -- these
+        # three do not separate from each other under colour-vision
+        # deficiency, and are not meant to.
+        status = "good" if frac > 0.66 else "warn" if frac > 0.25 else "bad"
+        self.coverage.set_value(
+            frac, f"{decided} of {trained_rounds} rounds", status)
+        self.verdict.setText(
+            "The table is driving." if frac > 0.66 else
+            "Mostly the fallback heuristic is driving — see the line under "
+            "the controls for which mismatch it is.")
 
 
 class NamingPanel(QWidget):
