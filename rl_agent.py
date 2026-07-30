@@ -229,7 +229,13 @@ class QAgent:
                 pass
             else:
                 apply_action(sim, s, a)
-            if s.boss_hp <= 0:
+            # The BOARD, not enemy 0. `State.boss_hp` is `enemies[0].hp`,
+            # so on a multi-mob board this used to declare victory the
+            # moment the first mob fell and hand out the full reward with
+            # the rest still swinging -- the agent was being trained to
+            # kill one thing, which is not the game. Identical on a 1v1
+            # board, where enemy 0 dying IS the board clearing.
+            if not any(e.alive for e in s.enemies):
                 won = True
                 turns = s.turn + 1
                 break
@@ -263,10 +269,52 @@ class QAgent:
         return pol
 
 
+def make_board_sampler(school, hp_range, max_mobs=3, dmg=60):
+    """A fresh board per episode, so one table covers many fights.
+
+    Training against a single fixed board produces a table for that board
+    and nothing else, because `Featurizer.key` is built from absolute
+    quantities: the enemy health bucket (`hp // 250`), and on a
+    multi-enemy board a `(living, weakest_index, ...)` tuple that is only
+    present at all when more than one mob is up. Walk into a fight with a
+    different mob count and the keys are a different *length*; walk into
+    one with different health and they are a different bucket. Either way
+    the table matches nothing and the policy is its own fallback.
+
+    Retraining before every fight is the alternative, and it is not a
+    real option -- you would have to know the board before you could
+    learn to fight it. So the board is randomised instead: mob count and
+    per-mob health resampled each episode, over the range the wizard is
+    actually going to meet.
+
+    Two details that look cosmetic and are not:
+
+      * healths are drawn **independently**, not scaled from one number.
+        Mobs that all start equal make `weakest_index` 0 in every opening
+        state, and a real board of 515 beside 390 opens in the half that
+        was never visited. Measured: 0% coverage.
+      * they are deliberately **not sorted**. Ordering them big-to-small
+        would put the weakest at the last index every time, which is the
+        same degeneracy wearing a different hat.
+    """
+    lo, hi = int(min(hp_range)), int(max(hp_range))
+    lo = max(1, lo)
+    hi = max(lo, hi)
+
+    def sample(rng):
+        n = rng.randint(1, max(1, max_mobs))
+        hps = [rng.randint(lo, hi) for _ in range(n)]
+        board = [Boss(name=f"mob {i}", hp=hp, school=school, dmg=dmg)
+                 for i, hp in enumerate(hps)]
+        return board[0], board[1:]
+
+    return sample
+
+
 def train_agent(cards, decklist, school, boss, episodes=60000,
                 warm=True, seed=0, player_hp=10**9, log=None,
                 snap_every=5000, sideboard=None, player_stats=None,
-                enemies=None):
+                enemies=None, board_sampler=None):
     """`player_stats` is the wizard's gear, as `Sim` takes it. Left out,
     training solves the fight for a wizard wearing nothing: every hit is
     priced below what it really lands for, so the table is optimal for a
@@ -276,8 +324,14 @@ def train_agent(cards, decklist, school, boss, episodes=60000,
     detail: `Featurizer.key` appends a `foes` tuple **only** when the
     board holds more than one enemy, so a table trained 1v1 and played
     against two mobs produces keys of a different length and cannot match
-    a single state. Train against the shape of the fight you intend to
-    play."""
+    a single state.
+
+    `board_sampler(rng) -> (boss, extra_enemies)` resamples the board
+    every episode, which is how one table comes to cover more than one
+    fight -- see `make_board_sampler`. `boss`/`enemies` are still used
+    for the periodic evaluation, so the checkpoint metric stays
+    comparable across snapshots instead of drifting with whatever board
+    happened to be up."""
     rng = random.Random(seed)
     sim = Sim(cards, decklist, school, boss, player_hp=player_hp, rng=rng,
               sideboard=sideboard, player_stats=player_stats,
@@ -289,19 +343,31 @@ def train_agent(cards, decklist, school, boss, episodes=60000,
     agent = QAgent(cards, decklist, school, dp_pol=dp_pol,
                    rng=random.Random(seed + 1))
     best = (-1.0, float("inf"), None)               # (kill%, ttk, Q snapshot)
+    #: the board `evaluate` scores on. Held fixed while the training
+    #: board is resampled, so successive snapshots are comparable and the
+    #: "best checkpoint" pick is not decided by which board came up.
+    eval_board = (sim.boss, list(sim.extra_bosses))
+
+    def use_eval_board():
+        sim.boss, sim.extra_bosses = eval_board[0], list(eval_board[1])
+
     for ep in range(episodes):
         frac = ep / episodes
         eps = max(0.02, 0.30 * (1 - frac))          # explore -> exploit
         dp_w = max(0.0, 0.50 * (1 - 2 * frac)) if warm else 0.0
         agent.alpha = 0.30 * (1 - 0.9 * frac)       # settle late training
+        if board_sampler is not None:
+            sim.boss, sim.extra_bosses = board_sampler(rng)
         agent.train_episode(sim, eps, dp_w)
         if (ep + 1) % snap_every == 0:
+            use_eval_board()
             w, m = evaluate(sim, agent.policy(), n=2000)
             score = w - m / 1000.0                  # kill% first, speed second
             if score > best[0] - best[1] / 1000.0:
                 best = (w, m, dict(agent.Q))
             if log and (ep + 1) % log == 0:
                 print(f"    ep {ep+1:>6}: kill {w*100:5.1f}%  TTK {m:6.2f}")
+    use_eval_board()
     if best[2] is not None:
         agent.Q = defaultdict(float, best[2])       # keep the best checkpoint
     return agent, sim

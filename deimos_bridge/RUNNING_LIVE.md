@@ -228,36 +228,53 @@ back to the heuristic and plays a completely ordinary-looking fight. The
 **Decisions** tab carries the same thing per row, with fallback rows
 tinted.
 
+### Train once, not per fight
+
+**"any board" is on by default**, and it is the reason you do not have to
+retrain when you walk into a different pack. It resamples the mobs every
+episode — how many, and each one's health — instead of learning a single
+board.
+
+Without it, a table covers exactly the board it was trained on, because
+the state key is built from absolute quantities: an enemy health bucket
+(`HP // 250`), and a targeting tuple that is only present *at all* when
+more than one mob is up. A different fight therefore produces keys of a
+different length or a different bucket, and the table matches nothing.
+
+Measured on one ice deck, 12,000 episodes each:
+
+| board fought | fixed-board model | "any board" model |
+| --- | --- | --- |
+| 1 mob, 515hp | 0% | 100% |
+| 1 mob, 1200hp | 0% | 100% |
+| 2 mobs, 515 + 390 | 0% | 100% |
+| 2 mobs, 800 + 800 | 0% | 100% |
+| 3 mobs, 400 / 600 / 350 | 0% | 100% |
+
+**mob HP** now centres the range (roughly 0.4× to 1.8× of it) rather than
+pinning it, and **up to mobs** is the largest pack to train for — every
+count from 1 to that is sampled. Both fill themselves in from fights you
+play, and they only ever widen. It costs episodes: there are far more
+states to fill, which is why the default is 20,000.
+
+Turn it off only to squeeze one specific repeated fight.
+
 A coverage near **zero** almost never means "train more episodes", and
 the window now says which of these it actually is:
 
-- **Wrong number of mobs.** `Featurizer.key` appends its targeting tuple
-  only when the board holds more than one enemy, so a table trained 1v1
-  and played against two mobs produces keys of a *different length*.
-  They cannot match — not approximately, at all. Measured coverage: 0%,
-  at any number of episodes.
-- **Mobs of equal health.** Subtler, and it survives fixing the count.
-  The key carries `(living, weakest_index, …)`; with every training mob
-  on the same health the weakest is index 0 in every opening state, so
-  the whole "weakest is not the first one" half of the space goes
-  unvisited — and a real board of 515 beside 390 opens squarely in it.
-  Also 0%.
-- **Wrong mob health.** The key buckets it as `HP // 250`, so training
-  at 1,200 and fighting a 515hp mob indexes different states.
+- **More mobs than were trained for.** `Featurizer.key` appends its
+  targeting tuple only when the board holds more than one enemy, so a
+  table that never saw two mobs produces keys of a *different length*
+  from a two-mob fight. They cannot match — not approximately, at all.
+  Raise **up to mobs**.
+- **Health outside the trained range.** The key buckets it as
+  `HP // 250`, so a mob well outside the band indexes states the table
+  has none of. Move **mob HP** nearer what you are fighting.
+- **"any board" turned off.** Then it is a one-board model, and every
+  other board reads 0%.
 
-Measured on the deck above, against a real 515 + 390 board:
-
-| training board | coverage |
-| --- | --- |
-| 1 mob @ 1200hp | 0% |
-| 2 mobs, both 500hp | 0% |
-| 2 mobs, 500 + 400 | 100% |
-| 2 mobs at the observed healths | 100% |
-
-You should not have to know any of that. The **mobs** and **mob HP**
-boxes fill themselves in from the fight that just finished, and training
-uses each mob's own health rather than one number repeated. Fight once,
-then press Train.
+Otherwise it really is undertrained: a wide board range has far more
+states to fill, so raise episodes.
 
 ---
 
