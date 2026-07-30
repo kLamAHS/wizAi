@@ -1026,41 +1026,58 @@ class Sim:
         enemies = s.living_enemies()
         if not enemies:
             return False
-        tgt_enemy = s.enemies[target] if target < len(s.enemies) else None
-        if tgt_enemy is not None and not tgt_enemy.alive:
-            tgt_enemy = enemies[0]
         if any(op["op"] == "sacrifice_minion" for op in card.ops) and \
                 not any(m.alive for m in s.allies):
             return False
-        # duplicate-placement rule: a PURE hanging-effect card is uncastable
-        # while its primary effect is still pending on the chosen target
-        # (the in-game "you may not place the same effect twice" X). Cards
-        # with damage/heal components always cast; dup riders just skip.
-        HANGING = ("charm", "ward", "prism", "absorb", "dispel")
-        if all(op["op"] in HANGING + ("self_damage",) for op in card.ops):
-            op = next(op for op in card.ops if op["op"] in HANGING)
-            key = (card.name, card.source, op.get("sub", 0))
-            slot = "charm" if op["op"] in ("charm", "dispel") else "ward"
-            tgt = op.get("tgt", "self")
-            if tgt in ("self", "allies", "ally"):
-                if s.player.has_stack(key, slot):
-                    return False
-            elif tgt == "enemy":
-                if tgt_enemy is not None and tgt_enemy.has_stack(key, slot):
-                    return False
-            elif tgt == "enemies":
-                if all(e.has_stack(key, slot) for e in enemies):
-                    return False
+        # There is NO duplicate-placement rule. This used to refuse a pure
+        # hanging-effect card while its effect was already pending on the
+        # target, described as the in-game "you may not place the same
+        # effect twice" X -- and that X does not exist. Three Ice Traps go
+        # on one mob perfectly happily; they simply do not all fire on the
+        # same hit, which is `_ward_pass`'s job and is where the rule
+        # actually lives.
+        #
+        # Deimos is the corroborating witness: it reads every hanging
+        # effect off the live participant and dedupes by
+        # `spell_effect_stacking_id` *during damage resolution*
+        # (`combat_math.py:189-194`). That design only makes sense if
+        # duplicates can sit on a target, because otherwise there would be
+        # nothing to dedupe.
+        #
+        # The guard was also inert exactly where it mattered. Live-read
+        # hangings are named `live:<template id>` with source "live"
+        # (`deimos_bridge/live_state.read_hangings`), so their stack keys
+        # never matched a card in hand and `has_stack` always said no --
+        # the policy laid trap after trap in a real fight while the
+        # simulator insisted it could not.
+        #
+        # `target` is therefore no longer read here. It stays in the
+        # signature because callers legitimately know which mob they are
+        # aiming at and `Sim.run` passes it, but nothing about legality
+        # currently depends on it.
         return True
 
     # ---- resolution core ---------------------------------------------------
     def _consume_damage_charms(self, s, caster, school):
-        """All matching damage charms (blades AND weaknesses) apply to one
-        strike and are consumed together, like the game."""
+        """Matching damage charms (blades AND weaknesses) apply to one
+        strike and are consumed together, like the game -- but **one per
+        stacking identity**.
+
+        Two copies of the same blade do not both multiply a single hit.
+        The game applies the first and leaves the second on the caster
+        for the next strike, which is what makes carrying duplicates
+        worth anything at all. Deimos does this by skipping any
+        `spell_effect_stacking_id` it has already seen while resolving
+        damage (`combat_math.py:161-167`); this is the same rule keyed on
+        wizAi's own `Hanging.stack_key`.
+        """
         mult = 1.0
         keep = []
+        seen = set()
         for h in caster.charms:
-            if h.kind == "damage" and h.matches(school):
+            if h.kind == "damage" and h.matches(school) \
+                    and h.stack_key not in seen:
+                seen.add(h.stack_key)
                 mult *= 1 + h.percent
                 self._ev(s, "charm_consumed", actor=caster.name,
                          effect=h.name, percent=h.percent)
@@ -1108,12 +1125,28 @@ class Sim:
         """FIFO over the target's wards with a running damage school:
         traps/shields consume if they match the CURRENT school, prisms
         convert it. Pierce eats resist first (handled by caller), remainder
-        shaves shield magnitude. Returns (multiplier, final_school)."""
+        shaves shield magnitude. Returns (multiplier, final_school).
+
+        **One ward per stacking identity fires per hit.** Three Ice Traps
+        on a mob are three separate boosted hits, not one hit at 1.4^3 --
+        the game applies the first and leaves the rest standing. wizAi
+        used to multiply all of them into a single strike, which valued a
+        third identical trap at 2.744x instead of 1.4x and made stacking
+        look worth spending the rounds on. Deimos does the dedupe at
+        resolution by `spell_effect_stacking_id`
+        (`combat_math.py:189-194`); this is the same rule on
+        `Hanging.stack_key`.
+        """
         mult = 1.0
         keep = []
+        seen = set()
         for h in target.wards:
+            if h.stack_key in seen:
+                keep.append(h)               # banked for the next hit
+                continue
             if h.kind == "prism":
                 if h.schools is None or school in h.schools:
+                    seen.add(h.stack_key)
                     self._ev(s, "prism_converted", target=target.name,
                              effect=h.name, to=h.convert_to)
                     school = h.convert_to
@@ -1121,6 +1154,7 @@ class Sim:
                 keep.append(h)
             elif h.kind == "damage":
                 if h.matches(school):
+                    seen.add(h.stack_key)
                     pct = h.percent
                     if pct < 0 and pierce > 0:
                         shaved = min(pierce, -pct)
@@ -1422,8 +1456,13 @@ class Sim:
                 o["_schools"] = _op_schools_resolved(o, school)
                 h = self._hanging_from_op(o, card_name, source, caster.name)
                 for t in targets:
-                    if t.has_stack(h.stack_key, h.slot):
-                        continue              # same stack key never doubles
+                    # Duplicates DO go up. This used to `continue` on a
+                    # matching stack key, which was the same mistaken rule
+                    # `can_cast` enforced -- except worse, because the card
+                    # and the pips were spent and the effect silently
+                    # discarded. One per stacking key fires per strike;
+                    # that is `_ward_pass` / `_consume_damage_charms`, and
+                    # placement is not where it belongs.
                     (t.charms if h.slot == "charm" else t.wards).append(
                         copy.copy(h))
 

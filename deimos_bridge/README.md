@@ -190,20 +190,85 @@ lowest-health living enemy, chosen because hitting it only lowers its
 health further, so the focus re-derives to the same mob until it dies
 rather than wandering and splitting a buff stack across two.
 
-One rule this exposed: Wizard101 refuses a second identical trap on the
-same mob, and `Sim.can_cast` knows it — but `w101_sim.castable` asks
-about `enemies[0]` whatever the cast is aimed at. Invisible while nothing
-aims; the moment something does, the policy picks a card the engine then
-refuses and burns the round. `policies.castable_at` asks about the mob
-being aimed at.
+### Duplicate effects: the rule wizAi had backwards
 
-`rl_agent` had the same hole from the other side. `Featurizer.legal`
-already expanded single-target cards into `name@i` per foe, but decided
-legality once at target 0 — so a trap on enemy 0 removed the card from
-the action set entirely, even while it was still legal on enemy 1, and
-`apply_action` would cast at a mob that had already refused the card.
-Both now ask per target. Single-enemy fights are unaffected: target 0 is
-the only enemy there, so every 1v1 table predating this is unchanged.
+wizAi used to model "you may not place the same effect twice" as a
+**cast restriction** — `Sim.can_cast` refused a pure hanging-effect card
+whose effect was already on the target, and `execute_ops` silently
+dropped it if it got through anyway. There is no such restriction in the
+game. Three Ice Traps go on one mob perfectly happily; what they do not
+do is all fire on the same strike.
+
+Deimos is the corroborating witness. It reads every hanging effect off
+the live participant and dedupes by `spell_effect_stacking_id` *during
+damage resolution* (`combat_math.py:161-194`) — a design that only makes
+sense if duplicates can sit on a target, because otherwise there would be
+nothing to dedupe.
+
+Getting this backwards was not a wash, because the guard was **inert
+exactly where it mattered**. Live-read hangings are named
+`live:<template id>` with source `"live"`, so their stack keys never
+matched a card in hand and `has_stack` always said no. In a real fight
+wizAi therefore laid duplicate after duplicate *and* multiplied every one
+of them into a single strike:
+
+```
+3 x 40% Ice Trap, one Snow Serpent
+  wizAi (before)   480 damage   2.744x     <- 1.4^3
+  Deimos / game    245 damage   1.400x     <- one fires, two are banked
+```
+
+A 96% overvaluation of the third trap is why stacking looked worth
+spending rounds on. `_ward_pass` and `_consume_damage_charms` now apply
+one hanging per stacking identity per strike and leave the rest standing,
+which is both the game's rule and Deimos's; the placement guards are
+gone. This is what closed the last row in the differential suite — the
+two engines now agree on all 22 scenarios.
+
+Nothing about legality depends on the target any more, so `can_cast`'s
+`target` argument is vestigial (kept because callers legitimately know
+what they are aiming at, and `Sim.run` passes it).
+
+### Knowing when to stop setting up
+
+Three separate things made the policy over-invest in setup, all of them
+in how a line gets scored rather than in the policy itself.
+
+**Enemies dealt no damage.** `read_state` builds enemies with no
+`flat_hit`, so `_enemy_turn` did nothing and every rollout modelled the
+mobs as harmless. Setting up cost turns and nothing else, and
+`_rollout`'s `player.alive` check could never fire — the policy had no
+way to know it was about to die to the minion. Nothing in the client
+reports a mob's spell damage, so `WizAiBackend._estimate_incoming`
+measures it: the player's health drop across a round, split over the mobs
+alive to cause it. That folds in DoTs and minion hits, which is right —
+what matters is how long the fight can afford to take, not who is
+responsible. Before the first measurement it uses the trainer's own
+dummy-boss prior, so turn one is not priced differently from the fight
+the Q table learned on.
+
+**A losing board erased every distinction.** `_rollout` returned one flat
+constant whenever the line died, so on a board where nothing survives the
+horizon *every* candidate scored identically, the comparison collapsed,
+and the choice fell through to the tiebreak — which takes the cheapest
+card. An Ice Trap costs zero pips. That is the whole mechanism behind
+"it spams every trap card": not a preference for traps, an absence of any
+preference at all. Dying now ranks below stalling and above nothing, and
+carries the damage the line actually banked.
+
+**Overkill counted as progress.** `Sim._strike` does `target.hp -= dmg`
+uncapped and `cast` returns the raw number, so a 300-damage nuke into a
+mob with 50 left banked 300 — and the damage tiebreak rewards banking
+more. Two pushes toward waste at once, since the third key was
+`-card.damage` ("take the biggest hit"). Damage is now floored at each
+mob's health, and ties break toward the *cheapest* card.
+
+On top of those, `policies.cheapest_lethal` asks the question that was
+missing entirely: *is it already dead?* A buff round against a mob the
+plain nuke already finishes is a round given away, and stacked three deep
+it is the fight given away. It runs the engine's own cast path, so a
+shielded mob is correctly not lethal, and it picks the smallest card that
+still kills rather than the biggest available.
 
 ### The wizard is not naked
 

@@ -238,6 +238,12 @@ def suite():
                  wards=[Buff("Fire Trap", 25, "fire")],
                  note="single multiplicative ward"),
 
+        Scenario("duplicate trap", 500, "fire",
+                 wards=[Buff("Fire Trap", 25, "fire", stack=4),
+                        Buff("Fire Trap", 25, "fire", stack=4)],
+                 note="three traps on a mob is three boosted hits, not one "
+                      "hit at 1.25^3 -- the second is banked, not consumed"),
+
         Scenario("blade and trap", 500, "fire",
                  blades=[Buff("Fireblade", 35, "fire")],
                  wards=[Buff("Fire Trap", 25, "fire")]),

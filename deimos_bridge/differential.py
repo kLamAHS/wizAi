@@ -20,17 +20,7 @@ from .scenarios import suite
 
 #: Scenarios where a disagreement is *expected* and does not indicate a
 #: wizAi bug, with the reason. Anything not listed here is a real finding.
-EXPECTED = {
-    "duplicate blade":
-        "Both engines refuse to count one effect twice; they just do it at "
-        "different stages. Deimos dedupes during damage resolution (by "
-        "`spell_effect_stacking_id`), wizAi refuses the *cast* "
-        "(`Sim.can_cast`, w101_sim.py:1007-1029, keyed on "
-        "(name, source, sub)), so a duplicate never reaches the board. This "
-        "scenario builds the board directly and so walks past wizAi's "
-        "guard. The two only observably differ if something other than a "
-        "player cast places a duplicate.",
-}
+EXPECTED = {}
 
 #: Divergences that used to be listed above and are now fixed on one side
 #: or the other. Kept as a record of what the harness was for, and as a
@@ -45,6 +35,22 @@ RESOLVED = {
     "flat damage": "wizAi adopted Deimos's flat-damage placement",
     "flat resist": "wizAi adopted Deimos's flat-resist placement",
     "full stack (no pierce)": "both of the above",
+    "duplicate blade":
+        "wizAi adopted Deimos's rule. This sat in EXPECTED for a while on "
+        "the argument that both engines refuse to count one effect twice "
+        "and merely do it at different stages -- Deimos during damage "
+        "resolution, wizAi by refusing the cast -- so the two could only "
+        "differ if something other than a player cast placed a duplicate. "
+        "Both halves of that were wrong. There is no such cast "
+        "restriction in the game: three Ice Traps go on one mob, and each "
+        "hit consumes one. And wizAi's guard was inert in the only place "
+        "it mattered, because live-read hangings are named "
+        "`live:<template id>` and never match a card in hand's stack key. "
+        "So in a real fight wizAi laid duplicate after duplicate and then "
+        "multiplied all of them into a single strike -- 2.744x for three "
+        "traps against the true 1.4x -- which is what made stacking look "
+        "worth spending rounds on.",
+    "duplicate trap": "same fix, on the ward side",
 }
 
 TOL = 0.5   # absolute damage; both engines work in floats
