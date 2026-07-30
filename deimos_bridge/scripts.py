@@ -24,15 +24,8 @@ only while the wizard is out of combat, so a `waitfor combat` line parks
 harmlessly until the policy has finished the duel.
 """
 import os
-import sys
 
-DEIMOS_ROOT = os.path.join(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))), "Deimos")
-
-
-def _ensure_path():
-    if DEIMOS_ROOT not in sys.path:
-        sys.path.insert(0, DEIMOS_ROOT)
+from .deimos_path import DEIMOS_ROOT, ensure_path as _ensure_path, install_hint
 
 
 def available():
@@ -44,11 +37,15 @@ def available():
         from src.deimoslang import vm  # noqa: F401
         return True, ""
     except Exception as exc:
+        # Name the one thing that is missing. The old message printed a
+        # fixed list headed by `wizsprinter`, which is not on PyPI at
+        # all -- it is vendored at Deimos/libs/wizsprinter and is now put
+        # on the path by `ensure_path`, so nobody should be told to
+        # install it.
+        hint = install_hint(exc)
         return False, (
-            f"deimoslang is not importable ({type(exc).__name__}: {exc}).\n\n"
-            "It shares Deimos's questing requirements:\n"
-            "    .venv\\Scripts\\python.exe -m pip install wizsprinter "
-            "thefuzz loguru pyyaml requests pypresence pyperclip")
+            f"deimoslang is not importable ({type(exc).__name__}: {exc})."
+            + (f"\n\n{hint}" if hint else ""))
 
 
 def check(source: str):

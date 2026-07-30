@@ -555,6 +555,17 @@ table entries. Switch to "every variant" to see them all.
 - **Auto-dialogue** — watches for dialogue and clicks through it for the
   whole run, paused during combat so it cannot fight the card clicks.
   Bounded per conversation, so one that reopens forever cannot hang a run.
+  It only *starts* conversations at the quest marker: the game shows its
+  press-X prompt (`NPCRangeWin`) for every interactable in range, so
+  clicking it whenever it appears greets every vendor and signpost walked
+  past — and each unwanted conversation then has to be clicked back out
+  of, which is worse than not helping. `questing.at_quest_marker` is the
+  discriminator, comparing the wizard's position with
+  `client.quest_position` on the flat plane (Z is height, and a quest NPC
+  one storey up a ramp is still the quest NPC). Anything *already* open
+  is still cleared regardless, because dialogue blocks movement. The gate
+  needs the in-game quest arrow on, and says so once when it is not,
+  rather than silently never firing.
 - **Auto-quest between fights** — wait out loading, read the marker,
   teleport, clear dialogue, press X, look for combat, repeat.
 
@@ -628,8 +639,31 @@ already does this inside `auto_quest_solo`, but only while questing;
 here it is its own toggle so it also runs when auto-quest is off, which
 is exactly the case when farming one fixed mob.
 
-Cost: `src.utils` imports `wizwalker.extensions.wizsprinter`, so this
-needs wizsprinter (Python 3.13+) plus `thefuzz`, `loguru`, `pyyaml` and
-`requests`. `setup-windows.bat` installs them and treats failure as
-non-fatal — without them the bridge falls back to the light questing and
-says so in the status bar. Nothing else in the package is affected.
+Cost: `src.utils` imports `wizwalker.extensions.wizsprinter`, and so does
+deimoslang — which is what bot scripts are written in, so both features
+stand or fall together.
+
+**wizsprinter is not a PyPI package.** It is a workspace member vendored
+at `Deimos/libs/wizsprinter` that installs *into* the `wizwalker`
+namespace, and its `pyproject` declares `requires-python = ">=3.13"`. So
+`pip install`ing it on 3.11/3.12 fails — which took the rest of the line
+down with it, left scripts broken, and printed advice
+(`pip install wizsprinter …`) that could not have worked on any version,
+since that name is not on the index.
+
+The 3.13 floor is declared metadata rather than a real one: those sources
+compile on 3.11. `deimos_path.py` therefore makes them importable by
+extending `wizwalker.extensions.__path__` at import time, and nothing
+needs installing for wizsprinter at all.
+
+It extends `__path__` rather than adding `libs/wizsprinter` to
+`sys.path`, deliberately. That directory holds a `wizwalker/` with no
+`__init__.py`, so putting it on the path makes `wizwalker` resolvable as
+a *namespace* package — which shadows the real one wherever the real one
+is absent or found later, turning "wizsprinter is missing" into
+"wizwalker is broken".
+
+What remains are ordinary packages: `lark`, `thefuzz`, `loguru`,
+`pyyaml`, `requests`. `setup-windows.bat` installs them and treats
+failure as non-fatal; `available()` then names the specific module that
+did not import rather than reciting a fixed list.

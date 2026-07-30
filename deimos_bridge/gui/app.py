@@ -331,7 +331,11 @@ class MainWindow(QMainWindow):
         self.auto_dialogue.setToolTip(
             "Watch for dialogue and click through it as it appears, for the "
             "whole run — not just when you press the button. Paused during "
-            "combat, so it cannot fight the card clicks.")
+            "combat, so it cannot fight the card clicks.\n\n"
+            "Only starts conversations at the quest marker. The game shows "
+            "its press-X prompt for every interactable in range, so without "
+            "that it greets every vendor and signpost you walk past. Needs "
+            "the in-game quest arrow switched on; it says so if it is not.")
         quest_row.addWidget(self.auto_dialogue)
 
         self.collect_wisps = QCheckBox("Collect wisps")

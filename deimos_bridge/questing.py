@@ -224,17 +224,71 @@ async def near_interactable(client) -> bool:
     return window is not None and await _visible(window)
 
 
-async def open_dialogue_if_near(client) -> bool:
+#: How close to the quest marker counts as "this is the quest NPC".
+#: Wizard101's world units put a conversation range at roughly 200-400,
+#: and quest markers sit on the objective rather than beside it, so this
+#: is generous enough to survive a marker on the far side of an NPC and
+#: tight enough to exclude the next vendor along.
+QUEST_RADIUS = 750.0
+
+
+async def at_quest_marker(client, radius: float = QUEST_RADIUS):
+    """(near, reason). Is the wizard standing at its quest objective?
+
+    The discriminator for "should I talk to this NPC". `NPCRangeWin` --
+    the game's press-X prompt -- appears for *every* interactable in
+    range: vendors, bank, the dye shop, other players' housing objects.
+    Clicking on all of them is how auto-dialogue ended up talking to
+    everyone walked past, which is worse than not helping, because each
+    unwanted conversation has to be clicked back out of.
+
+    Returns (False, reason) rather than a bare False when the quest
+    position cannot be read at all, so the caller can say why it is not
+    talking to anyone instead of looking broken.
+    """
+    quest, reason = await read_quest_position(client)
+    if quest is None:
+        return False, reason
+    try:
+        here = await client.body.position()
+    except Exception as exc:
+        return False, f"could not read your position ({type(exc).__name__})"
+    if here is None:
+        return False, "could not read your position"
+    try:
+        dx = here.x - quest.x
+        dy = here.y - quest.y
+        dz = here.z - quest.z
+    except AttributeError:
+        return False, "position read back in an unexpected shape"
+    # Flat distance. Z is height, and a quest NPC one storey up a ramp is
+    # still the quest NPC -- including it would refuse the very cases
+    # where standing next to someone is unambiguous.
+    if (dx * dx + dy * dy) ** 0.5 > radius:
+        return False, "not at the quest marker"
+    return True, ""
+
+
+async def open_dialogue_if_near(client, quest_only: bool = True) -> bool:
     """Start the conversation, rather than waiting for one to appear.
 
     Auto-dialogue that only clicks an *already open* window still needs a
     human to walk up and press X, which is most of the work. If the
     prompt is showing and no dialogue is up yet, press X to open it.
+
+    `quest_only` gates that on standing at the quest marker. On by
+    default: the press-X prompt is shown for every interactable in range,
+    so without the gate this greets every vendor and signpost on the way
+    past.
     """
     if await in_dialogue(client):
         return False
     if not await near_interactable(client):
         return False
+    if quest_only:
+        near, _ = await at_quest_marker(client)
+        if not near:
+            return False
     return await press_x(client)
 
 

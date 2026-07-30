@@ -79,6 +79,8 @@ class LiveWorker(QThread):
         self._hotkeys = None
         #: the wizard's gear, read off the client on connect
         self.player_stats = {}
+        #: said once, not every half-second, when the quest arrow is off
+        self._warned_quest_arrow = False
         self._stop = False
         #: one-shot questing requests from the GUI thread. A plain list
         #: rather than a queue: the GUI appends, the loop drains between
@@ -183,13 +185,7 @@ class LiveWorker(QThread):
                 if self.auto_dialogue and self.quester is None:
                     # Deimos's questing does its own dialogue handling, so
                     # a second clicker would race it for the same button.
-                    if await questing.open_dialogue_if_near(client):
-                        self.status.emit("opened a dialogue")
-                        await asyncio.sleep(0.6)
-                    if await questing.in_dialogue(client):
-                        n = await questing.advance_dialogue(client)
-                        if n:
-                            self.status.emit(f"auto-dialogue: {n} window(s)")
+                    await self._auto_dialogue(client)
 
                 if self.runner is not None:
                     if not await self.runner.step() and self.runner.finished:
@@ -210,6 +206,42 @@ class LiveWorker(QThread):
                 # The service task must outlive a bad read; the fight
                 # loop is the thing that matters.
                 await asyncio.sleep(1.0)
+
+    async def _auto_dialogue(self, client):
+        """Open and clear dialogue, but only the quest's.
+
+        The game's press-X prompt appears for every interactable in
+        range, so clicking it whenever it shows greets every vendor and
+        signpost walked past -- each of which then has to be clicked back
+        out of. `at_quest_marker` is the discriminator.
+
+        The gate has a failure mode worth naming out loud: with the
+        in-game quest arrow switched off the quest position never reads,
+        so nothing is ever "at the marker" and auto-dialogue would
+        silently do nothing at all. That is reported once rather than
+        left to look like a broken feature.
+        """
+        from .. import questing
+
+        if not await questing.in_dialogue(client):
+            if await questing.near_interactable(client):
+                near, why = await questing.at_quest_marker(client)
+                if near:
+                    if await questing.press_x(client):
+                        self.status.emit("opened the quest dialogue")
+                        await asyncio.sleep(0.6)
+                elif (why and "quest marker" not in why
+                        and not self._warned_quest_arrow):
+                    self._warned_quest_arrow = True
+                    self.status.emit(
+                        "auto-dialogue only talks to quest NPCs, and " + why)
+
+        if await questing.in_dialogue(client):
+            # Whatever is already open gets cleared, quest or not --
+            # dialogue blocks movement, so leaving one up strands the run.
+            n = await questing.advance_dialogue(client)
+            if n:
+                self.status.emit(f"auto-dialogue: {n} window(s)")
 
     async def _setup_hotkeys(self):
         """Bind the global hotkeys, if any were configured.
