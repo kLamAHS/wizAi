@@ -270,6 +270,37 @@ it is the fight given away. It runs the engine's own cast path, so a
 shielded mob is correctly not lethal, and it picks the smallest card that
 still kills rather than the biggest available.
 
+### Training the board you are actually fighting
+
+A trained policy reported **0% coverage** over a whole live fight — 40,000
+episodes, and the Q table decided nothing. Two separate mismatches, both
+in the board shape rather than in the learning:
+
+`Featurizer.key` appends a `(living, weakest_index, min_health_bucket)`
+tuple **only** when the board holds more than one enemy. A table trained
+against one dummy boss therefore emits 10-tuples and a two-mob fight
+emits 11-tuples: not a poor match, no possible match.
+
+Fixing the count is not enough. Training mobs that all start on the same
+health make `weakest_index == 0` in every opening state, so the entire
+"weakest is not the first one" half of the space is never visited — and a
+real board of 515 beside 390 opens exactly there.
+
+| training board | coverage on a real 515 + 390 fight |
+| --- | --- |
+| 1 mob @ 1200hp | 0% |
+| 2 mobs, both 500hp | 0% |
+| 2 mobs, 500 + 400 | 100% |
+| 2 mobs at the observed healths | 100% |
+
+`Telemetry.observed_mob_hps` reports each mob's health from the opening
+round of the last fight, the window adopts it, and `TrainWorker` builds
+one `Boss` per mob at its own health (spreading them 100/80/60% when no
+board has been observed, rather than making them identical). The coverage
+warning names the specific mismatch, because "train more episodes" is
+wrong advice for every cause here and expensive advice to follow before
+finding that out.
+
 ### The wizard is not naked
 
 `Sim` has always taken `player_stats` — damage, accuracy, pierce, crit,

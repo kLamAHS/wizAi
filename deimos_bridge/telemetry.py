@@ -386,6 +386,51 @@ class Telemetry:
                 counts[n] = counts.get(n, 0) + 1
         return dict(sorted(counts.items(), key=lambda kv: -kv[1]))
 
+    def observed_mob_hps(self):
+        """Each mob's max health, from the opening round of the last fight.
+
+        The individual numbers matter, not just the count. `Featurizer.key`
+        carries `(living, weakest_index, ...)`, so a training board whose
+        mobs all start at the same health has `weakest_index == 0` in
+        every opening state -- the entire `weakest == 1` half is never
+        visited, and a real board with a 515hp mob beside a 390hp one
+        lands squarely in it. That one field was the whole of a measured
+        0% coverage.
+        """
+        for rec in reversed(self.rounds):
+            if not rec.enemies:
+                continue
+            if rec.round != 1 and any(r.fight == rec.fight and r.round == 1
+                                      for r in self.rounds):
+                continue
+            return [e.max_hp for e in rec.enemies]
+        return []
+
+    def observed_board(self):
+        """(enemy count, biggest mob's max health) from the last fight.
+
+        Training has to match this or the Q table is unusable, and not
+        approximately -- `Featurizer.key` appends a `foes` tuple only when
+        the board holds more than one enemy, so a 1v1-trained table and a
+        two-mob fight produce keys of *different length* and cannot share
+        a single state. The health matters too, though less brutally: the
+        key buckets it as `max_health // 250`.
+
+        Taken from the opening round of the most recent fight, because
+        that is the board the fight was actually fought against -- later
+        rounds have mobs already dead.
+
+        Returns None when nothing has been fought yet.
+        """
+        for rec in reversed(self.rounds):
+            if not rec.enemies:
+                continue
+            if rec.round != 1 and any(r.fight == rec.fight and r.round == 1
+                                      for r in self.rounds):
+                continue
+            return len(rec.enemies), max(e.max_hp for e in rec.enemies)
+        return None
+
     def policy_mix(self):
         """Rounds played, per policy and per path within it.
 

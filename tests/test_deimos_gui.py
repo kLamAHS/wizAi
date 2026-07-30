@@ -2053,3 +2053,107 @@ def test_the_window_says_when_gear_was_never_read(qapp):
     assert "as if you wore none" in win.policy_state.text()
     win.on_gear_read({"damage": {"ice": 0.09}})
     assert "9% ice damage" in win.policy_state.text()
+
+
+# ------------------------------- training the board you are actually fighting
+def _key_for(mob_hps, deck=None, player_hp=784):
+    """The opening state key for a board with these mobs."""
+    import random
+
+    from data_full import load_spells_full
+    from rl_agent import Featurizer
+    from w101_sim import Boss, Sim
+
+    cards = load_spells_full()
+    deck = deck or (["Frost Beetle"] * 3 + ["Ice Trap"] * 3
+                    + ["Snow Serpent"] * 3)
+    sim = Sim(cards, deck, "ice",
+              Boss(name="a", hp=mob_hps[0], school="fire", dmg=65),
+              enemies=[Boss(name=f"b{i}", hp=h, school="fire", dmg=65)
+                       for i, h in enumerate(mob_hps[1:], 1)],
+              rng=random.Random(0), player_hp=player_hp)
+    return Featurizer(cards, deck).key(sim, sim.new_state())
+
+
+def test_a_table_trained_1v1_cannot_match_a_two_mob_board():
+    """Not "matches badly" -- cannot match. `Featurizer.key` appends its
+    targeting tuple only when the board holds more than one enemy, so the
+    keys are different LENGTHS. Measured coverage: 0%, at any number of
+    episodes."""
+    solo = _key_for([1200])
+    pair = _key_for([515, 390])
+    assert len(solo) != len(pair)
+    assert solo != pair
+
+
+def test_mobs_of_equal_health_never_produce_a_real_opening_state():
+    """The subtler half, and the one that survived matching the count.
+    The key carries (living, weakest_index, ...); with every mob on the
+    same health the weakest is index 0 in every opening state, so the
+    whole weakest-is-not-first half of the space goes unvisited -- and a
+    real board of 515 beside 390 opens squarely in it. Also measured at
+    0% coverage."""
+    equal = _key_for([500, 500])
+    spread = _key_for([515, 390])
+    assert len(equal) == len(spread)
+    assert equal[-1] != spread[-1]              # only the foes tuple differs
+    assert equal[:-1] == spread[:-1]
+    assert equal[-1][1] == 0 and spread[-1][1] == 1
+
+
+def test_the_trainer_spreads_mobs_when_no_board_was_observed(qapp):
+    """Falling back to one number repeated is the degenerate board."""
+    from deimos_bridge.gui.app import TrainWorker
+
+    w = TrainWorker({}, [], "ice", 500, boss_hp=1000, n_enemies=3)
+    hps = w.board_hps()
+    assert len(hps) == 3
+    assert len(set(hps)) == 3, hps
+
+
+def test_the_trainer_prefers_the_healths_actually_observed(qapp):
+    from deimos_bridge.gui.app import TrainWorker
+
+    w = TrainWorker({}, [], "ice", 500, boss_hp=1000, n_enemies=2,
+                    mob_hps=[515, 390])
+    assert w.board_hps() == [515, 390]
+
+
+def test_the_window_adopts_the_board_it_just_fought(qapp):
+    """The whole point: nobody should have to know that mob count and
+    health are load-bearing for the state key."""
+    from deimos_bridge.gui.app import MainWindow
+
+    tel = Telemetry()
+    read = _read(2000, 1, hand=("Fireblade",))
+    from deimos_bridge.telemetry import EnemyView
+    read.state.enemies = []
+    rec = tel.observe(_Decision(card_name="Fireblade"), read)
+    rec.enemies = [EnemyView("Alicane", 515, 515),
+                   EnemyView("Magma Man", 390, 390)]
+
+    win = MainWindow(tel)
+    assert win.adopt_observed_board()
+    assert win.n_enemies.value() == 2
+    assert win.boss_hp.value() == 515
+    assert win.observed_hps == [515, 390]
+
+
+def test_the_coverage_warning_names_the_mismatch_not_more_episodes(qapp):
+    """"Train more episodes" is wrong advice for every cause here, and
+    expensive advice to follow before finding that out."""
+    from deimos_bridge.gui.app import MainWindow
+    from deimos_bridge.telemetry import EnemyView
+
+    tel = Telemetry()
+    rec = tel.observe(_Decision(card_name="Fireblade"),
+                      _read(2000, 1, hand=("Fireblade",)))
+    rec.enemies = [EnemyView("A", 515, 515), EnemyView("B", 390, 390)]
+
+    win = MainWindow(tel)
+    win.n_enemies.setValue(1)
+    assert "different LENGTHS" in win._why_coverage_is_low()
+
+    win.n_enemies.setValue(2)
+    win.boss_hp.setValue(1200)
+    assert "HP//250" in win._why_coverage_is_low()
