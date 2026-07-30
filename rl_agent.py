@@ -265,14 +265,23 @@ class QAgent:
 
 def train_agent(cards, decklist, school, boss, episodes=60000,
                 warm=True, seed=0, player_hp=10**9, log=None,
-                snap_every=5000, sideboard=None, player_stats=None):
+                snap_every=5000, sideboard=None, player_stats=None,
+                enemies=None):
     """`player_stats` is the wizard's gear, as `Sim` takes it. Left out,
     training solves the fight for a wizard wearing nothing: every hit is
     priced below what it really lands for, so the table is optimal for a
-    fight nobody is going to play."""
+    fight nobody is going to play.
+
+    `enemies` are extra mobs beside `boss`, and the count is not a
+    detail: `Featurizer.key` appends a `foes` tuple **only** when the
+    board holds more than one enemy, so a table trained 1v1 and played
+    against two mobs produces keys of a different length and cannot match
+    a single state. Train against the shape of the fight you intend to
+    play."""
     rng = random.Random(seed)
     sim = Sim(cards, decklist, school, boss, player_hp=player_hp, rng=rng,
-              sideboard=sideboard, player_stats=player_stats)
+              sideboard=sideboard, player_stats=player_stats,
+              enemies=enemies)
     dp_pol = None
     if warm:
         V, pol, meta = solve(cards, decklist, boss, school)

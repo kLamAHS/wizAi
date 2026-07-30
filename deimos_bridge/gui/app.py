@@ -38,16 +38,43 @@ class TrainWorker(QThread):
     failed = pyqtSignal(str)
 
     def __init__(self, cards, deck, school, episodes, player_hp=800,
-                 boss_hp=1200, player_stats=None):
+                 boss_hp=1200, player_stats=None, n_enemies=1,
+                 mob_hps=None):
         super().__init__()
         self.cards, self.deck = cards, deck
         self.school, self.episodes = school, episodes
         self.player_hp = player_hp
         self.boss_hp = boss_hp
+        #: mobs on the training board. Has to match the live fight:
+        #: `Featurizer.key` only carries its targeting tuple on a
+        #: multi-enemy board, so 1v1 training and a two-mob fight produce
+        #: keys of different length and share no state whatsoever.
+        self.n_enemies = max(1, int(n_enemies))
+        #: each mob's health, when a real board has been observed. Equal
+        #: health is a degenerate board: the weakest mob is index 0 in
+        #: every opening state, so the agent never sees the half of the
+        #: target space a real fight starts in.
+        self.mob_hps = [h for h in (mob_hps or []) if h > 0]
         #: the wizard's real gear, read off the client. Training without
         #: it prices every hit as though the wizard were naked, so the Q
         #: table is learned for a fight nobody is going to play.
         self.player_stats = dict(player_stats or {})
+
+    def board_hps(self):
+        """Health for each training mob.
+
+        Prefers the health actually observed, mob by mob. Falling back to
+        one number repeated is what produced a measured 0% coverage: with
+        every mob on the same health the weakest is index 0 in every
+        opening state, and a real board of 515 and 390 opens in the half
+        that was never trained. So when no board has been observed, the
+        mobs are spread deliberately rather than made identical.
+        """
+        if len(self.mob_hps) == self.n_enemies:
+            return [max(1, int(h)) for h in self.mob_hps]
+        # 100%, 80%, 60%, ... of the headline number.
+        return [max(1, int(self.boss_hp * (1.0 - 0.2 * i)))
+                for i in range(self.n_enemies)]
 
     def run(self):
         try:
@@ -59,10 +86,14 @@ class TrainWorker(QThread):
             # otherwise -- so a policy trained on the default shares no
             # state at all with a live wizard, its Q table reads zero
             # everywhere, and greedy falls through to PASS every turn.
+            dmg = max(30, self.player_hp // 12)
+            hps = self.board_hps()
             agent, sim = train_agent(
                 self.cards, self.deck, self.school,
-                Boss(name="training dummy", hp=self.boss_hp, school="ice",
-                     dmg=max(30, self.player_hp // 12)),
+                Boss(name="training dummy", hp=hps[0], school="ice", dmg=dmg),
+                enemies=[Boss(name=f"training minion {i}", hp=hp,
+                              school="ice", dmg=dmg)
+                         for i, hp in enumerate(hps[1:], 1)],
                 episodes=self.episodes, player_hp=self.player_hp,
                 player_stats=self.player_stats)
             from w101_sim import evaluate
@@ -82,6 +113,9 @@ class MainWindow(QMainWindow):
         self.agent = None
         self.worker = None      # training
         self.live = None        # the live fight
+        #: each mob's health from the last real fight, so training does
+        #: not use a degenerate board of identically-sized mobs
+        self.observed_hps = []
         #: the wizard's gear, filled in from the client on connect.
         #: Training uses it, which is the whole point: a Q table learned
         #: for a naked wizard is solving a fight nobody will play.
@@ -179,8 +213,25 @@ class MainWindow(QMainWindow):
         self.boss_hp.setRange(100, 60000)
         self.boss_hp.setSingleStep(250)
         self.boss_hp.setValue(1200)
-        self.boss_hp.setToolTip("Health of the enemy to train against.")
+        self.boss_hp.setToolTip(
+            "Health of the enemy to train against. The state key buckets "
+            "it as health // 250, so training at 1200 and fighting a 500hp "
+            "mob indexes different states for the same board. Filled in "
+            "from the last fight.")
         row.addWidget(self.boss_hp)
+
+        row.addWidget(QLabel("mobs"))
+        self.n_enemies = QSpinBox()
+        self.n_enemies.setRange(1, 4)
+        self.n_enemies.setValue(1)
+        self.n_enemies.setToolTip(
+            "How many enemies to train against. This one is not a "
+            "refinement — the state key carries a per-board targeting "
+            "tuple ONLY when there is more than one enemy, so a table "
+            "trained 1v1 and played against two mobs produces keys of a "
+            "different length and matches nothing at all. Filled in from "
+            "the last fight.")
+        row.addWidget(self.n_enemies)
 
         row.addWidget(QLabel("fights"))
         self.fights = QSpinBox()
@@ -344,6 +395,31 @@ class MainWindow(QMainWindow):
                 bits.append(f"{st[key] * 100:.0f}% {label}")
         return "gear: " + ", ".join(bits) + " — training uses these"
 
+    def _why_coverage_is_low(self):
+        """Name the specific mismatch rather than saying "train more".
+
+        "Train more episodes" is the wrong advice for every cause here,
+        and it is expensive advice to follow before finding that out.
+        The mismatches are checkable, so check them.
+        """
+        seen = self.tel.observed_board()
+        if seen:
+            n, hp = seen
+            if n != self.n_enemies.value():
+                return (f"cause: trained against {self.n_enemies.value()} "
+                        f"mob(s), fighting {n}. The state key only carries "
+                        f"its targeting tuple on a multi-enemy board, so "
+                        f"these keys are different LENGTHS and can never "
+                        f"match — no amount of training fixes it. Set "
+                        f"mobs to {n} and retrain.")
+            if abs(hp - self.boss_hp.value()) >= 250:
+                return (f"cause: trained against {self.boss_hp.value():,} HP "
+                        f"mobs, fighting ~{hp:,.0f}. The key buckets health "
+                        f"as HP//250, so those are different states. Set "
+                        f"mob HP to ~{hp:,.0f} and retrain.")
+        return ("this deck's states are mostly unvisited; train more "
+                "episodes, or with the deck you are actually holding")
+
     def _update_policy_state(self):
         """Say which policy is driving, and how often it really decided."""
         mix = self.tel.policy_mix()
@@ -368,9 +444,7 @@ class MainWindow(QMainWindow):
             text += (f"\nQ table decided {cover:.0f}% of the boards it was "
                      f"shown ({trained.missed} fell back to the heuristic)")
             if cover < 25:
-                text += (" — this deck's states are mostly unvisited; train "
-                         "more episodes, or with the deck you are actually "
-                         "holding")
+                text += "\n" + self._why_coverage_is_low()
         self.policy_state.setText(text)
         self.policy_state.setStyleSheet(f"color: {colour}")
 
@@ -411,7 +485,9 @@ class MainWindow(QMainWindow):
                                   self.episodes.value(),
                                   player_hp=self.player_hp.value(),
                                   boss_hp=self.boss_hp.value(),
-                                  player_stats=self.player_stats)
+                                  player_stats=self.player_stats,
+                                  n_enemies=self.n_enemies.value(),
+                                  mob_hps=self.observed_hps)
         self.worker.progress.connect(self.on_progress)
         self.worker.finished_ok.connect(self.on_trained)
         self.worker.failed.connect(self.on_train_failed)
@@ -580,7 +656,7 @@ class MainWindow(QMainWindow):
                                hotkeys=self.hotkey_bindings())
         self.live.status.connect(self.on_live_status)
         self.live.round_done.connect(self.on_round)
-        self.live.fight_done.connect(lambda n: self.refresh_all())
+        self.live.fight_done.connect(self.on_fight_done)
         self.live.failed.connect(self.on_live_failed)
         self.live.finished_ok.connect(self.on_live_finished)
         self.live.hp_read.connect(self.on_hp_read)
@@ -603,8 +679,41 @@ class MainWindow(QMainWindow):
     def on_live_status(self, message):
         self.status.setText(message)
 
+    def adopt_observed_board(self):
+        """Point the training board at the fight actually being fought.
+
+        Left to hand-entry this is the single easiest way to produce a
+        useless Q table, and it fails silently: train 1v1 against a
+        1200hp dummy, walk into two 500hp mobs, and the learned states do
+        not merely differ -- the keys are a different *length*, so
+        coverage is exactly 0% and the trained policy is the fallback
+        heuristic wearing its name.
+        """
+        seen = self.tel.observed_board()
+        if not seen:
+            return False
+        n, hp = seen
+        changed = (n != self.n_enemies.value()
+                   or abs(hp - self.boss_hp.value()) >= 250)
+        # The individual healths, not just the biggest: mobs that all
+        # start equal never produce the opening state a real board has.
+        self.observed_hps = self.tel.observed_mob_hps()
+        self.n_enemies.setValue(min(max(int(n), 1), self.n_enemies.maximum()))
+        self.boss_hp.setValue(min(max(int(hp), self.boss_hp.minimum()),
+                                  self.boss_hp.maximum()))
+        return changed
+
     def on_round(self, _rec):
         # Queued from the worker thread, so this runs on the GUI thread.
+        self.refresh_all()
+        self._update_policy_state()
+
+    def on_fight_done(self, _n):
+        if self.adopt_observed_board():
+            self.status.setText(
+                f"training board set from that fight: "
+                f"{self.n_enemies.value()} mob(s) at ~"
+                f"{self.boss_hp.value():,} HP — retrain to use it")
         self.refresh_all()
         self._update_policy_state()
 

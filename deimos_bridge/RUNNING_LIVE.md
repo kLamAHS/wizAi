@@ -228,9 +228,36 @@ back to the heuristic and plays a completely ordinary-looking fight. The
 **Decisions** tab carries the same thing per row, with fallback rows
 tinted.
 
-A coverage near zero means the agent has never seen boards like these.
-Train more episodes, or train with the deck and health you are actually
-holding rather than the defaults.
+A coverage near **zero** almost never means "train more episodes", and
+the window now says which of these it actually is:
+
+- **Wrong number of mobs.** `Featurizer.key` appends its targeting tuple
+  only when the board holds more than one enemy, so a table trained 1v1
+  and played against two mobs produces keys of a *different length*.
+  They cannot match — not approximately, at all. Measured coverage: 0%,
+  at any number of episodes.
+- **Mobs of equal health.** Subtler, and it survives fixing the count.
+  The key carries `(living, weakest_index, …)`; with every training mob
+  on the same health the weakest is index 0 in every opening state, so
+  the whole "weakest is not the first one" half of the space goes
+  unvisited — and a real board of 515 beside 390 opens squarely in it.
+  Also 0%.
+- **Wrong mob health.** The key buckets it as `HP // 250`, so training
+  at 1,200 and fighting a 515hp mob indexes different states.
+
+Measured on the deck above, against a real 515 + 390 board:
+
+| training board | coverage |
+| --- | --- |
+| 1 mob @ 1200hp | 0% |
+| 2 mobs, both 500hp | 0% |
+| 2 mobs, 500 + 400 | 100% |
+| 2 mobs at the observed healths | 100% |
+
+You should not have to know any of that. The **mobs** and **mob HP**
+boxes fill themselves in from the fight that just finished, and training
+uses each mob's own health rather than one number repeated. Fight once,
+then press Train.
 
 ---
 
