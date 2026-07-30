@@ -92,13 +92,28 @@ class LiveWorker(QThread):
         """Ask the loop to finish after the current fight."""
         self._stop = True
 
-    def request(self, action):
-        """Queue a questing action ('teleport' | 'dialogue').
+    #: what `request` accepts. Every one of these drives the mouse, so
+    #: every one is serviced from the one task that owns it.
+    ACTIONS = ("teleport", "dialogue", "wisps", "potion")
 
-        Called from the GUI thread. The loop performs it between fights,
-        because the client cannot be driven from two places at once.
+    def request(self, action):
+        """Queue an action ('teleport' | 'dialogue' | 'wisps' | 'potion').
+
+        Called from the GUI thread. The loop performs it out of combat,
+        because the client cannot be driven from two places at once --
+        the combat handler is clicking cards during a duel and a second
+        coroutine reaching for the mouse produces misclicks.
+
+        Duplicates are dropped rather than queued. Holding a hotkey down
+        sends a burst of repeats, and a queue of eight wisp sweeps would
+        take a minute to work through with the fight waiting.
         """
+        if action not in self.ACTIONS:
+            return False
+        if action in self._requests:
+            return False
         self._requests.append(action)
+        return True
 
     # -- swapping the policy without dropping the connection --------------
     def set_policy(self, name, agent=None):
@@ -181,6 +196,8 @@ class LiveWorker(QThread):
                         self.status.emit(
                             f"advanced {n} dialogue window(s)" if n
                             else "no dialogue open")
+                    elif action in ("wisps", "potion"):
+                        await self._upkeep_now(client, action)
 
                 if self.auto_dialogue and self.quester is None:
                     # Deimos's questing does its own dialogue handling, so
@@ -242,6 +259,37 @@ class LiveWorker(QThread):
             n = await questing.advance_dialogue(client)
             if n:
                 self.status.emit(f"auto-dialogue: {n} window(s)")
+
+    async def _upkeep_now(self, client, action):
+        """Collect wisps, or drink a potion, on demand.
+
+        The failure is *reported*. The automatic version wraps this whole
+        area in `except Exception: pass`, so when it does not work -- and
+        it did not -- there is nothing on screen to say why, which makes
+        "collect wisps is broken" a report nobody can act on. A hotkey
+        that says "no wisps in range" is doing its job; one that says
+        nothing is indistinguishable from one that is not wired up.
+        """
+        from .. import upkeep
+
+        ok, why = await upkeep.available()
+        if not ok:
+            self.status.emit(f"upkeep unavailable — {why}")
+            return
+        try:
+            if action == "wisps":
+                n = await upkeep.collect_wisps(client)
+                self.status.emit(f"collected {n} wisp(s)" if n
+                                 else "no safe wisps in range")
+            else:
+                if await upkeep.drink_potion(client):
+                    self.status.emit("drank a potion")
+                else:
+                    self.status.emit(
+                        "no potion drunk — out of charges, or the potion "
+                        "helper needs Deimos's requirements")
+        except Exception as exc:
+            self.status.emit(f"{action} failed — {type(exc).__name__}: {exc}")
 
     async def _setup_hotkeys(self):
         """Bind the global hotkeys, if any were configured.
@@ -514,8 +562,14 @@ class LiveWorker(QThread):
                             client, wisps=self.collect_wisps,
                             potions=self.use_potions,
                             on_status=self.status.emit)
-                    except Exception:
-                        pass      # upkeep is a nicety, never a blocker
+                    except Exception as exc:
+                        # Still never a blocker -- but the reason is said
+                        # out loud. Swallowing it silently is what made
+                        # "collect wisps is not working" impossible to
+                        # act on: no message, no log, no difference
+                        # between broken and nothing-to-do.
+                        self.status.emit(
+                            f"upkeep failed — {type(exc).__name__}: {exc}")
                 self.status.emit(
                     f"fight {fought} over — waiting for the next"
                     if not self._stop else "stopping…")

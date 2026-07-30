@@ -370,6 +370,9 @@ class LearningPanel(QWidget):
                               fmt=lambda v: f"{v:.0f}%", height=170)
         self.ttk = LineChart("turns to kill", "mean, over won fights",
                              fmt=lambda v: f"{v:.1f}", height=170)
+        # `evaluate` reports an undefined mean as NaN, which is not
+        # missing data -- it is a checkpoint that won nothing.
+        self.ttk.dropped_note = "{n} checkpoint(s) won no fights"
         ll.addWidget(self.kill)
         ll.addWidget(self.ttk)
         cols.addWidget(learn, 3)

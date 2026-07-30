@@ -28,7 +28,10 @@ than crash.
 
 #: action -> default key name. Function keys because Wizard101 binds
 #: almost nothing above F1 and they are easy to hit without looking.
-DEFAULTS = {"teleport": "F1", "dialogue": "F2"}
+#: Wisps and potions are here because the automatic versions run only
+#: between fights -- there is no way to top up mid-run without one.
+DEFAULTS = {"teleport": "F1", "dialogue": "F2",
+            "wisps": "F3", "potion": "F4"}
 
 #: What the GUI offers. Deliberately short: every entry here is a key
 #: taken away from every other program for the length of the run, so the

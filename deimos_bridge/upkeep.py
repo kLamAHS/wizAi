@@ -27,13 +27,15 @@ WISP_NAMES = ("WispHealth", "WispMana", "WispGold")
 
 def _sprinty(client):
     """Deimos's `SprintyClient`, which needs only wizwalker."""
-    import os
-    import sys
+    from .deimos_path import ensure_path
 
-    root = os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))), "Deimos")
-    if root not in sys.path:
-        sys.path.insert(0, root)
+    # `ensure_path`, not a hand-rolled sys.path.insert. It also overlays
+    # the vendored wizsprinter into the wizwalker namespace, which
+    # `src.utils` (and therefore the potion helper) needs -- and it does
+    # so by extending `wizwalker.extensions.__path__` rather than by
+    # putting a directory on sys.path, which would make `wizwalker`
+    # resolvable as a namespace package and shadow the real one.
+    ensure_path()
     from src.sprinty_client import SprintyClient
     return SprintyClient(client)
 
@@ -44,11 +46,15 @@ async def available():
         _sprinty(None)
         return True, ""
     except Exception as exc:
+        from .deimos_path import install_hint
+        hint = install_hint(exc)
         return False, (f"Deimos's SprintyClient is not importable "
-                       f"({type(exc).__name__}: {exc})")
+                       f"({type(exc).__name__}: {exc})"
+                       + (f". {hint}" if hint else ""))
 
 
-async def collect_wisps(client, safe_only: bool = True, limit: int = 12):
+async def collect_wisps(client, safe_only: bool = True, limit: int = 12,
+                        on_status=None):
     """Teleport over the health/mana wisps lying around.
 
     `safe_only` keeps to wisps that are not sitting next to a mob, using
@@ -57,35 +63,58 @@ async def collect_wisps(client, safe_only: bool = True, limit: int = 12):
 
     Returns how many were collected. Bounded by `limit` so a zone strewn
     with pickups cannot stall the loop.
+
+    **Every failure here used to be silent.** Five separate `except`
+    blocks each returned or continued without a word, so a wizard whose
+    wisps were never collected got no message, no log line, and no way to
+    tell "there were none" apart from "the import failed" or "the
+    teleport was refused". That is what "collect wisps isn't working"
+    looks like from the outside. `on_status` is how it says which.
     """
+    def say(message):
+        if on_status:
+            on_status(message)
+
     try:
         sprinty = _sprinty(client)
-    except Exception:
+    except Exception as exc:
+        say(f"wisps unavailable — {type(exc).__name__}: {exc}")
         return 0
 
-    entities = []
+    entities, read_failed = [], []
     for name in WISP_NAMES:
         try:
             entities += await sprinty.get_base_entities_with_vague_name(name)
-        except Exception:
-            continue
+        except Exception as exc:
+            read_failed.append(f"{name} ({type(exc).__name__})")
     if not entities:
+        say("no wisps in this zone"
+            if not read_failed
+            else "could not read the wisp entities: " + ", ".join(read_failed))
         return 0
 
+    found = len(entities)
     if safe_only:
         try:
             entities = await sprinty.find_safe_entities_from(entities)
         except Exception:
-            pass
+            pass          # the unfiltered list is still worth walking
+        if not entities:
+            say(f"{found} wisp(s) found, all of them next to a mob")
+            return 0
 
-    collected = 0
+    collected, refused = 0, None
     for entity in entities[:limit]:
         try:
             await client.teleport(await entity.location())
             await asyncio.sleep(0.15)
             collected += 1
-        except Exception:
-            continue
+        except Exception as exc:
+            refused = f"{type(exc).__name__}: {exc}"
+    if collected:
+        say(f"collected {collected} wisp(s)")
+    elif refused:
+        say(f"could not teleport to a wisp — {refused}")
     return collected
 
 
@@ -123,18 +152,18 @@ async def drink_potion(client) -> bool:
     except Exception:
         return False
     try:
-        import os
-        import sys
-        root = os.path.join(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__))), "Deimos")
-        if root not in sys.path:
-            sys.path.insert(0, root)
+        # `ensure_path` rather than a bare sys.path insert: `src.utils`
+        # imports `wizwalker.extensions.wizsprinter.wiz_navigator`, and
+        # the overlay that makes the vendored wizsprinter importable
+        # lives there. Without it this raised ModuleNotFoundError and
+        # returned False, which read as "no potion charge".
+        from .deimos_path import ensure_path
+        ensure_path()
         from src.utils import use_potion
         await use_potion(client)
         return True
-    except Exception:
-        # use_potion lives in src.utils, which needs wizsprinter. Without
-        # it wisps still work; potions just do not.
+    except Exception as exc:
+        drink_potion.last_error = f"{type(exc).__name__}: {exc}"
         return False
 
 
@@ -150,12 +179,14 @@ async def after_fight(client, wisps: bool = True, potions: bool = True,
             on_status(message)
 
     if wisps:
-        n = await collect_wisps(client)
-        if n:
-            say(f"collected {n} wisp(s)")
+        # `on_status` passed down: the count alone cannot distinguish
+        # "there were none" from "the helper could not import".
+        await collect_wisps(client, on_status=say)
 
     if potions and await needs_potion(client):
         if await drink_potion(client):
             say("drank a potion")
         else:
-            say("low on health or mana, and no potion charge left")
+            why = getattr(drink_potion, "last_error", "")
+            say("low on health or mana, but no potion was drunk"
+                + (f" — {why}" if why else " — no charges left"))

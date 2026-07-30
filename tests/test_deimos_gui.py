@@ -1870,7 +1870,10 @@ def test_two_actions_cannot_share_one_key(qapp):
     win.hotkey_boxes["teleport"].setCurrentText("F4")
     win.hotkey_boxes["dialogue"].setCurrentText("F4")
     bindings = win.hotkey_bindings()
-    assert list(bindings.values()) == ["F4"]
+    keys = list(bindings.values())
+    assert len(keys) == len(set(keys)), keys      # no key bound twice
+    assert bindings["teleport"] == "F4"           # first claim wins
+    assert "dialogue" not in bindings             # second is dropped
     assert "bound twice" in win.status.text()
 
 
@@ -2839,3 +2842,190 @@ def test_logging_a_crash_never_becomes_the_crash(tmp_path, monkeypatch):
     monkeypatch.setattr(crashlog, "log_path",
                         lambda: str(tmp_path / "nope" / "deep" / "x.log"))
     crashlog._write("anything")                   # must not raise
+
+
+# ------------------------------------------------ non-finite numbers in charts
+def test_an_undefined_turns_to_kill_does_not_break_the_chart(qapp):
+    """The reported crash. `w101_sim.evaluate` returns float('nan') for
+    mean turns-to-kill when a checkpoint won no fights, Qt's coordinate
+    calls take ints, and `int(nan)` raises ValueError inside paintEvent
+    -- which in PyQt6 aborts the process."""
+    from deimos_bridge.gui.charts import Chart, LineChart
+
+    seen = []
+    original = Chart._paint_failed
+    Chart._paint_failed = lambda self, p, exc: (seen.append(exc),
+                                                original(self, p, exc))
+    try:
+        c = LineChart("turns to kill")
+        c.set_points([(1000, float("nan")), (2000, 6.1),
+                      (3000, float("inf"))])
+        c.resize(360, 190)
+        c.grab()
+    finally:
+        Chart._paint_failed = original
+
+    assert not seen, seen
+    assert c.points == [(2000.0, 6.1)]
+    assert c.dropped == 2
+
+
+def test_a_dropped_checkpoint_is_reported_not_hidden(qapp):
+    """A curve with invisible holes in it is worse than one that says
+    which samples had no value."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.on_snapshot(1000, 0.0, float("nan"))       # won nothing
+    win.on_snapshot(2000, 0.4, 7.0)
+    assert win.learning.ttk.dropped == 1
+    assert "won no fights" in win.learning.ttk.dropped_note
+    assert win.learning.kill.dropped == 0          # kill rate is still real
+
+
+def test_every_chart_entry_point_rejects_non_finite(qapp):
+    from deimos_bridge.gui.charts import (Heatmap, LineChart, Meter,
+                                          RankedBars, Scatter, finite,
+                                          nice_ticks)
+
+    nan, inf = float("nan"), float("inf")
+    assert finite(nan) == 0.0 and finite(inf) == 0.0
+    assert finite(nan, None) is None
+    assert finite("x", 3.0) == 3.0
+    assert all(t == t for t in nice_ticks(nan, inf))   # no NaN ticks
+
+    s = Scatter("t")
+    s.set_points([(nan, 1.0, True, "a"), (5.0, 6.0, True, "b")])
+    assert len(s.points) == 1
+
+    b = RankedBars("t")
+    b.set_bars([("a", nan, True, ""), ("b", 2.0, False, "")])
+    assert len(b.bars) == 1
+
+    h = Heatmap("t")
+    h.set_matrix([("r1", {"a": (nan, True, "n"), "b": (2.0, False, "n")})],
+                 ["a", "b"])
+    assert list(h.rows[0][1]) == ["b"]
+
+    m = Meter("t")
+    m.set_value(nan)
+    assert m.value == 0.0
+
+    line = LineChart("t")
+    line.set_points([(0, nan)])
+    assert not line.has_data()
+
+
+# ------------------------------------------------------- wisps and potions
+def test_wisps_and_potions_have_hotkeys_and_buttons(qapp):
+    """The automatic versions run only between fights, so there was no
+    way to top up during a long questing stretch -- or when the automatic
+    path was silently failing."""
+    from deimos_bridge.gui.app import MainWindow
+    from deimos_bridge.hotkeys import DEFAULTS
+
+    assert "wisps" in DEFAULTS and "potion" in DEFAULTS
+
+    win = MainWindow(Telemetry())
+    assert set(win.hotkey_boxes) == {"teleport", "dialogue", "wisps", "potion"}
+    bindings = win.hotkey_bindings()
+    assert bindings["wisps"] and bindings["potion"]
+    assert len(set(bindings.values())) == len(bindings)     # all distinct
+    assert win.wisps_btn is not None and win.potion_btn is not None
+
+
+def test_the_buttons_queue_the_worker_actions(qapp):
+    from deimos_bridge.gui.app import MainWindow
+    from deimos_bridge.gui.live import LiveWorker
+
+    win = MainWindow(Telemetry())
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    worker.isRunning = lambda: True
+    win.live = worker
+    win.on_wisps()
+    win.on_potion()
+    assert worker._requests == ["wisps", "potion"]
+
+
+def test_a_held_hotkey_does_not_queue_a_burst(qapp):
+    """RegisterHotKey repeats while the key is down, and eight queued
+    wisp sweeps would take a minute to work through with the fight
+    waiting on them."""
+    from deimos_bridge.gui.live import LiveWorker
+
+    w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    assert w.request("wisps") is True
+    assert w.request("wisps") is False
+    assert w._requests == ["wisps"]
+    assert w.request("nonsense") is False
+
+
+def test_collect_wisps_says_why_it_found_nothing(monkeypatch):
+    """Five separate except blocks each returned without a word, so a
+    wizard whose wisps were never collected got no message and no way to
+    tell 'there were none' from 'the import failed'."""
+    import asyncio
+
+    from deimos_bridge import upkeep
+
+    said = []
+
+    def boom(_client):
+        raise ImportError("no wizsprinter")
+
+    monkeypatch.setattr(upkeep, "_sprinty", boom)
+    n = asyncio.run(upkeep.collect_wisps(object(), on_status=said.append))
+    assert n == 0
+    assert said and "unavailable" in said[0] and "wizsprinter" in said[0]
+
+
+def test_collect_wisps_distinguishes_none_from_broken(monkeypatch):
+    import asyncio
+
+    from deimos_bridge import upkeep
+
+    class _Sprinty:
+        async def get_base_entities_with_vague_name(self, _name):
+            return []
+
+    said = []
+    monkeypatch.setattr(upkeep, "_sprinty", lambda c: _Sprinty())
+    asyncio.run(upkeep.collect_wisps(object(), on_status=said.append))
+    assert said == ["no wisps in this zone"]
+
+
+def test_a_failed_potion_reports_the_reason(monkeypatch):
+    """It returned False for both 'no charges' and 'the helper could not
+    import', and the message said 'no charge left' either way."""
+    import asyncio
+
+    from deimos_bridge import upkeep
+
+    class _Stats:
+        async def potion_charge(self):
+            return 3.0
+
+    class _Client:
+        stats = _Stats()
+
+    monkeypatch.setattr(upkeep, "_sprinty", lambda c: None)
+    ok = asyncio.run(upkeep.drink_potion(_Client()))
+    assert ok is False
+    assert getattr(upkeep.drink_potion, "last_error", "")
+
+
+def test_upkeep_resolves_wizsprinter_through_the_shared_path_helper():
+    """`src.utils` -- which the potion helper imports -- needs
+    wizsprinter, and upkeep used to do its own sys.path insert that
+    skipped the overlay entirely. That is why potions did nothing."""
+    import inspect
+
+    from deimos_bridge import upkeep
+
+    for fn in (upkeep._sprinty, upkeep.drink_potion):
+        # Code only -- the comments explain why the hand-rolled insert is
+        # wrong, so matching raw source would match the explanation.
+        code = "\n".join(line.split("#")[0]
+                         for line in inspect.getsource(fn).splitlines())
+        assert "ensure_path" in code, fn.__name__
+        assert "sys.path" not in code, fn.__name__
