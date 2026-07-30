@@ -58,18 +58,16 @@ meets a real fight.
 python -m deimos_bridge.differential --both
 ```
 
-21 scenarios, each declared once and rendered into both engines. wizAi is
+22 scenarios, each declared once and rendered into both engines. wizAi is
 driven through the same call sequence a real cast uses
 (`_consume_damage_charms` → `_crit_mult` → `_strike`), so shields, traps
 and prisms resolve exactly as they do in a duel.
 
-**20 of 21 now agree to the cent.** The one that doesn't is the
-duplicate-effect guard firing at a different stage: Deimos dedupes during
-damage resolution via `spell_effect_stacking_id`, wizAi refuses the
-*cast* (`Sim.can_cast`), so a duplicate never reaches the board. Both are
-right; the scenario builds a board directly and walks past wizAi's guard.
+**All 22 now agree to the cent.**
 
-Getting there took a fix on each side.
+Getting there took a fix on each side, and then a third that had been
+sitting in the "expected divergence" list — see *Duplicate effects*
+below, where the write-off turned out to be wrong in both of its halves.
 
 **wizAi had flat damage and flat resist in the wrong place.** Flat damage
 was added after charms, wards and crit; Deimos adds it right after the
@@ -552,6 +550,47 @@ table entries. Switch to "every variant" to see them all.
 
 - **Teleport to quest** — `client.quest_position`, the same hook
   `wizwalker/examples/quest_teleporter.py` uses.
+### The charts
+
+Five painted forms in `gui/charts.py`, on `QPainter` and no plotting
+dependency. matplotlib and QtCharts are both large additions to an
+install that has been the hard part of this project twice, and neither is
+needed to draw a few dozen marks. Everything renders offscreen, so every
+chart in the window is testable without a display.
+
+The colours were **validated, not chosen** — run against this app's own
+surface (`#1e1e1e`) rather than a default one, because contrast results
+only mean anything against the surface a chart actually paints on. The
+categorical slots stop at three: heatmap and scatter are all-pairs forms,
+and past three the palette cannot clear the all-pairs separation floors.
+The sequential ramp is one hue, monotone, with every adjacent lightness
+gap wide enough to read as a step.
+
+| Form | Where | Why that form |
+| --- | --- | --- |
+| Heatmap | decision matrix | rounds × moves, cell = turns to clear. One hue light→dark, because the cell value is a *magnitude*; the chosen cell carries a ring rather than a different hue, so "what it picked" and "how good it was" stay on separate channels |
+| Ranked bars | round detail, policy mix | emphasis — one winner, everything else grey. Colouring each candidate would bury the point |
+| Scatter | damage model | predicted against actual with the y=x line, so distance from the line *is* the error |
+| Line | training curve | kill rate and turns-to-kill as **two charts**, never two y-axes on one plot — aligning two unrelated scales invents a correlation that is not in the data |
+| Meter | Q-table coverage | one ratio against a limit, which is a number with a track rather than a one-bar chart |
+
+The decision matrix needed data that was being discarded: `greedy_ttk`
+scored every (card, target) pair and returned only the winner. It now
+keeps the whole comparison as `policies.Candidate`, which is the
+difference between "it played the trap" and "the trap beat the nuke by
+half a turn" — only the second is diagnosable.
+
+The round-detail bars plot the **gap to the best move**, not the raw
+turns. Candidates land within a turn or two of each other, so zero-based
+bars are all the same length and show nothing; the gap magnifies exactly
+the quantity the panel exists to display.
+
+Rendering caught four things reasoning did not: truncated row labels
+("Sun…" identifies no card), an x-axis label cropped to "24,00" by its
+own chart edge, a "perfect prediction" caption running off the widget,
+and y-ticks at 48% instead of 50%. Look at the output; the validator
+checks colour, not layout.
+
 - **Auto-dialogue** — watches for dialogue and clicks through it for the
   whole run, paused during combat so it cannot fight the card clicks.
   Bounded per conversation, so one that reopens forever cannot hang a run.

@@ -24,6 +24,50 @@ PALETTE = {
 }
 
 
+#: Chart colours, kept apart from the widget palette above because they
+#: answer to a different standard: they are read as *data*, so they have
+#: to survive colour-vision deficiency and clear contrast against the
+#: surface they are painted on. Every value below was checked with the
+#: data-viz palette validator against this app's own surface (#1e1e1e,
+#: dark) rather than chosen by eye.
+CHART = {
+    #: the plot surface -- the tab pane's own background
+    "surface": "#1e1e1e",
+    "grid": "#2c2c2a",        # hairline, one step off the surface
+    "axis": "#383835",
+    "ink": "#ffffff",
+    "ink_dim": "#c3c2b7",
+    "muted": "#898781",
+
+    #: Categorical identity. Only the first three slots are used, and
+    #: that is a rule rather than an accident: scatter and heatmap are
+    #: all-pairs forms, and past three the reference palette cannot clear
+    #: the all-pairs separation floors. Validated all-pairs on this
+    #: surface -- worst CVD dE 9.4, worst normal-vision dE 20.9.
+    "series": ("#3987e5", "#d95926", "#199e70"),
+
+    #: Sequential magnitude: one hue, light -> dark. Validated monotone
+    #: with visible steps (every adjacent dL >= 0.06) and a light end
+    #: that still clears the surface.
+    "ramp": ("#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf",
+             "#184f95"),
+
+    #: Emphasis: the one mark that matters, and the grey everything else
+    #: recedes to. The most useful form here -- a decision has exactly
+    #: one winner, and colouring all the candidates would bury it.
+    "accent": "#3987e5",
+    "recede": "#4a4a48",
+
+    #: Status. Never used for a series, always shipped beside a number or
+    #: a label -- these do not clear the categorical separation floors
+    #: against each other, and are not meant to: the text is what carries
+    #: the meaning, the colour only reinforces it.
+    "good": "#0ca30c",
+    "warn": "#fab219",
+    "bad": "#d03b3b",
+}
+
+
 def stylesheet(p=None) -> str:
     p = p or PALETTE
     return f"""

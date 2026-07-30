@@ -26,6 +26,29 @@ default without invalidating any published table.
 """
 
 
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """One move the policy weighed, and what the lookahead said about it.
+
+    Recorded for every option rather than only the winner, so a decision
+    can be read as a comparison instead of an assertion. `turns` is
+    turns-to-clear-the-board on a deterministic rollout that opens with
+    this move (lower is better); `damage` is the effective damage banked
+    inside the horizon, floored at each mob's health so overkill earns
+    nothing.
+    """
+
+    card: str
+    target: int = None
+    turns: float = 0.0
+    damage: float = 0.0
+    pips: int = 0
+    chosen: bool = False
+
+
 #: op kinds that carry the cast's real target, in the order they decide
 #: it. A card whose first op is a self-charm is a self-cast even if a
 #: later op mentions an enemy (Feint places a ward on both sides).
@@ -211,6 +234,18 @@ class TrainedPolicy:
         #: unanswerable from the outside -- a trained policy and its
         #: fallback look identical in a decision log.
         self.last_source = ""
+
+    @property
+    def last_candidates(self):
+        """Whatever the fallback weighed, when the fallback decided.
+
+        Empty when the Q table drove: a tabular lookup does not produce a
+        comparison to show, and inventing one would misrepresent how the
+        decision was made.
+        """
+        if self.last_source.startswith("fallback"):
+            return getattr(self.fallback, "last_candidates", [])
+        return []
 
     @property
     def coverage(self) -> float:
@@ -492,6 +527,19 @@ def greedy_ttk(max_turns: int = 12):
                             target), (card, target)))
         best_score, best_action = min(scored, key=lambda sc: sc[0])
 
+        # Keep the whole comparison, not just its winner. A decision log
+        # that records only the chosen card cannot answer the question
+        # actually worth asking -- *what else was on the table, and by how
+        # much did it lose?* -- and that is the difference between "the
+        # policy played a trap" and "the trap and the nuke were half a
+        # turn apart". Everything here was already computed; only the
+        # discarding was deliberate.
+        strat.last_candidates = [
+            Candidate(card=c.name, target=t, turns=score[0],
+                      damage=-score[1], pips=c.pips,
+                      chosen=(c, t) == best_action)
+            for score, (c, t) in scored]
+
         # Passing is a real move -- banking a pip for a bigger hit next
         # turn is exactly the call the heuristic could not make -- but it
         # has to earn it by killing *sooner*, not merely by ending the
@@ -499,16 +547,25 @@ def greedy_ttk(max_turns: int = 12):
         # the damage tiebreak instead made it pass almost every turn: a
         # line that skips a turn accumulates pips and so does more total
         # damage later, which is not a reason to do nothing now.
-        pass_turns, _ = _rollout(sim, s, None, max_turns)
-        if pass_turns < best_score[0]:
+        pass_turns, pass_damage = _rollout(sim, s, None, max_turns)
+        passing = pass_turns < best_score[0]
+        strat.last_candidates.append(
+            Candidate(card="pass", target=None, turns=pass_turns,
+                      damage=-pass_damage, pips=0, chosen=passing))
+        if passing:
             return None
 
         if best_score[0] > max_turns and best_score[1] == 0.0:
             # Nothing on offer even connects inside the horizon; fall
             # back to the heuristic rather than flailing.
+            strat.last_candidates = []      # none of it decided anything
             return school_aware_blade_stack(3)(sim, s)
         return best_action
 
+    #: the last decision's whole candidate set, newest call wins. Read by
+    #: `WizAiBackend` straight after the call, the same way `last_source`
+    #: is -- a policy cannot reach the telemetry and should not try.
+    strat.last_candidates = []
     return strat
 
 

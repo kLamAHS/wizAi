@@ -21,8 +21,8 @@ from ..hotkeys import DEFAULTS as HOTKEY_DEFAULTS, KEY_CHOICES as HOTKEY_CHOICES
 from ..telemetry import Telemetry
 from .deckpicker import pick_deck
 from .live import LiveWorker
-from .panels import (BoardPanel, DecisionsPanel, ModelPanel, NamingPanel,
-                     RunPanel, _label)
+from .panels import (BoardPanel, DecisionsPanel, LearningPanel,
+                     ModelPanel, NamingPanel, RunPanel, _label)
 from .theme import PALETTE, stylesheet
 
 SCHOOLS = ["fire", "ice", "storm", "myth", "life", "death", "balance"]
@@ -34,6 +34,7 @@ class TrainWorker(QThread):
     """Runs `rl_agent.train_agent` off the UI thread."""
 
     progress = pyqtSignal(int, int, float, float)   # ep, total, kill%, ttk
+    snapshot = pyqtSignal(int, float, float)        # ep, kill rate, ttk
     finished_ok = pyqtSignal(object)
     failed = pyqtSignal(str)
 
@@ -121,7 +122,9 @@ class TrainWorker(QThread):
                               school="ice", dmg=dmg)
                          for i, hp in enumerate(hps[1:], 1)],
                 episodes=self.episodes, player_hp=self.player_hp,
-                player_stats=self.player_stats, board_sampler=sampler)
+                player_stats=self.player_stats, board_sampler=sampler,
+                on_snapshot=lambda ep, kill, ttk:
+                    self.snapshot.emit(ep, kill, ttk))
             from w101_sim import evaluate
             kill, ttk = evaluate(sim, agent.policy(), n=800)
             self.progress.emit(self.episodes, self.episodes, kill * 100, ttk)
@@ -156,11 +159,13 @@ class MainWindow(QMainWindow):
         self.board = BoardPanel(self.tel)
         self.decisions = DecisionsPanel(self.tel)
         self.model = ModelPanel(self.tel)
+        self.learning = LearningPanel(self.tel)
         self.naming = NamingPanel(self.tel)
         self.runs = RunPanel(self.tel)
         tabs.addTab(self.board, "Board")
         tabs.addTab(self.decisions, "Decisions")
         tabs.addTab(self.model, "Damage model")
+        tabs.addTab(self.learning, "Learning")
         tabs.addTab(self.naming, "Naming")
         tabs.addTab(self.runs, "Runs")
         self.tabs = tabs
@@ -182,8 +187,8 @@ class MainWindow(QMainWindow):
         is undefined behaviour in Qt. Everything funnels through this,
         called on the GUI thread via `LiveWorker`'s queued signals.
         """
-        for panel in (self.board, self.decisions, self.model, self.naming,
-                      self.runs):
+        for panel in (self.board, self.decisions, self.model, self.learning,
+                      self.naming, self.runs):
             try:
                 panel.refresh()
             except Exception:
@@ -539,6 +544,8 @@ class MainWindow(QMainWindow):
                                   n_enemies=self.n_enemies.value(),
                                   mob_hps=self.observed_hps,
                                   generalize=self.generalize.isChecked())
+        self.tel.clear_curve()
+        self.worker.snapshot.connect(self.on_snapshot)
         self.worker.progress.connect(self.on_progress)
         self.worker.finished_ok.connect(self.on_trained)
         self.worker.failed.connect(self.on_train_failed)
@@ -548,6 +555,12 @@ class MainWindow(QMainWindow):
         # is a turn played by the game's timeout rather than by wizAi.
         self.worker.start(QThread.Priority.LowPriority if fighting
                           else QThread.Priority.InheritPriority)
+
+    def on_snapshot(self, episode, kill, ttk):
+        """One training checkpoint. Queued from the training thread, so
+        this runs on the GUI thread and may touch widgets."""
+        self.tel.record_snapshot(episode, kill, ttk)
+        self.learning.refresh()
 
     def on_progress(self, ep, total, kill, ttk):
         self.status.setText(

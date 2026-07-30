@@ -2419,3 +2419,210 @@ def test_auto_dialogue_ignores_an_npc_that_is_not_the_quest(monkeypatch):
     near = _DialogueClient(_Pos(0, 0), _Pos(50, 50))
     assert asyncio.run(questing.open_dialogue_if_near(near)) is True
     assert pressed == [1]
+
+
+# ------------------------------------------------------------- the visuals
+def test_a_lookahead_decision_records_what_it_weighed():
+    """The decision matrix needs the losers, not just the winner. Those
+    scores were being computed and thrown away, so a log could say what
+    the policy played but never how close the call was."""
+    import random
+
+    from data_full import load_spells_full
+    from w101_sim import Actor, Boss, Sim, State
+
+    from deimos_bridge.policies import greedy_ttk
+
+    cards = load_spells_full()
+    deck = ["Frost Beetle"] * 3 + ["Ice Trap"] * 3 + ["Snow Serpent"] * 3
+    sim = Sim(cards, deck, "ice", Boss(name="b", hp=600, school="fire", dmg=40),
+              rng=random.Random(2), player_hp=800)
+    p = Actor(name="W", school="ice", hp=800, max_hp=800, team=0, norm_pips=4)
+    p.hand = [cards[n] for n in ("Ice Trap", "Snow Serpent", "Frost Beetle")]
+    p.deck = [cards[n] for n in deck]
+    s = State(p, [Actor(name="b", school="fire", hp=600, max_hp=600, team=1)])
+
+    policy = greedy_ttk()
+    policy(sim, s)
+    cands = policy.last_candidates
+    assert len(cands) >= 4                       # three cards plus pass
+    assert sum(1 for c in cands if c.chosen) == 1
+    assert any(c.card == "pass" for c in cands)
+    assert all(c.turns > 0 for c in cands)
+
+
+def test_candidates_reach_the_telemetry_through_the_backend():
+    from deimos_bridge.telemetry import Telemetry as T
+
+    tel = T()
+    from deimos_bridge.policies import Candidate
+    d = _Decision(card_name="Sunbird")
+    d.candidates = [Candidate(card="Sunbird", target=0, turns=3.0, chosen=True),
+                    Candidate(card="pass", turns=5.0)]
+    tel.observe(d, _read(2000, 1, hand=("Sunbird",)))
+    assert len(tel.rounds[-1].candidates) == 2
+
+
+def test_the_matrix_keeps_the_target_in_the_move_identity():
+    """On a two-mob board the same card aimed at each enemy scores
+    differently. Collapsing them into one column would average away the
+    entire targeting decision."""
+    from deimos_bridge.policies import Candidate
+    from deimos_bridge.telemetry import Telemetry as T
+
+    tel = T()
+    d = _Decision(card_name="Ice Trap")
+    d.candidates = [Candidate(card="Ice Trap", target=0, turns=6.0),
+                    Candidate(card="Ice Trap", target=1, turns=4.0,
+                              chosen=True)]
+    tel.observe(d, _read(2000, 1, hand=("Ice Trap",)))
+    _rows, cols, _dropped = tel.decision_matrix()
+    assert set(cols) == {"Ice Trap → 0", "Ice Trap → 1"}
+
+
+def test_the_matrix_reports_what_it_left_out():
+    """A grid that quietly dropped six moves reads as 'these were all the
+    options', which is a lie."""
+    from deimos_bridge.policies import Candidate
+    from deimos_bridge.telemetry import Telemetry as T
+
+    tel = T()
+    d = _Decision(card_name="c0")
+    d.candidates = [Candidate(card=f"c{i}", turns=float(i))
+                    for i in range(T.MATRIX_COLUMNS + 4)]
+    tel.observe(d, _read(2000, 1, hand=("c0",)))
+    _rows, cols, dropped = tel.decision_matrix()
+    assert len(cols) == T.MATRIX_COLUMNS
+    assert dropped == 4
+
+
+def test_a_q_table_decision_contributes_no_candidate_row():
+    """A tabular lookup produces no comparison. Inventing one would
+    misrepresent how that decision was made."""
+    from deimos_bridge.policies import TrainedPolicy
+
+    class _Agent:
+        Q = {("k", "a"): 1.0}
+
+        class feat:
+            @staticmethod
+            def key(sim, s):
+                return "k"
+
+            @staticmethod
+            def legal(sim, s):
+                return ["a"]
+
+        @staticmethod
+        def policy():
+            return lambda sim, s: None
+
+    fallback = lambda sim, s: None
+    fallback.last_candidates = ["something"]
+    wrapped = TrainedPolicy(_Agent(), fallback=fallback)
+    wrapped(None, None)
+    assert wrapped.last_source == "Q table"
+    assert wrapped.last_candidates == []
+
+
+def test_axis_ticks_land_on_clean_numbers():
+    """Axis labels carry the values that are not directly labelled, so
+    0 / 50 / 100 rather than 0 / 47.3 / 94.6."""
+    from deimos_bridge.gui.charts import nice_ticks
+
+    assert nice_ticks(0, 95) == [0, 50, 100]
+    assert nice_ticks(0, 9.5) == [0, 5, 10]
+    assert nice_ticks(0, 640)[0] == 0
+    assert all(t == round(t, 6) for t in nice_ticks(0, 1234))
+
+
+def test_ranked_bars_plot_the_gap_to_the_best_when_lower_wins(qapp):
+    """Turns-to-clear all land within a turn or two, so zero-based bars
+    are the same length and show nothing. The gap to the winner is the
+    quantity the panel exists to display."""
+    from deimos_bridge.gui.charts import RankedBars
+
+    bars = RankedBars(lower_is_better=True)
+    bars.set_bars([("a", 4.6, True, ""), ("b", 5.2, False, ""),
+                   ("c", 7.1, False, "")])
+    drawn, printed = bars._plotted()
+    assert drawn == [0.0, pytest.approx(0.6), pytest.approx(2.5)]
+    assert printed == [4.6, 5.2, 7.1]
+
+
+def test_ranked_bars_plot_raw_values_when_more_is_better(qapp):
+    from deimos_bridge.gui.charts import RankedBars
+
+    bars = RankedBars()
+    bars.set_bars([("a", 4, True, ""), ("b", 2, False, "")])
+    drawn, printed = bars._plotted()
+    assert drawn == printed == [4, 2]
+
+
+def test_the_sequential_ramp_is_one_hue_and_monotone(qapp):
+    """A hue rotation would be a rainbow ramp, which is the classic way
+    to make magnitude unreadable."""
+    from deimos_bridge.gui.charts import ramp_color
+
+    shades = [ramp_color(t / 10) for t in range(11)]
+    hues = {s.hue() for s in shades}
+    assert max(hues) - min(hues) <= 8            # one hue
+    lightness = [s.lightness() for s in shades]
+    assert lightness == sorted(lightness, reverse=True)
+
+
+def test_every_chart_renders_empty_and_populated(qapp):
+    """The empty state is the most common thing a person sees, and a
+    blank rectangle reads as broken."""
+    from deimos_bridge.gui.charts import (Heatmap, LineChart, Meter,
+                                          RankedBars, Scatter)
+
+    line = LineChart("t")
+    line.resize(360, 190)
+    line.grab()                                   # empty
+    line.set_points([(0, 1), (100, 4)])
+    line.grab()
+
+    sc = Scatter("t")
+    sc.resize(360, 230)
+    sc.grab()
+    sc.set_points([(100.0, 90.0, True, "a"), (200.0, 260.0, False, "b")])
+    sc.grab()
+    assert "error" in sc.hit_text(0)
+
+    hm = Heatmap("t")
+    hm.resize(360, 200)
+    hm.grab()
+    hm.set_matrix([("r1", {"a": (3.0, True, "note")})], ["a"])
+    hm.grab()
+    assert "chosen" in hm.hit_text(0)
+
+    rb = RankedBars("t")
+    rb.resize(360, 200)
+    rb.grab()
+    rb.set_bars([("a", 2.0, True, "note")])
+    rb.grab()
+
+    m = Meter("cover")
+    m.resize(300, 74)
+    m.set_value(0.5, "3 of 6", "good")
+    m.grab()
+
+
+def test_the_learning_tab_survives_an_empty_run(qapp):
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.learning.refresh()
+    assert win.learning.coverage.value == 0.0
+
+
+def test_a_training_snapshot_lands_on_the_curve(qapp):
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.on_snapshot(2000, 0.42, 7.5)
+    win.on_snapshot(4000, 0.61, 6.1)
+    assert win.tel.training_curve() == [(2000, pytest.approx(42.0)),
+                                        (4000, pytest.approx(61.0))]
+    assert win.tel.ttk_curve() == [(2000, 7.5), (4000, 6.1)]

@@ -53,6 +53,9 @@ class PolicyDecision:
         #: cast never touched; `target_index` only means something when
         #: this is 'enemy'.
         self.target_kind = target_kind
+        #: every move the policy weighed this round, with its score. The
+        #: chosen card alone cannot say whether the decision was close.
+        self.candidates = []
         #: which policy played this round, and by which path. Recorded
         #: per decision rather than per run because the policy can be
         #: swapped mid-run, and because a trained policy falling through
@@ -201,8 +204,10 @@ class WizAiBackend:
 
         decision = self._interpret(choice, read)
         # After the call, deliberately: a wrapped policy records which
-        # path it took while deciding.
+        # path it took while deciding, and a lookahead policy records
+        # what it weighed.
         decision.policy = self._why(policy, label)
+        decision.candidates = list(getattr(policy, "last_candidates", ()) or ())
         self._record(decision, read)
         return decision
 
