@@ -334,7 +334,8 @@ def make_board_sampler(school, hp_range, max_mobs=3, dmg=60):
 def train_agent(cards, decklist, school, boss, episodes=60000,
                 warm=True, seed=0, player_hp=10**9, log=None,
                 snap_every=5000, sideboard=None, player_stats=None,
-                enemies=None, board_sampler=None, on_snapshot=None):
+                enemies=None, board_sampler=None, on_snapshot=None,
+                on_tick=None, tick_every=None, on_stage=None):
     """`player_stats` is the wizard's gear, as `Sim` takes it. Left out,
     training solves the fight for a wizard wearing nothing: every hit is
     priced below what it really lands for, so the table is optimal for a
@@ -351,13 +352,32 @@ def train_agent(cards, decklist, school, boss, episodes=60000,
     fight -- see `make_board_sampler`. `boss`/`enemies` are still used
     for the periodic evaluation, so the checkpoint metric stays
     comparable across snapshots instead of drifting with whatever board
-    happened to be up."""
+    happened to be up.
+
+    `on_snapshot(ep, kill, ttk)` is a *checkpoint*: it costs a 2,000-fight
+    evaluation, so it fires every `snap_every` episodes and no oftener.
+    `on_tick(done, total)` is the cheap one -- it carries no measurement,
+    only a count -- and exists because 5,000 episodes between checkpoints
+    is a long time to look at a bar that could equally mean "working" or
+    "hung". It fires every `tick_every` episodes, defaulting to 200 ticks
+    across the run however long that run is. `on_stage(name)` names the
+    phases that are not episodes at all: the warm-start solve in
+    particular can run for a while before episode 1, with nothing to
+    count and nothing on screen."""
     rng = random.Random(seed)
     sim = Sim(cards, decklist, school, boss, player_hp=player_hp, rng=rng,
               sideboard=sideboard, player_stats=player_stats,
               enemies=enemies)
+    def stage(name):
+        if on_stage is not None:
+            try:
+                on_stage(name)
+            except Exception:
+                pass          # a watching view never breaks training
+
     dp_pol = None
     if warm:
+        stage("solving the warm start")
         V, pol, meta = solve(cards, decklist, boss, school)
         dp_pol = dp_policy(V, pol, meta, school)
     agent = QAgent(cards, decklist, school, dp_pol=dp_pol,
@@ -371,6 +391,13 @@ def train_agent(cards, decklist, school, boss, episodes=60000,
     def use_eval_board():
         sim.boss, sim.extra_bosses = eval_board[0], list(eval_board[1])
 
+    # Roughly 200 ticks over the run, whatever its length. Enough that a
+    # bar visibly moves on a 2,000-episode run and few enough that a
+    # 200,000-episode one is not paying for a signal per episode.
+    if tick_every is None:
+        tick_every = max(1, episodes // 200)
+
+    stage("training")
     for ep in range(episodes):
         frac = ep / episodes
         eps = max(0.02, 0.30 * (1 - frac))          # explore -> exploit
@@ -379,6 +406,11 @@ def train_agent(cards, decklist, school, boss, episodes=60000,
         if board_sampler is not None:
             sim.boss, sim.extra_bosses = board_sampler(rng)
         agent.train_episode(sim, eps, dp_w)
+        if on_tick is not None and (ep + 1) % tick_every == 0:
+            try:
+                on_tick(ep + 1, episodes)
+            except Exception:
+                pass
         if (ep + 1) % snap_every == 0:
             use_eval_board()
             w, m = evaluate(sim, agent.policy(), n=2000)
@@ -392,6 +424,14 @@ def train_agent(cards, decklist, school, boss, episodes=60000,
                 best = (w, m, dict(agent.Q))
             if log and (ep + 1) % log == 0:
                 print(f"    ep {ep+1:>6}: kill {w*100:5.1f}%  TTK {m:6.2f}")
+
+    if on_tick is not None and episodes % tick_every:
+        # The loop's last tick lands on a multiple of `tick_every`, so an
+        # episode count that is not one leaves the bar short of the end.
+        try:
+            on_tick(episodes, episodes)
+        except Exception:
+            pass
     use_eval_board()
     if best[2] is not None:
         agent.Q = defaultdict(float, best[2])       # keep the best checkpoint

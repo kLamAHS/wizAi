@@ -1839,6 +1839,87 @@ def test_the_dropdown_swaps_a_running_fight(qapp):
     assert swaps == ["nuke-asap"]
 
 
+def test_training_reports_a_count_not_just_a_moving_bar(qapp):
+    """Checkpoints are 5,000 episodes apart and each costs a 2,000-fight
+    evaluation, so between them there was nothing on screen but an
+    indeterminate bar -- which reads the same whether the run is working
+    or hung."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.train_progress.setVisible(True)
+
+    # The warm-start solve runs before episode 1 and has nothing to
+    # count, so it stays indeterminate and says what it is doing.
+    win.on_stage("solving the warm start")
+    assert win.train_progress.maximum() == 0
+    assert "warm start" in win.train_progress.format()
+
+    win.on_stage("training")
+    win.on_tick(2500, 100_000, 1240.0)
+    text = win.train_progress.format()
+    assert win.train_progress.value() == 2500
+    assert win.train_progress.maximum() == 100_000
+    assert "2,500 / 100,000 episodes" in text
+    assert "2%" in text
+    assert "21 min left" in text
+
+    # A checkpoint's numbers ride along, so a run left on another tab
+    # still says whether it is going anywhere.
+    win.on_snapshot(5000, 0.42, 6.13)
+    win.on_tick(5000, 100_000, 1180.0)
+    assert "kill 42%" in win.train_progress.format()
+
+    # An undefined turns-to-kill is a checkpoint that won nothing, not a
+    # missing number, and must never reach a format that wants an int.
+    win.on_snapshot(10_000, 0.0, float("nan"))
+    win.on_tick(10_500, 100_000, 900.0)
+    assert "won nothing" in win.train_progress.format()
+
+    # No estimate once it is finished; "0s left" is noise.
+    win.on_tick(100_000, 100_000, 0.0)
+    assert "left" not in win.train_progress.format()
+    assert "100%" in win.train_progress.format()
+
+
+def test_the_tick_reaches_the_end_on_any_episode_count():
+    """The loop's ticks land on multiples of the interval, so a count
+    that is not one would leave the bar short of the end forever."""
+    from rl_agent import train_agent
+
+    ticks = []
+    calls = {"episodes": 0}
+
+    class _Agent:
+        Q = {}
+
+        def train_episode(self, *a, **kw):
+            calls["episodes"] += 1
+
+        def policy(self):
+            return lambda sim, s: None
+
+        alpha = 0.0
+
+    import rl_agent
+    real_agent, real_eval = rl_agent.QAgent, rl_agent.evaluate
+    real_sim = rl_agent.Sim
+    rl_agent.QAgent = lambda *a, **kw: _Agent()
+    rl_agent.Sim = lambda *a, **kw: type("S", (), {"boss": None,
+                                                   "extra_bosses": []})()
+    rl_agent.evaluate = lambda *a, **kw: (0.0, float("nan"))
+    try:
+        train_agent({}, [], "ice", None, episodes=1_003, warm=False,
+                    snap_every=10_000, on_tick=lambda d, t: ticks.append(d))
+    finally:
+        rl_agent.QAgent, rl_agent.evaluate = real_agent, real_eval
+        rl_agent.Sim = real_sim
+
+    assert calls["episodes"] == 1_003
+    assert ticks[-1] == 1_003, ticks[-3:]
+    assert 100 <= len(ticks) <= 300, len(ticks)   # ~200 over any run
+
+
 def test_training_stays_available_during_a_live_run(qapp):
     """Requiring a disconnect to train meant training on guesses: the
     deck the picker learned and the health the client reported both come

@@ -30,11 +30,34 @@ POLICIES = ["ttk-lookahead", "school-aware", "blade-stack(3)",
             "blade-stack(2)", "nuke-asap", "trained (Q)"]
 
 
+def _duration(seconds):
+    """A rough time, in the units a person would say it in.
+
+    Deliberately coarse. An estimate accurate to the second would be
+    claiming a precision it does not have -- the run's own checkpoints
+    are irregular -- and "about 4 min" is the whole of what the number
+    is for.
+    """
+    seconds = max(0.0, float(seconds))
+    if seconds < 90:
+        return f"{seconds:.0f}s"
+    if seconds < 3600:
+        return f"{seconds / 60:.0f} min"
+    return f"{seconds / 3600:.1f} h"
+
+
 class TrainWorker(QThread):
     """Runs `rl_agent.train_agent` off the UI thread."""
 
     progress = pyqtSignal(int, int, float, float)   # ep, total, kill%, ttk
     snapshot = pyqtSignal(int, float, float)        # ep, kill rate, ttk
+    #: episodes done, episodes total, seconds left (<0 = not yet known).
+    #: Carries no measurement -- that is what `snapshot` is for, and it
+    #: costs a 2,000-fight evaluation. This one only counts, which is why
+    #: it can fire while the checkpoints are 5,000 episodes apart.
+    tick = pyqtSignal(int, int, float)
+    #: what the run is doing when it is not counting episodes
+    stage = pyqtSignal(str)
     finished_ok = pyqtSignal(object)
     failed = pyqtSignal(str)
 
@@ -65,6 +88,31 @@ class TrainWorker(QThread):
         #: it prices every hit as though the wizard were naked, so the Q
         #: table is learned for a fight nobody is going to play.
         self.player_stats = dict(player_stats or {})
+        #: set when the episode loop starts, so the estimate measures
+        #: episodes rather than the warm-start solve that precedes them
+        self._t0 = None
+
+    def _on_stage(self, name):
+        if name == "training":
+            import time
+            self._t0 = time.monotonic()
+        self.stage.emit(name)
+
+    def _on_tick(self, done, total):
+        """Episodes done, and how long the rest will take.
+
+        The estimate is elapsed/fraction rather than a per-episode rate,
+        which amortises the periodic checkpoints instead of pretending
+        they are free -- each one is a 2,000-fight evaluation, so a rate
+        measured between them would promise a finish it cannot meet.
+        """
+        import time
+
+        left = -1.0
+        if self._t0 is not None and done > 0:
+            spent = time.monotonic() - self._t0
+            left = max(0.0, spent * (total - done) / done)
+        self.tick.emit(done, total, left)
 
     def hp_range(self):
         """The band of mob health to train across.
@@ -124,8 +172,10 @@ class TrainWorker(QThread):
                 episodes=self.episodes, player_hp=self.player_hp,
                 player_stats=self.player_stats, board_sampler=sampler,
                 on_snapshot=lambda ep, kill, ttk:
-                    self.snapshot.emit(ep, kill, ttk))
+                    self.snapshot.emit(ep, kill, ttk),
+                on_tick=self._on_tick, on_stage=self._on_stage)
             from w101_sim import evaluate
+            self.stage.emit("scoring the trained table")
             kill, ttk = evaluate(sim, agent.policy(), n=800)
             self.progress.emit(self.episodes, self.episodes, kill * 100, ttk)
             self.finished_ok.emit(agent)
@@ -134,6 +184,11 @@ class TrainWorker(QThread):
 
 
 class MainWindow(QMainWindow):
+    #: the last training checkpoint's numbers, appended to the progress
+    #: bar. A class attribute so the bar can be driven before a run has
+    #: ever been started.
+    _last_checkpoint = ""
+
     def __init__(self, telemetry=None):
         super().__init__()
         self.setWindowTitle("wizAi — live combat lab")
@@ -471,6 +526,11 @@ class MainWindow(QMainWindow):
 
         self.train_progress = QProgressBar()
         self.train_progress.setVisible(False)
+        # The count goes *in* the bar. A bare bar answers "is it moving",
+        # which is only half of what anyone watching a twenty-minute
+        # train wants to know -- the other half is how far in it is and
+        # how much longer, and both of those are numbers.
+        self.train_progress.setTextVisible(True)
         box.layout().addWidget(self.train_progress)
         return box
 
@@ -649,7 +709,13 @@ class MainWindow(QMainWindow):
 
         self.train_btn.setEnabled(False)
         self.train_progress.setVisible(True)
-        self.train_progress.setRange(0, 0)          # indeterminate
+        # Indeterminate only until the first tick. The warm-start solve
+        # runs before episode 1 and has nothing to count, so a bar that
+        # started at 0/N would sit at zero looking stalled through the
+        # one phase that genuinely has no progress to report.
+        self.train_progress.setRange(0, 0)
+        self.train_progress.setFormat("starting…")
+        self._last_checkpoint = ""
         fighting = self.live is not None and self.live.isRunning()
         self.status.setText(
             f"training {self.episodes.value():,} episodes on {len(deck)} cards…"
@@ -666,6 +732,8 @@ class MainWindow(QMainWindow):
         self.tel.clear_curve()
         self.worker.snapshot.connect(self.on_snapshot)
         self.worker.progress.connect(self.on_progress)
+        self.worker.tick.connect(self.on_tick)
+        self.worker.stage.connect(self.on_stage)
         self.worker.finished_ok.connect(self.on_trained)
         self.worker.failed.connect(self.on_train_failed)
         # Below the live worker, deliberately. Training is minutes of
@@ -679,10 +747,38 @@ class MainWindow(QMainWindow):
         """One training checkpoint. Queued from the training thread, so
         this runs on the GUI thread and may touch widgets."""
         self.tel.record_snapshot(episode, kill, ttk)
+        # Kept for the bar to append. A checkpoint is the only thing in a
+        # training run that says whether it is going anywhere, and it
+        # used to be visible only as a new point on a chart on another
+        # tab -- so a run left on the Live tab reported nothing but a
+        # moving bar for its whole length.
+        self._last_checkpoint = (
+            f"kill {kill * 100:.0f}%"
+            + (f", {ttk:.1f} turns" if ttk == ttk else ", won nothing"))
         try:
             self.learning.refresh()
         except Exception:
             pass          # a watching panel never interrupts training
+
+    def on_stage(self, name):
+        """A phase of training that is not measured in episodes."""
+        if name == "training":
+            return          # the bar takes over from here
+        self.train_progress.setRange(0, 0)
+        self.train_progress.setFormat(f"{name}…")
+        self.status.setText(f"{name}…")
+
+    def on_tick(self, done, total, seconds_left):
+        """Episodes done, in the bar itself."""
+        if self.train_progress.maximum() != total:
+            self.train_progress.setRange(0, total)
+        self.train_progress.setValue(done)
+        text = f"{done:,} / {total:,} episodes  ({done * 100 // max(1, total)}%)"
+        if seconds_left >= 0 and done < total:
+            text += f" — {_duration(seconds_left)} left"
+        if self._last_checkpoint:
+            text += f" — {self._last_checkpoint}"
+        self.train_progress.setFormat(text)
 
     def on_progress(self, ep, total, kill, ttk):
         self.status.setText(
