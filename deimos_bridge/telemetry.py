@@ -302,6 +302,16 @@ class Telemetry:
                      for e in s.enemies],
         )
 
+        unreadable = list(getattr(read, "unreadable", ()) or ())
+        if unreadable:
+            # The board the policy was shown was missing effects it could
+            # not read -- charms, wards, shields, prisms. Its damage
+            # prediction was computed against that board, so the residual
+            # is not evidence about the damage model.
+            rec.clean = False
+            rec.confounds.append(
+                "could not read " + "; ".join(unreadable))
+
         if sim is not None and not decision.passing and cards:
             card = cards.get(decision.chosen if hasattr(decision, "chosen")
                              else decision.card_name)
@@ -317,6 +327,56 @@ class Telemetry:
         f.unresolved = len(rec.unresolved)
         self._pending = rec
         self._emit("round", rec)
+        return rec
+
+    def observe_lost_round(self, round_number, reason):
+        """Record a round the run could not read the board for.
+
+        Not merely a counter. A round dropped inside the combat handler
+        used to leave no record anywhere: the Decisions table went round
+        3, round 5, `FightRecord.passes` was never incremented while
+        `rounds` picked up 5 -- so the fight read as "5 rounds, 1 pass"
+        when it was five rounds and two passes, one of them unexplained.
+
+        `_pending` is cleared without settling, because the next board
+        this run sees is two rounds away from the last one it recorded.
+        Differencing across that gap charges a round nobody watched to
+        the previous round's residual, which then scores against the
+        damage model as though the model had missed.
+        """
+        if not self.fights:
+            self.start_fight()
+        self._pending = None
+        rec = RoundRecord(fight=self._fight, round=int(round_number or 0),
+                          passing=True, reason=reason,
+                          policy="board read failed")
+        self.rounds.append(rec)
+        f = self.fights[-1]
+        f.rounds = max(f.rounds, rec.round)
+        f.passes += 1
+        self._emit("round", rec)
+        return rec
+
+    def note_failed_cast(self, reason):
+        """The round in hand claimed a cast that never went out.
+
+        The record is written before the click, so this arrives after the
+        fact. Dropping the prediction is the substance of it: with the
+        prediction left in place, the next board shows the target at
+        unchanged HP, the residual settles at minus the whole prediction,
+        and a misclick is counted as the damage model's worst miss of the
+        run -- with `clean` reading "yes".
+        """
+        rec = self._pending
+        if rec is None:
+            return None
+        rec.predicted_damage = None
+        rec.passing = True
+        rec.reason = reason
+        rec.clean = False
+        rec.confounds.append("the cast failed; nothing was played")
+        if self.fights:
+            self.fights[-1].passes += 1
         return rec
 
     def _settle(self, read):
@@ -510,14 +570,21 @@ class Telemetry:
             rows.append((f"r{rec.round}", cells))
         return rows, cols, dropped
 
-    def candidate_bars(self, index):
+    def candidate_bars(self, index, rounds=14):
         """[(label, turns, chosen, note)] for one row of the matrix.
 
         Ranked best-first, because the question a person asks of a single
         decision is "what else was close" and a ranked list answers it
         directly.
+
+        `index` is a **row of the matrix**, so it is windowed the same
+        way `decision_matrix` windows its rows. It was not: the matrix
+        showed the last 14 candidate rounds while this indexed the whole
+        list, so past round 14 every row was off by N-14 and clicking a
+        row broke out a different round's candidates than the one
+        labelled beside it.
         """
-        recs = [r for r in self.rounds if r.candidates]
+        recs = [r for r in self.rounds if r.candidates][-rounds:]
         if not recs or not (0 <= index < len(recs)):
             return [], ""
         rec = recs[index]

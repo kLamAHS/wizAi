@@ -499,10 +499,17 @@ class LiveWorker(QThread):
             self._backend.player_stats = stats
         self.gear_read.emit(dict(stats))
         dmg = (stats.get("damage") or {}).get(self.school, 0.0)
-        self.status.emit(
-            f"read your gear: {dmg * 100:.0f}% {self.school} damage, "
-            f"{stats.get('pierce', 0.0) * 100:.0f}% pierce, "
-            f"{stats.get('accuracy', 0.0) * 100:.0f}% accuracy")
+        line = (f"read your gear: {dmg * 100:.0f}% {self.school} damage, "
+                f"{stats.get('pierce', 0.0) * 100:.0f}% pierce, "
+                f"{stats.get('accuracy', 0.0) * 100:.0f}% accuracy")
+        unread = stats.get("unread") or []
+        if unread:
+            # A stat that failed to read used to be folded into 0.0, so a
+            # wizard in full gear was shown a confident "0% damage" that
+            # then priced every hit in training below what it lands for.
+            line += (f" — but {', '.join(unread)} could not be read and "
+                     f"are being treated as 0")
+        self.status.emit(line)
 
     async def _setup_questing(self, client):
         """Prefer Deimos's questing; fall back to ours if it will not import."""
@@ -655,7 +662,9 @@ class LiveWorker(QThread):
                 policy=policy, cards=cards, school=self.school,
                 decklist=self.deck, catalog=catalog,
                 policy_name=built_as, on_decision=self._on_decision,
-                player_stats=self.player_stats)
+                player_stats=self.player_stats,
+                on_lost_round=self._on_lost_round)
+            backend.on_failed_cast = self._on_failed_cast
             self.tel.resolver = backend.resolver
             self._backend = backend
             if self.policy_name != built_as:
@@ -770,3 +779,23 @@ class LiveWorker(QThread):
             decision, read, sim=sim,
             cards=self._backend.cards if self._backend else None)
         self.round_done.emit(rec)
+
+    def _on_lost_round(self, round_number, reason):
+        """A round whose board could not be read. Recorded as that.
+
+        It used to vanish: no row in the Decisions table, no pass
+        counted, and the round after it differenced against the round
+        before -- so the missing round's damage was folded into its
+        predecessor's residual and scored against the damage model.
+        """
+        self.status.emit(reason)
+        rec = self.tel.observe_lost_round(round_number, reason)
+        if rec is not None:
+            self.round_done.emit(rec)
+
+    def _on_failed_cast(self, reason):
+        """The card never went out, after the round said it had."""
+        self.status.emit(reason)
+        rec = self.tel.note_failed_cast(reason)
+        if rec is not None:
+            self.round_done.emit(rec)

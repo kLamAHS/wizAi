@@ -165,6 +165,20 @@ class Chart(QWidget):
     def has_data(self) -> bool:
         return False
 
+    def empty_message(self) -> str:
+        """What to say when there is nothing to draw.
+
+        Overridable because "nothing to draw" and "nothing happened" are
+        not the same claim, and a chart that conflates them is lying by
+        omission. The case that made this necessary: a training run in
+        which every checkpoint won no fights produces an all-NaN
+        turns-to-kill curve, and the count of dropped samples was drawn
+        only inside `paint_data`, which the empty state never reaches --
+        so the one chart that knew the run had won nothing said "no
+        training run yet" instead.
+        """
+        return self.empty_text
+
     def plot_rect(self) -> QRect:
         top = PAD_T + (16 if self.title else 0) + (14 if self.subtitle else 0)
         return QRect(self.pad_l, top,
@@ -186,6 +200,13 @@ class Chart(QWidget):
 
         The failure is drawn rather than hidden: a chart silently showing
         nothing is indistinguishable from a chart with nothing to show.
+
+        `end()` in a `finally` rather than leaving it to the garbage
+        collector: a `QPainter` still open on a widget that is then
+        destroyed segfaults the process outright -- no traceback, no
+        qFatal line, nothing to read afterwards. Which is the same
+        outcome this method exists to prevent, arriving by the one route
+        the `except` cannot cover.
         """
         p = QPainter(self)
         try:
@@ -195,11 +216,13 @@ class Chart(QWidget):
             if not self.has_data():
                 p.setPen(_c("muted"))
                 p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
-                           self.empty_text)
+                           self.empty_message())
                 return
             self.paint_data(p, self.plot_rect())
         except Exception as exc:
             self._paint_failed(p, exc)
+        finally:
+            p.end()
 
     def _paint_failed(self, p, exc):
         p.setPen(_c("bad"))
@@ -352,6 +375,19 @@ class LineChart(Chart):
 
     def has_data(self):
         return len(self.points) >= 1
+
+    def empty_message(self):
+        """An all-NaN curve is a finding, not an absence.
+
+        Every sample dropped means every checkpoint had no value -- for
+        turns-to-kill, that a run of 100,000 episodes won no fights. The
+        Learning tab was showing a populated kill-rate chart reading 0%
+        directly above a turns-to-kill chart reading "no training run
+        yet", which is the opposite of what happened.
+        """
+        if self.dropped and not self.points:
+            return self.dropped_note.format(n=self.dropped)
+        return self.empty_text
 
     def _scales(self, r):
         xs = [x for x, _ in self.points]

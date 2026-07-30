@@ -3079,6 +3079,26 @@ def test_a_heatmap_row_with_no_cells_is_not_data(qapp):
     h.grab()
 
 
+def test_a_painted_chart_closes_its_painter(qapp):
+    """`paintEvent` left its QPainter for the garbage collector, and a
+    QPainter still open on a widget that is then destroyed segfaults the
+    interpreter -- no traceback, no qFatal line, nothing to read
+    afterwards. Same outcome the guarded paintEvent exists to prevent,
+    arriving by the one route the `except` cannot cover.
+
+    Asserted on the source rather than by crashing: the failure mode is
+    a segfault during a later garbage collection, which no assertion
+    survives to report.
+    """
+    import inspect
+
+    from deimos_bridge.gui.charts import Chart
+
+    body = inspect.getsource(Chart.paintEvent)
+    code = "\n".join(line.split("#")[0] for line in body.splitlines())
+    assert "finally:" in code and "p.end()" in code
+
+
 def test_hovering_a_broken_chart_does_not_abort(qapp):
     """A hover is the last thing that should be able to end a fight."""
     from PyQt6.QtCore import QPointF, Qt
@@ -3189,6 +3209,217 @@ def test_a_dropped_checkpoint_is_reported_not_hidden(qapp):
     assert win.learning.ttk.dropped == 1
     assert "won no fights" in win.learning.ttk.dropped_note
     assert win.learning.kill.dropped == 0          # kill rate is still real
+
+
+def test_an_all_nan_curve_reports_the_drops_rather_than_looking_empty(qapp):
+    """The exact shape of a run that wins nothing: every checkpoint has
+    an undefined turns-to-kill, so every sample drops and the note that
+    reports them lives inside paint_data, which the empty state never
+    reaches. The Learning tab showed a populated kill-rate chart reading
+    0% above a turns-to-kill chart reading "no training run yet"."""
+    from deimos_bridge.gui.charts import LineChart
+
+    c = LineChart("turns to kill")
+    c.dropped_note = "{n} checkpoint(s) won no fights"
+    c.set_points([(2000, float("nan")), (4000, float("nan")),
+                  (6000, float("nan"))])
+    assert c.points == [] and c.dropped == 3
+    assert c.has_data() is False
+    assert c.empty_message() == "3 checkpoint(s) won no fights"
+
+    # ...and a chart that genuinely has nothing yet still says so.
+    fresh = LineChart("turns to kill")
+    assert fresh.empty_message() == fresh.empty_text
+
+    c.resize(360, 190)
+    c.grab()                    # and it still paints without aborting
+
+
+def test_a_round_whose_board_would_not_read_is_recorded_as_that():
+    """It used to vanish entirely: the Decisions table went round 3,
+    round 5, the pass was never counted, and the next board differenced
+    against round 3 -- so the missing round's damage was folded into its
+    predecessor's residual and charged to the damage model."""
+    from deimos_bridge.telemetry import Telemetry
+
+    tel = Telemetry()
+    tel.start_fight()
+    rec = tel.observe_lost_round(4, "could not read the board "
+                                    "(MemoryReadError: ...) — passed")
+    assert rec.round == 4 and rec.passing
+    assert rec.policy == "board read failed"
+    assert tel.rounds[-1] is rec
+    assert tel.fights[-1].passes == 1
+    assert tel.fights[-1].rounds >= 4
+    assert tel._pending is None, "the next board must not settle across it"
+
+
+def test_a_cast_that_never_went_out_is_not_charged_to_the_damage_model():
+    """The record is written before the click. A failed cast left the
+    round claiming the card was played, so the next board showed the
+    target unchanged and the residual settled at minus the whole
+    prediction -- the model's worst miss of the run, marked clean."""
+    from deimos_bridge.telemetry import RoundRecord, Telemetry
+
+    tel = Telemetry()
+    tel.start_fight()
+    rec = RoundRecord(fight=1, round=1, chosen="Sunbird",
+                      target_name="Krokopatra")
+    rec.predicted_damage = 325.0
+    tel.rounds.append(rec)
+    tel._pending = rec
+
+    amended = tel.note_failed_cast("the cast of Sunbird did not go "
+                                   "through (ClickError: x) — passed instead")
+    assert amended is rec
+    assert rec.predicted_damage is None
+    assert rec.passing is True
+    assert rec.clean is False
+    assert any("cast failed" in c for c in rec.confounds)
+    assert tel.fights[-1].passes == 1
+
+
+class _Mouseless:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _stub_handler(decide, read, card=None):
+    """A `WizAiCombatHandler` with just enough around it to run a round."""
+    from deimos_bridge.live_backend import WizAiCombatHandler
+
+    passes = []
+
+    class _Backend:
+        cards = {}
+        last_read = read
+        failed = []
+        lost = []
+
+        async def decide(self):
+            return await decide()
+
+        def report_failed_cast(self, name, exc):
+            self.failed.append((name, type(exc).__name__))
+
+        def report_lost_round(self, number, reason):
+            self.lost.append((number, reason))
+
+    class _Client:
+        mouse_handler = _Mouseless()
+
+    handler = WizAiCombatHandler.__new__(WizAiCombatHandler)
+    handler.client = _Client()
+    handler.backend = _Backend()
+    handler._last_read = None
+    handler._read_failures = 0
+    handler.pass_button = lambda: _tick(passes)
+    handler.round_number = lambda: _value(4)
+    handler._pick_card = lambda _read, _name: card
+    handler._resolve_target = lambda *a, **kw: _value(None)
+    return handler, passes
+
+
+async def _value(v):
+    return v
+
+
+def test_the_handler_reports_a_failed_cast_rather_than_swallowing_it():
+    """The round was recorded as a cast before the click. A swallowed
+    failure leaves the record claiming a card was played that was not."""
+    import asyncio
+
+    from deimos_bridge.live_backend import PolicyDecision
+
+    class _Card:
+        async def cast(self, target):
+            raise RuntimeError("the board moved")
+
+    async def _decide():
+        return PolicyDecision(card_name="Sunbird", target_index=0)
+
+    handler, passes = _stub_handler(_decide, read=object(), card=_Card())
+    asyncio.run(handler.handle_round())
+
+    assert handler.backend.failed == [("Sunbird", "RuntimeError")]
+    assert passes, "it must still pass the round rather than hang"
+
+
+def test_a_round_lost_to_a_failed_read_goes_through_the_record():
+    """`_read_failures` was documented as surfaced at the end of a run
+    and never was -- nothing in the package read it, so ten rounds lost
+    across a fight were invisible."""
+    import asyncio
+
+    async def _decide():
+        raise RuntimeError("MemoryReadError")
+
+    handler, passes = _stub_handler(_decide, read=None)
+    asyncio.run(handler.handle_round())
+
+    assert handler._read_failures == 1
+    assert len(handler.backend.lost) == 1
+    number, reason = handler.backend.lost[0]
+    assert number == 4                          # off the live round number
+    assert "could not read the board" in reason and "MemoryReadError" in reason
+    assert passes
+
+
+def test_a_board_with_unreadable_wards_is_not_a_clean_observation():
+    """An empty ward list is the same value for "no shields" and "the
+    read failed". The second hands the policy a bare mob, it prices its
+    hit against no Tower Shield, and the ~50%-off residual is filed as
+    evidence the damage model is wrong."""
+    from deimos_bridge.live_backend import PolicyDecision
+    from deimos_bridge.telemetry import Telemetry
+
+    tel = Telemetry()
+    tel.start_fight()
+
+    class _Read:
+        def __init__(self, state):
+            self.state = state
+            self.round_number = 1
+            self.hand_cards = {}
+            self.resolver = type("R", (), {"misses": set()})()
+            self.hidden = []
+            self.hand_visibility = 1.0
+            self.unreadable = ["Lost Soul's wards (MemoryReadError: x)"]
+
+    from w101_sim import Actor, State
+    me = Actor(name="Wizard", school="ice", hp=3000, max_hp=3000, team=0)
+    foe = Actor(name="Lost Soul", school="death", hp=2000, max_hp=2000,
+                team=1)
+    read = _Read(State(me, [foe]))
+    rec = tel.observe(PolicyDecision(card_name="Sunbird", target_index=0),
+                      read)
+    assert rec.clean is False
+    assert any("could not read" in c for c in rec.confounds)
+
+
+def test_clicking_a_heatmap_row_breaks_out_that_round(qapp):
+    """The matrix windows to the last 14 candidate rounds; the detail
+    bars indexed the unwindowed list, so past 14 rounds every row was off
+    by N-14 and the bars belonged to a different round than the label."""
+    from deimos_bridge.telemetry import RoundRecord, Telemetry
+
+    class _C:
+        def __init__(self, name):
+            self.card, self.turns, self.chosen = name, 2.0, name == "fire"
+            self.damage, self.pips = 100, 2
+
+    tel = Telemetry()
+    tel.rounds = [RoundRecord(fight=1, round=i,
+                              candidates=[_C("fire"), _C("ice")])
+                  for i in range(1, 21)]
+
+    rows, _cols, _dropped = tel.decision_matrix()
+    assert len(rows) == 14 and rows[-1][0] == "r20"
+    assert tel.candidate_bars(len(rows) - 1)[1] == "fight 1, round 20"
+    assert tel.candidate_bars(0)[1] == "fight 1, round 7"
 
 
 def test_every_chart_entry_point_rejects_non_finite(qapp):

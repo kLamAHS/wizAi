@@ -280,7 +280,15 @@ async def read_hangings(member, slot: str) -> list:
     `slot` is 'charm' for the caster's outgoing effects and 'ward' for a
     target's incoming ones -- the same split wizAi's `Actor.charms` /
     `Actor.wards` uses.
+
+    A failed read leaves `read_hangings.last_error` set. An empty list is
+    otherwise the same answer for "this mob has no shields" and "the
+    effect list would not read", and the second is a materially different
+    fight: the policy prices its hit against a bare mob, walks it into a
+    50% Tower Shield, and the residual is filed as a clean observation
+    the damage model got wrong by half.
     """
+    read_hangings.last_error = ""
     out = []
     try:
         participant = await member.get_participant()
@@ -289,7 +297,8 @@ async def read_hangings(member, slot: str) -> list:
             effects += list(await participant.aura_effects())
         except Exception:
             pass
-    except Exception:
+    except Exception as exc:
+        read_hangings.last_error = f"{type(exc).__name__}: {exc}"
         return out
 
     for i, e in enumerate(effects):
@@ -380,6 +389,12 @@ class LiveRead:
         #: a wizAi Card. The policy did not see them. A run with a high
         #: `hand_visibility` deficit is not measuring the policy.
         self.hidden = list(hidden)
+        #: Effect lists that would not read, as human-readable strings.
+        #: An empty ward list is the same value for "no shields" and "the
+        #: read failed", and the second hands the policy a materially
+        #: different fight -- so the difference is carried here rather
+        #: than being lost in an empty list.
+        self.unreadable = []
 
     @property
     def hand_visibility(self) -> float:
@@ -430,21 +445,31 @@ async def read_player_stats(client, school: str) -> dict:
 
     Returns `{}` if the stats will not read; the caller then gets the old
     no-gear behaviour rather than a crash, and can say so.
+
+    A stat that fails to read is recorded under `"unread"` rather than
+    folded into 0.0. They were the same value, so a wizard in full gear
+    whose `dmg_bonus_percent` raised was told "read your gear: 0% ice
+    damage" -- a confident number, indistinguishable from a true zero,
+    that then priced every hit in training below what it lands for.
     """
     stats = getattr(client, "stats", None)
     if stats is None:
         return {}
 
+    unread = []
+
     async def vec(name):
         try:
             return await getattr(stats, name)()
         except Exception:
+            unread.append(name)
             return []
 
     async def one(name):
         try:
             return float(await getattr(stats, name)())
         except Exception:
+            unread.append(name)
             return 0.0
 
     school = (school or "").lower()
@@ -475,6 +500,11 @@ async def read_player_stats(client, school: str) -> dict:
         out["crit"] = crit
     if 0.0 < block <= 1.0:
         out["block"] = block
+    if unread and out:
+        # Only when something else read: an entirely failed read already
+        # returns {} and is reported by the caller as such. This is the
+        # partial case, which looked like a complete one.
+        out["unread"] = sorted(set(unread))
     return out
 
 
@@ -504,9 +534,18 @@ async def read_state(combat, resolver: NameResolver, school: str,
             pow_pips=int(await m.power_pips()) if team == 0 else 0,
         )
 
+    unreadable = []
+
+    async def _hangings(m, slot, who):
+        effects = await read_hangings(m, slot)
+        if read_hangings.last_error:
+            unreadable.append(f"{who}'s {slot}s "
+                              f"({read_hangings.last_error})")
+        return effects
+
     player = await _mk_actor(me, 0)
-    player.charms = await read_hangings(me, "charm")
-    player.wards = await read_hangings(me, "ward")
+    player.charms = await _hangings(me, "charm", "you")
+    player.wards = await _hangings(me, "ward", "you")
 
     enemies, allies, enemy_members = [], [], []
     me_name = await me.name()
@@ -518,8 +557,8 @@ async def read_state(combat, resolver: NameResolver, school: str,
             continue
         hostile = await _is_hostile(m, my_team)
         actor = await _mk_actor(m, 1 if hostile else 0)
-        actor.charms = await read_hangings(m, "charm")
-        actor.wards = await read_hangings(m, "ward")
+        actor.charms = await _hangings(m, "charm", actor.name)
+        actor.wards = await _hangings(m, "ward", actor.name)
         actor.is_minion = bool(await m.is_minion())
         if hostile:
             enemies.append(actor)
@@ -560,5 +599,7 @@ async def read_state(combat, resolver: NameResolver, school: str,
 
     state = State(player, enemies or [Actor(name="none", school="ice", hp=0,
                                             max_hp=1, team=1)], allies)
-    return LiveRead(state, hand_cards, resolver, members, me,
+    read = LiveRead(state, hand_cards, resolver, members, me,
                     await combat.round_number(), enemy_members, hidden)
+    read.unreadable = unreadable
+    return read
