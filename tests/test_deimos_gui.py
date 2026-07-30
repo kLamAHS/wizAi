@@ -4233,3 +4233,34 @@ def test_the_window_says_whether_the_table_beats_its_own_fallback(qapp):
 
     win.on_verdict(0.91, 0.82)
     assert "worth playing" in win.verdict_text
+
+
+def test_a_miss_says_which_fact_it_did_not_recognise():
+    """"It always goes to fallback" is not actionable. "A 1,500 HP mob is
+    above the 276-1,242 band this table was trained on" points at a box
+    already on screen."""
+    from deimos_bridge.policies import trained_policy
+    from rl_agent import QAgent
+    from w101_sim import Actor, State
+
+    agent = QAgent({}, [], "ice")
+    agent.trained_on = {"hp": (276, 1242), "mobs": 2, "schools": ["death"],
+                        "player_hp": 857}
+    tp = trained_policy(agent)
+
+    def board(hps, schools=("death",)):
+        me = Actor(name="W", school="ice", hp=857, max_hp=857, team=0)
+        foes = [Actor(name=f"m{i}", school=schools[i % len(schools)],
+                      hp=h, max_hp=h, team=1) for i, h in enumerate(hps)]
+        return State(me, foes)
+
+    assert "above the 276–1,242 band" in tp.why_missed(board([1500]))
+    assert "below the 276–1,242 band" in tp.why_missed(board([100]))
+    assert "3 mobs, trained for up to 2" in tp.why_missed(board([500] * 3))
+    assert "trained against death, fighting fire" in \
+        tp.why_missed(board([690], schools=("fire",)))
+    assert tp.why_missed(board([690])) == ""      # in band: nothing to say
+
+    # No stamp, no claim -- inventing a band would be worse than silence.
+    bare = trained_policy(QAgent({}, [], "ice"))
+    assert bare.why_missed(board([9999])) == ""

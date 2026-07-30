@@ -297,6 +297,15 @@ class TrainWorker(QThread):
             # operator's board: 89% coverage, 6.4% kill, against 82.4%
             # for the heuristic. That comparison is the answer to "is
             # the model stupid?", and nothing in the window had it.
+            # What the table was actually trained on, stamped onto it
+            # so a live miss can say which fact it did not recognise.
+            # "it always goes to fallback" is not actionable; "a 1,500 HP
+            # mob is above the 276-1,242 band this table was trained on"
+            # is, and points at a box already on screen.
+            lo, hi = self.hp_range()
+            agent.trained_on = {"hp": (lo, hi), "mobs": self.n_enemies,
+                                "schools": list(self.school_pool()),
+                                "player_hp": self.player_hp}
             from ..policies import school_aware_blade_stack
             rival, _rttk = evaluate(sim, school_aware_blade_stack(3), n=400)
             self.verdict.emit(kill, rival)
