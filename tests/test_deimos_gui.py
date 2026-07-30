@@ -2120,8 +2120,10 @@ def test_the_trainer_prefers_the_healths_actually_observed(qapp):
 
 
 def test_the_window_adopts_the_board_it_just_fought(qapp):
-    """The whole point: nobody should have to know that mob count and
-    health are load-bearing for the state key."""
+    """Centres the training range on real fights, so nobody has to know
+    that mob count and health touch the state key at all. It only ever
+    widens -- a model that already covers three mobs must not forget them
+    because the last fight had one."""
     from deimos_bridge.gui.app import MainWindow
 
     tel = Telemetry()
@@ -2133,10 +2135,15 @@ def test_the_window_adopts_the_board_it_just_fought(qapp):
                    EnemyView("Magma Man", 390, 390)]
 
     win = MainWindow(tel)
+    win.n_enemies.setValue(1)
     assert win.adopt_observed_board()
     assert win.n_enemies.value() == 2
     assert win.boss_hp.value() == 515
     assert win.observed_hps == [515, 390]
+
+    win.n_enemies.setValue(4)          # already broader
+    win.adopt_observed_board()
+    assert win.n_enemies.value() == 4  # not narrowed back to 2
 
 
 def test_the_coverage_warning_names_the_mismatch_not_more_episodes(qapp):
@@ -2152,8 +2159,103 @@ def test_the_coverage_warning_names_the_mismatch_not_more_episodes(qapp):
 
     win = MainWindow(tel)
     win.n_enemies.setValue(1)
-    assert "different LENGTHS" in win._why_coverage_is_low()
+    assert "Raise 'up to mobs' to 2" in win._why_coverage_is_low()
 
     win.n_enemies.setValue(2)
-    win.boss_hp.setValue(1200)
+    win.boss_hp.setValue(4000)         # 515 falls outside 1600-7200
     assert "HP//250" in win._why_coverage_is_low()
+
+    win.generalize.setChecked(False)
+    assert "any board" in win._why_coverage_is_low()
+
+
+# ------------------------------------------ one model, more than one fight
+def _covers(agent, mob_hps, n=12):
+    """Coverage of a trained agent on a board of these mobs."""
+    import random
+
+    from data_full import load_spells_full
+    from w101_sim import Boss, Sim
+
+    from deimos_bridge.policies import trained_policy
+
+    cards = load_spells_full()
+    deck = ["Frost Beetle"] * 3 + ["Ice Trap"] * 3 + ["Snow Serpent"] * 3
+    wrapped = trained_policy(agent)
+    for seed in range(n):
+        sim = Sim(cards, deck, "ice",
+                  Boss(name="m0", hp=mob_hps[0], school="fire", dmg=65),
+                  enemies=[Boss(name=f"m{i}", hp=h, school="fire", dmg=65)
+                           for i, h in enumerate(mob_hps[1:], 1)],
+                  rng=random.Random(seed), player_hp=784)
+        wrapped(sim, sim.new_state())
+    return wrapped.coverage
+
+
+def test_a_randomised_board_covers_fights_it_never_saw():
+    """The reason 'any board' is on by default. Trained on one board, a
+    table covers that board and nothing else -- and retraining before
+    every fight needs you to know the board before you can learn to fight
+    it, which is not a workflow."""
+    from data_full import load_spells_full
+    from rl_agent import make_board_sampler, train_agent
+    from w101_sim import Boss
+
+    cards = load_spells_full()
+    deck = ["Frost Beetle"] * 3 + ["Ice Trap"] * 3 + ["Snow Serpent"] * 3
+    boards = [[515], [515, 390], [400, 600, 350]]
+
+    fixed, _ = train_agent(
+        cards, deck, "ice", Boss(name="d", hp=800, school="ice", dmg=65),
+        episodes=1500, player_hp=784)
+    roaming, _ = train_agent(
+        cards, deck, "ice", Boss(name="d", hp=800, school="ice", dmg=65),
+        episodes=1500, player_hp=784,
+        board_sampler=make_board_sampler("ice", (300, 1400), max_mobs=3,
+                                         dmg=65))
+
+    for hps in boards:
+        assert _covers(fixed, hps) == 0.0, hps
+        assert _covers(roaming, hps) > 0.5, hps
+
+
+def test_the_sampler_varies_both_the_count_and_which_mob_is_weakest():
+    """Equal healths, or healths sorted, would make the weakest index
+    constant -- the same degeneracy that measured 0% coverage, wearing a
+    different hat."""
+    import random
+
+    from rl_agent import make_board_sampler
+
+    sample = make_board_sampler("ice", (200, 1200), max_mobs=3, dmg=60)
+    rng = random.Random(0)
+    counts, weakest = set(), set()
+    for _ in range(200):
+        boss, extra = sample(rng)
+        hps = [boss.hp] + [b.hp for b in extra]
+        counts.add(len(hps))
+        weakest.add(min(range(len(hps)), key=lambda i: hps[i]))
+    assert counts == {1, 2, 3}
+    assert weakest == {0, 1, 2}
+
+
+def test_training_scores_clearing_the_board_not_killing_the_first_mob():
+    """`State.boss_hp` is `enemies[0].hp`, so the episode used to declare
+    victory the moment the first mob fell and hand out the full reward
+    with the rest still swinging."""
+    import random
+
+    from data_full import load_spells_full
+    from rl_agent import QAgent
+    from w101_sim import Boss, Sim
+
+    cards = load_spells_full()
+    deck = ["Snow Serpent"] * 9
+    sim = Sim(cards, deck, "ice",
+              Boss(name="a", hp=1, school="fire", dmg=0),
+              enemies=[Boss(name="b", hp=10 ** 6, school="fire", dmg=0)],
+              rng=random.Random(0), player_hp=784)
+    agent = QAgent(cards, deck, "ice", rng=random.Random(1))
+    turns, won = agent.train_episode(sim, eps=1.0, dp_w=0.0)
+    # mob b cannot be killed inside the horizon, so this is not a win
+    assert not won

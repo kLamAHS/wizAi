@@ -293,13 +293,37 @@ real board of 515 beside 390 opens exactly there.
 | 2 mobs, 500 + 400 | 100% |
 | 2 mobs at the observed healths | 100% |
 
-`Telemetry.observed_mob_hps` reports each mob's health from the opening
-round of the last fight, the window adopts it, and `TrainWorker` builds
-one `Boss` per mob at its own health (spreading them 100/80/60% when no
-board has been observed, rather than making them identical). The coverage
-warning names the specific mismatch, because "train more episodes" is
-wrong advice for every cause here and expensive advice to follow before
-finding that out.
+The obvious repair — auto-fill the board from the last fight and retrain —
+solves the wrong problem. It needs you to know the board before you can
+learn to fight it, and it means retraining on every new pack. So the
+board is **randomised instead**: `rl_agent.make_board_sampler` resamples
+mob count and per-mob health each episode, and `train_agent` swaps it in
+before every `train_episode` while holding a fixed board for the periodic
+evaluation so checkpoint scores stay comparable.
+
+| board fought | fixed-board model | randomised model |
+| --- | --- | --- |
+| 1 mob, 515hp | 0% | 100% |
+| 1 mob, 1200hp | 0% | 100% |
+| 2 mobs, 515 + 390 | 0% | 100% |
+| 2 mobs, 800 + 800 | 0% | 100% |
+| 3 mobs, 400 / 600 / 350 | 0% | 100% |
+
+Healths are drawn independently and left unsorted, both deliberately:
+equal healths pin `weakest_index` to 0 and sorting pins it to the last
+index, and either is the same degeneracy that measured 0%.
+
+`Telemetry.observed_mob_hps` still reports what was actually fought, but
+now only to *centre* the range — it widens and never narrows. The
+coverage warning names the specific mismatch, because "train more
+episodes" is wrong advice for most of these and expensive advice to
+follow before finding that out.
+
+One more thing multi-enemy training needed: `train_episode` scored a win
+on `s.boss_hp <= 0`, which is `enemies[0].hp`. On a pack that handed out
+the full reward the moment the first mob fell, with the rest still
+swinging — the agent was being trained to kill one thing. It now requires
+the board to be clear, which is identical on a 1v1.
 
 ### The wizard is not naked
 
