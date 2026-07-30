@@ -119,6 +119,12 @@ class WizAiBackend:
         #: casts from this, so the card it clicks and the target it picks
         #: come from the same snapshot the policy saw.
         self.last_read = None
+        #: running measurement of how hard this board hits, per living
+        #: enemy per round. See `_estimate_incoming`.
+        self._incoming = []
+        self._hp_seen = None
+        self._round_seen = None
+        self._enemies_seen = 1
 
     # -- the policy, swappable mid-fight ----------------------------------
     @property
@@ -175,6 +181,7 @@ class WizAiBackend:
             if name not in self._seen:
                 self._seen.append(name)
         read.state.player.deck = self._deck_remaining(read.hand_cards)
+        self._estimate_incoming(read)
         self.last_read = read
 
         sim = self._sim_for(read)
@@ -274,6 +281,48 @@ class WizAiBackend:
         label = label or self.policy_name or "policy"
         source = getattr(policy, "last_source", "")
         return f"{label} — {source}" if source else label
+
+    #: per-enemy incoming damage assumed before there is a round to
+    #: measure. Matches the trainer's own dummy-boss rule
+    #: (`gui/app.TrainWorker`), so a live fight and the fight the Q table
+    #: was learned on are not priced differently on turn one.
+    INCOMING_PRIOR_DIVISOR = 12.0
+
+    def _estimate_incoming(self, read):
+        """How hard this board actually hits, measured round to round.
+
+        Enemies built by `read_state` carry no `flat_hit`, so `_enemy_turn`
+        did nothing and every rollout modelled the mobs dealing **zero**
+        damage. The consequences are not subtle: setting up costs nothing
+        but turns, `_rollout`'s `player.alive` check can never fire, and
+        the policy has no reason to prefer killing something now over
+        stacking one more buff. That is the exact shape of "it spends the
+        fight setting up and then dies to the minion".
+
+        Nothing in the client reports a mob's spell damage, so it is
+        measured instead: the player's health drop across a round, split
+        over the mobs that were alive to cause it. That folds in DoTs and
+        minion hits, which is right -- what the policy needs to know is
+        how long it can afford to take, not which mob is responsible.
+        """
+        player = read.state.player
+        living = [e for e in read.state.enemies if e.alive]
+        if self._hp_seen is not None and self._round_seen != read.round_number:
+            lost = self._hp_seen - player.hp
+            if lost > 0:
+                self._incoming.append(lost / max(1, self._enemies_seen))
+        self._hp_seen = player.hp
+        self._round_seen = read.round_number
+        self._enemies_seen = max(1, len(living))
+
+        if self._incoming:
+            per_enemy = sum(self._incoming) / len(self._incoming)
+        else:
+            per_enemy = max(30.0,
+                            player.max_hp / self.INCOMING_PRIOR_DIVISOR)
+        for enemy in read.state.enemies:
+            enemy.flat_hit = per_enemy
+        return per_enemy
 
     def _record(self, decision, read):
         self.history.append(decision)

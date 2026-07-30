@@ -141,11 +141,36 @@ def test_empower_gains_pips_and_hurts():
 
 # ---------------------------------------------------------------- stacking
 
-def test_same_name_same_source_does_not_stack():
+def test_same_name_same_source_is_placeable_but_fires_one_at_a_time():
+    """Two copies of one blade both go up; only one multiplies a hit.
+
+    This used to assert `not sim.can_cast(s, b2)` -- that the game
+    refuses the second cast outright. It does not. Three Ice Traps go on
+    a mob perfectly happily; what they do not do is all fire on the same
+    strike. Deimos is the corroborating witness: it reads every hanging
+    effect off the live participant and dedupes by
+    `spell_effect_stacking_id` during damage resolution, which only makes
+    sense if duplicates can be on the board at all.
+
+    Modelling it as a cast restriction was not a wash. The guard was
+    inert live -- read-back hangings are named `live:<template id>` and
+    never match a card in hand -- so a real fight stacked duplicates
+    anyway and then multiplied every one of them into a single strike:
+    2.744x for three 40% traps against the true 1.4x.
+    """
     sim, s = fresh()
     b1, b2 = give(sim, s, "Fireblade", "Fireblade")
     cast(sim, s, b1)
-    assert not sim.can_cast(s, b2)                    # illegal, like the game
+    assert sim.can_cast(s, b2)              # legal, like the game
+    cast(sim, s, b2)
+    assert len(s.player.charms) == 2        # both standing
+
+    shark = give(sim, s, "Fire Shark")
+    hp0 = s.boss_hp
+    cast(sim, s, shark)
+    # ONE 35% blade on this hit, not 1.35^2 -- and the other survives.
+    assert s.boss_hp == pytest.approx(hp0 - 405 * 1.35)
+    assert len(s.player.charms) == 1        # banked for the next strike
 
 
 def test_provenance_stacks():

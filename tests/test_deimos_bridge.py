@@ -110,13 +110,18 @@ def test_plain_scenarios_agree_exactly():
         assert rows[name]["agree"], (name, rows[name])
 
 
-def test_only_the_guard_staging_row_still_diverges():
-    """After both fixes -- wizAi adopting Deimos's flat-stat placement and
-    Deimos's pierce units being corrected -- the two independently written
-    engines agree on every scenario except the one where they enforce the
-    same rule at different stages."""
+def test_the_two_engines_now_agree_everywhere():
+    """After three fixes -- wizAi adopting Deimos's flat-stat placement,
+    Deimos's pierce units being corrected, and wizAi adopting Deimos's
+    effect-stacking rule -- two independently written engines agree on
+    every scenario in the suite.
+
+    The last of those sat in EXPECTED for a while, written off as the
+    same rule enforced at different stages. It was not: wizAi refused the
+    duplicate *cast*, which the game permits, and then multiplied every
+    duplicate into one strike, which the game does not."""
     diverging = {r["scenario"] for r in compare() if not r["agree"]}
-    assert diverging == {"duplicate blade"}, diverging
+    assert diverging == set(), diverging
 
 
 def test_legacy_rules_still_show_the_flat_divergence():
@@ -1107,29 +1112,34 @@ def test_the_rollout_scores_targets_apart():
     sim.cast(s, s.hand[0], 1)                    # trap the second mob
     nuke = next(c for c in s.hand if c.name == "Snow Serpent")
 
-    _, dmg_untrapped = _rollout(sim, s, nuke, 12, 0)
-    _, dmg_trapped = _rollout(sim, s, nuke, 12, 1)
+    # One ply, so the first cast is the whole score and the trap is the
+    # only thing separating the two lines.
+    _, dmg_untrapped = _rollout(sim, s, nuke, 1, 0)
+    _, dmg_trapped = _rollout(sim, s, nuke, 1, 1)
     # `_rollout` returns damage negated, so lower is more damage.
     assert dmg_trapped < dmg_untrapped, (dmg_trapped, dmg_untrapped)
+    assert dmg_trapped == pytest.approx(dmg_untrapped * 1.4)
 
 
-def test_castable_at_respects_the_duplicate_placement_rule():
-    """Wizard101 refuses a second identical trap on the same mob, and
-    `Sim.can_cast` knows it -- but `w101_sim.castable` asks about
-    `enemies[0]` whatever the cast is aimed at. Aiming without this makes
-    the policy pick a card the engine then refuses, wasting the round."""
-    from w101_sim import castable
-
-    from deimos_bridge.policies import castable_at
+def test_a_second_identical_trap_is_legal_and_is_banked():
+    """Three Ice Traps go on one mob. Each hit consumes one; the rest
+    stay standing. wizAi used to refuse the second cast outright *and*
+    multiply every trap into a single strike, which valued three at
+    2.744x instead of 1.4x -- the arithmetic that made stacking look
+    worth spending rounds on."""
+    from deimos_bridge.telemetry import predict_damage
 
     sim, s, cards = _two_mobs(["Ice Trap", "Ice Trap", "Snow Serpent"])
-    sim.cast(s, s.hand[0], 1)                    # trap the minion
+    sim.cast(s, s.hand[0], 1)
+    trap2 = next(c for c in s.hand if c.name == "Ice Trap")
+    assert sim.can_cast(s, trap2, 1)             # legal, like the game
 
-    # `castable` still offers Ice Trap, because it only ever asks about
-    # enemy 0 -- which has no trap on it.
-    assert any(c.name == "Ice Trap" for c in castable(sim, s, "trap"))
-    assert not castable_at(sim, s, "trap", 1)    # illegal on the minion
-    assert castable_at(sim, s, "trap", 0)        # still legal on the boss
+    nuke = next(c for c in s.hand if c.name == "Snow Serpent")
+    one = predict_damage(sim, s, nuke, 1)
+    sim.cast(s, trap2, 1)
+    assert len(s.enemies[1].wards) == 2          # both standing
+    two = predict_damage(sim, s, nuke, 1)
+    assert two == pytest.approx(one)             # the second does not add
 
 
 def test_backend_accepts_an_aimed_move():
@@ -1190,11 +1200,10 @@ def _q_board(hand, deck=None, foes=((900, "boss"), (400, "minion"))):
     return sim, State(p, enemies), cards
 
 
-def test_the_action_set_keeps_a_trap_legal_on_the_other_mob():
-    """`Featurizer.legal` asked `can_cast` once, at target 0, then
-    expanded over every foe. Once a trap sat on enemy 0 the card left the
-    action set entirely -- so the agent could not trap the minion, and
-    the only remaining way to spend a trap was not to."""
+def test_the_action_set_offers_a_trap_on_every_mob():
+    """A trap on the boss does not remove Ice Trap from the action set --
+    the game lets you put one on each mob, and on a board with a minion
+    that is often the right play."""
     from rl_agent import Featurizer, apply_action
 
     sim, s, cards = _q_board(["Ice Trap", "Ice Trap", "Snow Serpent"])
@@ -1203,22 +1212,26 @@ def test_the_action_set_keeps_a_trap_legal_on_the_other_mob():
 
     apply_action(sim, s, "Ice Trap@0")
     now = feat.legal(sim, s)
-    assert "Ice Trap@0" not in now          # the boss refuses a second
-    assert "Ice Trap@1" in now              # the minion does not
+    assert "Ice Trap@1" in now
+    assert "Ice Trap@0" in now              # a second on the boss is legal too
+    assert len(s.enemies[0].wards) == 1
 
 
-def test_an_action_aimed_at_a_mob_that_refuses_it_casts_nothing():
-    """Wizard101 will not place the same trap twice on one mob, and the
-    turn is spent either way -- so the action must not be offered."""
+def test_a_second_trap_on_one_mob_does_not_double_the_hit():
+    """It is banked for the next strike instead. This is the arithmetic
+    that decides whether stacking is worth the round, and wizAi had it
+    at 1.4^n."""
     from rl_agent import Featurizer, apply_action
 
+    from deimos_bridge.telemetry import predict_damage
+
     sim, s, cards = _q_board(["Ice Trap", "Ice Trap", "Snow Serpent"])
-    feat = Featurizer(cards, ["Ice Trap"] * 3 + ["Snow Serpent"] * 3)
     apply_action(sim, s, "Ice Trap@0")
-    wards_before = len(s.enemies[0].wards)
-    apply_action(sim, s, "Ice Trap@0")      # would be a wasted round
-    assert len(s.enemies[0].wards) == wards_before
-    assert "Ice Trap@0" not in feat.legal(sim, s)
+    nuke = next(c for c in s.hand if c.name == "Snow Serpent")
+    one = predict_damage(sim, s, nuke, 0)
+    apply_action(sim, s, "Ice Trap@0")
+    assert len(s.enemies[0].wards) == 2
+    assert predict_damage(sim, s, nuke, 0) == pytest.approx(one)
 
 
 def test_single_enemy_action_sets_are_unchanged():
@@ -1230,3 +1243,104 @@ def test_single_enemy_action_sets_are_unchanged():
                              foes=((900, "boss"),))
     feat = Featurizer(cards, ["Ice Trap"] * 3 + ["Snow Serpent"] * 3)
     assert feat.legal(sim, s) == ["__pass__", "Ice Trap", "Snow Serpent"]
+
+
+# ------------------------------------- knowing when to stop setting up
+def test_it_fires_when_the_hit_already_kills():
+    """The reported gap: "it doesn't seem to understand minimum damage
+    thresholds to kill". A buff round against a mob the plain nuke
+    already finishes is a round given to the mob for nothing."""
+    from deimos_bridge.policies import school_aware_blade_stack, _split
+
+    # Snow Serpent comfortably kills a 90hp mob unbuffed.
+    sim, s, _ = _two_mobs(["Ice Trap", "Snow Serpent"], boss_hp=900,
+                          minion_hp=90)
+    card, target = _split(school_aware_blade_stack(3)(sim, s))
+    assert card.name == "Snow Serpent"
+    assert target == 1                         # the one it kills
+
+
+def test_it_picks_the_cheapest_card_that_still_kills():
+    """Between two lethal options, the small one -- it banks pips and
+    keeps the big card for the mob that needs it."""
+    from deimos_bridge.policies import cheapest_lethal
+
+    sim, s, _ = _two_mobs(["Frost Beetle", "Snow Serpent"], boss_hp=900,
+                          minion_hp=60)
+    got = cheapest_lethal(sim, s, 1)
+    assert got is not None and got.name == "Frost Beetle"
+
+
+def test_a_shielded_mob_is_not_lethal():
+    """Lethality goes through the engine's own cast path, so a shield,
+    a resist or an absorb correctly makes the hit not enough."""
+    from w101_sim import Hanging
+
+    from deimos_bridge.policies import cheapest_lethal
+
+    sim, s, _ = _two_mobs(["Snow Serpent"], boss_hp=900, minion_hp=170)
+    assert cheapest_lethal(sim, s, 1) is not None
+    s.enemies[1].wards.append(
+        Hanging(name="Tower Shield", slot="ward", kind="damage",
+                percent=-0.5, schools=None, source="deck"))
+    assert cheapest_lethal(sim, s, 1) is None
+
+
+def test_a_losing_board_still_ranks_its_moves():
+    """The trap-spam mechanism, pinned. When no line survives the
+    horizon, `_rollout` used to return one flat constant for every
+    candidate -- so the comparison collapsed and the decision fell
+    through to the tiebreak, which takes the cheapest card. An Ice Trap
+    costs zero pips, so the answer to a hopeless board was three traps."""
+    from deimos_bridge.policies import _rollout
+
+    sim, s, _ = _two_mobs(["Ice Trap", "Snow Serpent", "Frost Beetle"],
+                          pips=2, boss_hp=9000, minion_hp=9000)
+    for e in s.enemies:
+        e.flat_hit = 900               # kills the wizard well inside the horizon
+
+    scores = {c.name: _rollout(sim, s, c, 6, 0) for c in s.hand}
+    assert len(set(scores.values())) > 1, scores
+    # and the nuke outranks the trap, rather than losing on pip cost
+    assert scores["Snow Serpent"] < scores["Ice Trap"], scores
+
+
+def test_overkill_earns_no_credit():
+    """`Sim._strike` does `target.hp -= dmg` uncapped, so a 300 hit into
+    a mob with 50 left used to bank 300 -- and the tiebreak rewards
+    banking more, which is a scoring function that prefers waste."""
+    from deimos_bridge.policies import _rollout
+
+    sim, s, _ = _two_mobs(["Snow Serpent"], boss_hp=9000, minion_hp=20)
+    nuke = s.hand[0]
+    _, dealt = _rollout(sim, s, nuke, 1, 1)
+    assert -dealt == pytest.approx(20.0)      # the mob's health, not the hit's
+
+
+def test_incoming_damage_is_measured_rather_than_assumed_zero():
+    """Enemies built by `read_state` carry no `flat_hit`, so every
+    rollout modelled the mobs dealing zero damage: setting up cost
+    nothing but turns and the player could never die inside the horizon.
+    That is the shape of "it spends the fight setting up and then dies to
+    the minion"."""
+    be = _backend(policy=lambda sim, s: None)
+    hand = [MockCard("Fireblade")]
+
+    def board(hp):
+        return MockCombat(
+            [MockMember("Wizard", hp, client=True, team_id=0, normal_pips=4,
+                        max_health=600),
+             MockMember("A", 400, monster=True, team_id=1),
+             MockMember("B", 400, monster=True, team_id=1)], hand,
+            round_number=board.rnd)
+    board.rnd = 1
+
+    be.attach_combat(board(600))
+    run(be.decide())
+    prior = be.last_read.state.enemies[0].flat_hit
+    assert prior > 0                       # never zero, even before a reading
+
+    board.rnd = 2
+    be.attach_combat(board(400))           # lost 200 across two mobs
+    run(be.decide())
+    assert be.last_read.state.enemies[0].flat_hit == pytest.approx(100.0)

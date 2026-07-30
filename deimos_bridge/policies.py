@@ -335,8 +335,40 @@ def _rollout(sim, state, first_action, max_turns=12, target=0):
     def enemy_alive():
         return any(e.alive for e in s.enemies)
 
+    def board_hp():
+        """Enemy health left, floored at zero per mob.
+
+        Flooring is the point. `Sim._strike` does `target.hp -= dmg` and
+        `cast` returns the raw number, so a 300-damage nuke into a mob
+        with 50 left used to bank 300 -- and the tiebreak below *rewards*
+        banking more. That is a scoring function that prefers overkill,
+        which is the opposite of the "what is the smallest thing that
+        kills this?" question. Damage past lethal buys nothing, so it
+        counts for nothing.
+        """
+        return sum(max(e.hp, 0.0) for e in s.enemies)
+
     dealt = 0.0
-    lost = (max_turns + 1, 0.0)
+    #: Ranks worse than any line that clears the board, and worse than
+    #: one that merely runs out of horizon while alive. `unplayable` is
+    #: for a move that cannot be made at all.
+    unplayable = (max_turns + 3, 0.0)
+
+    def died():
+        """Dying still banked whatever it banked.
+
+        This used to return a flat constant, and that was the bug behind
+        "it spams every trap card": on a board where no line survives the
+        horizon, *every* candidate scored identically, the comparison
+        collapsed, and the decision fell through to the tiebreak -- which
+        picks the cheapest card, and an Ice Trap costs zero pips. A
+        policy in trouble should still play the line that gets furthest,
+        not the one that costs least.
+        """
+        return (max_turns + 2, -dealt)
+
+    def stalled():
+        return (max_turns + 1, -dealt)
 
     # find the copied card matching the chosen one
     action = None
@@ -346,7 +378,7 @@ def _rollout(sim, state, first_action, max_turns=12, target=0):
                 action = c
                 break
         if action is None:
-            return lost
+            return unplayable
 
     for turn in range(1, max_turns + 1):
         if action is not None:
@@ -356,20 +388,22 @@ def _rollout(sim, state, first_action, max_turns=12, target=0):
                 # could ever be *chosen* -- and a rollout that traps one
                 # mob and hits another scores a buff that never fires.
                 if not probe.can_cast(s, action, target):
-                    return lost
-                dealt += probe.cast(s, action, target) or 0.0
+                    return unplayable
+                before = board_hp()
+                probe.cast(s, action, target)
+                dealt += before - board_hp()
             except Exception:
-                return lost
+                return unplayable
         if not enemy_alive():
             return turn, -dealt
         try:
             probe.end_round(s)
         except Exception:
-            return lost
+            return stalled()
         if not enemy_alive():
             return turn, -dealt
         if not s.player.alive:
-            return lost
+            return died()
 
         action, target = _split(continuation(probe, s))
         if not (0 <= target < len(s.enemies)) or not s.enemies[target].alive:
@@ -377,7 +411,7 @@ def _rollout(sim, state, first_action, max_turns=12, target=0):
             # continuation re-aim rather than casting into a corpse.
             target = focus_target(s)
 
-    return max_turns + 1, -dealt
+    return stalled()
 
 
 def greedy_ttk(max_turns: int = 12):
@@ -439,15 +473,23 @@ def greedy_ttk(max_turns: int = 12):
         if not candidates:
             return None
 
-        # Third key: front-load. Among lines that kill on the same turn
-        # having banked the same damage, take the bigger hit now --
-        # damage already dealt cannot be undone by a heal, a shield or a
-        # fizzle on a later turn.
+        # Third key: spend the least that still gets there. Damage is
+        # counted floored at each mob's health, so two lines that kill on
+        # the same turn and bank the same *effective* damage are
+        # genuinely equivalent in outcome -- and between equivalent
+        # outcomes the cheaper card is strictly better, because it leaves
+        # pips banked and the bigger card still in hand.
+        #
+        # This key used to be `-card.damage`, i.e. deliberately take the
+        # biggest hit. Combined with uncapped damage that was two pushes
+        # toward overkill at once: a 300-damage nuke into a mob with 50
+        # left both scored 300 of "banked damage" and won the tiebreak
+        # for being large.
         scored = []
         for card, target in candidates:
             turns, neg_damage = _rollout(sim, s, card, max_turns, target)
-            scored.append(((turns, neg_damage, -card.damage, target),
-                           (card, target)))
+            scored.append(((turns, neg_damage, card.pips, card.damage,
+                            target), (card, target)))
         best_score, best_action = min(scored, key=lambda sc: sc[0])
 
         # Passing is a real move -- banking a pip for a bigger hit next
@@ -470,30 +512,51 @@ def greedy_ttk(max_turns: int = 12):
     return strat
 
 
-def castable_at(sim, s, kind, target=0):
-    """`w101_sim.castable`, but legal against the mob being aimed at.
+def cheapest_lethal(sim, s, target):
+    """The smallest thing in hand that finishes `target` this turn.
 
-    `castable` calls `can_cast(s, c)` with the default target, so on a
-    board with more than one enemy it answers about `enemies[0]`
-    regardless of where the cast is going. That is invisible while
-    nothing aims -- and the moment something does, it produces a policy
-    that picks a card the engine then refuses.
+    "Is it already dead?" has to be asked before "would another blade
+    help?", and nothing was asking it. Buff-then-hit is only worth a
+    round if the hit still needs the buff -- against a mob the plain nuke
+    already kills, every buff round is a free round for the mob, and a
+    stack spent on overkill is a stack that is not there for the next
+    one.
 
-    The rule it gets wrong is the duplicate-placement one: Wizard101 will
-    not let the same trap sit on the same mob twice (`Sim.can_cast`,
-    HANGING branch). So a deck holding three Ice Traps *cannot* stack
-    them on one enemy; asking about the wrong enemy means the policy
-    offers a second Ice Trap on a mob that already has one, casts
-    nothing, and burns the round.
+    Cheapest, not biggest: among cards that all kill, the one costing
+    fewest pips leaves the most banked and keeps the big card in hand.
+    That is the minimum-damage threshold -- the answer to a 400hp mob
+    holding a 300 hit and a 100 hit is both, in that order, not the 500
+    hit twice.
+
+    Uses the engine's own cast path (`predict_damage`), so resist,
+    shields, prisms and absorbs are all accounted for rather than
+    estimated -- a shielded mob is correctly *not* lethal.
     """
-    out = []
-    for c in s.hand:
-        if c.kind != kind:
+    from .telemetry import predict_damage
+
+    foe = s.enemies[target] if 0 <= target < len(s.enemies) else None
+    if foe is None or not foe.alive:
+        return None
+
+    best = None
+    seen = set()
+    for card in s.hand:
+        if card.name in seen or card.kind not in ("damage", "drain"):
             continue
-        at = target if aimed_at_one_enemy(c) else 0
-        if sim.can_cast(s, c, at):
-            out.append(c)
-    return out
+        seen.add(card.name)
+        if card.x_pips or not sim.can_cast(s, card, target):
+            continue
+        # Cheap gate before the expensive one: `predict_damage` runs a
+        # real cast on a deep copy, and a card that could not reach even
+        # tripled is not worth that.
+        if card.damage * 3 < foe.hp:
+            continue
+        got = predict_damage(sim, s, card, target)
+        if got is not None and got >= foe.hp:
+            rank = (card.pips, card.damage)
+            if best is None or rank < best[0]:
+                best = (rank, card)
+    return best[1] if best else None
 
 
 def _buff_options(sim, s, school, target=0):
@@ -511,12 +574,13 @@ def _buff_options(sim, s, school, target=0):
     still multiplies an ice hit that a prism is about to turn into myth,
     and a prism is never the wrong school for the hit it converts.
     """
-    options = [c for c in castable_at(sim, s, "blade", target)
-               + castable_at(sim, s, "trap", target)
+    from w101_sim import castable
+
+    options = [c for c in castable(sim, s, "blade") + castable(sim, s, "trap")
                if buff_matches(c, school)]
     if s.player.aura is None:
-        options = options + castable_at(sim, s, "aura", target)
-    return options or castable_at(sim, s, "prism", target)
+        options = options + castable(sim, s, "aura")
+    return options or castable(sim, s, "prism")
 
 
 def school_aware_blade_stack(n_buffs=3):
@@ -529,7 +593,7 @@ def school_aware_blade_stack(n_buffs=3):
     """
 
     def strat(sim, s):
-        from w101_sim import effective_pips
+        from w101_sim import castable, effective_pips
 
         focus = focus_target(s)
 
@@ -539,11 +603,19 @@ def school_aware_blade_stack(n_buffs=3):
                 return None
             return (card, focus) if aimed_at_one_enemy(card) else (card, 0)
 
+        # Lethal beats another buff, always. Checked first because a
+        # buff round against a mob that is already dead to the plain hit
+        # is a round given away -- and stacked three deep it is the whole
+        # fight given away.
+        finisher = cheapest_lethal(sim, s, focus)
+        if finisher is not None:
+            return (finisher, focus)
+
         nuke = choose_nuke(sim, s)
         if nuke is None:
             # No hit in hand: bank the best buff on offer, else pass.
-            options = (castable_at(sim, s, "blade", focus)
-                       + castable_at(sim, s, "trap", focus))
+            options = (castable(sim, s, "blade")
+                       + castable(sim, s, "trap"))
             return aimed(max(options, key=lambda c: c.percent, default=None))
 
         school = nuke.school
@@ -566,8 +638,8 @@ def school_aware_blade_stack(n_buffs=3):
         # afford rather than passing: a level-6 wizard holding a 1-pip
         # Frost Beetle and a 2-pip Snow Serpent, with one pip and no
         # blades, was passing the turn away entirely.
-        affordable = [c for c in castable_at(sim, s, "damage", focus)
-                      + castable_at(sim, s, "drain", focus) if not c.x_pips]
+        affordable = [c for c in castable(sim, s, "damage")
+                      + castable(sim, s, "drain") if not c.x_pips]
         return aimed(max(affordable, key=lambda c: c.damage, default=None))
 
     return strat

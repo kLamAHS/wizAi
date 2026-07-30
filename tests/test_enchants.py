@@ -33,9 +33,19 @@ def test_enchant_adds_ten_points_and_its_own_source():
     assert e.stack_key != CARDS["Fireblade"].stack_key
 
 
-def test_enchanted_and_plain_coexist_but_a_duplicate_does_not():
+def test_enchanted_and_plain_coexist_and_a_duplicate_is_banked():
     """The mechanic, stated as the test: two DIFFERENT stack keys both
-    land; the same key never doubles."""
+    land and both multiply one hit; the SAME key also lands, but only one
+    of the pair fires per strike.
+
+    The second half used to read `len(charms) == 2  # duplicate refused`.
+    That was the wrong rule in the wrong place -- the game lets a
+    duplicate go up, and dedupes when the hit resolves. Enforcing it at
+    placement made three 40% traps read as 2.744x on one strike in live
+    play, because the placement guard could not fire there (a live-read
+    hanging is named `live:<template id>` and matches no card in hand)
+    while the resolution had no guard at all.
+    """
     cards = dict(CARDS)
     register_enchants(cards, ["Fireblade"], "Sharpen Blade")
     sim = _sim(["Fireblade", "Fireblade+sharp"], cards)
@@ -46,9 +56,15 @@ def test_enchanted_and_plain_coexist_but_a_duplicate_does_not():
                         cards[nm].ops, "fire")
     assert [h.name for h in s.player.charms] == ["Fireblade",
                                                  "Fireblade+sharp"]
+
     sim.execute_ops(s, s.player, "Fireblade", cards["Fireblade"].source,
                     cards["Fireblade"].ops, "fire")
-    assert len(s.player.charms) == 2          # duplicate refused
+    assert len(s.player.charms) == 3          # the duplicate goes up too
+
+    # One strike: the two distinct keys apply, the duplicate does not.
+    mult = sim._consume_damage_charms(s, s.player, "fire")
+    assert abs(mult - 1.35 * 1.45) < 1e-9
+    assert [h.name for h in s.player.charms] == ["Fireblade"]   # banked
 
 
 def test_traps_stack_the_same_way_on_the_enemy():
