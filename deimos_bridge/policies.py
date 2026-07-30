@@ -26,6 +26,67 @@ default without invalidating any published table.
 """
 
 
+#: op kinds that carry the cast's real target, in the order they decide
+#: it. A card whose first op is a self-charm is a self-cast even if a
+#: later op mentions an enemy (Feint places a ward on both sides).
+TARGET_OPS = ("hit", "dot", "drain", "charm", "ward", "prism", "heal",
+              "absorb", "dispel", "stun", "aura")
+
+
+def primary_target(card):
+    """'self' | 'enemy' | 'enemies' | 'ally' | 'allies' | 'global' | None.
+
+    Reads it off the card's own ops rather than guessing from its kind,
+    because the data already carries it and the kinds do not map cleanly
+    -- a 'trap' goes on an enemy, a 'blade' on the caster, and both are
+    charms.
+    """
+    ops = getattr(card, "ops", None) or []
+    if not ops:
+        return None
+    for want in TARGET_OPS:
+        for op in ops:
+            if op.get("op") == want:
+                return op.get("tgt")
+    return ops[0].get("tgt")
+
+
+def aimed_at_one_enemy(card) -> bool:
+    """Does choosing *which* enemy mean anything for this card?
+
+    False for self-buffs, AoEs and globals -- picking a target index for
+    those is meaningless, and pretending otherwise puts a fabricated
+    enemy name in the decision log.
+    """
+    return primary_target(card) == "enemy"
+
+
+def focus_target(state) -> int:
+    """Which enemy to build the turn around.
+
+    The lowest-health living enemy. Two properties make this the right
+    default rather than an arbitrary one:
+
+      * It is **coherent**. A trap only pays off if the hit lands on the
+        same enemy, so the buff and the hit have to agree on a target.
+        Before this, nothing chose at all -- every cast went to
+        `enemies[0]`, whichever mob the participant list happened to put
+        first, and when that one died the rest of the plan silently moved
+        to a different mob with the traps left behind on a corpse.
+      * It is **stable**. Hitting the focus only lowers its health, so
+        the choice re-derives to the same enemy next round until it dies.
+        A rule like "highest health" would thrash between two mobs as
+        their totals crossed, splitting a buff stack across both.
+
+    Focus fire is also just correct play: a dead enemy stops attacking,
+    and every round a mob lives is another round of incoming damage.
+    """
+    live = [(i, e) for i, e in enumerate(state.enemies) if e.alive]
+    if not live:
+        return 0
+    return min(live, key=lambda ie: (ie[1].hp, ie[0]))[0]
+
+
 def _card_schools(card):
     """Damage schools a buff applies to, or None for universal.
 
@@ -50,12 +111,17 @@ def buff_matches(card, school):
     return schools is None or school in schools
 
 
-def pending_for(state, school):
-    """Buffs already on the board that apply to `school`.
+def pending_for(state, school, target=0):
+    """Buffs already on the board that apply to `school`, against `target`.
 
     Counts the same things `make_blade_stack` counts — charms on the
-    caster, wards on the primary enemy, the aura — but only those that
+    caster, wards on the target enemy, the aura — but only those that
     can actually act on this school, which it does not check.
+
+    `target` matters on any board with more than one mob. Counting wards
+    on `enemies[0]` while the hit is aimed at `enemies[1]` credits the
+    turn with traps that will never fire, so the stack stops early and
+    the nuke goes out unbuffed.
 
     That distinction is worth more than it sounds, and not only on mixed
     hands. A **Tri Trap** places three ward legs: fire, ice and storm. An
@@ -70,7 +136,8 @@ def pending_for(state, school):
     for h in state.player.charms:
         if h.kind == "damage" and h.percent > 0 and h.matches(school):
             n += 1
-    enemy = state.enemies[0] if state.enemies else None
+    enemy = (state.enemies[target]
+             if 0 <= target < len(state.enemies) else None)
     if enemy is not None:
         for h in enemy.wards:
             if h.kind == "prism" or (h.kind == "damage" and h.percent > 0
@@ -223,7 +290,20 @@ def _continuation():
     return _CONTINUATION
 
 
-def _rollout(sim, state, first_action, max_turns=12):
+def _split(action):
+    """(card, target) from whatever a policy returned.
+
+    `Sim._normalize_action` already accepts a `(card, target)` tuple, so
+    that is the contract policies use to aim -- no string encoding, and
+    it flows through `Sim.run`, `evaluate` and `evaluate_paired`
+    untouched.
+    """
+    if isinstance(action, tuple):
+        return action[0], (action[1] if len(action) > 1 else 0)
+    return action, 0
+
+
+def _rollout(sim, state, first_action, max_turns=12, target=0):
     """Score playing `first_action` now: (turns_to_kill, -damage_dealt).
 
     Lower is better on both, so `min` ranks them.
@@ -262,7 +342,7 @@ def _rollout(sim, state, first_action, max_turns=12):
     action = None
     if first_action is not None:
         for c in s.hand:
-            if c.name == first_action.name and probe.can_cast(s, c):
+            if c.name == first_action.name and probe.can_cast(s, c, target):
                 action = c
                 break
         if action is None:
@@ -271,7 +351,13 @@ def _rollout(sim, state, first_action, max_turns=12):
     for turn in range(1, max_turns + 1):
         if action is not None:
             try:
-                dealt += probe.cast(s, action) or 0.0
+                # Aimed. Casting the whole rollout at enemy 0 made every
+                # line look identical on a multi-mob board, so no target
+                # could ever be *chosen* -- and a rollout that traps one
+                # mob and hits another scores a buff that never fires.
+                if not probe.can_cast(s, action, target):
+                    return lost
+                dealt += probe.cast(s, action, target) or 0.0
             except Exception:
                 return lost
         if not enemy_alive():
@@ -285,7 +371,11 @@ def _rollout(sim, state, first_action, max_turns=12):
         if not s.player.alive:
             return lost
 
-        action = continuation(probe, s)
+        action, target = _split(continuation(probe, s))
+        if not (0 <= target < len(s.enemies)) or not s.enemies[target].alive:
+            # The focus died to the move just played; let the
+            # continuation re-aim rather than casting into a corpse.
+            target = focus_target(s)
 
     return max_turns + 1, -dealt
 
@@ -311,20 +401,40 @@ def greedy_ttk(max_turns: int = 12):
     and diminishing returns on a fourth blade all come out of the
     arithmetic rather than a hand-tuned count.
 
-    Slower than the heuristics -- roughly (hand size + 1) rollouts per
-    decision -- which is nothing next to a live planning phase.
+    **Every candidate carries a target.** A move is a (card, enemy) pair,
+    not a card, because on a board with a boss and a minion those score
+    differently and the difference is the whole decision: a trap is worth
+    nothing unless the hit it is buying lands on the same mob. Before
+    this the rollout cast everything at `enemies[0]`, so every target
+    scored identically and none could be chosen -- the live handler then
+    clicked whichever mob the participant list put first, which is how
+    traps ended up spread across two enemies.
+
+    Slower than the heuristics -- roughly (castable × live enemies + 1)
+    rollouts per decision -- which is still nothing next to a live
+    planning phase.
     """
 
     def strat(sim, s):
         from w101_sim import castable
 
+        foes = [i for i, e in enumerate(s.enemies) if e.alive]
+        if not foes:
+            foes = [0]
+
         candidates = []
         seen = set()
         for card in s.hand:
-            if card.name in seen or not sim.can_cast(s, card):
+            if card.name in seen:
+                continue
+            # A self-buff or an AoE has one version of itself; only a
+            # single-enemy card is worth rolling out once per mob.
+            aims = foes if aimed_at_one_enemy(card) else foes[:1]
+            playable = [t for t in aims if sim.can_cast(s, card, t)]
+            if not playable:
                 continue
             seen.add(card.name)
-            candidates.append(card)
+            candidates.extend((card, t) for t in playable)
 
         if not candidates:
             return None
@@ -334,9 +444,10 @@ def greedy_ttk(max_turns: int = 12):
         # damage already dealt cannot be undone by a heal, a shield or a
         # fizzle on a later turn.
         scored = []
-        for card in candidates:
-            turns, neg_damage = _rollout(sim, s, card, max_turns)
-            scored.append(((turns, neg_damage, -card.damage), card))
+        for card, target in candidates:
+            turns, neg_damage = _rollout(sim, s, card, max_turns, target)
+            scored.append(((turns, neg_damage, -card.damage, target),
+                           (card, target)))
         best_score, best_action = min(scored, key=lambda sc: sc[0])
 
         # Passing is a real move -- banking a pip for a bigger hit next
@@ -359,7 +470,33 @@ def greedy_ttk(max_turns: int = 12):
     return strat
 
 
-def _buff_options(sim, s, school):
+def castable_at(sim, s, kind, target=0):
+    """`w101_sim.castable`, but legal against the mob being aimed at.
+
+    `castable` calls `can_cast(s, c)` with the default target, so on a
+    board with more than one enemy it answers about `enemies[0]`
+    regardless of where the cast is going. That is invisible while
+    nothing aims -- and the moment something does, it produces a policy
+    that picks a card the engine then refuses.
+
+    The rule it gets wrong is the duplicate-placement one: Wizard101 will
+    not let the same trap sit on the same mob twice (`Sim.can_cast`,
+    HANGING branch). So a deck holding three Ice Traps *cannot* stack
+    them on one enemy; asking about the wrong enemy means the policy
+    offers a second Ice Trap on a mob that already has one, casts
+    nothing, and burns the round.
+    """
+    out = []
+    for c in s.hand:
+        if c.kind != kind:
+            continue
+        at = target if aimed_at_one_enemy(c) else 0
+        if sim.can_cast(s, c, at):
+            out.append(c)
+    return out
+
+
+def _buff_options(sim, s, school, target=0):
     """The buffs worth casting toward a hit of `school`.
 
     Mirrors `make_blade_stack.buffs` exactly -- blades and traps compete
@@ -374,49 +511,63 @@ def _buff_options(sim, s, school):
     still multiplies an ice hit that a prism is about to turn into myth,
     and a prism is never the wrong school for the hit it converts.
     """
-    from w101_sim import castable
-
-    options = [c for c in castable(sim, s, "blade") + castable(sim, s, "trap")
+    options = [c for c in castable_at(sim, s, "blade", target)
+               + castable_at(sim, s, "trap", target)
                if buff_matches(c, school)]
     if s.player.aura is None:
-        options = options + castable(sim, s, "aura")
-    return options or castable(sim, s, "prism")
+        options = options + castable_at(sim, s, "aura", target)
+    return options or castable_at(sim, s, "prism", target)
 
 
 def school_aware_blade_stack(n_buffs=3):
-    """Stack up to `n_buffs` buffs that apply to the nuke, then fire it."""
+    """Stack up to `n_buffs` buffs that apply to the nuke, then fire it.
+
+    Everything it plays is aimed at one focus enemy (`focus_target`), and
+    that is not cosmetic: a trap on one mob followed by a nuke on another
+    is two wasted turns, and it is what the un-aimed version produced on
+    every board with a minion on it.
+    """
 
     def strat(sim, s):
-        from w101_sim import castable, effective_pips
+        from w101_sim import effective_pips
+
+        focus = focus_target(s)
+
+        def aimed(card):
+            """The move, carrying its target if the target means anything."""
+            if card is None:
+                return None
+            return (card, focus) if aimed_at_one_enemy(card) else (card, 0)
 
         nuke = choose_nuke(sim, s)
         if nuke is None:
             # No hit in hand: bank the best buff on offer, else pass.
-            options = castable(sim, s, "blade") + castable(sim, s, "trap")
-            return max(options, key=lambda c: c.percent, default=None)
+            options = (castable_at(sim, s, "blade", focus)
+                       + castable_at(sim, s, "trap", focus))
+            return aimed(max(options, key=lambda c: c.percent, default=None))
 
         school = nuke.school
-        if pending_for(s, school) < n_buffs:
-            options = _buff_options(sim, s, school)
+        if pending_for(s, school, focus) < n_buffs:
+            options = _buff_options(sim, s, school, focus)
             if options:
-                return max(options, key=lambda c: c.percent)
+                return aimed(max(options, key=lambda c: c.percent))
 
-        if sim.afford(s, nuke) and not nuke.x_pips:
-            return nuke
+        if sim.can_cast(s, nuke, focus) and not nuke.x_pips:
+            return aimed(nuke)
         if nuke.x_pips and effective_pips(sim, s, nuke) >= 7:
-            return nuke
+            return aimed(nuke)
 
         # Cannot fire the one we were building toward -- keep building.
-        options = _buff_options(sim, s, school)
+        options = _buff_options(sim, s, school, focus)
         if options:
-            return max(options, key=lambda c: c.percent)
+            return aimed(max(options, key=lambda c: c.percent))
 
         # Nothing to build with either. Fire the biggest hit we CAN
         # afford rather than passing: a level-6 wizard holding a 1-pip
         # Frost Beetle and a 2-pip Snow Serpent, with one pip and no
         # blades, was passing the turn away entirely.
-        affordable = [c for c in castable(sim, s, "damage")
-                      + castable(sim, s, "drain") if not c.x_pips]
-        return max(affordable, key=lambda c: c.damage, default=None)
+        affordable = [c for c in castable_at(sim, s, "damage", focus)
+                      + castable_at(sim, s, "drain", focus) if not c.x_pips]
+        return aimed(max(affordable, key=lambda c: c.damage, default=None))
 
     return strat

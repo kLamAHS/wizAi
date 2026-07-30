@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (QApplication, QComboBox, QFileDialog, QGroupBox,
                              QMessageBox, QProgressBar, QPushButton, QSpinBox, QCheckBox,
                              QTabWidget, QVBoxLayout, QWidget)
 
+from ..hotkeys import DEFAULTS as HOTKEY_DEFAULTS, KEY_CHOICES as HOTKEY_CHOICES
 from ..telemetry import Telemetry
 from .deckpicker import pick_deck
 from .live import LiveWorker
@@ -37,12 +38,16 @@ class TrainWorker(QThread):
     failed = pyqtSignal(str)
 
     def __init__(self, cards, deck, school, episodes, player_hp=800,
-                 boss_hp=1200):
+                 boss_hp=1200, player_stats=None):
         super().__init__()
         self.cards, self.deck = cards, deck
         self.school, self.episodes = school, episodes
         self.player_hp = player_hp
         self.boss_hp = boss_hp
+        #: the wizard's real gear, read off the client. Training without
+        #: it prices every hit as though the wizard were naked, so the Q
+        #: table is learned for a fight nobody is going to play.
+        self.player_stats = dict(player_stats or {})
 
     def run(self):
         try:
@@ -58,7 +63,8 @@ class TrainWorker(QThread):
                 self.cards, self.deck, self.school,
                 Boss(name="training dummy", hp=self.boss_hp, school="ice",
                      dmg=max(30, self.player_hp // 12)),
-                episodes=self.episodes, player_hp=self.player_hp)
+                episodes=self.episodes, player_hp=self.player_hp,
+                player_stats=self.player_stats)
             from w101_sim import evaluate
             kill, ttk = evaluate(sim, agent.policy(), n=800)
             self.progress.emit(self.episodes, self.episodes, kill * 100, ttk)
@@ -76,6 +82,10 @@ class MainWindow(QMainWindow):
         self.agent = None
         self.worker = None      # training
         self.live = None        # the live fight
+        #: the wizard's gear, filled in from the client on connect.
+        #: Training uses it, which is the whole point: a Q table learned
+        #: for a naked wizard is solving a fight nobody will play.
+        self.player_stats = {}
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -261,6 +271,29 @@ class MainWindow(QMainWindow):
         quest_row.addStretch()
         outer.addLayout(quest_row)
 
+        key_row = QHBoxLayout()
+        self.use_hotkeys = QCheckBox("Hotkeys")
+        self.use_hotkeys.setChecked(True)
+        self.use_hotkeys.setToolTip(
+            "Do the two actions above without leaving the game. These are "
+            "system-wide keys — they fire whatever window has focus, and "
+            "while the run is connected the key is taken away from every "
+            "other program, Wizard101 included. Pick keys the game does "
+            "not use.")
+        key_row.addWidget(self.use_hotkeys)
+
+        self.hotkey_boxes = {}
+        for action, label in (("teleport", "tp to quest"),
+                              ("dialogue", "advance dialogue")):
+            key_row.addWidget(QLabel(label))
+            combo = QComboBox()
+            combo.addItems(HOTKEY_CHOICES)
+            combo.setCurrentText(HOTKEY_DEFAULTS[action])
+            key_row.addWidget(combo)
+            self.hotkey_boxes[action] = combo
+        key_row.addStretch()
+        outer.addLayout(key_row)
+
         script_row = QHBoxLayout()
         self.use_script = QCheckBox("Run script")
         self.use_script.setToolTip(
@@ -287,18 +320,43 @@ class MainWindow(QMainWindow):
         outer.addWidget(self.train_progress)
         return box
 
+    def _gear_line(self):
+        """What the simulator thinks the wizard is wearing.
+
+        Worth a line of its own: with no gear read, every hit is priced
+        as though the wizard were naked, and the policy then optimises
+        that fight rather than the one on screen.
+        """
+        st = self.player_stats
+        if not st:
+            return ("gear not read — hits are priced as if you wore none, "
+                    "so the policy is solving a different fight")
+        # The school the stats were *read for*, not whatever the dropdown
+        # says now: gear is read once on connect, and re-keying it off a
+        # combo the user can move afterwards would report 0%.
+        damage = st.get("damage") or {}
+        school, pct = next(iter(damage.items()), (self.school.currentText(),
+                                                  0.0))
+        bits = [f"{pct * 100:.0f}% {school} damage"]
+        for key, label in (("pierce", "pierce"), ("accuracy", "accuracy"),
+                           ("crit", "crit")):
+            if st.get(key):
+                bits.append(f"{st[key] * 100:.0f}% {label}")
+        return "gear: " + ", ".join(bits) + " — training uses these"
+
     def _update_policy_state(self):
         """Say which policy is driving, and how often it really decided."""
         mix = self.tel.policy_mix()
         if not mix:
             self.policy_state.setText(
                 "policy selected: " + self.policy.currentText() +
-                " — no rounds played yet")
+                " — no rounds played yet\n" + self._gear_line())
             self.policy_state.setStyleSheet(f"color: {PALETTE['muted']}")
             return
         total = sum(mix.values())
         parts = [f"{name} ×{n}" for name, n in mix.items()]
-        text = f"{total} round(s): " + "  ·  ".join(parts)
+        text = (f"{total} round(s): " + "  ·  ".join(parts)
+                + "\n" + self._gear_line())
 
         colour = PALETTE["muted"]
         live = self.live if (self.live and self.live.isRunning()) else None
@@ -352,7 +410,8 @@ class MainWindow(QMainWindow):
         self.worker = TrainWorker(cards, deck, self.school.currentText(),
                                   self.episodes.value(),
                                   player_hp=self.player_hp.value(),
-                                  boss_hp=self.boss_hp.value())
+                                  boss_hp=self.boss_hp.value(),
+                                  player_stats=self.player_stats)
         self.worker.progress.connect(self.on_progress)
         self.worker.finished_ok.connect(self.on_trained)
         self.worker.failed.connect(self.on_train_failed)
@@ -439,6 +498,27 @@ class MainWindow(QMainWindow):
         self.live.request(coro_name)
         self.status.setText(label)
 
+    def hotkey_bindings(self):
+        """{action: key}, or empty when hotkeys are off.
+
+        Two actions may not share a key: `RegisterHotKey` would take the
+        first and silently refuse the second, so the second action would
+        appear bound and do nothing.
+        """
+        if not self.use_hotkeys.isChecked():
+            return {}
+        out, taken = {}, set()
+        for action, box in self.hotkey_boxes.items():
+            key = box.currentText()
+            if key in taken:
+                self.status.setText(
+                    f"{key} is bound twice — only the first takes; give "
+                    f"'{action}' a different key")
+                continue
+            taken.add(key)
+            out[action] = key
+        return out
+
     def on_teleport(self):
         self._quest_action("teleport", "teleporting to the quest marker…")
 
@@ -456,6 +536,11 @@ class MainWindow(QMainWindow):
         """
         if self.live is not None and self.live.isRunning():
             self.live.set_policy(name, agent=self.agent)
+        self._update_policy_state()
+
+    def on_gear_read(self, stats):
+        """The wizard's real damage/accuracy/pierce, off the client."""
+        self.player_stats = dict(stats or {})
         self._update_policy_state()
 
     def on_hp_read(self, hp):
@@ -491,13 +576,15 @@ class MainWindow(QMainWindow):
                                collect_wisps=self.collect_wisps.isChecked(),
                                use_potions=self.use_potions.isChecked(),
                                script=(self.script_source
-                                       if self.use_script.isChecked() else ""))
+                                       if self.use_script.isChecked() else ""),
+                               hotkeys=self.hotkey_bindings())
         self.live.status.connect(self.on_live_status)
         self.live.round_done.connect(self.on_round)
         self.live.fight_done.connect(lambda n: self.refresh_all())
         self.live.failed.connect(self.on_live_failed)
         self.live.finished_ok.connect(self.on_live_finished)
         self.live.hp_read.connect(self.on_hp_read)
+        self.live.gear_read.connect(self.on_gear_read)
         self.live.policy_changed.connect(self.on_policy_installed)
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)

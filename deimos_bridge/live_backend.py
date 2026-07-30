@@ -14,8 +14,9 @@ click.
     await SprintyCombat(client, backend).handle_combat()
 
 Policies are just callables, which is the whole reason this is short:
-wizAi's in-fight contract is `policy(sim, state) -> Card | str | None`
-(`w101_sim.py:1978`, `:2128`), and its action strings are already card
+wizAi's in-fight contract is
+`policy(sim, state) -> Card | (Card, target) | str | None`
+(`w101_sim.py:1994`, `:2128`), and its action strings are already card
 names -- optionally `"name@i"` for a target index (`rl_agent.py:97-107`).
 That maps onto `NamedSpell(name)` plus a `TargetData` almost directly.
 
@@ -26,31 +27,12 @@ against `mock_client`.
 import random
 
 from .live_state import NameResolver, WIKI_TO_GAME, read_state
-
-
-#: op kinds that carry the cast's real target, in the order they decide
-#: it. A card whose first op is a self-charm is a self-cast even if a
-#: later op mentions an enemy (Feint places a ward on both sides).
-_TARGET_OPS = ("hit", "dot", "drain", "charm", "ward", "prism", "heal",
-               "absorb", "dispel", "stun", "aura")
-
-
-def _primary_target(card):
-    """'self' | 'enemy' | 'enemies' | 'ally' | 'allies' | 'global' | None.
-
-    Reads it off the card's own ops rather than guessing from its kind,
-    because the data already carries it and the kinds do not map cleanly
-    -- a 'trap' goes on an enemy, a 'blade' on the caster, and both are
-    charms.
-    """
-    ops = getattr(card, "ops", None) or []
-    if not ops:
-        return None
-    for want in _TARGET_OPS:
-        for op in ops:
-            if op.get("op") == want:
-                return op.get("tgt")
-    return ops[0].get("tgt")
+#: Where a card wants to be clicked. Lives in `policies` because it is
+#: card reasoning that both sides need -- the policies use it to decide
+#: whether choosing an enemy means anything at all, this module uses it
+#: to decide what the mouse clicks after the card.
+from .policies import TARGET_OPS as _TARGET_OPS       # noqa: F401 re-export
+from .policies import primary_target as _primary_target
 
 
 class PolicyDecision:
@@ -61,11 +43,16 @@ class PolicyDecision:
     """
 
     def __init__(self, card_name=None, target_index=None, passing=False,
-                 reason="", policy=""):
+                 reason="", policy="", target_kind=None):
         self.card_name = card_name
         self.target_index = target_index
         self.passing = passing
         self.reason = reason
+        #: what the card is aimed at -- 'enemy', 'self', 'enemies', ... .
+        #: Kept so a log can say "on myself" rather than naming a mob the
+        #: cast never touched; `target_index` only means something when
+        #: this is 'enemy'.
+        self.target_kind = target_kind
         #: which policy played this round, and by which path. Recorded
         #: per decision rather than per run because the policy can be
         #: swapped mid-run, and because a trained policy falling through
@@ -90,7 +77,8 @@ class WizAiBackend:
     """
 
     def __init__(self, policy, cards, school, decklist=None, cast_time=0.3,
-                 on_decision=None, rules=None, catalog=None, policy_name=""):
+                 on_decision=None, rules=None, catalog=None, policy_name="",
+                 player_stats=None):
         """
         Args:
             policy:   `policy(sim, state) -> Card | str | None`, wizAi's
@@ -103,6 +91,9 @@ class WizAiBackend:
                       logging a live run.
             policy_name: what to call `policy` on screen. Purely a label;
                       the decision loop never reads it.
+            player_stats: the wizard's gear, as `Sim(player_stats=...)`
+                      takes it. See `live_state.read_player_stats`;
+                      leaving it empty models a wizard wearing nothing.
         """
         #: The policy and its display name, held as one tuple so that
         #: swapping is a single atomic rebind. Two attributes would let a
@@ -114,6 +105,9 @@ class WizAiBackend:
         self.cards = cards
         self.school = school
         self.decklist = list(decklist or [])
+        #: settable after construction -- the stats are read once the
+        #: hooks are up, which is after the backend exists
+        self.player_stats = dict(player_stats or {})
         self.cast_time = cast_time
         self.combat = None
         self.on_decision = on_decision
@@ -209,6 +203,20 @@ class WizAiBackend:
         if choice is None:
             return PolicyDecision(passing=True, reason="policy chose to pass")
 
+        # `(card, target)` is wizAi's own aimed-move form --
+        # `Sim._normalize_action` unpacks exactly this tuple, so a policy
+        # that aims works unchanged in the simulator, in `evaluate`, and
+        # here. It is how a trap and the nuke it is buying agree on one
+        # mob; without it every cast went to whichever enemy the
+        # participant list happened to put first.
+        aimed = None
+        if isinstance(choice, tuple):
+            choice, aimed = (choice + (None,))[:2]
+            if choice is None:
+                return PolicyDecision(passing=True,
+                                      reason="policy chose to pass")
+
+        card = choice if hasattr(choice, "ops") else None
         name = getattr(choice, "name", choice)
         if not isinstance(name, str):
             return PolicyDecision(passing=True,
@@ -224,7 +232,7 @@ class WizAiBackend:
         # Only a trailing *integer* is a target index. rpartition takes the
         # last "@", so a targeted item card ("Imp@item@0") still splits
         # correctly into ("Imp@item", 0).
-        target_index = None
+        target_index = aimed
         if "@" in name:
             head, _, idx = name.rpartition("@")
             if idx.isdigit():
@@ -239,8 +247,20 @@ class WizAiBackend:
                 reason=f"{name!r} is not a castable card in hand "
                        f"({sorted(read.hand_cards)})")
 
+        # A target index on a self-buff or an AoE is meaningless, and
+        # carrying one would put a fabricated enemy name in the log --
+        # the decision row would claim the blade went "on Bastilla".
+        card = card if card is not None else self.cards.get(name)
+        kind = _primary_target(card) if card is not None else "enemy"
+        if kind != "enemy":
+            target_index = None
+        elif target_index is not None:
+            n = len(read.state.enemies)
+            if not (0 <= target_index < n):
+                target_index = None
+
         return PolicyDecision(card_name=name, target_index=target_index,
-                              reason="policy choice")
+                              target_kind=kind, reason="policy choice")
 
     def _why(self, policy, label=""):
         """Which policy just decided, and by which path.
@@ -289,6 +309,10 @@ class WizAiBackend:
                       school=enemy.school, dmg=0),
             rules=self.rules or Rules(),
             player_hp=int(read.state.player.max_hp) or 3000,
+            # The wizard's real gear. Empty means "no gear at all", so
+            # every hit is priced below what it lands for and the policy
+            # is optimising a different fight than the one on screen.
+            player_stats=self.player_stats,
             rng=random.Random(0),
         )
 

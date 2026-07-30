@@ -389,6 +389,95 @@ class LiveRead:
             (total - len(self.hidden)) / total
 
 
+#: `GameStats`'s by-school vectors are indexed by Deimos's
+#: `school_list_ids` -- the same 0..15 ordering `deimos_damage` already
+#: ports. Only the seven playable schools matter here.
+_SCHOOL_SLOT = {"fire": 0, "ice": 1, "storm": 2, "myth": 3, "life": 4,
+                "death": 5, "balance": 6}
+
+
+def _stat_for(vector, school, universal=0.0):
+    """One school's entry out of a by-school stat vector, plus the
+    'all schools' scalar the game keeps separately.
+
+    Deimos does the same addition in `combat_math.real_stat` -- a stat
+    lives in two places and reading only the vector silently drops
+    everything granted as universal, which on low-level gear is most of
+    it.
+    """
+    slot = _SCHOOL_SLOT.get(school)
+    base = 0.0
+    if slot is not None and vector and slot < len(vector):
+        try:
+            base = float(vector[slot])
+        except (TypeError, ValueError):
+            base = 0.0
+    return base + float(universal or 0.0)
+
+
+async def read_player_stats(client, school: str) -> dict:
+    """The wizard's real gear, as `Sim(player_stats=...)` wants it.
+
+    Without this the simulator models a wizard with **no gear at all**:
+    zero damage bonus, zero pierce, base accuracy. Every hit is then
+    priced below what it really lands for, so the policy is solving a
+    different fight than the one being played -- and it changes real
+    decisions. Measured on a 2000hp mob with an ice deck, `greedy_ttk`
+    opens with a trap 100% of the time given 9% damage and 4% pierce, and
+    0% of the time given nothing; on a 400hp mob both open with the hit.
+    Which way the error goes depends on the board, so there is no safe
+    direction to guess in.
+
+    Returns `{}` if the stats will not read; the caller then gets the old
+    no-gear behaviour rather than a crash, and can say so.
+    """
+    stats = getattr(client, "stats", None)
+    if stats is None:
+        return {}
+
+    async def vec(name):
+        try:
+            return await getattr(stats, name)()
+        except Exception:
+            return []
+
+    async def one(name):
+        try:
+            return float(await getattr(stats, name)())
+        except Exception:
+            return 0.0
+
+    school = (school or "").lower()
+    dmg = _stat_for(await vec("dmg_bonus_percent"), school,
+                    await one("dmg_bonus_percent_all"))
+    acc = _stat_for(await vec("acc_bonus_percent"), school,
+                    await one("acc_bonus_percent_all"))
+    pierce = _stat_for(await vec("ap_bonus_percent"), school,
+                       await one("ap_bonus_percent_all"))
+    resist = _stat_for(await vec("dmg_reduce_percent"), school,
+                       await one("dmg_reduce_percent_all"))
+    crit = await one("critical_hit_percent_all")
+    block = await one("block_percent_all")
+
+    out = {}
+    if dmg:
+        out["damage"] = {school: dmg}
+    if acc:
+        out["accuracy"] = acc
+    if pierce:
+        out["pierce"] = pierce
+    if resist:
+        out["resist"] = {"*": resist}
+    # The game reports crit and block as ratings on some builds and
+    # percentages on others; anything above 1.0 is a rating, and feeding
+    # a rating in as a probability would make every cast a critical.
+    if 0.0 < crit <= 1.0:
+        out["crit"] = crit
+    if 0.0 < block <= 1.0:
+        out["block"] = block
+    return out
+
+
 async def read_state(combat, resolver: NameResolver, school: str,
                      deck_remaining=None) -> LiveRead:
     """Build a wizAi `State` from a live combat.

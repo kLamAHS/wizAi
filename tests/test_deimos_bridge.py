@@ -490,13 +490,20 @@ def test_a_real_starter_hand_produces_a_cast():
 
 
 def test_backend_understands_a_targeted_action():
-    """`rl_agent` emits 'name@i' on a multi-enemy board."""
-    be = _backend(policy=lambda sim, s: "Fireblade@1")
-    me = MockMember("Wizard", 2000, client=True, normal_pips=4)
+    """`rl_agent` emits 'name@i' on a multi-enemy board.
+
+    On a *hit*. This used to ask for "Fireblade@1" and assert the index
+    survived -- but a Fireblade goes on the caster, so the index was
+    never clicked, only written into the log. The parsing is the thing
+    worth pinning, so it is pinned on a card the index can mean
+    something for; the self-buff case has its own test.
+    """
+    be = _backend(policy=lambda sim, s: "Sunbird@1")
+    me = MockMember("Wizard", 2000, client=True, normal_pips=6)
     foes = [MockMember("A", 500, monster=True), MockMember("B", 700, monster=True)]
-    be.attach_combat(MockCombat([me] + foes, [MockCard("Fireblade")]))
+    be.attach_combat(MockCombat([me] + foes, [MockCard("Sunbird")]))
     d = run(be.decide())
-    assert d.card_name == "Fireblade"
+    assert d.card_name == "Sunbird"
     assert d.target_index == 1
 
 
@@ -983,3 +990,243 @@ def test_a_swap_does_not_land_halfway_through_a_round():
 
     nxt = run(be.decide())                    # the next round is swapped
     assert (nxt.card_name, nxt.policy) == ("Sunbird", "after")
+
+
+# --------------------------------------------------------------- aiming
+def _two_mobs(hand, pips=6, boss_hp=800, minion_hp=250, deck=None):
+    """A boss and a minion -- the board where targeting starts to matter."""
+    import random
+
+    from data_full import load_spells_full
+    from w101_sim import Actor, Boss, Sim, State
+
+    cards = load_spells_full()
+    deck = deck or (["Frost Beetle"] * 3 + ["Ice Trap"] * 3
+                    + ["Snow Serpent"] * 3)
+    sim = Sim(cards, deck, "ice",
+              Boss(name="boss", hp=boss_hp, school="fire", dmg=40),
+              rng=random.Random(4), player_hp=800)
+    p = Actor(name="W", school="ice", hp=800, max_hp=800, team=0,
+              norm_pips=pips)
+    p.hand = [cards[n] for n in hand]
+    p.deck = [cards[n] for n in deck]
+    foes = [Actor(name="boss", school="fire", hp=boss_hp, max_hp=boss_hp,
+                  team=1),
+            Actor(name="minion", school="fire", hp=minion_hp,
+                  max_hp=minion_hp, team=1)]
+    return sim, State(p, foes), cards
+
+
+def _play(sim, s, policy, turns=8):
+    """(card name, target name) per turn, playing the moves out."""
+    from deimos_bridge.policies import _split
+
+    out = []
+    for _ in range(turns):
+        if not any(e.alive for e in s.enemies):
+            break
+        card, tgt = _split(policy(sim, s))
+        if card is None:
+            out.append(("pass", None))
+        else:
+            who = s.enemies[tgt].name if 0 <= tgt < len(s.enemies) else None
+            out.append((card.name, who))
+            if sim.can_cast(s, card, tgt):
+                sim.cast(s, card, tgt)
+        sim.end_round(s)
+    return out
+
+
+def test_policies_aim_at_a_specific_enemy():
+    """They used to return a bare card. Nothing chose a target, so the
+    live handler clicked `enemy_members[0]` -- whichever mob the
+    participant list happened to put first -- and when that one died
+    everything silently moved to a different mob."""
+    from deimos_bridge.policies import (greedy_ttk, school_aware_blade_stack,
+                                        _split)
+
+    for policy in (greedy_ttk(), school_aware_blade_stack(3)):
+        sim, s, _ = _two_mobs(["Ice Trap", "Snow Serpent", "Frost Beetle"])
+        card, target = _split(policy(sim, s))
+        assert card is not None
+        assert isinstance(target, int) and 0 <= target < len(s.enemies)
+
+
+def test_a_trap_and_the_hit_it_buys_land_on_the_same_mob():
+    """The reported symptom: traps spread across two enemies. A trap on
+    one mob followed by a nuke on another is two wasted turns -- the
+    charm never fires."""
+    from deimos_bridge.policies import school_aware_blade_stack
+
+    sim, s, _ = _two_mobs(["Ice Trap", "Ice Trap", "Snow Serpent",
+                           "Frost Beetle"])
+    played = _play(sim, s, school_aware_blade_stack(3), turns=4)
+    traps = {who for name, who in played if name == "Ice Trap"}
+    hits = {who for name, who in played if name in ("Snow Serpent",
+                                                    "Frost Beetle")}
+    assert len(traps) == 1, played          # all traps on ONE mob
+    assert traps == hits, played            # and that is the mob we hit
+
+
+def test_the_focus_does_not_wander_while_the_target_lives():
+    """`focus_target` picks the lowest-health living enemy, which is
+    self-reinforcing: hitting it only lowers its health further. A rule
+    that wandered would split a buff stack across two mobs."""
+    from deimos_bridge.policies import school_aware_blade_stack
+
+    sim, s, _ = _two_mobs(["Ice Trap", "Snow Serpent", "Frost Beetle",
+                           "Snow Serpent"], minion_hp=600, boss_hp=900)
+    played = _play(sim, s, school_aware_blade_stack(3), turns=3)
+    assert len({who for _, who in played}) == 1, played
+
+
+def test_focus_moves_on_once_the_target_dies():
+    from deimos_bridge.policies import focus_target
+    from w101_sim import Actor, State
+
+    p = Actor(name="W", school="ice", hp=800, max_hp=800, team=0)
+    a = Actor(name="a", school="fire", hp=100, max_hp=500, team=1)
+    b = Actor(name="b", school="fire", hp=300, max_hp=500, team=1)
+    s = State(p, [a, b])
+    assert focus_target(s) == 0
+    a.hp = 0
+    assert focus_target(s) == 1
+
+
+def test_the_rollout_scores_targets_apart():
+    """It cast every candidate at enemy 0, so on a multi-mob board every
+    target scored identically -- and a scoring function that cannot tell
+    two targets apart can never choose between them.
+
+    Made unambiguous by putting a trap on one mob: the same nuke is worth
+    more against it, and only an aimed rollout can see that."""
+    from deimos_bridge.policies import _rollout
+
+    sim, s, _ = _two_mobs(["Ice Trap", "Snow Serpent"], boss_hp=900,
+                          minion_hp=900)
+    sim.cast(s, s.hand[0], 1)                    # trap the second mob
+    nuke = next(c for c in s.hand if c.name == "Snow Serpent")
+
+    _, dmg_untrapped = _rollout(sim, s, nuke, 12, 0)
+    _, dmg_trapped = _rollout(sim, s, nuke, 12, 1)
+    # `_rollout` returns damage negated, so lower is more damage.
+    assert dmg_trapped < dmg_untrapped, (dmg_trapped, dmg_untrapped)
+
+
+def test_castable_at_respects_the_duplicate_placement_rule():
+    """Wizard101 refuses a second identical trap on the same mob, and
+    `Sim.can_cast` knows it -- but `w101_sim.castable` asks about
+    `enemies[0]` whatever the cast is aimed at. Aiming without this makes
+    the policy pick a card the engine then refuses, wasting the round."""
+    from w101_sim import castable
+
+    from deimos_bridge.policies import castable_at
+
+    sim, s, cards = _two_mobs(["Ice Trap", "Ice Trap", "Snow Serpent"])
+    sim.cast(s, s.hand[0], 1)                    # trap the minion
+
+    # `castable` still offers Ice Trap, because it only ever asks about
+    # enemy 0 -- which has no trap on it.
+    assert any(c.name == "Ice Trap" for c in castable(sim, s, "trap"))
+    assert not castable_at(sim, s, "trap", 1)    # illegal on the minion
+    assert castable_at(sim, s, "trap", 0)        # still legal on the boss
+
+
+def test_backend_accepts_an_aimed_move():
+    be = _backend(policy=lambda sim, s: (s.hand[0], 1))
+    me = MockMember("Wizard", 2000, client=True, normal_pips=4, team_id=0)
+    foes = [MockMember("A", 500, monster=True, team_id=1),
+            MockMember("B", 700, monster=True, team_id=1)]
+    be.attach_combat(MockCombat([me] + foes, [MockCard("Sunbird")]))
+    d = run(be.decide())
+    assert d.card_name == "Sunbird"
+    assert d.target_index == 1
+
+
+def test_a_self_buff_carries_no_enemy_target():
+    """A blade goes on the caster. Carrying an index for it would put a
+    mob in the decision log that the cast never touched."""
+    be = _backend(policy=lambda sim, s: (s.hand[0], 1))
+    me = MockMember("Wizard", 2000, client=True, normal_pips=4, team_id=0)
+    foes = [MockMember("A", 500, monster=True, team_id=1),
+            MockMember("B", 700, monster=True, team_id=1)]
+    be.attach_combat(MockCombat([me] + foes, [MockCard("Fireblade")]))
+    d = run(be.decide())
+    assert d.card_name == "Fireblade"
+    assert d.target_kind == "self"
+    assert d.target_index is None
+
+
+def test_an_out_of_range_target_is_dropped_not_clicked():
+    """A stale index -- the mob it named died between the read and the
+    decision -- must fall back to the handler's default rather than
+    indexing off the end of the board."""
+    be = _backend(policy=lambda sim, s: (s.hand[0], 7))
+    be.attach_combat(simple_fight(hand=("Sunbird",), pips=6))
+    d = run(be.decide())
+    assert d.card_name == "Sunbird"
+    assert d.target_index is None
+
+
+# ----------------------------------------------- the trained policy's aiming
+def _q_board(hand, deck=None, foes=((900, "boss"), (400, "minion"))):
+    import random
+
+    from data_full import load_spells_full
+    from w101_sim import Actor, Boss, Sim, State
+
+    cards = load_spells_full()
+    deck = deck or (["Ice Trap"] * 3 + ["Snow Serpent"] * 3)
+    sim = Sim(cards, deck, "ice",
+              Boss(name="boss", hp=foes[0][0], school="fire", dmg=40),
+              rng=random.Random(0), player_hp=900)
+    p = sim.new_state().player
+    p.hp = p.max_hp = 900
+    p.norm_pips = 6
+    p.hand = [cards[n] for n in hand]
+    p.deck = [cards[n] for n in deck]
+    enemies = [Actor(name=n, school="fire", hp=hp, max_hp=hp, team=1)
+               for hp, n in foes]
+    return sim, State(p, enemies), cards
+
+
+def test_the_action_set_keeps_a_trap_legal_on_the_other_mob():
+    """`Featurizer.legal` asked `can_cast` once, at target 0, then
+    expanded over every foe. Once a trap sat on enemy 0 the card left the
+    action set entirely -- so the agent could not trap the minion, and
+    the only remaining way to spend a trap was not to."""
+    from rl_agent import Featurizer, apply_action
+
+    sim, s, cards = _q_board(["Ice Trap", "Ice Trap", "Snow Serpent"])
+    feat = Featurizer(cards, ["Ice Trap"] * 3 + ["Snow Serpent"] * 3)
+    assert "Ice Trap@0" in feat.legal(sim, s)
+
+    apply_action(sim, s, "Ice Trap@0")
+    now = feat.legal(sim, s)
+    assert "Ice Trap@0" not in now          # the boss refuses a second
+    assert "Ice Trap@1" in now              # the minion does not
+
+
+def test_an_action_aimed_at_a_mob_that_refuses_it_casts_nothing():
+    """Wizard101 will not place the same trap twice on one mob, and the
+    turn is spent either way -- so the action must not be offered."""
+    from rl_agent import Featurizer, apply_action
+
+    sim, s, cards = _q_board(["Ice Trap", "Ice Trap", "Snow Serpent"])
+    feat = Featurizer(cards, ["Ice Trap"] * 3 + ["Snow Serpent"] * 3)
+    apply_action(sim, s, "Ice Trap@0")
+    wards_before = len(s.enemies[0].wards)
+    apply_action(sim, s, "Ice Trap@0")      # would be a wasted round
+    assert len(s.enemies[0].wards) == wards_before
+    assert "Ice Trap@0" not in feat.legal(sim, s)
+
+
+def test_single_enemy_action_sets_are_unchanged():
+    """Target 0 is the only enemy in a 1v1, so every published table
+    predating the aiming work has to stay bit-identical."""
+    from rl_agent import Featurizer
+
+    sim, s, cards = _q_board(["Ice Trap", "Snow Serpent"],
+                             foes=((900, "boss"),))
+    feat = Featurizer(cards, ["Ice Trap"] * 3 + ["Snow Serpent"] * 3)
+    assert feat.legal(sim, s) == ["__pass__", "Ice Trap", "Snow Serpent"]

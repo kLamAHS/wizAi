@@ -183,11 +183,35 @@ Press **Play live** once and leave it connected. From there:
   buckets health as a fraction of the maximum, so a table trained
   against a guessed 800 and played on a 1,300 HP wizard indexes
   different states for the same board.
+- **Your gear is read too** — damage, accuracy, pierce and resist, per
+  school plus the "all schools" bonus the game keeps separately. Both
+  the live fight and training use it. Without it the simulator prices
+  every hit as though you were wearing nothing, and then optimises *that*
+  fight: on a 2000hp mob with an ice deck, `ttk-lookahead` opens with a
+  trap given 9% damage and 4% pierce, and opens with the hit given
+  neither. The line under the controls says which it is using.
 
 This ordering is the useful one, not a convenience. Both inputs to a good
 training run — the deck (the picker learns card names from what it saw in
 combat) and the health — only exist *after* you have been connected, so
 requiring a disconnect to train meant training on guesses.
+
+### Hotkeys
+
+*Teleport to quest* and *Advance dialogue* also bind to keys (F1 and F2
+by default), so you never have to alt-tab out of a full-screen client to
+use them. Pick the keys next to the **Hotkeys** checkbox.
+
+These are **system-wide** keys, via Win32 `RegisterHotKey`. Two
+consequences worth knowing before you bind something:
+
+- They fire whatever window has focus, not just the game.
+- While the run is connected the key is taken *away* from every other
+  program, Wizard101 included. Bind a key the game uses and you lose it
+  in the game until you press Stop.
+
+If another running program already owns the key, that binding is skipped
+with a message and the rest of the run continues — pick a different key.
 
 ### Is the model actually driving?
 

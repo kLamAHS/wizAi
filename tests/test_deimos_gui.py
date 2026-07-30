@@ -1263,7 +1263,11 @@ def _ice_board(deck, hand, pips, hp):
 
 
 def _name(action):
-    return getattr(action, "name", action) if action is not None else "PASS"
+    """Card name from a policy return, which is now an aimed (card, target)."""
+    from deimos_bridge.policies import _split
+
+    card, _ = _split(action)
+    return getattr(card, "name", card) if card is not None else "PASS"
 
 
 def test_heuristic_no_longer_passes_on_an_affordable_hit():
@@ -1763,3 +1767,289 @@ def test_the_window_says_whether_the_selected_model_is_driving(qapp):
     assert "3 round(s)" in text
     assert "fallback" in text
     assert "0%" in text
+
+
+# ---------------------------------------------------------------- hotkeys
+def test_hotkeys_report_why_they_are_unavailable():
+    """Off Windows there is no RegisterHotKey. It has to say so rather
+    than raise, or the checkbox takes down the run."""
+    from deimos_bridge import hotkeys
+
+    ok, reason = hotkeys.available()
+    if not ok:
+        assert "Windows" in reason or "import" in reason
+
+
+def test_a_keypress_lands_in_the_same_queue_as_the_button(qapp):
+    """A hotkey must not drive the client itself. The service task owns
+    the mouse between fights; a second clicker firing mid-cast misclicks.
+    So a keypress does exactly what the button does -- queues a request."""
+    import asyncio
+
+    from deimos_bridge import hotkeys
+    from deimos_bridge.gui.live import LiveWorker
+
+    w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1,
+                   hotkeys={"teleport": "F1"})
+    hk = hotkeys.Hotkeys({"teleport": "F1"}, w.request)
+    asyncio.run(hk._make("teleport")())
+    assert w._requests == ["teleport"]
+
+
+def test_an_unavailable_key_is_skipped_not_fatal(qapp):
+    """The usual cause is another program already holding the key --
+    which only the person at the keyboard can fix, and which is no reason
+    to lose the fight."""
+    import asyncio
+
+    from deimos_bridge import hotkeys
+
+    class _Listener:
+        started = False
+
+        async def add_hotkey(self, key, cb, **kw):
+            if key.name == "F1":
+                raise ValueError("already registered")
+
+        def start(self):
+            self.__class__.started = True
+
+    said = []
+    hk = hotkeys.Hotkeys({"teleport": "F1", "dialogue": "F2"},
+                         lambda a: None, on_status=said.append)
+
+    class _WW:
+        HotkeyListener = _Listener
+
+        class Keycode:
+            class F1:
+                name = "F1"
+
+            class F2:
+                name = "F2"
+
+    import sys
+    real = sys.modules.get("wizwalker")
+    sys.modules["wizwalker"] = _WW
+    try:
+        installed = asyncio.run(hk.start())
+    finally:
+        if real is None:
+            del sys.modules["wizwalker"]
+        else:
+            sys.modules["wizwalker"] = real
+
+    assert installed == {"dialogue": "F2"}          # F2 still took
+    assert any("another program" in m for m in said)
+
+
+def test_the_window_offers_a_hotkey_for_the_teleport_button(qapp):
+    """The ask: teleport without leaving a full-screen game."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    assert "teleport" in win.hotkey_boxes
+    assert win.hotkey_bindings()["teleport"] == "F1"
+
+    win.hotkey_boxes["teleport"].setCurrentText("F5")
+    assert win.hotkey_bindings()["teleport"] == "F5"
+
+    win.use_hotkeys.setChecked(False)
+    assert win.hotkey_bindings() == {}
+
+
+def test_two_actions_cannot_share_one_key(qapp):
+    """RegisterHotKey takes the first and refuses the second, so the
+    second action would look bound and silently do nothing."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.hotkey_boxes["teleport"].setCurrentText("F4")
+    win.hotkey_boxes["dialogue"].setCurrentText("F4")
+    bindings = win.hotkey_bindings()
+    assert list(bindings.values()) == ["F4"]
+    assert "bound twice" in win.status.text()
+
+
+def test_hotkey_choices_are_all_real_keycodes():
+    """Every key the dropdown offers has to resolve, or picking it fails
+    at run time with the game already open."""
+    from deimos_bridge import hotkeys
+
+    ok, _ = hotkeys.available()
+    if not ok:
+        pytest.skip("wizwalker (Windows) not importable")
+    for name in hotkeys.KEY_CHOICES:
+        assert hotkeys.resolve(name) is not None, name
+
+
+# ------------------------------------------------------- gear, and over-buffing
+class _GearStats:
+    """`GameStats`, as much of it as `read_player_stats` touches.
+
+    The by-school vectors are indexed by Deimos's `school_list_ids`
+    ordering: fire 0, ice 1, storm 2, myth 3, life 4, death 5, balance 6.
+    """
+
+    def __init__(self, dmg=None, dmg_all=0.0, acc=None, pierce=None,
+                 resist=None, crit=0.0, block=0.0):
+        self._dmg = dmg or [0.0] * 7
+        self._dmg_all = dmg_all
+        self._acc = acc or [0.0] * 7
+        self._pierce = pierce or [0.0] * 7
+        self._resist = resist or [0.0] * 7
+        self._crit, self._block = crit, block
+
+    async def dmg_bonus_percent(self):
+        return list(self._dmg)
+
+    async def dmg_bonus_percent_all(self):
+        return self._dmg_all
+
+    async def acc_bonus_percent(self):
+        return list(self._acc)
+
+    async def acc_bonus_percent_all(self):
+        return 0.0
+
+    async def ap_bonus_percent(self):
+        return list(self._pierce)
+
+    async def ap_bonus_percent_all(self):
+        return 0.0
+
+    async def dmg_reduce_percent(self):
+        return list(self._resist)
+
+    async def dmg_reduce_percent_all(self):
+        return 0.0
+
+    async def critical_hit_percent_all(self):
+        return self._crit
+
+    async def block_percent_all(self):
+        return self._block
+
+
+class _GearClient:
+    def __init__(self, stats):
+        self.stats = stats
+
+
+def test_gear_is_read_off_the_client_per_school():
+    """The simulator was pricing every hit as though the wizard wore
+    nothing, and then optimising that fight instead of the real one."""
+    import asyncio
+
+    from deimos_bridge.live_state import read_player_stats
+
+    dmg = [0.0] * 7
+    dmg[1] = 0.09                                # ice
+    stats = _GearStats(dmg=dmg, pierce=[0.0, 0.04, 0, 0, 0, 0, 0])
+    got = asyncio.run(read_player_stats(_GearClient(stats), "ice"))
+    assert got["damage"] == {"ice": pytest.approx(0.09)}
+    assert got["pierce"] == pytest.approx(0.04)
+
+
+def test_the_universal_stat_is_added_to_the_school_one():
+    """A stat lives in two places -- the by-school vector and an 'all
+    schools' scalar -- and Deimos adds them (`combat_math.real_stat`).
+    Reading only the vector drops everything granted universally, which
+    on low-level gear is most of it."""
+    import asyncio
+
+    from deimos_bridge.live_state import read_player_stats
+
+    dmg = [0.0] * 7
+    dmg[1] = 0.09
+    got = asyncio.run(read_player_stats(
+        _GearClient(_GearStats(dmg=dmg, dmg_all=0.06)), "ice"))
+    assert got["damage"]["ice"] == pytest.approx(0.15)
+
+
+def test_a_crit_rating_is_not_mistaken_for_a_probability():
+    """Some builds report crit as a rating rather than a percentage, and
+    feeding a rating in as a probability makes every cast a critical."""
+    import asyncio
+
+    from deimos_bridge.live_state import read_player_stats
+
+    got = asyncio.run(read_player_stats(
+        _GearClient(_GearStats(crit=140.0)), "ice"))
+    assert "crit" not in got
+    got = asyncio.run(read_player_stats(
+        _GearClient(_GearStats(crit=0.12)), "ice"))
+    assert got["crit"] == pytest.approx(0.12)
+
+
+def test_unreadable_gear_is_empty_not_an_exception():
+    """It is read right after the hooks come up; losing the run over a
+    stat would be absurd."""
+    import asyncio
+
+    from deimos_bridge.live_state import read_player_stats
+
+    class _Bad:
+        def __getattr__(self, _name):
+            raise RuntimeError("no")
+
+    assert asyncio.run(read_player_stats(_GearClient(_Bad()), "ice")) == {}
+    assert asyncio.run(read_player_stats(object(), "ice")) == {}
+
+
+def test_gear_reaches_the_backend_and_the_trainer(qapp):
+    """Both, or the Q table is learned for a different wizard than the
+    one it plays."""
+    from deimos_bridge.gui.app import MainWindow, TrainWorker
+    from deimos_bridge.live_backend import WizAiBackend
+
+    stats = {"damage": {"ice": 0.09}, "pierce": 0.04}
+    win = MainWindow(Telemetry())
+    win.on_gear_read(stats)
+    assert win.player_stats == stats
+    worker = TrainWorker({}, [], "ice", 500, player_stats=win.player_stats)
+    assert worker.player_stats == stats
+
+    be = WizAiBackend.from_trained(school="ice", deck=["Frost Beetle"],
+                                   policy=lambda sim, s: None,
+                                   player_stats=stats)
+    assert be.player_stats == stats
+
+
+def test_gear_changes_what_the_simulator_predicts():
+    """If it did not, threading it through would be decoration."""
+    import random
+
+    from data_full import load_spells_full
+    from w101_sim import Actor, Boss, Sim, State
+
+    from deimos_bridge.telemetry import predict_damage
+
+    cards = load_spells_full()
+
+    def probe(stats):
+        sim = Sim(cards, ["Snow Serpent"], "ice",
+                  Boss(name="m", hp=400, school="fire", dmg=0),
+                  rng=random.Random(0), player_hp=900, player_stats=stats)
+        p = Actor(name="W", school="ice", hp=900, max_hp=900, team=0,
+                  norm_pips=6, damage_bonus=dict((stats or {})
+                                                 .get("damage", {})))
+        p.hand = [cards["Snow Serpent"]]
+        s = State(p, [Actor(name="m", school="fire", hp=400, max_hp=400,
+                            team=1)])
+        return predict_damage(sim, s, cards["Snow Serpent"], 0)
+
+    bare, geared = probe({}), probe({"damage": {"ice": 0.09}})
+    assert geared > bare
+    assert geared == pytest.approx(bare * 1.09, rel=1e-6)
+
+
+def test_the_window_says_when_gear_was_never_read(qapp):
+    """Silence here reads as 'fine'. It is not -- it is the state that
+    makes the policy over-buff."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    assert "as if you wore none" in win.policy_state.text()
+    win.on_gear_read({"damage": {"ice": 0.09}})
+    assert "9% ice damage" in win.policy_state.text()
