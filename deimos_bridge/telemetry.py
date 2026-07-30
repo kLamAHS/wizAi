@@ -226,11 +226,23 @@ class Telemetry:
 
         self._settle(read)
 
+        # Only name a mob the cast actually went at. A self-buff or an
+        # AoE has no enemy target, and reporting `enemies[0]` for one --
+        # which this used to do for every decision that carried no index
+        # -- puts a mob in the log that was never clicked, and makes the
+        # damage residual settle against the wrong actor.
+        kind = getattr(decision, "target_kind", None) or "enemy"
         target_name = None
-        if decision.target_index is not None and \
+        if decision.passing:
+            pass
+        elif kind in ("self", "ally", "allies"):
+            target_name = "self" if kind == "self" else "ally"
+        elif kind in ("enemies", "global"):
+            target_name = "all enemies"
+        elif decision.target_index is not None and \
                 decision.target_index < len(s.enemies):
             target_name = s.enemies[decision.target_index].name
-        elif s.enemies and not decision.passing:
+        elif s.enemies:
             target_name = s.enemies[0].name
 
         rec = RoundRecord(

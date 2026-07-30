@@ -170,6 +170,56 @@ Every decision is logged with the state that produced it. On a live run
 the first thing to check is not whether the policy won but whether it was
 ever shown the right board.
 
+### Moves carry a target
+
+A policy returns `(card, enemy_index)` — the tuple `Sim._normalize_action`
+already unpacks, so aiming works identically in the simulator, in
+`evaluate`, and live.
+
+That is not cosmetic. Before it, no policy chose a target at all: every
+cast went to `enemies[0]`, whichever mob the participant list happened to
+put first, and when that one died the rest of the plan silently moved to
+a different mob with the traps left behind on a corpse. A trap only pays
+off if the hit it is buying lands on the same enemy, so the two have to
+agree.
+
+`greedy_ttk` scores every (card, enemy) pair — on a boss-and-minion board
+those genuinely differ, and that difference *is* the decision.
+`school_aware_blade_stack` aims everything at one `focus_target`: the
+lowest-health living enemy, chosen because hitting it only lowers its
+health further, so the focus re-derives to the same mob until it dies
+rather than wandering and splitting a buff stack across two.
+
+One rule this exposed: Wizard101 refuses a second identical trap on the
+same mob, and `Sim.can_cast` knows it — but `w101_sim.castable` asks
+about `enemies[0]` whatever the cast is aimed at. Invisible while nothing
+aims; the moment something does, the policy picks a card the engine then
+refuses and burns the round. `policies.castable_at` asks about the mob
+being aimed at.
+
+`rl_agent` had the same hole from the other side. `Featurizer.legal`
+already expanded single-target cards into `name@i` per foe, but decided
+legality once at target 0 — so a trap on enemy 0 removed the card from
+the action set entirely, even while it was still legal on enemy 1, and
+`apply_action` would cast at a mob that had already refused the card.
+Both now ask per target. Single-enemy fights are unaffected: target 0 is
+the only enemy there, so every 1v1 table predating this is unchanged.
+
+### The wizard is not naked
+
+`Sim` has always taken `player_stats` — damage, accuracy, pierce, crit,
+resist — and nothing was filling it in. `live_state.read_player_stats`
+reads them off `GameStats` on connect, adding the "all schools" scalar to
+the by-school vector the way `combat_math.real_stat` does, and both the
+live `Sim` and `train_agent` now get them.
+
+This changes decisions rather than decorating them: on a 2000hp mob with
+an ice deck, `greedy_ttk` opens with a trap 100% of the time given 9%
+damage and 4% pierce and 0% of the time given nothing. The direction
+depends on the board — more damage shortens the fight, which can make a
+trap pay off *or* stop being worth the round — so there is no safe
+direction to guess in, which is the argument for reading it.
+
 ### Two ways in, and only one of them measures your policy
 
 `WizAiCombatHandler` (what `run_live.py` uses) subclasses wizwalker's

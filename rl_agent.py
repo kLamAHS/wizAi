@@ -97,18 +97,34 @@ class Featurizer:
         slot 0 — the deficit that cost it 54 points at Krokotopia and
         that mob_generalist.py isolated as representational.
 
-        Single-enemy fights emit bare names exactly as before, so every
-        1v1 result predating this is bit-identical."""
+        Legality is asked **per foe**. `sim.can_cast(s, c)` defaults to
+        target 0, so asking it once and then expanding over every foe got
+        the duplicate-placement rule wrong in both directions: once a
+        trap was on enemy 0 the card vanished from the action set
+        entirely, even though it was still legal on enemy 1 — and on a
+        board where enemy 0 was clean, `name@1` was offered for a mob
+        that already carried it, so the agent spent the turn casting
+        nothing.
+
+        Single-enemy fights emit bare names exactly as before — target 0
+        is the only enemy there — so every 1v1 result predating this is
+        bit-identical."""
         acts = [PASS]
         foes = [i for i, e in enumerate(s.enemies) if e.alive]
         seen = set()
         for c in s.hand:
-            if c.name in seen or not sim.can_cast(s, c):
+            if c.name in seen:
                 continue
-            seen.add(c.name)
             if len(foes) > 1 and _single_target_offense(c):
-                acts.extend(f"{c.name}@{i}" for i in foes)
+                aimed = [i for i in foes if sim.can_cast(s, c, i)]
+                if not aimed:
+                    continue
+                seen.add(c.name)
+                acts.extend(f"{c.name}@{i}" for i in aimed)
             else:
+                if not sim.can_cast(s, c):
+                    continue
+                seen.add(c.name)
                 acts.append(c.name)
         return acts
 
@@ -138,7 +154,10 @@ def apply_action(sim, s, act, dig_keep=None):
         return
     name, target = split_target(act)
     for c in s.hand:
-        if c.name == name and sim.can_cast(s, c):
+        # Legality against the mob being aimed at, not against enemy 0.
+        # The default target made this cast into a mob that had already
+        # refused the card — the turn passed with nothing played.
+        if c.name == name and sim.can_cast(s, c, target):
             sim.cast(s, c, target=target)
             return
 
@@ -265,10 +284,14 @@ class QAgent:
 
 def train_agent(cards, decklist, school, boss, episodes=60000,
                 warm=True, seed=0, player_hp=10**9, log=None,
-                snap_every=5000, sideboard=None):
+                snap_every=5000, sideboard=None, player_stats=None):
+    """`player_stats` is the wizard's gear, as `Sim` takes it. Left out,
+    training solves the fight for a wizard wearing nothing: every hit is
+    priced below what it really lands for, so the table is optimal for a
+    fight nobody is going to play."""
     rng = random.Random(seed)
     sim = Sim(cards, decklist, school, boss, player_hp=player_hp, rng=rng,
-              sideboard=sideboard)
+              sideboard=sideboard, player_stats=player_stats)
     dp_pol = None
     if warm:
         V, pol, meta = solve(cards, decklist, boss, school)

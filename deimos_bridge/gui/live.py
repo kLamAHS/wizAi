@@ -35,12 +35,16 @@ class LiveWorker(QThread):
     #: to use it or the learned states share no health bucket with a live
     #: board, and typing it in by hand is a guess the game can answer.
     hp_read = pyqtSignal(int)
+    #: the wizard's gear stats, so training prices hits the way the game
+    #: does rather than assuming a naked wizard
+    gear_read = pyqtSignal(object)
     #: the policy actually installed on the backend, after a swap
     policy_changed = pyqtSignal(str)
 
     def __init__(self, telemetry, school, deck, policy_name, fights,
                  agent=None, auto_quest=False, auto_dialogue=True,
-                 collect_wisps=True, use_potions=True, script=""):
+                 collect_wisps=True, use_potions=True, script="",
+                 hotkeys=None):
         super().__init__()
         self.tel = telemetry
         self.school = school
@@ -67,6 +71,14 @@ class LiveWorker(QThread):
         #: a deimoslang program, stepped between fights like the quester
         self.script = script or ""
         self.runner = None
+        #: {action: key name}. Global hotkeys, so the same actions the
+        #: buttons perform are reachable without alt-tabbing out of a
+        #: full-screen game -- which is the difference between using them
+        #: and not.
+        self.hotkeys = dict(hotkeys or {})
+        self._hotkeys = None
+        #: the wizard's gear, read off the client on connect
+        self.player_stats = {}
         self._stop = False
         #: one-shot questing requests from the GUI thread. A plain list
         #: rather than a queue: the GUI appends, the loop drains between
@@ -199,6 +211,27 @@ class LiveWorker(QThread):
                 # loop is the thing that matters.
                 await asyncio.sleep(1.0)
 
+    async def _setup_hotkeys(self):
+        """Bind the global hotkeys, if any were configured.
+
+        A keypress does exactly what the button does: it lands in
+        `_requests`, and the service task performs it between clicks. It
+        deliberately does not touch the client directly -- a hotkey can
+        arrive mid-cast, and two things driving the mouse at once
+        misclick.
+        """
+        if not self.hotkeys:
+            return
+        from .. import hotkeys as hk
+
+        self._hotkeys = hk.Hotkeys(self.hotkeys, self.request,
+                                   on_status=self.status.emit)
+        try:
+            await self._hotkeys.start()
+        except Exception as exc:
+            self._hotkeys = None
+            self.status.emit(f"hotkeys not installed ({type(exc).__name__})")
+
     async def _read_max_hp(self, client):
         """Report the wizard's real max health, once, on connect.
 
@@ -214,6 +247,36 @@ class LiveWorker(QThread):
             return          # a nicety; never worth failing the connect
         if hp > 0:
             self.hp_read.emit(hp)
+
+    async def _read_gear(self, client):
+        """The wizard's damage, accuracy, pierce and resist, on connect.
+
+        Without it the simulator prices every hit as though the wizard
+        were wearing nothing, and then optimises that fight instead of
+        this one. A pet giving 9% is already enough to flip which move
+        kills soonest -- see `live_state.read_player_stats` for the
+        measurement.
+        """
+        from .. import live_state
+
+        try:
+            stats = await live_state.read_player_stats(client, self.school)
+        except Exception:
+            return
+        if not stats:
+            self.status.emit(
+                "could not read your gear stats — the simulator will price "
+                "hits as if you were wearing none")
+            return
+        self.player_stats = stats
+        if self._backend is not None:
+            self._backend.player_stats = stats
+        self.gear_read.emit(dict(stats))
+        dmg = (stats.get("damage") or {}).get(self.school, 0.0)
+        self.status.emit(
+            f"read your gear: {dmg * 100:.0f}% {self.school} damage, "
+            f"{stats.get('pierce', 0.0) * 100:.0f}% pierce, "
+            f"{stats.get('accuracy', 0.0) * 100:.0f}% accuracy")
 
     async def _setup_questing(self, client):
         """Prefer Deimos's questing; fall back to ours if it will not import."""
@@ -357,6 +420,7 @@ class LiveWorker(QThread):
                 raise
 
             await self._read_max_hp(client)
+            await self._read_gear(client)
 
             self.tel.policy_name = self.policy_name
             self.tel.school = self.school
@@ -364,7 +428,8 @@ class LiveWorker(QThread):
             backend = WizAiBackend(
                 policy=policy, cards=cards, school=self.school,
                 decklist=self.deck, catalog=catalog,
-                policy_name=built_as, on_decision=self._on_decision)
+                policy_name=built_as, on_decision=self._on_decision,
+                player_stats=self.player_stats)
             self.tel.resolver = backend.resolver
             self._backend = backend
             if self.policy_name != built_as:
@@ -378,6 +443,7 @@ class LiveWorker(QThread):
                 await self._setup_questing(client)
             if self.script:
                 await self._setup_script(client)
+            await self._setup_hotkeys()
 
             self._client = client
             self.status.emit(
@@ -423,6 +489,12 @@ class LiveWorker(QThread):
                     if not self._stop else "stopping…")
             self.finished_ok.emit()
         finally:
+            if self._hotkeys is not None:
+                # Before anything else: a registered hotkey is taken away
+                # from every other program until it is released, so it
+                # must not survive a failed run.
+                await self._hotkeys.stop()
+                self._hotkeys = None
             if self.runner is not None:
                 self.runner.stop()
             if servicer is not None:
