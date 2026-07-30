@@ -323,6 +323,48 @@ the full reward the moment the first mob fell, with the rest still
 swinging — the agent was being trained to kill one thing. It now requires
 the board to be clear, which is identical on a 1v1.
 
+### The agent could not use its own table
+
+A run reported a **flat 0% kill rate across 100,000 episodes** and 0%
+live coverage. The board was not the problem — the same board is won 92%
+of the time by `school_aware_blade_stack` — and neither was the state
+key. `QAgent.policy` was:
+
+```python
+a = self.greedy(sim, s, legal)       # e.g. "Snow Serpent@1"
+for c in s.hand:
+    if c.name == a and sim.can_cast(s, c):   # "Snow Serpent" == "Snow Serpent@1"
+        return c
+return None                                   # ...so: always
+```
+
+`Featurizer.legal` expands single-target cards into `name@i` on a
+multi-enemy board — it has done since the Krokotopia targeting work — but
+`policy()` compared the raw action against the bare card name. It
+therefore matched nothing and returned `None`, and the agent **passed
+every single turn on any board with more than one mob**.
+
+`train_episode` was unaffected, because it goes through `apply_action`,
+which has always split the target. So the agent learned a perfectly
+ordinary table and then could not use it: the Q values were fine, the
+greedy read of them was fine, and the translation back into a cast
+dropped everything. The only visible symptom was a kill rate that never
+moved, in `evaluate` — which is also what the GUI plots — and a live
+trained policy that passed, since `TrainedPolicy` calls the same
+`policy()`.
+
+Fixed by splitting the target and returning `(card, target)`, the aimed
+form the rest of the project already uses (`test_mob.py` asserts the same
+tuple convention for the generalist policy). On the reported
+configuration that is **0% → 57%** at 6,000 episodes.
+
+Single-enemy boards were never affected: `legal` emits bare names there,
+so every 1v1 table predating this is unchanged.
+
+The Learning tab now names a flat-zero training run as the cause when
+coverage is low, because every other explanation is a distraction from
+"the table learned nothing to apply".
+
 ### The wizard is not naked
 
 `Sim` has always taken `player_stats` — damage, accuracy, pierce, crit,

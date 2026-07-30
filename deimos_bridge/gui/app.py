@@ -542,6 +542,16 @@ class MainWindow(QMainWindow):
         and it is expensive advice to follow before finding that out.
         The mismatches are checkable, so check them.
         """
+        # First: did training learn anything at all? A table whose kill
+        # rate never left zero has nothing to apply, and every other
+        # explanation below is a distraction from that.
+        curve = self.tel.training_curve()
+        if curve and max(k for _ep, k in curve) <= 0.0:
+            return ("cause: training never won a fight — kill rate stayed "
+                    "at 0% for every checkpoint, so the table learned "
+                    "nothing to apply. Check the Learning tab: if the "
+                    "board is unwinnable at these settings, lower mob HP "
+                    "or the mob count.")
         seen = self.tel.observed_board()
         if not self.generalize.isChecked():
             return ("cause: trained on one fixed board. Tick 'any board' "

@@ -3029,3 +3029,129 @@ def test_upkeep_resolves_wizsprinter_through_the_shared_path_helper():
                          for line in inspect.getsource(fn).splitlines())
         assert "ensure_path" in code, fn.__name__
         assert "sys.path" not in code, fn.__name__
+
+
+# ------------------------------------ the agent has to be able to use its table
+def test_the_greedy_policy_can_cast_on_a_multi_mob_board():
+    """The 0%-kill-rate bug. `Featurizer.legal` emits "Snow Serpent@1" on
+    a multi-enemy board, but `QAgent.policy` matched `c.name == a` --
+    which never matches -- so it returned None and the agent passed every
+    single turn. `train_episode` was unaffected because it goes through
+    `apply_action`, which has always split the target: the agent learned
+    a table it could then not use, and the only symptom was a kill rate
+    that never moved."""
+    import random
+
+    from data_full import load_spells_full
+    from rl_agent import PASS, QAgent
+    from w101_sim import Boss, Sim
+
+    cards = load_spells_full()
+    deck = ["Frost Beetle"] * 3 + ["Ice Trap"] * 3 + ["Snow Serpent"] * 3
+
+    for n_mobs in (1, 3):
+        sim = Sim(cards, deck, "ice",
+                  Boss(name="m0", hp=200, school="ice", dmg=40),
+                  enemies=[Boss(name=f"m{i}", hp=150, school="ice", dmg=40)
+                           for i in range(1, n_mobs)],
+                  rng=random.Random(1), player_hp=800)
+        agent = QAgent(cards, deck, "ice", rng=random.Random(2))
+        s = sim.new_state()
+        want = next(a for a in agent.feat.legal(sim, s) if a != PASS)
+        agent.Q[(agent.feat.key(sim, s), want)] = 99.0
+
+        got = agent.policy()(sim, s)
+        assert got is not None, f"{n_mobs} mob(s): policy passed"
+        card, target = got
+        assert card.name == want.split("@")[0]
+        assert 0 <= target < max(1, n_mobs)
+
+
+def test_the_greedy_policy_keeps_the_target_it_chose():
+    """Returning the bare card would throw away the target, which is
+    most of what the multi-enemy action space exists for."""
+    import random
+
+    from data_full import load_spells_full
+    from rl_agent import QAgent
+    from w101_sim import Boss, Sim
+
+    cards = load_spells_full()
+    deck = ["Snow Serpent"] * 6
+    sim = Sim(cards, deck, "ice", Boss(name="a", hp=400, school="ice", dmg=0),
+              enemies=[Boss(name="b", hp=400, school="ice", dmg=0),
+                       Boss(name="c", hp=400, school="ice", dmg=0)],
+              rng=random.Random(0), player_hp=800)
+    agent = QAgent(cards, deck, "ice", rng=random.Random(1))
+    s = sim.new_state()
+    s.norm_pips = 6
+    key = agent.feat.key(sim, s)
+    aimed = [a for a in agent.feat.legal(sim, s) if a.endswith("@2")]
+    if not aimed:
+        pytest.skip("no aimed action available on this draw")
+    agent.Q[(key, aimed[0])] = 99.0
+    card, target = agent.policy()(sim, s)
+    assert target == 2
+
+
+def test_a_trained_agent_wins_on_a_multi_mob_board():
+    """End to end: with the policy able to cast, training on a winnable
+    three-mob board must move off zero. It reported a flat 0% across
+    100,000 episodes before."""
+    import random
+
+    from data_full import load_spells_full
+    from rl_agent import train_agent
+    from w101_sim import Boss, Sim, evaluate
+
+    cards = load_spells_full()
+    deck = ["Frost Beetle"] * 3 + ["Ice Trap"] * 3 + ["Snow Serpent"] * 3
+    hps, dmg = [135, 108, 81], 68
+    boss = Boss(name="m0", hp=hps[0], school="ice", dmg=dmg)
+    extra = [Boss(name=f"m{i}", hp=h, school="ice", dmg=dmg)
+             for i, h in enumerate(hps[1:], 1)]
+
+    agent, sim = train_agent(cards, deck, "ice", boss, enemies=extra,
+                             episodes=1500, player_hp=826,
+                             player_stats={"damage": {"ice": 0.09}})
+    kill, _ttk = evaluate(sim, agent.policy(), n=300)
+    assert kill > 0.15, kill
+
+
+def test_the_board_the_user_trained_on_is_winnable():
+    """Before blaming the agent, the board has to be beatable at all --
+    otherwise a 0% kill rate is the honest answer rather than a bug."""
+    import random
+
+    from data_full import load_spells_full
+    from w101_sim import Boss, Sim, evaluate
+
+    from deimos_bridge.policies import school_aware_blade_stack
+
+    cards = load_spells_full()
+    deck = ["Frost Beetle"] * 3 + ["Ice Trap"] * 3 + ["Snow Serpent"] * 3
+    hps, dmg = [135, 108, 81], 68
+    sim = Sim(cards, deck, "ice",
+              Boss(name="m0", hp=hps[0], school="ice", dmg=dmg),
+              enemies=[Boss(name=f"m{i}", hp=h, school="ice", dmg=dmg)
+                       for i, h in enumerate(hps[1:], 1)],
+              rng=random.Random(7), player_hp=826,
+              player_stats={"damage": {"ice": 0.09}, "accuracy": 0.05})
+    kill, _ = evaluate(sim, school_aware_blade_stack(3), n=150)
+    assert kill > 0.5, kill
+
+
+def test_a_flat_zero_kill_rate_is_named_as_the_cause(qapp):
+    """Every other coverage explanation is a distraction from "training
+    never won a fight" -- that table has nothing to apply."""
+    from deimos_bridge.gui.app import MainWindow
+
+    tel = Telemetry()
+    for ep in (5000, 10000, 100000):
+        tel.record_snapshot(ep, 0.0, float("nan"))
+    win = MainWindow(tel)
+    why = win._why_coverage_is_low()
+    assert "never won a fight" in why
+
+    tel.record_snapshot(200000, 0.4, 6.0)          # it did learn something
+    assert "never won a fight" not in win._why_coverage_is_low()
