@@ -21,8 +21,8 @@ from ..hotkeys import DEFAULTS as HOTKEY_DEFAULTS, KEY_CHOICES as HOTKEY_CHOICES
 from ..telemetry import Telemetry
 from .deckpicker import pick_deck
 from .live import LiveWorker
-from .panels import (BoardPanel, DecisionsPanel, LearningPanel,
-                     ModelPanel, NamingPanel, RunPanel, _label)
+from .panels import (BoardPanel, DecisionsPanel, LearningPanel, ModelPanel,
+                     NamingPanel, RunPanel, _label, scrollable)
 from .theme import PALETTE, stylesheet
 
 SCHOOLS = ["fire", "ice", "storm", "myth", "life", "death", "balance"]
@@ -162,12 +162,17 @@ class MainWindow(QMainWindow):
         self.learning = LearningPanel(self.tel)
         self.naming = NamingPanel(self.tel)
         self.runs = RunPanel(self.tel)
-        tabs.addTab(self.board, "Board")
-        tabs.addTab(self.decisions, "Decisions")
-        tabs.addTab(self.model, "Damage model")
-        tabs.addTab(self.learning, "Learning")
-        tabs.addTab(self.naming, "Naming")
-        tabs.addTab(self.runs, "Runs")
+        # Every tab scrolls. The Decisions and Learning panels stack a
+        # chart, a second chart and a table, which is taller than a laptop
+        # window -- and Qt's answer to "does not fit" is to squeeze all
+        # three until none of them is readable.
+        for panel, name in ((self.board, "Board"),
+                            (self.decisions, "Decisions"),
+                            (self.model, "Damage model"),
+                            (self.learning, "Learning"),
+                            (self.naming, "Naming"),
+                            (self.runs, "Runs")):
+            tabs.addTab(scrollable(panel), name)
         self.tabs = tabs
         root.addWidget(tabs)
 
@@ -220,62 +225,6 @@ class MainWindow(QMainWindow):
         self.policy.currentTextChanged.connect(self.on_policy_changed)
         row.addWidget(self.policy)
 
-        row.addWidget(QLabel("episodes"))
-        self.episodes = QSpinBox()
-        self.episodes.setRange(500, 200_000)
-        self.episodes.setSingleStep(1000)
-        self.episodes.setValue(20000)
-        row.addWidget(self.episodes)
-
-        row.addWidget(QLabel("my HP"))
-        self.player_hp = QSpinBox()
-        self.player_hp.setRange(100, 20000)
-        self.player_hp.setSingleStep(100)
-        self.player_hp.setValue(800)
-        self.player_hp.setToolTip(
-            "Your wizard's max health. Training uses it so the learned "
-            "states match a live board — train immortal and the Q table "
-            "shares no state with the real game at all, and the policy "
-            "passes every turn. Filled in from the game on connect.")
-        row.addWidget(self.player_hp)
-
-        row.addWidget(QLabel("mob HP"))
-        self.boss_hp = QSpinBox()
-        self.boss_hp.setRange(100, 60000)
-        self.boss_hp.setSingleStep(250)
-        self.boss_hp.setValue(1200)
-        self.boss_hp.setToolTip(
-            "Typical mob health. With 'any board' on this only centres "
-            "the range trained over (roughly 0.4x to 1.8x of it), so it "
-            "does not have to be exact. Filled in from the last fight.")
-        row.addWidget(self.boss_hp)
-
-        row.addWidget(QLabel("up to mobs"))
-        self.n_enemies = QSpinBox()
-        self.n_enemies.setRange(1, 4)
-        self.n_enemies.setValue(3)
-        self.n_enemies.setToolTip(
-            "The biggest board to train for. With 'any board' on, every "
-            "count from 1 to this is trained, so one model handles a lone "
-            "mob and a pack.")
-        row.addWidget(self.n_enemies)
-
-        self.generalize = QCheckBox("any board")
-        self.generalize.setChecked(True)
-        self.generalize.setToolTip(
-            "Resample the mobs every episode — count and health — instead "
-            "of training one board.\n\n"
-            "This is what lets a single model cover many fights. Trained "
-            "on one board it covers exactly that board: the state key "
-            "holds an absolute health bucket, and a targeting tuple that "
-            "is only present at all when more than one mob is up, so a "
-            "different fight produces keys of a different length or a "
-            "different bucket and the table matches nothing.\n\n"
-            "Measured on one deck: a fixed-board model covered 0% of five "
-            "different boards; a randomised one covered 100% of all five. "
-            "Costs more episodes — there are more states to fill.")
-        row.addWidget(self.generalize)
-
         row.addWidget(QLabel("fights"))
         self.fights = QSpinBox()
         self.fights.setRange(0, 999)
@@ -306,6 +255,90 @@ class MainWindow(QMainWindow):
         row.addWidget(self.export_btn)
         row.addStretch()
         outer.addLayout(row)
+
+        # Everything past the first row lives behind a toggle. Five rows
+        # of controls is ~250px gone before the tabs begin, and they are
+        # set once and then not touched -- while the panels below them are
+        # what a run is actually watched through.
+        self.more_btn = QPushButton("▾ options")
+        self.more_btn.setCheckable(True)
+        self.more_btn.setChecked(True)
+        self.more_btn.setFlat(True)
+        self.more_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: "
+            f"{PALETTE['muted']}; border: none; padding: 2px 0; "
+            f"text-align: left; }}")
+        self.more_btn.toggled.connect(self.on_toggle_options)
+        row.addWidget(self.more_btn)
+
+        self.more = QWidget()
+        outer.addWidget(self.more)
+        outer = QVBoxLayout(self.more)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        # The training parameters. Set once per wizard and then left
+        # alone, which is exactly what belongs behind the toggle -- and
+        # keeping ten controls out of the top row is what lets the window
+        # be narrower than a desk.
+        train_row = QHBoxLayout()
+        train_row.addWidget(QLabel("episodes"))
+        self.episodes = QSpinBox()
+        self.episodes.setRange(500, 200_000)
+        self.episodes.setSingleStep(1000)
+        self.episodes.setValue(20000)
+        train_row.addWidget(self.episodes)
+
+        train_row.addWidget(QLabel("my HP"))
+        self.player_hp = QSpinBox()
+        self.player_hp.setRange(100, 20000)
+        self.player_hp.setSingleStep(100)
+        self.player_hp.setValue(800)
+        self.player_hp.setToolTip(
+            "Your wizard's max health. Training uses it so the learned "
+            "states match a live board — train immortal and the Q table "
+            "shares no state with the real game at all, and the policy "
+            "passes every turn. Filled in from the game on connect.")
+        train_row.addWidget(self.player_hp)
+
+        train_row.addWidget(QLabel("mob HP"))
+        self.boss_hp = QSpinBox()
+        self.boss_hp.setRange(100, 60000)
+        self.boss_hp.setSingleStep(250)
+        self.boss_hp.setValue(1200)
+        self.boss_hp.setToolTip(
+            "Typical mob health. With 'any board' on this only centres "
+            "the range trained over (roughly 0.4x to 1.8x of it), so it "
+            "does not have to be exact. Filled in from the last fight.")
+        train_row.addWidget(self.boss_hp)
+
+        train_row.addWidget(QLabel("up to mobs"))
+        self.n_enemies = QSpinBox()
+        self.n_enemies.setRange(1, 4)
+        self.n_enemies.setValue(3)
+        self.n_enemies.setToolTip(
+            "The biggest board to train for. With 'any board' on, every "
+            "count from 1 to this is trained, so one model handles a lone "
+            "mob and a pack.")
+        train_row.addWidget(self.n_enemies)
+
+        self.generalize = QCheckBox("any board")
+        self.generalize.setChecked(True)
+        self.generalize.setToolTip(
+            "Resample the mobs every episode — count and health — instead "
+            "of training one board.\n\n"
+            "This is what lets a single model cover many fights. Trained "
+            "on one board it covers exactly that board: the state key "
+            "holds an absolute health bucket, and a targeting tuple that "
+            "is only present at all when more than one mob is up, so a "
+            "different fight produces keys of a different length or a "
+            "different bucket and the table matches nothing.\n\n"
+            "Measured on one deck: a fixed-board model covered 0% of five "
+            "different boards; a randomised one covered 100% of all five. "
+            "Costs more episodes — there are more states to fill.")
+        train_row.addWidget(self.generalize)
+
+        train_row.addStretch()
+        outer.addLayout(train_row)
 
         deck_row = QHBoxLayout()
         deck_row.addWidget(QLabel("deck"))
@@ -411,12 +444,52 @@ class MainWindow(QMainWindow):
         # trained policy that falls back on every board decides exactly
         # like the heuristic it falls back to, so without this the only
         # symptom is that the fight looks unremarkable.
-        outer.addWidget(self.policy_state)
+        # Back on the group box itself: the coverage/gear readout and the
+        # progress bar answer "is this working right now", so they stay
+        # visible when the options are folded away.
+        box.layout().addWidget(self.policy_state)
 
         self.train_progress = QProgressBar()
         self.train_progress.setVisible(False)
-        outer.addWidget(self.train_progress)
+        box.layout().addWidget(self.train_progress)
         return box
+
+    def on_toggle_options(self, shown, by_user=True):
+        self.more.setVisible(shown)
+        self.more_btn.setText("▾ options" if shown else "▸ options")
+        if by_user:
+            # A deliberate choice is never overridden by the auto-fold
+            # below. Adaptive layout that undoes what someone just did is
+            # worse than no adaptive layout.
+            self._options_pinned = True
+
+    #: set once the toggle has been pressed by hand
+    _options_pinned = False
+    #: below this the config block is more than a third of the window
+    FOLD_BELOW = 700
+
+    def resizeEvent(self, event):
+        """Fold the options away on a short window.
+
+        Five rows of set-once controls is ~250px; on a 520px-tall window
+        that is half the screen spent on things nobody is looking at
+        while the panels underneath are the point.
+        """
+        super().resizeEvent(event)
+        # Qt can deliver a resize before `_build_config` has run, and a
+        # virtual like this one aborts the process on an unhandled
+        # AttributeError rather than printing it.
+        if self._options_pinned or not hasattr(self, "more_btn"):
+            return
+        try:
+            want = self.height() >= self.FOLD_BELOW
+            if want != self.more_btn.isChecked():
+                self.more_btn.blockSignals(True)
+                self.more_btn.setChecked(want)
+                self.more_btn.blockSignals(False)
+                self.on_toggle_options(want, by_user=False)
+        except Exception:
+            pass
 
     def _gear_line(self):
         """What the simulator thinks the wizard is wearing.
@@ -560,7 +633,10 @@ class MainWindow(QMainWindow):
         """One training checkpoint. Queued from the training thread, so
         this runs on the GUI thread and may touch widgets."""
         self.tel.record_snapshot(episode, kill, ttk)
-        self.learning.refresh()
+        try:
+            self.learning.refresh()
+        except Exception:
+            pass          # a watching panel never interrupts training
 
     def on_progress(self, ep, total, kill, ttk):
         self.status.setText(
@@ -882,6 +958,20 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     app = QApplication(sys.argv[:1])
+
+    # Before the window, so an error building it is still reported. Qt
+    # loses errors unusually well: an exception inside a virtual aborts
+    # the process outright, which from a desktop shortcut is a window
+    # vanishing with nothing written down.
+    from . import crashlog
+
+    def show_crash(text):
+        QMessageBox.critical(
+            None, "wizAi hit an error",
+            text[-2000:] + f"\n\nWritten to {crashlog.log_path()}")
+
+    crashlog.install(show=show_crash)
+
     win = MainWindow(demo_telemetry() if args.demo else None)
     if args.demo:
         win.status.setText("demo data — press Play live to use the real game")

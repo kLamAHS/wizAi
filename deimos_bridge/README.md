@@ -550,6 +550,39 @@ table entries. Switch to "every variant" to see them all.
 
 - **Teleport to quest** — `client.quest_position`, the same hook
   `wizwalker/examples/quest_teleporter.py` uses.
+### Making it fit
+
+The window could not be made narrower than **1577px** — wider than a
+1366-wide laptop screen — and the controls ate 48% of a 520px-tall
+window before the panels got any. Three causes, none of them the thing
+that looked responsible:
+
+- **Ten controls in one non-wrapping row.** `QHBoxLayout` has no floor
+  of its own; it inherits the sum of its children's. The five set-once
+  training parameters (episodes, health, mob count, "any board") moved
+  into the collapsible section, which took the minimum width to 872px.
+- **Non-wrapping description labels.** A `QLabel` without `wordWrap`
+  reports its entire sentence as its minimum width, so one paragraph of
+  explanatory text set a floor on the whole panel — and inside a scroll
+  area that floor became a *horizontal* scrollbar under charts that
+  would have fitted fine. `_label` now wraps by default.
+- **A seven-column table.** Qt's default minimum section width is the
+  header text's, so the table set a width floor too;
+  `setMinimumSectionSize(46)` lets the columns get narrow.
+
+Every tab is wrapped in a `QScrollArea` (`panels.scrollable`), horizontal
+policy **as-needed rather than off** — `setWidgetResizable` makes the
+inner widget follow the viewport, but a child that refuses to shrink gets
+its overflow *clipped* rather than scrolled, and the last heatmap column
+simply vanished at a narrow window. A scrollbar that appears is
+worse-looking and better behaved than content that disappears.
+
+The options section folds itself away below a 700px-tall window, and
+stops doing that the moment the toggle is pressed by hand — adaptive
+layout that reverses what someone just did is worse than none. The
+coverage and gear readout stays visible either way, because it answers
+"is this working right now".
+
 ### The charts
 
 Five painted forms in `gui/charts.py`, on `QPainter` and no plotting

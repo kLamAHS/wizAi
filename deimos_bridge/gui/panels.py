@@ -8,16 +8,49 @@ tested without a display.
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import (QGroupBox, QHBoxLayout, QHeaderView, QLabel,
-                             QListWidget, QProgressBar, QSizePolicy,
-                             QTableWidget, QTableWidgetItem, QVBoxLayout,
-                             QWidget)
+                             QListWidget, QProgressBar, QScrollArea,
+                             QSizePolicy, QTableWidget, QTableWidgetItem,
+                             QVBoxLayout, QWidget)
 
 from .charts import Heatmap, LineChart, Meter, RankedBars, Scatter
 from .theme import PALETTE
 
 
-def _label(text, color=None, bold=False, size=None):
+def scrollable(widget):
+    """`widget` in a vertical scroll area, sized to its own content.
+
+    Every tab goes through this. A panel that stacks a chart, a detail
+    chart and a table is taller than a laptop window, and Qt's answer to
+    "does not fit" is to squeeze every child until each is a few pixels
+    tall -- which reads as a broken layout rather than as a full one.
+    Scrolling keeps each piece at the size it needs to be legible.
+    """
+    area = QScrollArea()
+    area.setWidget(widget)
+    area.setWidgetResizable(True)          # follow the width, scroll the height
+    area.setFrameShape(QScrollArea.Shape.NoFrame)
+    # Horizontal as-needed, not off. `setWidgetResizable` makes the inner
+    # widget follow the viewport width, but a child with a minimum width
+    # of its own -- a seven-column table -- refuses to shrink, and the
+    # overflow is then *clipped* rather than scrolled: the last heatmap
+    # column simply vanished at a narrow window. A scrollbar that appears
+    # is worse-looking and better behaved than content that disappears.
+    area.setHorizontalScrollBarPolicy(
+        Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    return area
+
+
+def _label(text, color=None, bold=False, size=None, wrap=True):
+    """A label that wraps by default.
+
+    Wrapping is not cosmetic here. A non-wrapping QLabel reports its
+    whole sentence as its minimum width, so one paragraph of explanatory
+    text sets a floor on the entire panel -- and inside a scroll area
+    that floor becomes a horizontal scrollbar under charts that would
+    otherwise have fitted.
+    """
     lab = QLabel(text)
+    lab.setWordWrap(wrap)
     css = []
     if color:
         css.append(f"color: {color}")
@@ -37,6 +70,15 @@ def _table(headers):
     t.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
     t.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
     t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+    # Columns must be allowed to get narrow. Qt's default minimum section
+    # width is the header text's, so a seven-column table sets a floor on
+    # the whole panel's width -- which then forces a horizontal scrollbar
+    # onto charts that would have fitted perfectly well.
+    t.horizontalHeader().setMinimumSectionSize(46)
+    t.setSizeAdjustPolicy(QTableWidget.SizeAdjustPolicy.AdjustIgnored)
+    # Inside a scroll area an expanding table happily shrinks to a couple
+    # of rows; a floor keeps it a table.
+    t.setMinimumHeight(160)
     return t
 
 

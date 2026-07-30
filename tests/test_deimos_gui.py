@@ -2626,3 +2626,216 @@ def test_a_training_snapshot_lands_on_the_curve(qapp):
     assert win.tel.training_curve() == [(2000, pytest.approx(42.0)),
                                         (4000, pytest.approx(61.0))]
     assert win.tel.ttk_curve() == [(2000, 7.5), (4000, 6.1)]
+
+
+# --------------------------------------------------------------- it has to fit
+def test_every_tab_scrolls(qapp):
+    """A panel that stacks a chart, a second chart and a table is taller
+    than a laptop window, and Qt's answer to 'does not fit' is to squeeze
+    every child until none is readable."""
+    from PyQt6.QtWidgets import QScrollArea
+
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    assert win.tabs.count() == 6
+    for i in range(win.tabs.count()):
+        assert isinstance(win.tabs.widget(i), QScrollArea), i
+        assert win.tabs.widget(i).widgetResizable()
+
+
+def test_the_window_fits_a_laptop(qapp):
+    """It could not go narrower than 1577px, which does not fit a
+    1366-wide screen at all. Ten controls in one non-wrapping row were
+    setting the floor."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.show()
+    hint = win.minimumSizeHint()
+    assert hint.width() <= 1280, hint.width()
+    assert hint.height() <= 700, hint.height()
+
+
+def test_a_short_window_folds_the_options_away(qapp):
+    """Five rows of set-once controls is ~250px; on a 520px-tall window
+    that is half the screen spent on things nobody is looking at."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.show()
+    win.resize(1180, 800)
+    qapp.processEvents()
+    assert win.more_btn.isChecked()
+
+    win.resize(1000, 560)
+    qapp.processEvents()
+    assert not win.more_btn.isChecked()
+    assert not win.more.isVisible()
+
+
+def test_folding_by_hand_is_not_undone_by_a_resize(qapp):
+    """Adaptive layout that reverses what someone just did is worse than
+    no adaptive layout."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.show()
+    win.resize(1000, 560)
+    qapp.processEvents()
+    win.more_btn.setChecked(True)          # a deliberate choice
+    qapp.processEvents()
+
+    win.resize(1000, 500)                  # still short
+    qapp.processEvents()
+    assert win.more_btn.isChecked()
+
+
+def test_the_readout_stays_visible_when_the_options_fold(qapp):
+    """Coverage and gear answer 'is this working right now', so they are
+    not part of what folds away."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.show()
+    win.more_btn.setChecked(False)
+    qapp.processEvents()
+    assert win.policy_state.isVisible()
+    assert win.start_btn.isVisible()        # and so is Play live
+
+
+def test_description_labels_wrap(qapp):
+    """A non-wrapping QLabel reports its whole sentence as its minimum
+    width, so one paragraph sets a floor on the entire panel -- and in a
+    scroll area that floor becomes a horizontal scrollbar under charts
+    that would otherwise have fitted."""
+    from deimos_bridge.gui.panels import _label
+
+    assert _label("some long explanatory sentence").wordWrap()
+
+
+def test_a_panel_can_shrink_below_its_content(qapp):
+    """Otherwise the scroll area has nothing to scroll and clips
+    instead."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.show()
+    win.resize(900, 500)
+    qapp.processEvents()
+    area = win.tabs.widget(1)               # Decisions
+    assert area.height() < win.decisions.sizeHint().height()
+
+
+# ------------------------------------------------- crashes must not be silent
+def test_a_chart_that_cannot_draw_says_so_instead_of_aborting(qapp):
+    """PyQt6 does not print an unhandled exception raised inside a Qt
+    virtual -- it calls qFatal and the process aborts. So one chart
+    meeting an unanticipated data shape would kill a live fight mid-duel,
+    which is the one thing this window must not do."""
+    from deimos_bridge.gui.charts import Chart
+
+    class _Broken(Chart):
+        def has_data(self):
+            return True
+
+        def paint_data(self, p, r):
+            raise ValueError("boom")
+
+    seen = []
+    original = Chart._paint_failed
+    Chart._paint_failed = lambda self, p, exc: (seen.append(exc),
+                                                original(self, p, exc))
+    try:
+        c = _Broken("t")
+        c.resize(300, 150)
+        c.grab()                                  # must not abort
+    finally:
+        Chart._paint_failed = original
+    assert seen and isinstance(seen[0], ValueError)
+
+
+def test_a_heatmap_row_with_no_cells_is_not_data(qapp):
+    """`min()` over an empty sequence, inside paintEvent -- the exact
+    shape that aborted. A round whose every candidate fell outside the
+    shown columns produces one."""
+    from deimos_bridge.gui.charts import Heatmap
+
+    h = Heatmap("t")
+    h.set_matrix([("r1", {})], ["a"])
+    assert not h.has_data()
+    h.resize(300, 150)
+    h.grab()
+
+
+def test_hovering_a_broken_chart_does_not_abort(qapp):
+    """A hover is the last thing that should be able to end a fight."""
+    from PyQt6.QtCore import QPointF, Qt
+    from PyQt6.QtGui import QMouseEvent
+
+    from deimos_bridge.gui.charts import RankedBars
+
+    bars = RankedBars("t")
+    bars.set_bars([("a", 1.0, True, "n")])
+    bars.resize(300, 150)
+    bars.hits = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+    event = QMouseEvent(QMouseEvent.Type.MouseMove, QPointF(10, 10),
+                        QPointF(10, 10), Qt.MouseButton.NoButton,
+                        Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+    bars.mouseMoveEvent(event)                    # must not raise
+
+
+def test_the_resize_hook_survives_running_before_its_widgets_exist(qapp):
+    """Qt can deliver a resize before `_build_config` has run, and an
+    AttributeError in a virtual aborts rather than prints."""
+    from PyQt6.QtCore import QSize
+    from PyQt6.QtGui import QResizeEvent
+
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    event = QResizeEvent(QSize(900, 500), QSize(800, 400))
+
+    # exactly the half-built state Qt can deliver into
+    button, win.more_btn = win.more_btn, None
+    del win.more_btn
+    win.resizeEvent(event)                        # must not raise
+    win.more_btn = button
+
+    # and a failure inside the hook is survived too
+    win.more_btn = object()                       # has no isChecked()
+    win.resizeEvent(event)
+    win.more_btn = button
+
+
+def test_the_crash_log_captures_an_unhandled_error(tmp_path, monkeypatch):
+    """Qt loses errors well: from a desktop shortcut a fatal is a window
+    vanishing with nothing written down, which makes 'it crashes' a
+    report nobody can act on."""
+    import sys
+
+    from deimos_bridge.gui import crashlog
+
+    path = tmp_path / "wizAi-crash.log"
+    monkeypatch.setattr(crashlog, "log_path", lambda: str(path))
+    shown = []
+    previous = sys.excepthook
+    try:
+        crashlog.install(show=shown.append)
+        try:
+            raise RuntimeError("probe")
+        except RuntimeError:
+            sys.excepthook(*sys.exc_info())
+    finally:
+        sys.excepthook = previous
+
+    assert shown and "probe" in shown[0]
+    assert path.exists() and "RuntimeError: probe" in path.read_text()
+
+
+def test_logging_a_crash_never_becomes_the_crash(tmp_path, monkeypatch):
+    from deimos_bridge.gui import crashlog
+
+    monkeypatch.setattr(crashlog, "log_path",
+                        lambda: str(tmp_path / "nope" / "deep" / "x.log"))
+    crashlog._write("anything")                   # must not raise
