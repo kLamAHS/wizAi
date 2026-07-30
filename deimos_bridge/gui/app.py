@@ -552,6 +552,22 @@ class MainWindow(QMainWindow):
                     "nothing to apply. Check the Learning tab: if the "
                     "board is unwinnable at these settings, lower mob HP "
                     "or the mob count.")
+        # Second: was the wizard's own health ever read? The key buckets
+        # player health as a fraction of the maximum, so training against
+        # the box's default while the wizard has some other maximum makes
+        # every live board key a bucket the table never visited. This
+        # cause is invisible in the board numbers below -- mob count and
+        # mob HP can both be perfectly in range -- and its symptom looks
+        # exactly like an under-trained table, which is the one fix that
+        # cannot help.
+        if self.live is not None and getattr(self.live, "hp_known", True) \
+                is False:
+            return ("cause: your max health was never read off the client "
+                    "(the status bar said so on connect), so training used "
+                    "whatever was in the box. The key buckets health as a "
+                    "fraction of the maximum — a wrong maximum shares no "
+                    "states with the live board. Fix the health box and "
+                    "retrain.")
         seen = self.tel.observed_board()
         if not self.generalize.isChecked():
             return ("cause: trained on one fixed board. Tick 'any board' "
@@ -738,10 +754,18 @@ class MainWindow(QMainWindow):
         if self.live is None or not self.live.isRunning():
             QMessageBox.information(
                 self, "wizAi",
-                "Press Play live first — teleporting needs the hooks "
-                "installed, and the live run owns the client connection.")
+                "Press Play live first — these need the hooks installed, "
+                "and the live run owns the client connection.")
             return
-        self.live.request(coro_name)
+        # Honoured, not discarded: `request` refuses an action that is
+        # already queued or already running, and telling the user it is
+        # happening anyway is how a dropped press became "the button
+        # does nothing".
+        if not self.live.request(coro_name):
+            self.status.setText(
+                f"{coro_name} is already queued or running — it will "
+                f"finish on its own")
+            return
         self.status.setText(label)
 
     def hotkey_bindings(self):
@@ -750,19 +774,28 @@ class MainWindow(QMainWindow):
         Two actions may not share a key: `RegisterHotKey` would take the
         first and silently refuse the second, so the second action would
         appear bound and do nothing.
+
+        Every collision is collected and reported together. With four
+        actions on four default keys, retargeting one onto another's
+        default drops that *other* action -- one the user never touched
+        -- and reporting them one at a time meant each message overwrote
+        the last, so only the final collision was ever seen.
         """
         if not self.use_hotkeys.isChecked():
             return {}
-        out, taken = {}, set()
+        out, taken, clashes = {}, set(), []
         for action, box in self.hotkey_boxes.items():
             key = box.currentText()
             if key in taken:
-                self.status.setText(
-                    f"{key} is bound twice — only the first takes; give "
-                    f"'{action}' a different key")
+                clashes.append((action, key))
                 continue
             taken.add(key)
             out[action] = key
+        if clashes:
+            self.status.setText(
+                "; ".join(f"{key} is bound twice — '{action}' is unbound"
+                          for action, key in clashes)
+                + ". Give each action its own key.")
         return out
 
     def on_teleport(self):

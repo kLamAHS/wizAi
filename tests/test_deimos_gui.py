@@ -547,8 +547,9 @@ def test_advance_dialogue_stops_when_the_window_closes():
     from deimos_bridge.questing import advance_dialogue
     root, _ = _dialogue_root()
     client = _QuestClient(root)
-    clicks = asyncio.run(advance_dialogue(client, settle=0))
+    clicks, why = asyncio.run(advance_dialogue(client, settle=0))
     assert clicks == 2
+    assert why == ""
     assert len(client.mouse_handler.clicks) == 2
 
 
@@ -565,7 +566,37 @@ def test_advance_dialogue_is_bounded():
     root, _ = _dialogue_root()
     client = _QuestClient(root)
     client.mouse_handler = _Sticky()
-    assert asyncio.run(advance_dialogue(client, max_clicks=5, settle=0)) == 5
+    assert asyncio.run(advance_dialogue(client, max_clicks=5, settle=0)) \
+        == (5, "")
+
+
+def test_a_failed_dialogue_click_is_not_reported_as_no_dialogue():
+    """Zero clicks had two causes and one story.
+
+    A click that failed -- the window moved, another program is over the
+    game -- returned the same 0 as "there was no dialogue", so the status
+    bar said "no dialogue open" at a wizard looking at an open one.
+    """
+    import asyncio
+
+    from deimos_bridge.questing import advance_dialogue
+
+    class _Broken(_Mouse):
+        async def click_window(self, window):
+            raise RuntimeError("window moved")
+
+    root, _ = _dialogue_root()
+    client = _QuestClient(root)
+    client.mouse_handler = _Broken()
+    clicks, why = asyncio.run(advance_dialogue(client, settle=0))
+    assert clicks == 0
+    assert "click failed" in why and "RuntimeError" in why
+
+    # ...and the genuinely-empty case still says nothing, so the caller
+    # can keep its own wording for it.
+    quiet, _ = _dialogue_root(visible=False)
+    assert asyncio.run(advance_dialogue(_QuestClient(quiet), settle=0)) \
+        == (0, "")
 
 
 def test_teleport_to_quest_reports_failure_rather_than_raising():
@@ -658,8 +689,28 @@ def test_press_x_is_a_no_op_without_wizwalker(monkeypatch):
     monkeypatch.setattr(questing, "keycode_x", lambda: None)
     root, _ = _dialogue_root(visible=False)
     client = _QuestClient(root)
-    assert asyncio.run(questing.press_x(client)) is False
+    ok, why = asyncio.run(questing.press_x(client))
+    assert ok is False
+    assert "keycode for X" in why      # and it says so rather than shrugging
     assert client.keys == []
+
+
+def test_a_failed_press_x_says_so(monkeypatch):
+    """Auto-quest that teleports correctly and never interacts looks
+    exactly like auto-quest that is working, unless this speaks up."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    class _NoKeys(_QuestClient):
+        async def send_key(self, key, seconds):
+            raise RuntimeError("send_key is gone")
+
+    monkeypatch.setattr(questing, "keycode_x", lambda: "X")
+    root, _ = _dialogue_root(visible=False)
+    ok, why = asyncio.run(questing.press_x(_NoKeys(root)))
+    assert ok is False
+    assert "RuntimeError" in why and "sigils" in why
 
 
 def test_hop_stops_early_when_asked():
@@ -864,6 +915,161 @@ def test_service_loop_leaves_the_mouse_alone_during_combat(qapp):
     asyncio.run(drive())
     assert client.teleported == []
     assert client.mouse_handler.clicks == []
+
+
+def test_a_broken_stage_does_not_take_the_others_off_the_air(qapp):
+    """One `except` around the whole service tick meant a broken mouse
+    hook killed auto-dialogue, the script runner and auto-quest at once,
+    forever, without a word on screen."""
+    import asyncio
+
+    from deimos_bridge import questing
+    from deimos_bridge.gui.live import LiveWorker
+
+    root, _ = _dialogue_root(visible=True)
+    client = _QuestClient(root, in_battle=False)
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1,
+                        auto_dialogue=True, auto_quest=True)
+    said = []
+    worker.status = type("S", (), {"emit": staticmethod(said.append)})()
+
+    stepped = []
+    worker._quest_step = lambda c: _tick(stepped)
+
+    async def _boom(_client, **kw):
+        raise RuntimeError("the mouse hook is not active")
+
+    async def drive():
+        task = asyncio.ensure_future(worker._service_loop(client))
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            if stepped:
+                break
+        worker._stop = True
+        task.cancel()
+        try:
+            await task
+        except BaseException:
+            pass
+
+    # auto-dialogue runs above the quest step in the tick, so breaking it
+    # is the case that used to take everything below it off the air.
+    real = questing.advance_dialogue
+    questing.advance_dialogue = _boom
+    try:
+        asyncio.run(drive())
+    finally:
+        questing.advance_dialogue = real
+
+    assert stepped, "the quest step never ran below the broken stage"
+    assert any("auto-dialogue failed" in m for m in said), said
+
+
+async def _tick(seen):
+    seen.append(1)
+
+
+def test_a_dropped_request_is_not_reported_as_happening(qapp):
+    """A hotkey held down, or a second press during a multi-second wisp
+    sweep, must not read as another sweep that never happened."""
+    from deimos_bridge.gui.live import LiveWorker
+
+    w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    assert w.request("wisps") is True
+    assert w.request("wisps") is False        # already queued
+
+    w._requests.clear()
+    w._busy = "wisps"
+    assert w.request("wisps") is False        # already running
+    assert w.request("potion") is True
+
+
+def test_the_request_drain_stops_when_a_duel_starts(qapp):
+    """A wisp sweep runs for seconds. A duel that starts partway through
+    would leave this teleporting while the handler clicks cards."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    root, _ = _dialogue_root(visible=False)
+    client = _QuestClient(root, in_battle=False)
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    worker.status = type("S", (), {"emit": staticmethod(lambda *_: None)})()
+    done = []
+
+    async def _slow(_client, action):
+        done.append(action)
+        client._in_battle = True              # a duel starts mid-sweep
+
+    worker._upkeep_now = _slow
+    worker._requests[:] = ["wisps", "potion"]
+    asyncio.run(worker._drain_requests(client))
+    assert done == ["wisps"]
+    assert worker._requests == ["potion"], "the rest must wait, not be lost"
+
+
+def test_upkeep_and_questing_do_not_drive_the_client_at_once(qapp):
+    """A quest-marker teleport landing between two wisp teleports moves
+    the wizard off the field while the sweep keeps counting."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    root, _ = _dialogue_root(visible=False)
+    client = _QuestClient(root, in_battle=False)
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1,
+                        auto_quest=True)
+    worker.status = type("S", (), {"emit": staticmethod(lambda *_: None)})()
+    hopped = []
+    worker._quest_step = lambda c: _tick(hopped)
+    worker._in_upkeep = True
+
+    async def drive():
+        task = asyncio.ensure_future(worker._service_loop(client))
+        await asyncio.sleep(0.3)
+        worker._stop = True
+        task.cancel()
+        try:
+            await task
+        except BaseException:
+            pass
+
+    asyncio.run(drive())
+    assert hopped == [], "questing ran during the between-fights chores"
+
+
+def test_the_manual_wisp_sweep_relays_the_reason_it_found_none(qapp):
+    """Five diagnosed reasons collapsed into one invented line, "no safe
+    wisps in range", printed at a wizard standing on a pile of them."""
+    import asyncio
+
+    from deimos_bridge import upkeep
+    from deimos_bridge.gui.live import LiveWorker
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    said = []
+    worker.status = type("S", (), {"emit": staticmethod(said.append)})()
+
+    async def _available():
+        return True, ""
+
+    async def _wisps(client, on_status=None, **kw):
+        on_status("could not read the wisp entities: WispHealth "
+                  "(MemoryReadError)")
+        return 0
+
+    real_available, real_wisps = upkeep.available, upkeep.collect_wisps
+    upkeep.available, upkeep.collect_wisps = _available, _wisps
+    try:
+        asyncio.run(worker._upkeep_now(object(), "wisps"))
+    finally:
+        upkeep.available, upkeep.collect_wisps = real_available, real_wisps
+
+    assert any("MemoryReadError" in m for m in said), said
+    assert not any("no safe wisps in range" in m for m in said)
 
 
 def test_auto_dialogue_clicks_without_being_asked(qapp):
@@ -1699,7 +1905,34 @@ def test_reading_max_health_never_fails_the_connect(qapp):
         stats = _Stats()
 
     w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    said = []
+    w.status = type("S", (), {"emit": staticmethod(said.append)})()
     asyncio.run(w._read_max_hp(_Client()))       # must not raise
+
+    # ...but it is not silent. The symptom of an unread maximum is "the Q
+    # table decided 0% of the boards it was shown", whose obvious fix --
+    # train for longer -- cannot help, so the real cause has to be said.
+    assert any("max health" in m for m in said), said
+    assert w.hp_known is False
+
+
+def test_an_unread_max_health_is_offered_as_the_coverage_cause(qapp):
+    """The mob count and mob HP can both be perfectly in range while the
+    wizard's own health bucket matches nothing, and then the advice was
+    'raise episodes and retrain', which is the one fix that cannot help."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.generalize.setChecked(True)
+
+    class _Live:
+        hp_known = False
+
+    win.live = _Live()
+    assert "max health" in win._why_coverage_is_low()
+
+    _Live.hp_known = True
+    assert "max health" not in win._why_coverage_is_low()
 
 
 def test_the_run_records_which_policy_played_each_round():
@@ -1879,14 +2112,86 @@ def test_two_actions_cannot_share_one_key(qapp):
 
 def test_hotkey_choices_are_all_real_keycodes():
     """Every key the dropdown offers has to resolve, or picking it fails
-    at run time with the game already open."""
+    at run time with the game already open.
+
+    Read out of wizwalker's source rather than by importing it. The
+    import needs Windows, so this test skipped everywhere it was run --
+    which is how `NUMPAD0`..`NUMPAD3` sat in the dropdown for four
+    choices that could never bind (`Keycode` spells them
+    `Numeric_pad_0`).
+    """
+    import ast
+    import pathlib
+
     from deimos_bridge import hotkeys
 
-    ok, _ = hotkeys.available()
-    if not ok:
-        pytest.skip("wizwalker (Windows) not importable")
+    source = pathlib.Path(__file__).resolve().parents[1] / (
+        "Deimos/libs/wizwalker/wizwalker/constants.py")
+    if not source.exists():
+        pytest.skip("the vendored wizwalker is not checked out")
+    tree = ast.parse(source.read_text(encoding="utf-8", errors="replace"))
+    members = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "Keycode":
+            for stmt in node.body:
+                if isinstance(stmt, ast.Assign):
+                    members.update(t.id for t in stmt.targets
+                                   if isinstance(t, ast.Name))
+    assert members, "could not read Keycode out of wizwalker"
     for name in hotkeys.KEY_CHOICES:
-        assert hotkeys.resolve(name) is not None, name
+        assert name in members or name.upper() in members, name
+
+
+def test_a_hotkey_that_will_not_install_says_what_went_wrong(qapp):
+    """Every failure was blamed on "another program has it", so a
+    wizwalker API mismatch sent the user cycling through all fourteen
+    keys, none of which was ever the problem."""
+    import asyncio
+    import sys
+
+    from deimos_bridge import hotkeys
+
+    class _Listener:
+        async def add_hotkey(self, key, cb, **kw):
+            raise TypeError("object NoneType can't be used in 'await'")
+
+        def start(self):
+            pass
+
+    class _WW:
+        HotkeyListener = _Listener
+
+        class Keycode:
+            F1 = 1
+
+    said = []
+    hk = hotkeys.Hotkeys({"teleport": "F1"}, lambda a: None,
+                         on_status=said.append)
+    real = sys.modules.get("wizwalker")
+    sys.modules["wizwalker"] = _WW
+    try:
+        assert asyncio.run(hk.start()) == {}
+    finally:
+        if real is None:
+            del sys.modules["wizwalker"]
+        else:
+            sys.modules["wizwalker"] = real
+
+    assert any("TypeError" in m for m in said), said
+    assert not any("another program" in m for m in said)
+
+
+def test_a_collision_names_every_action_it_unbound(qapp):
+    """With four actions on four default keys, retargeting one onto
+    another's default drops an action the user never touched."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.hotkey_boxes["teleport"].setCurrentText("F3")     # wisps' default
+    bindings = win.hotkey_bindings()
+    assert bindings["teleport"] == "F3"
+    assert "wisps" not in bindings
+    assert "wisps" in win.status.text(), win.status.text()
 
 
 # ------------------------------------------------------- gear, and over-buffing
@@ -2410,10 +2715,13 @@ def test_auto_dialogue_ignores_an_npc_that_is_not_the_quest(monkeypatch):
     async def _yes(_c):
         return True
 
+    async def _pressed(_c):
+        return True, ""
+
     monkeypatch.setattr(questing, "in_dialogue", _no)
     monkeypatch.setattr(questing, "near_interactable", _yes)
     monkeypatch.setattr(questing, "press_x",
-                        lambda c: pressed.append(1) or _yes(c))
+                        lambda c: pressed.append(1) or _pressed(c))
 
     far = _DialogueClient(_Pos(0, 0), _Pos(9000, 9000))
     assert asyncio.run(questing.open_dialogue_if_near(far)) is False
@@ -3029,6 +3337,239 @@ def test_upkeep_resolves_wizsprinter_through_the_shared_path_helper():
                          for line in inspect.getsource(fn).splitlines())
         assert "ensure_path" in code, fn.__name__
         assert "sys.path" not in code, fn.__name__
+
+
+# ------------------------------- upkeep has to wait for the wizard to be free
+class _FreeClient:
+    """A client that is busy for the first `busy` reads, then free."""
+
+    def __init__(self, busy=0, hud=True, loading=False):
+        self.busy = busy
+        self._hud = hud
+        self._loading = loading
+        self.teleported = []
+        self.root_window = _Win("root", [
+            _Win("WorldView", [
+                _Win("windowHUD", [_Win("btnPotions", visible=hud)])])])
+
+    async def is_loading(self):
+        return self._loading and self.busy > 0
+
+    async def in_battle(self):
+        if self.busy > 0:
+            self.busy -= 1
+            return not self._loading
+        return False
+
+    async def teleport(self, xyz):
+        self.teleported.append(xyz)
+
+
+def test_upkeep_waits_for_the_duel_to_actually_end():
+    """`wait_for_combat` returns when duel_phase is `ended`, which is
+    before the results screen clears and before the body is released --
+    so the chores ran against a wizard the game still owned."""
+    import asyncio
+
+    from deimos_bridge import upkeep
+
+    client = _FreeClient(busy=3)
+    ok, why = asyncio.run(upkeep.wait_until_free(client, timeout=5.0,
+                                                 poll=0.01, settle=0))
+    assert ok is True and why == ""
+    assert client.busy == 0, "it returned before the duel had ended"
+
+
+def test_upkeep_skips_the_chores_when_the_duel_never_ends():
+    import asyncio
+
+    from deimos_bridge import upkeep
+
+    client = _FreeClient(busy=10_000)
+    ok, why = asyncio.run(upkeep.wait_until_free(client, timeout=0.05,
+                                                 poll=0.01, settle=0))
+    assert ok is False
+    assert "still in the duel" in why and "skipped" in why
+
+
+def test_upkeep_goes_ahead_when_the_hud_cannot_be_read():
+    """The light-install case. An unanswerable gate must not become a
+    timeout that stops upkeep from ever running."""
+    import asyncio
+
+    from deimos_bridge import upkeep
+
+    class _NoWindows:
+        root_window = None
+
+    ok, why = asyncio.run(upkeep.wait_until_free(_NoWindows(), timeout=9.0,
+                                                 poll=0.01, settle=0))
+    assert ok is True and why == ""
+
+
+def test_upkeep_says_so_when_the_hud_never_returns():
+    import asyncio
+
+    from deimos_bridge import upkeep
+
+    client = _FreeClient(hud=False)
+    ok, why = asyncio.run(upkeep.wait_until_free(client, timeout=0.05,
+                                                 poll=0.01, settle=0))
+    assert ok is True, "a missing HUD must not stop the chores outright"
+    assert "HUD never came back" in why
+
+
+def test_after_fight_will_not_touch_a_client_that_is_still_in_the_duel(
+        monkeypatch):
+    import asyncio
+
+    from deimos_bridge import upkeep
+
+    ran = []
+
+    async def _wisps(client, **kw):
+        ran.append("wisps")
+        return 1
+
+    monkeypatch.setattr(upkeep, "collect_wisps", _wisps)
+    said = []
+    asyncio.run(upkeep.after_fight(_FreeClient(busy=10_000), potions=False,
+                                   on_status=said.append))
+    assert ran == []
+    assert said and "skipped" in said[0]
+
+
+def test_a_wisp_teleport_that_snaps_back_is_not_counted(monkeypatch):
+    """`client.teleport` raises nothing when the game undoes it, so
+    counting the call reported "collected 3 wisp(s)" for a wizard that
+    never moved."""
+    import asyncio
+
+    from deimos_bridge import upkeep
+
+    class _Pos3:
+        def __init__(self, x, y, z=0.0):
+            self.x, self.y, self.z = x, y, z
+
+    class _Wisp:
+        def __init__(self, xyz):
+            self._xyz = xyz
+
+        async def location(self):
+            return self._xyz
+
+    class _Sprinty:
+        async def get_base_entities_with_vague_name(self, name):
+            return ([_Wisp(_Pos3(500, 500)), _Wisp(_Pos3(600, 600))]
+                    if name == "WispHealth" else [])
+
+        async def find_safe_entities_from(self, entities):
+            return entities
+
+    class _Body:
+        async def position(self):
+            return _Pos3(0, 0)          # never moved: the duel circle
+
+    class _Stuck:
+        body = _Body()
+
+        async def teleport(self, xyz):
+            pass                        # accepted, then undone
+
+    said = []
+    monkeypatch.setattr(upkeep, "_sprinty", lambda c: _Sprinty())
+    n = asyncio.run(upkeep.collect_wisps(_Stuck(), on_status=said.append))
+    assert n == 0
+    assert said and "snapped back" in said[0]
+
+
+def test_an_unsafe_wisp_sweep_says_it_is_unsafe(monkeypatch):
+    """`safe_only=True` degrading to False in silence walks the wizard
+    into the second fight the checkbox promises to avoid."""
+    import asyncio
+
+    from deimos_bridge import upkeep
+
+    class _Sprinty:
+        async def get_base_entities_with_vague_name(self, name):
+            return ([_Entity("safe"), _Entity("guarded")]
+                    if name == "WispHealth" else [])
+
+        async def find_safe_entities_from(self, entities):
+            raise RuntimeError("MemoryReadError")
+
+    said = []
+    monkeypatch.setattr(upkeep, "_sprinty", lambda c: _Sprinty())
+    client = _UpkeepClient()
+    n = asyncio.run(upkeep.collect_wisps(client, on_status=said.append))
+    assert n == 2 and client.teleported == ["safe", "guarded"]
+    assert any("may pull a fight" in m for m in said)
+
+
+def test_a_failed_health_read_is_not_reported_as_healthy(monkeypatch):
+    """A wizard at 12% with three charges sat there all run because one
+    of five stat reads raised and False came back either way."""
+    import asyncio
+
+    from deimos_bridge import upkeep
+
+    class _Stats:
+        async def current_mana(self):
+            raise RuntimeError("MemoryReadError")
+
+    class _Client:
+        stats = _Stats()
+
+    assert asyncio.run(upkeep.needs_potion(_Client())) is False
+    assert "could not check" in upkeep.needs_potion.last_error
+
+    said = []
+    asyncio.run(upkeep.after_fight(_Client(), wisps=False, potions=True,
+                                   on_status=said.append, wait=False))
+    assert said and "could not check" in said[0]
+
+
+def test_a_failed_charge_read_is_not_reported_as_no_charges():
+    """"No charges left" is an assertion about the game. Saying it
+    because the read failed sends you to a vendor to buy potions you
+    already have."""
+    import asyncio
+
+    from deimos_bridge import upkeep
+
+    class _Stats:
+        async def potion_charge(self):
+            raise RuntimeError("MemoryReadError")
+
+    class _Client:
+        stats = _Stats()
+
+    assert asyncio.run(upkeep.drink_potion(_Client())) is False
+    why = upkeep.drink_potion.last_error
+    assert "could not read your potion charges" in why
+    assert "no charges" not in why
+
+
+def test_the_potion_error_does_not_outlive_the_call_that_made_it():
+    """It was a module-level function attribute that nothing cleared, so
+    fight 1's ModuleNotFoundError was still being reported at fight 8 as
+    the reason an empty bottle had not been drunk."""
+    import asyncio
+
+    from deimos_bridge import upkeep
+
+    upkeep.drink_potion.last_error = "ModuleNotFoundError: no thefuzz"
+
+    class _Stats:
+        async def potion_charge(self):
+            return 0.0
+
+    class _Client:
+        stats = _Stats()
+
+    assert asyncio.run(upkeep.drink_potion(_Client())) is False
+    assert "thefuzz" not in upkeep.drink_potion.last_error
+    assert "empty" in upkeep.drink_potion.last_error
 
 
 # ------------------------------------ the agent has to be able to use its table

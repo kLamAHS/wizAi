@@ -14,6 +14,7 @@ ultimately refresh on, and because the signal crosses threads Qt queues
 it onto the GUI thread automatically.
 """
 import asyncio
+import threading as _threading
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -83,9 +84,36 @@ class LiveWorker(QThread):
         self._warned_quest_arrow = False
         self._stop = False
         #: one-shot questing requests from the GUI thread. A plain list
-        #: rather than a queue: the GUI appends, the loop drains between
-        #: fights, and CPython's list ops are atomic enough for that.
+        #: under a lock: individual list ops are atomic, but "is it
+        #: already queued" followed by "queue it" is a check-then-act,
+        #: and the two callers are on different threads -- buttons on the
+        #: GUI thread, hotkeys on the worker's loop.
         self._requests = []
+        self._requests_lock = _threading.Lock()
+        #: the action currently being performed, if any. The queue
+        #: dedupe only covers the window in which an action sits
+        #: *waiting*; a wisp sweep runs for seconds, and a held hotkey
+        #: would otherwise queue a fresh sweep the moment the last one
+        #: started.
+        self._busy = None
+        #: serialises upkeep against itself. The fight loop awaits
+        #: `after_fight` while the service task is live, and after a
+        #: fight `in_battle` is False -- so a queued wisps request was
+        #: serviced *during* the automatic sweep, running two of them
+        #: against one client. Created in `_go`, on the worker's loop.
+        self._upkeep_lock = None
+        #: set while the fight loop is doing the between-fights chores.
+        #: The lock keeps two upkeep runs apart; this keeps *questing*
+        #: apart from upkeep, which is a different collision -- a wisp
+        #: sweep yields the loop every 0.15s, and a quest-marker teleport
+        #: landing between two wisp teleports moves the wizard off the
+        #: field while the sweep keeps counting.
+        self._in_upkeep = False
+        #: stage name -> how many times it has failed, so a broken stage
+        #: is reported rather than retried silently twice a second
+        self._stage_errors = {}
+        #: whether the wizard's real max health was ever read
+        self.hp_known = False
         self._client = None
 
     def stop(self):
@@ -104,15 +132,19 @@ class LiveWorker(QThread):
         the combat handler is clicking cards during a duel and a second
         coroutine reaching for the mouse produces misclicks.
 
-        Duplicates are dropped rather than queued. Holding a hotkey down
-        sends a burst of repeats, and a queue of eight wisp sweeps would
-        take a minute to work through with the fight waiting.
+        Duplicates are dropped rather than queued -- including one that
+        is *running* rather than waiting. Holding a hotkey down sends a
+        burst of repeats, and a queue of eight wisp sweeps would take a
+        minute to work through with the fight waiting. Returns whether
+        the action was accepted, so the caller can stop claiming an
+        action is happening when it was dropped.
         """
         if action not in self.ACTIONS:
             return False
-        if action in self._requests:
-            return False
-        self._requests.append(action)
+        with self._requests_lock:
+            if action in self._requests or action == self._busy:
+                return False
+            self._requests.append(action)
         return True
 
     # -- swapping the policy without dropping the connection --------------
@@ -181,48 +213,113 @@ class LiveWorker(QThread):
 
         while not self._stop:
             try:
-                if await questing.in_battle(client):
+                if await questing.in_battle(client) or self._in_upkeep:
                     await asyncio.sleep(0.5)
                     continue
 
-                while self._requests:
-                    action = self._requests.pop(0)
-                    if action == "teleport":
-                        ok, reason = await questing.teleport_to_quest(client)
-                        self.status.emit("teleported to the quest marker"
-                                         if ok else reason)
-                    elif action == "dialogue":
-                        n = await questing.advance_dialogue(client)
-                        self.status.emit(
-                            f"advanced {n} dialogue window(s)" if n
-                            else "no dialogue open")
-                    elif action in ("wisps", "potion"):
-                        await self._upkeep_now(client, action)
+                await self._drain_requests(client)
 
                 if self.auto_dialogue and self.quester is None:
                     # Deimos's questing does its own dialogue handling, so
                     # a second clicker would race it for the same button.
-                    await self._auto_dialogue(client)
+                    await self._stage("auto-dialogue",
+                                      self._auto_dialogue(client))
 
                 if self.runner is not None:
-                    if not await self.runner.step() and self.runner.finished:
-                        self.status.emit("script finished")
-                        self.runner = None
-                    elif self.runner is not None and \
-                            self.runner.failures in (1, 10):
-                        self.status.emit(
-                            f"script error: {self.runner.last_error}")
+                    await self._stage("script step", self._script_step())
 
                 if self.auto_quest:
-                    await self._quest_step(client)
+                    await self._stage("quest step", self._quest_step(client))
 
                 await asyncio.sleep(0.5)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
                 # The service task must outlive a bad read; the fight
-                # loop is the thing that matters.
+                # loop is the thing that matters. But it says so now.
+                # One `except` around the whole body used to swallow
+                # every stage below the one that raised, so a broken
+                # mouse hook killed auto-dialogue, the script runner and
+                # auto-quest simultaneously and forever, without a word.
+                self._stage_failed("the service loop", exc)
                 await asyncio.sleep(1.0)
+
+    async def _stage(self, name, coro):
+        """Run one stage of the service tick, reporting its own failure.
+
+        Per stage rather than per tick: a stage that raises must not take
+        the ones below it off the air, and the message has to name which
+        one it was or "nothing works" is all anybody can report.
+        """
+        try:
+            await coro
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._stage_failed(name, exc)
+
+    def _stage_failed(self, name, exc):
+        self._say_once(name, f"{name} failed — {type(exc).__name__}: {exc}")
+
+    def _say_once(self, key, message):
+        """Say it the first time, then every 20th -- twice a second is spam.
+
+        The service tick runs twice a second, so a stage that is broken
+        rather than unlucky would fill the status bar with one line and
+        nothing else. Reporting the first and then thinning out keeps
+        the failure visible without burying everything around it.
+        """
+        n = self._stage_errors.get(key, 0) + 1
+        self._stage_errors[key] = n
+        if n == 1 or n % 20 == 0:
+            self.status.emit(
+                message + (f" (still failing after {n} tries)"
+                           if n > 1 else ""))
+
+    async def _drain_requests(self, client):
+        """Perform the queued button/hotkey actions, one at a time.
+
+        `in_battle` is re-checked before each one, not once per tick: a
+        wisp sweep is a multi-second, multi-teleport action, and a duel
+        that starts partway through would leave this teleporting the
+        wizard around while the combat handler clicks cards.
+        """
+        from .. import questing
+
+        while self._requests and not self._stop:
+            if await questing.in_battle(client):
+                return
+            with self._requests_lock:
+                if not self._requests:
+                    return
+                action = self._requests.pop(0)
+                self._busy = action
+            try:
+                await self._stage(f"the {action} request",
+                                  self._do_request(client, action))
+            finally:
+                self._busy = None
+
+    async def _do_request(self, client, action):
+        from .. import questing
+
+        if action == "teleport":
+            ok, reason = await questing.teleport_to_quest(client)
+            self.status.emit("teleported to the quest marker"
+                             if ok else reason)
+        elif action == "dialogue":
+            n, why = await questing.advance_dialogue(client)
+            self.status.emit(f"advanced {n} dialogue window(s)" if n
+                             else (why or "no dialogue open"))
+        elif action in ("wisps", "potion"):
+            await self._upkeep_now(client, action)
+
+    async def _script_step(self):
+        if not await self.runner.step() and self.runner.finished:
+            self.status.emit("script finished")
+            self.runner = None
+        elif self.runner is not None and self.runner.failures in (1, 10):
+            self.status.emit(f"script error: {self.runner.last_error}")
 
     async def _auto_dialogue(self, client):
         """Open and clear dialogue, but only the quest's.
@@ -244,9 +341,12 @@ class LiveWorker(QThread):
             if await questing.near_interactable(client):
                 near, why = await questing.at_quest_marker(client)
                 if near:
-                    if await questing.press_x(client):
+                    ok, pressed_why = await questing.press_x(client)
+                    if ok:
                         self.status.emit("opened the quest dialogue")
                         await asyncio.sleep(0.6)
+                    elif pressed_why:
+                        self._say_once("press-x", pressed_why)
                 elif (why and "quest marker" not in why
                         and not self._warned_quest_arrow):
                     self._warned_quest_arrow = True
@@ -256,19 +356,24 @@ class LiveWorker(QThread):
         if await questing.in_dialogue(client):
             # Whatever is already open gets cleared, quest or not --
             # dialogue blocks movement, so leaving one up strands the run.
-            n = await questing.advance_dialogue(client)
+            n, click_why = await questing.advance_dialogue(client)
             if n:
                 self.status.emit(f"auto-dialogue: {n} window(s)")
+            elif click_why:
+                # Reported, not spun on: this used to loop twice a second
+                # forever against an open dialogue it could not click,
+                # with movement blocked and nothing on screen.
+                self._say_once("auto-dialogue-click", click_why)
 
     async def _upkeep_now(self, client, action):
         """Collect wisps, or drink a potion, on demand.
 
-        The failure is *reported*. The automatic version wraps this whole
-        area in `except Exception: pass`, so when it does not work -- and
-        it did not -- there is nothing on screen to say why, which makes
-        "collect wisps is broken" a report nobody can act on. A hotkey
-        that says "no wisps in range" is doing its job; one that says
-        nothing is indistinguishable from one that is not wired up.
+        The failure is *reported* -- and reported as the helper diagnosed
+        it, not as this function guesses. `collect_wisps` distinguishes
+        five separate reasons for coming back with nothing; passing no
+        `on_status` threw all five away and printed one invented line,
+        "no safe wisps in range", at a wizard standing on a pile of them.
+        The helper's own message is the whole point of the hotkey.
         """
         from .. import upkeep
 
@@ -276,20 +381,46 @@ class LiveWorker(QThread):
         if not ok:
             self.status.emit(f"upkeep unavailable — {why}")
             return
-        try:
-            if action == "wisps":
-                n = await upkeep.collect_wisps(client)
-                self.status.emit(f"collected {n} wisp(s)" if n
-                                 else "no safe wisps in range")
-            else:
-                if await upkeep.drink_potion(client):
-                    self.status.emit("drank a potion")
+
+        # The same lock the automatic sweep holds. Pressing the hotkey as
+        # a fight ends would otherwise run two wisp sweeps, or two potion
+        # calls, against one client on one loop.
+        async with self._upkeep():
+            try:
+                if action == "wisps":
+                    said = []
+
+                    def relay(message):
+                        said.append(message)
+                        self.status.emit(message)
+
+                    await upkeep.collect_wisps(client, on_status=relay)
+                    if not said:
+                        self.status.emit("no wisps in range")
                 else:
-                    self.status.emit(
-                        "no potion drunk — out of charges, or the potion "
-                        "helper needs Deimos's requirements")
-        except Exception as exc:
-            self.status.emit(f"{action} failed — {type(exc).__name__}: {exc}")
+                    if await upkeep.drink_potion(client):
+                        self.status.emit("drank a potion")
+                    else:
+                        why = getattr(upkeep.drink_potion, "last_error", "")
+                        self.status.emit(
+                            "no potion drunk"
+                            + (f" — {why}" if why else ""))
+            except Exception as exc:
+                self.status.emit(
+                    f"{action} failed — {type(exc).__name__}: {exc}")
+
+    def _upkeep(self):
+        """The upkeep lock, or a no-op when there is no loop yet.
+
+        `_upkeep_now` is reachable before `_go` has built the lock (and
+        from tests that drive it directly), and a missing lock must not
+        be the reason a chore does not run.
+        """
+        import contextlib
+
+        if self._upkeep_lock is None:
+            return contextlib.nullcontext()
+        return self._upkeep_lock
 
     async def _setup_hotkeys(self):
         """Bind the global hotkeys, if any were configured.
@@ -320,12 +451,27 @@ class LiveWorker(QThread):
         played on a wizard with 1,300 indexes different states for the
         same board. The client knows the number -- there is no reason to
         make anyone type it, and no reason for the guess to be wrong.
+
+        A failed read is *said*, because its symptom points at the wrong
+        fix. The box keeps its default, training buckets health against
+        that default, the live wizard has some other maximum, and every
+        live board then keys a health bucket the table never visited --
+        so the window reports "the Q table decided 0% of the boards it
+        was shown" and the obvious response, train for longer, cannot
+        help. Naming the unread stat is the difference between a
+        two-second fix and an hour of retraining.
         """
         try:
             hp = int(await client.stats.max_hitpoints())
-        except Exception:
+        except Exception as exc:
+            self.status.emit(
+                f"could not read your max health ({type(exc).__name__}) — "
+                f"training will use whatever is in the box, and a wrong "
+                f"value makes the Q table share no states with the live "
+                f"board")
             return          # a nicety; never worth failing the connect
         if hp > 0:
+            self.hp_known = True
             self.hp_read.emit(hp)
 
     async def _read_gear(self, client):
@@ -529,6 +675,9 @@ class LiveWorker(QThread):
             self.status.emit(
                 "connected — hunting for fights" if self.auto_quest
                 else "connected — walk into a fight")
+            # Built here, not in __init__: an asyncio.Lock binds to the
+            # loop it is created on, and __init__ runs on the GUI thread.
+            self._upkeep_lock = asyncio.Lock()
             servicer = asyncio.ensure_future(self._service_loop(client))
             fought = 0
             while not self._stop and (self.fights <= 0 or fought < self.fights):
@@ -558,10 +707,18 @@ class LiveWorker(QThread):
                 if not self._stop and (self.collect_wisps or self.use_potions):
                     from .. import upkeep
                     try:
-                        await upkeep.after_fight(
-                            client, wisps=self.collect_wisps,
-                            potions=self.use_potions,
-                            on_status=self.status.emit)
+                        # Under the lock, and under a flag the service
+                        # task honours: a wisp sweep yields the loop
+                        # every 0.15s, and the service task used to wake
+                        # up inside it, decide the wizard was out of
+                        # combat and free, and teleport it to the quest
+                        # marker halfway through the sweep.
+                        self._in_upkeep = True
+                        async with self._upkeep():
+                            await upkeep.after_fight(
+                                client, wisps=self.collect_wisps,
+                                potions=self.use_potions,
+                                on_status=self.status.emit)
                     except Exception as exc:
                         # Still never a blocker -- but the reason is said
                         # out loud. Swallowing it silently is what made
@@ -570,6 +727,8 @@ class LiveWorker(QThread):
                         # between broken and nothing-to-do.
                         self.status.emit(
                             f"upkeep failed — {type(exc).__name__}: {exc}")
+                    finally:
+                        self._in_upkeep = False
                 self.status.emit(
                     f"fight {fought} over — waiting for the next"
                     if not self._stop else "stopping…")

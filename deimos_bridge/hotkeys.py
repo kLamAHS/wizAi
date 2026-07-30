@@ -36,8 +36,15 @@ DEFAULTS = {"teleport": "F1", "dialogue": "F2",
 #: What the GUI offers. Deliberately short: every entry here is a key
 #: taken away from every other program for the length of the run, so the
 #: list is confined to ones a game or an editor is unlikely to want.
+#:
+#: The numpad names are wizwalker's spelling, not the obvious one. They
+#: were listed here as `NUMPAD0`..`NUMPAD3`, which is not what
+#: `Keycode` calls them (`constants.py:111` — `Numeric_pad_0`), so
+#: `resolve` returned None and four of the fourteen choices bound
+#: nothing at all: pick one and the action is quietly dropped.
 KEY_CHOICES = ("F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8",
-               "F9", "F10", "NUMPAD0", "NUMPAD1", "NUMPAD2", "NUMPAD3")
+               "F9", "F10", "Numeric_pad_0", "Numeric_pad_1",
+               "Numeric_pad_2", "Numeric_pad_3")
 
 
 def available():
@@ -51,10 +58,19 @@ def available():
 
 
 def resolve(name):
-    """A `Keycode` from a name in `KEY_CHOICES`, or None."""
+    """A `Keycode` from a name in `KEY_CHOICES`, or None.
+
+    Exact name first. `Keycode` mixes cases -- `F1` but `Numeric_pad_0`
+    -- so upper-casing everything can never match half the enum, and a
+    name that does not resolve is an action that silently does nothing.
+    """
     from wizwalker import Keycode
 
-    return getattr(Keycode, str(name).upper(), None)
+    name = str(name)
+    key = getattr(Keycode, name, None)
+    # `is None`, not truthiness: `Keycode` is an IntEnum and a member
+    # whose value is 0 is falsy while being perfectly valid.
+    return key if key is not None else getattr(Keycode, name.upper(), None)
 
 
 class Hotkeys:
@@ -79,6 +95,9 @@ class Hotkeys:
         self.listener = None
         #: action -> key name, for the ones that actually registered
         self.installed = {}
+        #: actions whose last press was refused, so a held key reports
+        #: "already running" once rather than once per repeat
+        self._dropped = set()
 
     async def start(self):
         """Register every binding. Returns the ones that took.
@@ -102,14 +121,24 @@ class Hotkeys:
                 self.on_status(f"hotkey: no such key {key_name!r}")
                 continue
             try:
-                await self.listener.add_hotkey(key, self._make(action))
-            except Exception:
-                # wizwalker raises ValueError("already registered") for
-                # this, which is misleading -- the collision is with
-                # another *program*, not with us.
-                self.on_status(
-                    f"hotkey {key_name} unavailable — another program has "
-                    f"it. Pick a different key.")
+                await self.listener.add_hotkey(key, self._make(action),
+                                               **self._modifiers())
+            except Exception as exc:
+                # wizwalker raises ValueError("already registered") for a
+                # genuine collision, which is misleading -- it is another
+                # *program* holding the key, not us. But that message was
+                # printed for **every** exception, so a wizwalker API
+                # mismatch or a permissions problem sent the user off
+                # cycling through all fourteen keys, none of which was
+                # ever the problem. Name what actually happened.
+                if isinstance(exc, ValueError) and "registered" in str(exc):
+                    self.on_status(
+                        f"hotkey {key_name} unavailable — another program "
+                        f"has it. Pick a different key.")
+                else:
+                    self.on_status(
+                        f"hotkey {key_name} could not be installed — "
+                        f"{type(exc).__name__}: {exc}")
                 continue
             self.installed[action] = key_name
 
@@ -133,10 +162,40 @@ class Hotkeys:
             self.listener = None
             self.installed = {}
 
+    @staticmethod
+    def _modifiers():
+        """`NOREPEAT`, if this wizwalker has it.
+
+        Without it Windows auto-repeats `WM_HOTKEY` for as long as the
+        key is held, so leaning on the wisps key fires a stream of
+        requests. The queue's dedupe only covers the window in which an
+        action sits *waiting* -- a sweep that is already running is not
+        in the queue -- so the repeats chained back-to-back sweeps.
+        wizwalker strips NOREPEAT before keying the callback
+        (`hotkey.py:369`), so dispatch is unaffected.
+        """
+        try:
+            from wizwalker import ModifierKeys
+        except Exception:
+            try:
+                from wizwalker.hotkey import ModifierKeys
+            except Exception:
+                return {}
+        return {"modifiers": ModifierKeys.NOREPEAT}
+
     def _make(self, action):
         async def fire():
             try:
-                self.on_action(action)
+                accepted = self.on_action(action)
             except Exception:
-                pass      # a bad callback must not kill the listener
+                return    # a bad callback must not kill the listener
+            if accepted is False:
+                # Said once per run of drops, not per repeat: a key held
+                # down would otherwise fill the status bar with this.
+                if action not in self._dropped:
+                    self._dropped.add(action)
+                    self.on_status(f"{action} is already running — "
+                                   f"ignoring the repeat")
+            else:
+                self._dropped.discard(action)
         return fire
