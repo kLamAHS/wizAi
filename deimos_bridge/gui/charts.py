@@ -155,6 +155,9 @@ class Chart(QWidget):
         super().__init__(parent)
         self.title = title
         self.subtitle = subtitle
+        #: the height the panel asked for, kept as a floor for charts
+        #: that grow to fit their rows
+        self._floor = height
         self.setMinimumHeight(height)
         self.setSizePolicy(QSizePolicy.Policy.Expanding,
                            QSizePolicy.Policy.Preferred)
@@ -259,6 +262,15 @@ class Chart(QWidget):
         p.setFont(QFont(self.font()))
         fm = QFontMetrics(self.font())
         for value, y in ticks:
+            # `nice_ticks` deliberately emits ticks up to half a step
+            # beyond the range, so a tick can land outside the plot
+            # entirely: on a flat 0% curve it drew "2%" over the
+            # subtitle and "-2%" off the bottom of the widget. Measured
+            # as 23 pixels of literal overprint at the shipped window
+            # size. A gridline that is not on the plot is not a
+            # gridline.
+            if not (r.top() - 1 <= y <= r.bottom() + 1):
+                continue
             p.setPen(QPen(_c("grid"), 1))
             p.drawLine(r.left(), int(y), r.right(), int(y))
             p.setPen(_c("muted"))
@@ -395,7 +407,12 @@ class LineChart(Chart):
         x0, x1 = min(xs), max(xs)
         y0, y1 = min(ys), max(ys)
         if y1 - y0 < 1e-9:
-            y0, y1 = y0 - 1, y1 + 1
+            # A flat series still needs a band, but expanding
+            # symmetrically invents a negative half -- a kill rate that
+            # is 0% everywhere was drawn on a -2%..2% axis, implying
+            # negative kill rates are a thing. Expand upward from the
+            # value, and downward only as far as zero.
+            y0, y1 = min(0.0, y0), y1 + max(1.0, abs(y1) * 0.1)
         y0 = min(y0, 0.0) if y0 > 0 and y0 < (y1 - y0) else y0
         # Headroom, so the top gridline label does not collide with the
         # subtitle and the endpoint dot is not clipped by the plot edge.
@@ -570,6 +587,10 @@ class Heatmap(Chart):
         self.cols = list(cols)
         self.low_is_good = low_is_good
         self._hot = None
+        fm = QFontMetrics(self.font())
+        self.setMinimumHeight(
+            max(self._floor, PAD_T + PAD_B + 30 + fm.height() * len(self.rows)))
+        self.updateGeometry()
         self.update()
 
     def has_data(self):
@@ -623,15 +644,24 @@ class Heatmap(Chart):
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawPath(path)
             text = f"{value:g}"
+            # Same clipping as the bars: a 9.7px cell slices a 15px
+            # glyph. Give the text a font-height rect centred on the
+            # cell rather than the cell's own height.
+            box = QRectF(rect)
+            if box.height() < fm.height():
+                box.setTop(rect.center().y() - fm.height() / 2)
+                box.setHeight(fm.height())
             if fm.horizontalAdvance(text) + 8 <= rect.width():
                 p.setPen(readable_on(fill))
-                p.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+                p.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
 
         # Row labels, left of the plot.
         ch = min(30, r.height() / max(1, len(self.rows)))
+        lh = max(ch, fm.height())
         p.setPen(_c("muted"))
         for ri, (label, _cells) in enumerate(self.rows):
-            p.drawText(QRectF(0, r.top() + ri * ch, self.pad_l - 8, ch),
+            p.drawText(QRectF(0, r.top() + ri * ch + (ch - lh) / 2,
+                              self.pad_l - 8, lh),
                        Qt.AlignmentFlag.AlignRight
                        | Qt.AlignmentFlag.AlignVCenter, label)
 
@@ -677,7 +707,7 @@ class RankedBars(Chart):
     def __init__(self, title="", subtitle="", parent=None, height=200,
                  lower_is_better=False):
         super().__init__(title, subtitle, parent, height)
-        self.bars = []        # [(label, value, chosen, note)]
+        self.bars = []        # [(label, value, chosen, note, text)]
         self.unit = ""
         #: When the metric is "turns to clear", the raw value is a bad bar:
         #: every candidate lands within a turn or two of the others, so
@@ -688,11 +718,29 @@ class RankedBars(Chart):
         self.lower_is_better = lower_is_better
 
     def set_bars(self, bars, unit=""):
-        self.bars = [(label, finite(value), chosen, note)
-                     for label, value, chosen, note in bars
+        """`bars` is (label, value, chosen, note) or (..., value_text).
+
+        The fifth element exists because some values are not numbers
+        wearing a unit. A lookahead that ran out of horizon encodes the
+        outcome *in* the number -- 14 at a horizon of 12 means "the
+        wizard dies", not "fourteen turns" -- and printing the sentinel
+        as a turn count is the difference between a board that reads as
+        a flat tie and one that reads as "no line survives".
+        """
+        rows = [(b if len(b) == 5 else (*b, None)) for b in bars]
+        self.bars = [(label, finite(value), chosen, note, text)
+                     for label, value, chosen, note, text in rows
                      if finite(value, None) is not None]
         self.unit = unit
         self._hot = None
+        # Size to the content. A fixed 180px with eleven candidates gave
+        # each row 8.5px of band, which is half a line of text -- the
+        # panel already sits in a scroll area built for exactly this, so
+        # growing costs nothing and squeezing costs legibility.
+        fm = QFontMetrics(self.font())
+        self.setMinimumHeight(
+            max(self._floor, PAD_T + PAD_B + 30 + fm.height() * len(self.bars)))
+        self.updateGeometry()
         self.update()
 
     def has_data(self):
@@ -700,7 +748,7 @@ class RankedBars(Chart):
 
     def _plotted(self):
         """(what to draw, what to print) per bar."""
-        values = [v for _l, v, _c2, _n in self.bars]
+        values = [v for _l, v, _c2, _n, _t in self.bars]
         if self.lower_is_better:
             best = min(values)
             return [v - best for v in values], values
@@ -722,8 +770,17 @@ class RankedBars(Chart):
         p.setPen(QPen(_c("axis"), 1))
         p.drawLine(r.left(), r.top(), r.left(), r.bottom())
 
-        for i, (label, value, chosen, _note) in enumerate(self.bars):
+        # Text gets its own height. Drawing it into a rect as tall as
+        # the bar means Qt clips the glyphs to the bar: at eleven
+        # candidates in a 180px chart the bar is 4.55px against a 15px
+        # font, so every row rendered as a horizontal slice and
+        # "Scarab - Starter Wa... 14 turns <- best" came out as
+        # "Scaran - Starter Wa... 14 turns <- nesr".
+        th = max(thick, fm.height())
+
+        for i, (label, value, chosen, _note, value_text) in enumerate(self.bars):
             y = r.top() + band * i + (band - thick) / 2
+            ty = r.top() + band * i + (band - th) / 2
             width = max(2.0, drawn[i] / top * (r.width() - 70))
             colour = _c("accent") if chosen else _c("recede")
             path = QPainterPath()
@@ -733,17 +790,17 @@ class RankedBars(Chart):
             p.fillPath(path, QBrush(colour))
 
             p.setPen(_c("ink") if chosen else _c("ink_dim"))
-            p.drawText(QRectF(0, y, self.pad_l - 8, thick),
+            p.drawText(QRectF(0, ty, self.pad_l - 8, th),
                        Qt.AlignmentFlag.AlignRight
                        | Qt.AlignmentFlag.AlignVCenter,
                        fm.elidedText(label, Qt.TextElideMode.ElideRight,
                                      self.pad_l - 10))
             # Value at the tip, outside the bar -- always fits there.
-            text = f"{printed[i]:g}{self.unit}"
+            text = value_text or f"{printed[i]:g}{self.unit}"
             if self.lower_is_better and chosen:
                 text += "   ← best"
             p.setPen(_c("ink") if chosen else _c("ink_dim"))
-            p.drawText(QRectF(r.left() + width + 6, y, 160, thick),
+            p.drawText(QRectF(r.left() + width + 6, ty, 160, th),
                        Qt.AlignmentFlag.AlignLeft
                        | Qt.AlignmentFlag.AlignVCenter, text)
 
@@ -755,7 +812,7 @@ class RankedBars(Chart):
                        int(band)), i) for i in range(len(self.bars))]
 
     def hit_text(self, index):
-        label, value, chosen, note = self.bars[index]
+        label, value, chosen, note, _text = self.bars[index]
         return f"{label}\n{note}" + ("\n— chosen" if chosen else "")
 
 

@@ -778,6 +778,13 @@ class LiveWorker(QThread):
         rec = self.tel.observe(
             decision, read, sim=sim,
             cards=self._backend.cards if self._backend else None)
+        # The backend measures this every round; it used to go nowhere,
+        # while the trainer guessed the same quantity off the wizard's
+        # own health.
+        rec.incoming = float(
+            getattr(self._backend, "_measured_incoming", 0.0) or 0.0)
+        if self.tel.fights:
+            self.tel.fights[-1].damage_taken += rec.incoming
         self.round_done.emit(rec)
 
     def _on_lost_round(self, round_number, reason):

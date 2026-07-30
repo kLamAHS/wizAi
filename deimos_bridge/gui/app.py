@@ -58,12 +58,18 @@ class TrainWorker(QThread):
     tick = pyqtSignal(int, int, float)
     #: what the run is doing when it is not counting episodes
     stage = pyqtSignal(str)
+    #: (trained kill rate, heuristic kill rate) on the same eval board.
+    #: The comparison the window never made — a table that keys 95% of
+    #: boards and plays them worse than the fallback reads as a success
+    #: on every number the Learning tab used to show.
+    verdict = pyqtSignal(float, float)
     finished_ok = pyqtSignal(object)
     failed = pyqtSignal(str)
 
     def __init__(self, cards, deck, school, episodes, player_hp=800,
                  boss_hp=1200, player_stats=None, n_enemies=1,
-                 mob_hps=None, generalize=True):
+                 mob_hps=None, generalize=True, mob_schools=None,
+                 mob_damage=0):
         super().__init__()
         self.cards, self.deck = cards, deck
         self.school, self.episodes = school, episodes
@@ -78,6 +84,19 @@ class TrainWorker(QThread):
         #: healths seen in real fights, used to centre the range rather
         #: than to pin the board
         self.mob_hps = [h for h in (mob_hps or []) if h > 0]
+        #: schools seen in real fights. This used to be the literal
+        #: "ice" for every training mob regardless of anything, which
+        #: is not a cosmetic default: `Boss.resist_own` is 0.40, so an
+        #: ice wizard was training against a board that resisted 40% of
+        #: every card in the deck. On the operator's settings that made
+        #: the board unwinnable by *every* policy in the repo, at every
+        #: enemy damage down to zero -- which is what a flat 0% kill
+        #: rate across 40,000 episodes was.
+        self.mob_schools = [s for s in (mob_schools or []) if s]
+        #: measured incoming damage per enemy per round, off the live
+        #: fight. 0 means "never measured", and only then is the wizard's
+        #: own health used as a stand-in.
+        self.mob_damage = int(mob_damage or 0)
         #: Resample the board every episode instead of training one.
         #: On by default, because the alternative is retraining before
         #: every fight -- which needs you to know the board before you
@@ -132,6 +151,26 @@ class TrainWorker(QThread):
             hi = max(hi, int(max(self.mob_hps) * 1.6))
         return max(1, lo), max(lo + 1, hi)
 
+    def school_pool(self):
+        """The schools to draw training mobs from.
+
+        Observed schools first -- if the run has actually fought a death
+        boss, train against death. Failing that, all seven, because a
+        table trained against one school has learned that school's
+        resist as if it were a property of the game. Never the wizard's
+        own school on its own: that is the 0.40 own-school resist, the
+        worst matchup available, and it was the shipped default.
+        """
+        from rl_agent import MOB_SCHOOLS
+
+        seen = [s for s in dict.fromkeys(self.mob_schools) if s in MOB_SCHOOLS]
+        return seen or list(MOB_SCHOOLS)
+
+    def board_schools(self):
+        """Schools for the fixed evaluation board, one per mob."""
+        pool = self.school_pool()
+        return [pool[i % len(pool)] for i in range(self.n_enemies)]
+
     def board_hps(self):
         """The fixed board, for `generalize=False` and for evaluation.
 
@@ -146,6 +185,61 @@ class TrainWorker(QThread):
         return [max(1, int(self.boss_hp * (1.0 - 0.2 * i)))
                 for i in range(self.n_enemies)]
 
+    def enemy_damage(self):
+        """How hard a training mob hits, per round.
+
+        This was `max(30, player_hp // 12)` -- the *wizard's* health
+        divided by a constant, which is not a model of an enemy at all.
+        Its specific defect is that it makes the fight exactly as hard
+        whatever the wizard wears: the death clock sits at 12/n_mobs
+        rounds at every level, so a table trained on it can never learn
+        that more health buys more turns. Measured: kill rate stays in a
+        68-80% band across a 15x range of player health, where a fixed
+        enemy number gives the correct 0% -> 92% progression.
+
+        Measured incoming damage first -- the live run counts it every
+        round. Then the wizard's health, which is at least in the right
+        order of magnitude for the level ranges where the two grow
+        together, and is what this used to always do.
+        """
+        if self.mob_damage and self.mob_damage > 0:
+            return int(self.mob_damage)
+        return max(30, self.player_hp // 12)
+
+    def preflight(self, board, extra, n=200):
+        """(feasible, note) -- can anything win this board?
+
+        The check that would have saved the operator 40,000 episodes.
+        A learner on an unwinnable board does not fail loudly: it
+        explores normally, builds tens of thousands of Q entries,
+        collects zero reward and draws a flat line. Scoring one scripted
+        policy on the same evaluation board separates "the learner did
+        not learn" from "no policy can win this", which are different
+        problems with different fixes.
+        """
+        from w101_sim import Boss, Sim, evaluate      # noqa: F401
+        from ..policies import school_aware_blade_stack
+
+        try:
+            sim = Sim(self.cards, self.deck, self.school, board,
+                      player_hp=self.player_hp,
+                      player_stats=self.player_stats, enemies=extra)
+            kill, _ttk = evaluate(sim, school_aware_blade_stack(3), n=n)
+        except Exception:
+            return True, ""       # never block a run over the check itself
+        if kill > 0.0:
+            return True, ""
+        mobs = " + ".join(f"{b.hp:,} HP {b.school}" for b in [board] + extra)
+        return False, (
+            f"this board cannot be won at these settings, so training it "
+            f"would draw a flat 0% however long it ran.\n\n"
+            f"Board: {mobs}, each hitting for {board.dmg}/round, against "
+            f"{self.player_hp:,} HP.\n\n"
+            f"A scripted policy wins 0 of {n} fights on it. Lower the mob "
+            f"HP or the mob count, raise your health, or check that the "
+            f"enemy school is right — a mob of your own school resists "
+            f"40% of everything you cast.")
+
     def run(self):
         try:
             from rl_agent import train_agent
@@ -156,19 +250,37 @@ class TrainWorker(QThread):
             # otherwise -- so a policy trained on the default shares no
             # state at all with a live wizard, its Q table reads zero
             # everywhere, and greedy falls through to PASS every turn.
-            dmg = max(30, self.player_hp // 12)
+            dmg = self.enemy_damage()
             hps = self.board_hps()
+            schools = self.board_schools()
             sampler = None
             if self.generalize:
                 from rl_agent import make_board_sampler
                 sampler = make_board_sampler(
-                    "ice", self.hp_range(), max_mobs=self.n_enemies, dmg=dmg)
+                    schools[0], self.hp_range(), max_mobs=self.n_enemies,
+                    dmg=dmg, schools=self.school_pool())
+
+            board = Boss(name="training dummy", hp=hps[0],
+                         school=schools[0], dmg=dmg)
+            extra = [Boss(name=f"training minion {i}", hp=hp,
+                          school=schools[i], dmg=dmg)
+                     for i, hp in enumerate(hps[1:], 1)]
+
+            # Before 40,000 episodes: can this board be won at all? A
+            # learner given a board with no winning line explores
+            # normally, builds a table of tens of thousands of entries,
+            # collects zero reward, and reports a flat 0% -- which reads
+            # as "training failed" when it means "this fight is
+            # arithmetically impossible". Three seconds of checking beats
+            # twenty minutes of it.
+            feasible, note = self.preflight(board, extra)
+            self.stage.emit(note if note else "training")
+            if not feasible:
+                self.failed.emit(note)
+                return
+
             agent, sim = train_agent(
-                self.cards, self.deck, self.school,
-                Boss(name="training dummy", hp=hps[0], school="ice", dmg=dmg),
-                enemies=[Boss(name=f"training minion {i}", hp=hp,
-                              school="ice", dmg=dmg)
-                         for i, hp in enumerate(hps[1:], 1)],
+                self.cards, self.deck, self.school, board, enemies=extra,
                 episodes=self.episodes, player_hp=self.player_hp,
                 player_stats=self.player_stats, board_sampler=sampler,
                 on_snapshot=lambda ep, kill, ttk:
@@ -177,6 +289,17 @@ class TrainWorker(QThread):
             from w101_sim import evaluate
             self.stage.emit("scoring the trained table")
             kill, ttk = evaluate(sim, agent.policy(), n=800)
+            # Against the heuristic it would displace, on the same board.
+            # Coverage was the only number this ever reported, and
+            # coverage is not competence: a table can key 95% of boards
+            # and play every one of them worse than the fallback it is
+            # keeping out of the driver's seat. Measured on the
+            # operator's board: 89% coverage, 6.4% kill, against 82.4%
+            # for the heuristic. That comparison is the answer to "is
+            # the model stupid?", and nothing in the window had it.
+            from ..policies import school_aware_blade_stack
+            rival, _rttk = evaluate(sim, school_aware_blade_stack(3), n=400)
+            self.verdict.emit(kill, rival)
             self.progress.emit(self.episodes, self.episodes, kill * 100, ttk)
             self.finished_ok.emit(agent)
         except Exception as exc:
@@ -188,6 +311,11 @@ class MainWindow(QMainWindow):
     #: bar. A class attribute so the bar can be driven before a run has
     #: ever been started.
     _last_checkpoint = ""
+    #: how the last trained table scored against the heuristic it
+    #: displaces, on the same board. Empty until a run has finished.
+    verdict_text = ""
+    trained_kill = 0.0
+    rival_kill = 0.0
 
     def __init__(self, telemetry=None):
         super().__init__()
@@ -200,6 +328,13 @@ class MainWindow(QMainWindow):
         #: each mob's health from the last real fight, so training does
         #: not use a degenerate board of identically-sized mobs
         self.observed_hps = []
+        #: mob schools and measured incoming damage, off the live run.
+        #: Training used to invent both -- the school as a hardcoded
+        #: literal and the damage from the wizard's own health -- and
+        #: each of those was on its own enough to make the trained board
+        #: a different fight from the played one.
+        self.observed_schools = []
+        self.observed_incoming = 0.0
         #: the wizard's gear, filled in from the client on connect.
         #: Training uses it, which is the whole point: a Q table learned
         #: for a naked wizard is solving a fight nobody will play.
@@ -679,6 +814,14 @@ class MainWindow(QMainWindow):
                      f"shown ({trained.missed} fell back to the heuristic)")
             if cover < 25:
                 text += "\n" + self._why_coverage_is_low()
+        if self.verdict_text:
+            # Under the coverage line on purpose. Coverage answers "does
+            # the table recognise this board"; this answers "is it any
+            # good at it", and when the answer is no, coverage is the
+            # bad news rather than the good.
+            text += "\n" + self.verdict_text
+            if self.rival_kill > self.trained_kill:
+                colour = PALETTE["bad"]
         self.policy_state.setText(text)
         self.policy_state.setStyleSheet(f"color: {colour}")
 
@@ -728,12 +871,18 @@ class MainWindow(QMainWindow):
                                   player_stats=self.player_stats,
                                   n_enemies=self.n_enemies.value(),
                                   mob_hps=self.observed_hps,
-                                  generalize=self.generalize.isChecked())
+                                  generalize=self.generalize.isChecked(),
+                                  # Both read off the real fight. The
+                                  # schools especially: every training
+                                  # mob used to be the literal "ice".
+                                  mob_schools=self.observed_schools,
+                                  mob_damage=self.observed_incoming)
         self.tel.clear_curve()
         self.worker.snapshot.connect(self.on_snapshot)
         self.worker.progress.connect(self.on_progress)
         self.worker.tick.connect(self.on_tick)
         self.worker.stage.connect(self.on_stage)
+        self.worker.verdict.connect(self.on_verdict)
         self.worker.finished_ok.connect(self.on_trained)
         self.worker.failed.connect(self.on_train_failed)
         # Below the live worker, deliberately. Training is minutes of
@@ -779,6 +928,32 @@ class MainWindow(QMainWindow):
         if self._last_checkpoint:
             text += f" — {self._last_checkpoint}"
         self.train_progress.setFormat(text)
+
+    def on_verdict(self, kill, rival):
+        """Is the table worth playing, against the heuristic it displaces?
+
+        The one number the window never showed. Coverage answers "does
+        the table recognise this board", which is a different question
+        and the less useful one: a table can key 95% of boards and play
+        every one of them worse than the fallback it is keeping out of
+        the driver's seat, and every readout in the Learning tab would
+        still look healthy.
+        """
+        self.trained_kill, self.rival_kill = kill, rival
+        if rival <= 0.0 and kill <= 0.0:
+            self.verdict_text = ""
+        elif kill >= rival:
+            self.verdict_text = (
+                f"the trained table wins {kill * 100:.0f}% where the "
+                f"school-aware heuristic wins {rival * 100:.0f}% — worth "
+                f"playing")
+        else:
+            self.verdict_text = (
+                f"the trained table wins {kill * 100:.0f}% where the "
+                f"school-aware heuristic wins {rival * 100:.0f}% on the "
+                f"same board — the table is the weaker player here, so "
+                f"high coverage makes the fight worse, not better")
+        self._update_policy_state()
 
     def on_progress(self, ep, total, kill, ttk):
         self.status.setText(
@@ -1003,6 +1178,8 @@ class MainWindow(QMainWindow):
         # The individual healths, not just the biggest: mobs that all
         # start equal never produce the opening state a real board has.
         self.observed_hps = self.tel.observed_mob_hps()
+        self.observed_schools = self.tel.observed_mob_schools()
+        self.observed_incoming = self.tel.observed_incoming()
         self.n_enemies.setValue(min(max(int(n), 1), self.n_enemies.maximum()))
         self.boss_hp.setValue(min(max(int(hp), self.boss_hp.minimum()),
                                   self.boss_hp.maximum()))

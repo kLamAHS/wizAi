@@ -4008,3 +4008,228 @@ def test_a_flat_zero_kill_rate_is_named_as_the_cause(qapp):
 
     tel.record_snapshot(200000, 0.4, 6.0)          # it did learn something
     assert "never won a fight" not in win._why_coverage_is_low()
+
+
+# ------------------------------- the training board has to be the real fight
+def test_enemy_school_is_read_not_assumed():
+    """`"ice"` was hardcoded for every live enemy, and that is not a
+    cosmetic default: `Boss.resist_own` is 0.40, so an ice wizard's whole
+    deck was being planned against mobs that resisted 40% of it."""
+    import asyncio
+
+    from deimos_bridge.deimos_damage import SCHOOL_ID_TO_NAMES
+    from deimos_bridge.live_state import read_school
+
+    class _M:
+        def __init__(self, sid):
+            self._sid = sid
+
+        async def primary_magic_school_id(self):
+            return self._sid
+
+    assert asyncio.run(read_school(_M(SCHOOL_ID_TO_NAMES["Death"]))) == "death"
+    assert asyncio.run(read_school(_M(SCHOOL_ID_TO_NAMES["Fire"]))) == "fire"
+    # Star/Sun/Moon are real ids no mob fights as, and an unreadable
+    # school falls back to balance -- neutral both ways, so it costs
+    # accuracy rather than inventing a resistance.
+    assert asyncio.run(read_school(_M(SCHOOL_ID_TO_NAMES["Sun"]))) == "balance"
+
+    class _Broken:
+        async def primary_magic_school_id(self):
+            raise RuntimeError("MemoryReadError")
+
+    assert asyncio.run(read_school(_Broken())) == "balance"
+
+
+def test_training_never_pits_a_wizard_against_its_own_school(qapp):
+    """The shipped default. An ice wizard trained against ice mobs is
+    the worst matchup in the game, and it made the board unwinnable by
+    every policy in the repo at every enemy damage down to zero."""
+    from deimos_bridge.gui.app import TrainWorker
+    from rl_agent import MOB_SCHOOLS
+
+    w = TrainWorker({}, [], "ice", 500, boss_hp=690, n_enemies=2)
+    assert w.school_pool() == list(MOB_SCHOOLS)     # unknown: all seven
+    assert w.school_pool() != ["ice"]
+
+    w = TrainWorker({}, [], "ice", 500, boss_hp=690, n_enemies=2,
+                    mob_schools=["death", "death"])
+    assert w.school_pool() == ["death"]             # observed: the real one
+    assert w.board_schools() == ["death", "death"]
+
+
+def test_the_board_sampler_varies_the_school():
+    import random
+
+    from rl_agent import MOB_SCHOOLS, make_board_sampler
+
+    sample = make_board_sampler("balance", (400, 900), max_mobs=2, dmg=60,
+                                schools=list(MOB_SCHOOLS))
+    rng = random.Random(0)
+    seen = set()
+    for _ in range(200):
+        boss, extra = sample(rng)
+        seen.update(b.school for b in [boss] + list(extra))
+    assert len(seen) >= 5, seen
+
+
+def test_training_refuses_a_board_nothing_can_win(qapp):
+    """40,000 episodes on an unwinnable board is not a failed run, it is
+    an impossible one -- and it draws exactly the same flat 0% line."""
+    from deimos_bridge.gui.app import TrainWorker
+    from data_full import load_spells_full
+    from w101_sim import Boss
+
+    cards = load_spells_full()
+    deck = (["Evil Snowman"] * 3 + ["Frost Beetle"] * 3 + ["Ice Trap"] * 2
+            + ["Scarab - Starter Wand@item"] + ["Snow Serpent"] * 3)
+    w = TrainWorker(cards, deck, "ice", 500, player_hp=857, boss_hp=690,
+                    n_enemies=2)
+
+    ice = Boss(name="d", hp=690, school="ice", dmg=71)
+    icex = [Boss(name="m", hp=552, school="ice", dmg=71)]
+    ok, note = w.preflight(ice, icex, n=80)
+    assert ok is False
+    assert "cannot be won" in note and "resists" in note
+
+    death = Boss(name="d", hp=690, school="death", dmg=71)
+    deathx = [Boss(name="m", hp=552, school="death", dmg=71)]
+    assert w.preflight(death, deathx, n=80)[0] is True
+
+
+def test_enemy_damage_comes_off_the_enemy_when_it_has_been_measured(qapp):
+    """`player_hp // 12` is the *wizard's* health over a constant, so the
+    death clock is the same at every level and a table trained on it
+    cannot learn that more health buys more turns."""
+    from deimos_bridge.gui.app import TrainWorker
+
+    guessed = TrainWorker({}, [], "ice", 500, player_hp=857)
+    assert guessed.enemy_damage() == 71             # the old behaviour
+
+    measured = TrainWorker({}, [], "ice", 500, player_hp=857, mob_damage=87)
+    assert measured.enemy_damage() == 87
+
+    # and the guess still scales with the wizard, which is the defect --
+    # pinned here so a change to it is deliberate
+    assert TrainWorker({}, [], "ice", 500, player_hp=3000).enemy_damage() == 250
+
+
+def test_the_run_records_what_training_needs_to_know():
+    from deimos_bridge.telemetry import EnemyView, RoundRecord, Telemetry
+
+    tel = Telemetry()
+    tel.start_fight()
+    tel.rounds.append(RoundRecord(
+        fight=1, round=1, incoming=84.0,
+        enemies=[EnemyView("Lord Nightshade", 690, 690, school="death"),
+                 EnemyView("Field Guard", 255, 255, school="death")]))
+    tel.rounds.append(RoundRecord(fight=1, round=2, incoming=90.0))
+    assert tel.observed_mob_schools() == ["death", "death"]
+    assert tel.observed_incoming() == 87.0          # averaged, not last
+
+
+def test_a_sentinel_is_not_rendered_as_a_turn_count():
+    """Every candidate reading "14 turns", including "pass", is
+    `died()` at a horizon of 12 -- "no line survives", which is the
+    opposite of the tie it looks like."""
+    from deimos_bridge.policies import Candidate
+    from deimos_bridge.telemetry import (RoundRecord, Telemetry, outcome_of,
+                                         turns_label)
+
+    assert outcome_of(Candidate(card="x", turns=4, horizon=12)) == ""
+    assert outcome_of(Candidate(card="x", turns=13, horizon=12)) == "no clear"
+    assert outcome_of(Candidate(card="x", turns=14, horizon=12)) == "dies"
+    assert outcome_of(Candidate(card="x", turns=15, horizon=12)) == "unplayable"
+    assert turns_label(Candidate(card="x", turns=4, horizon=12)) == "4 turns"
+    assert turns_label(Candidate(card="x", turns=14, horizon=12)) == "dies"
+
+    tel = Telemetry()
+    tel.rounds = [RoundRecord(fight=1, round=1, candidates=[
+        Candidate(card="Ice Trap", target=1, turns=14, damage=1126,
+                  chosen=True, horizon=12),
+        Candidate(card="pass", turns=14, damage=778, horizon=12)])]
+    bars, title = tel.candidate_bars(0)
+    assert "no line survives" in title
+    assert all(b[4] == "dies" for b in bars), bars
+
+
+def test_a_gridline_outside_the_plot_is_not_drawn(qapp):
+    """A flat 0% curve was labelled -2% / 0% / 2%: the 2% printed over
+    the subtitle and the -2% fell off the bottom edge. Measured at 23
+    pixels of literal overprint at the shipped window size."""
+    from deimos_bridge.gui.charts import LineChart
+
+    c = LineChart("kill rate", "% of simulated fights won",
+                  fmt=lambda v: f"{v:.0f}%", height=170)
+    c.set_points([(e, 0.0) for e in range(5000, 45000, 5000)])
+    c.resize(654, 170)
+
+    drawn = []
+    real = LineChart.grid_y
+
+    def spy(self, p, r, ticks, fmt=lambda v: f"{v:g}"):
+        drawn.extend(v for v, y in ticks if r.top() - 1 <= y <= r.bottom() + 1)
+        return real(self, p, r, ticks, fmt)
+
+    LineChart.grid_y = spy
+    try:
+        c.grab()
+    finally:
+        LineChart.grid_y = real
+
+    assert drawn, "no gridlines at all"
+    assert min(drawn) >= 0.0, f"a kill rate axis went negative: {drawn}"
+
+
+def test_bar_and_cell_text_gets_a_line_of_height(qapp):
+    """Qt clips drawText to its rect, and the rect was the bar's own
+    thickness -- 4.55px against a 15px font on the 11-candidate board,
+    so every row rendered as a horizontal slice."""
+    from PyQt6.QtGui import QFontMetrics
+
+    from deimos_bridge.gui.charts import Heatmap, RankedBars
+
+    bars = [(f"card {i} → 0", 14, i == 3, "n") for i in range(11)]
+    b = RankedBars("round detail", "", height=180)
+    b.set_bars(bars, unit=" turns")
+    fm = QFontMetrics(b.font())
+    assert b.minimumHeight() >= fm.height() * 11, b.minimumHeight()
+
+    h = Heatmap("matrix", "", height=250)
+    h.set_matrix([(f"r{i}", {"a": (2.0, False, "n")}) for i in range(14)], ["a"])
+    assert h.minimumHeight() >= fm.height() * 14, h.minimumHeight()
+
+    # ...and it still paints
+    b.resize(700, b.minimumHeight()); b.grab()
+    h.resize(700, h.minimumHeight()); h.grab()
+
+
+def test_the_decisions_table_gives_its_width_to_what_needs_it(qapp):
+    """Seven equal columns gave 'fight' 165px for a one-character value
+    while 'policy' elided away the reason the column exists for."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.resize(1180, 800)
+    table = win.decisions.table
+    assert getattr(table, "_weights", None), "no column weights"
+    win.decisions.refresh()
+    widths = [table.columnWidth(i) for i in range(table.columnCount())]
+    assert widths[5] > widths[0] * 2, widths      # 'why' beats 'fight'
+    assert widths[2] > widths[1] * 2, widths      # 'policy' beats 'round'
+
+
+def test_the_window_says_whether_the_table_beats_its_own_fallback(qapp):
+    """Coverage is not competence: a table can key 95% of boards and
+    play every one of them worse than the heuristic it is keeping out of
+    the driver's seat, and every number the Learning tab showed would
+    still look healthy."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.on_verdict(0.064, 0.824)
+    assert "weaker player" in win.verdict_text
+    assert "6%" in win.verdict_text and "82%" in win.verdict_text
+
+    win.on_verdict(0.91, 0.82)
+    assert "worth playing" in win.verdict_text

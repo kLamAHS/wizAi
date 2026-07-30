@@ -126,6 +126,36 @@ def _attr(obj, name, default=None):
     return getattr(obj, name, default)
 
 
+def outcome_of(cand) -> str:
+    """"" for a real turn count, or what the sentinel actually means.
+
+    `_rollout` encodes three non-outcomes above its horizon: `+1` ran out
+    of horizon alive, `+2` the wizard died, `+3` the move could not be
+    made. The panel rendered all three as turn counts, so a board where
+    no line survives showed every candidate -- including `pass` -- at a
+    flat "14 turns", which reads as a tie between equally good options
+    when it means the opposite. A sentinel drawn as a number is a lie,
+    and this is the string that stops it being one.
+    """
+    horizon = int(_attr(cand, "horizon", 12) or 12)
+    turns = float(_attr(cand, "turns", 0.0) or 0.0)
+    if turns >= horizon + 3:
+        return "unplayable"
+    if turns >= horizon + 2:
+        return "dies"
+    if turns >= horizon + 1:
+        return "no clear"
+    return ""
+
+
+def turns_label(cand, unit=" turns") -> str:
+    """What to print in a cell for one candidate's score."""
+    why = outcome_of(cand)
+    if why:
+        return why
+    return f"{float(_attr(cand, 'turns', 0.0)):g}{unit}"
+
+
 def _move_label(cand) -> str:
     """'Ice Trap → 1', the identity a decision matrix column needs.
 
@@ -146,6 +176,11 @@ class EnemyView:
     max_hp: float
     charms: list = field(default_factory=list)
     wards: list = field(default_factory=list)
+    #: the mob's school, read off the client. Recorded because training
+    #: has to know it: `Boss.resist_own` is 0.40, so a training mob given
+    #: the wrong school -- and it was given the literal "ice" for every
+    #: mob in every fight -- can resist 40% of the whole deck.
+    school: str = ""
 
 
 @dataclass
@@ -184,6 +219,10 @@ class RoundRecord:
     clean: bool = True
     #: why an observation was marked unclean, if it was
     confounds: list = field(default_factory=list)
+    #: measured damage per living enemy per round, off the live fight.
+    #: Recorded so training can be given the real number instead of
+    #: deriving one from the wizard's own health.
+    incoming: float = 0.0
 
     @property
     def error(self):
@@ -298,7 +337,8 @@ class Telemetry:
             player_charms=[describe_hanging(h) for h in s.player.charms],
             enemies=[EnemyView(e.name, e.hp, e.max_hp,
                                [describe_hanging(h) for h in e.charms],
-                               [describe_hanging(h) for h in e.wards])
+                               [describe_hanging(h) for h in e.wards],
+                               getattr(e, "school", "") or "")
                      for e in s.enemies],
         )
 
@@ -498,6 +538,42 @@ class Telemetry:
             return [e.max_hp for e in rec.enemies]
         return []
 
+    def observed_mob_schools(self):
+        """Each mob's school, from the opening round of the last fight.
+
+        Training needs this and never had it: `TrainWorker` built every
+        mob as the literal `"ice"`, and `Boss.resist_own` is 0.40, so an
+        ice wizard trained against a board that resisted 40% of every
+        card in the deck. On a real board that was the difference
+        between a kill rate that climbs and one that is flat at zero for
+        40,000 episodes.
+        """
+        for rec in reversed(self.rounds):
+            if not rec.enemies:
+                continue
+            if rec.round != 1 and any(r.fight == rec.fight and r.round == 1
+                                      for r in self.rounds):
+                continue
+            return [getattr(e, "school", "") or "" for e in rec.enemies]
+        return []
+
+    def observed_incoming(self):
+        """Measured damage per enemy per round, over the whole run.
+
+        The live backend computes this every round and it was thrown
+        away, while the trainer guessed the same quantity from the
+        *wizard's* own health -- a number that makes the fight equally
+        hard however the wizard is geared, so a table trained on it
+        cannot learn that more health buys more turns.
+
+        Averaged over rounds rather than taken from the last: a single
+        round's drop has a standard deviation about 40% of its own mean,
+        because it depends on what the mobs happened to cast.
+        """
+        seen = [r.incoming for r in self.rounds
+                if getattr(r, "incoming", 0.0) > 0]
+        return sum(seen) / len(seen) if seen else 0.0
+
     def observed_board(self):
         """(enemy count, biggest mob's max health) from the last fight.
 
@@ -562,11 +638,14 @@ class Telemetry:
                 key = _move_label(cand)
                 if key not in cols:
                     continue
+                why = outcome_of(cand)
                 cells[key] = (
                     round(float(_attr(cand, "turns", 0.0)), 1),
                     bool(_attr(cand, "chosen", False)),
-                    f"kills in {_attr(cand, 'turns', 0):g} turn(s), "
-                    f"{_attr(cand, 'damage', 0):,.0f} damage banked")
+                    (f"{why} — no clear inside the horizon; "
+                     if why else
+                     f"kills in {_attr(cand, 'turns', 0):g} turn(s), ")
+                    + f"{_attr(cand, 'damage', 0):,.0f} damage banked")
             rows.append((f"r{rec.round}", cells))
         return rows, cols, dropped
 
@@ -591,11 +670,20 @@ class Telemetry:
         bars = sorted(
             ((_move_label(c), round(float(_attr(c, "turns", 0.0)), 1),
               bool(_attr(c, "chosen", False)),
-              f"{_attr(c, 'damage', 0):,.0f} damage banked, "
-              f"{_attr(c, 'pips', 0):g} pip(s)")
+              (f"{outcome_of(c)} — " if outcome_of(c) else "")
+              + f"{_attr(c, 'damage', 0):,.0f} damage banked, "
+              f"{_attr(c, 'pips', 0):g} pip(s)",
+              outcome_of(c) or None)
              for c in rec.candidates),
             key=lambda b: (b[1], -b[2]))
-        return bars, f"fight {rec.fight}, round {rec.round}"
+        lost = [c for c in rec.candidates if outcome_of(c)]
+        title = f"fight {rec.fight}, round {rec.round}"
+        if lost and len(lost) == len(rec.candidates):
+            # Every option is a sentinel: the lookahead did not rank
+            # these, it gave up on all of them. Saying so is the
+            # difference between "a close call" and "no line survives".
+            title += " — no line survives the horizon"
+        return bars, title
 
     def training_curve(self):
         """[(episode, kill rate %)] recorded during the last training run."""

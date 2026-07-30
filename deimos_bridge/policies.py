@@ -47,6 +47,13 @@ class Candidate:
     damage: float = 0.0
     pips: int = 0
     chosen: bool = False
+    #: the rollout's horizon, so a reader can tell a turn count from a
+    #: sentinel. `turns` above `horizon` is not a turn count at all --
+    #: it encodes dying, stalling, or being unplayable -- and the panel
+    #: was rendering all three as numbers. A whole board of candidates
+    #: reading "14 turns", including "pass", is `died()` at a horizon of
+    #: 12, i.e. "no line survives", and it looked like a flat tie.
+    horizon: int = 12
 
 
 #: op kinds that carry the cast's real target, in the order they decide
@@ -537,7 +544,7 @@ def greedy_ttk(max_turns: int = 12):
         strat.last_candidates = [
             Candidate(card=c.name, target=t, turns=score[0],
                       damage=-score[1], pips=c.pips,
-                      chosen=(c, t) == best_action)
+                      chosen=(c, t) == best_action, horizon=max_turns)
             for score, (c, t) in scored]
 
         # Passing is a real move -- banking a pip for a bigger hit next
@@ -551,7 +558,8 @@ def greedy_ttk(max_turns: int = 12):
         passing = pass_turns < best_score[0]
         strat.last_candidates.append(
             Candidate(card="pass", target=None, turns=pass_turns,
-                      damage=-pass_damage, pips=0, chosen=passing))
+                      damage=-pass_damage, pips=0, chosen=passing,
+                      horizon=max_turns))
         if passing:
             return None
 

@@ -63,13 +63,32 @@ def _label(text, color=None, bold=False, size=None, wrap=True):
     return lab
 
 
-def _table(headers):
+def _table(headers, weights=None):
+    """A table whose columns get width in proportion to what they hold.
+
+    `weights` because a blanket `Stretch` is content-blind: seven equal
+    columns gave 'fight' and 'round' 165px each for a one-character
+    value while 'policy' elided its reason away to
+    'trained (Q) - fallback (...' and 'why' lost two thirds of its text.
+    The one clause the reader needs was always the one cut.
+    """
     t = QTableWidget(0, len(headers))
     t.setHorizontalHeaderLabels(headers)
     t.verticalHeader().setVisible(False)
     t.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
     t.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-    t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+    if weights:
+        head = t.horizontalHeader()
+        head.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        head.setStretchLastSection(True)
+        t._weights = list(weights)
+    else:
+        t.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch)
+    # Elide in the middle rather than at the end: the end is where the
+    # reason lives. "trained (Q) ... in Q table)" keeps both halves of
+    # the fact; "trained (Q) - fallback (..." keeps neither.
+    t.setTextElideMode(Qt.TextElideMode.ElideMiddle)
     # Columns must be allowed to get narrow. Qt's default minimum section
     # width is the header text's, so a seven-column table sets a floor on
     # the whole panel's width -- which then forces a horizontal scrollbar
@@ -82,10 +101,24 @@ def _table(headers):
     return t
 
 
+def _apply_weights(table):
+    """Hand out the viewport in proportion to `_weights`."""
+    weights = getattr(table, "_weights", None)
+    if not weights:
+        return
+    total = sum(weights) or 1
+    width = max(1, table.viewport().width())
+    for i, w in enumerate(weights):
+        table.setColumnWidth(i, max(46, int(width * w / total)))
+
+
 def _cell(text, color=None):
     it = QTableWidgetItem(str(text))
     if color:
         it.setForeground(QColor(color))
+    # Free, and the only fix that is width-independent: whatever the
+    # column does to the text, the whole string is one hover away.
+    it.setToolTip(str(text))
     return it
 
 
@@ -205,8 +238,12 @@ class DecisionsPanel(QWidget):
             "state-featurisation bug. 'policy' names which one actually "
             "decided: a trained policy that says 'fallback' is playing the "
             "heuristic, not the table you trained.", PALETTE["muted"]))
+        # Measured content widths at the default window: fight 20,
+        # round 20, policy 273, cast 184, target 110, why 332,
+        # passed over 229.
         self.table = _table(["fight", "round", "policy", "cast", "target",
-                             "why", "passed over"])
+                             "why", "passed over"],
+                            weights=(1, 1, 4, 3, 2, 5, 4))
         root.addWidget(self.table)
         self._row = -1              # -1 = follow the latest round
 
@@ -219,9 +256,17 @@ class DecisionsPanel(QWidget):
         self.detail.title = f"round detail — {title}" if title else "round detail"
         self.detail.set_bars(bars, unit=" turns")
 
+    def resizeEvent(self, event):
+        # Widths are proportions, so they have to be re-applied whenever
+        # the viewport changes; Interactive columns keep whatever they
+        # were last given otherwise.
+        super().resizeEvent(event)
+        _apply_weights(self.table)
+
     def refresh(self):
         rows, cols, dropped = self.tel.decision_matrix()
         self.matrix.set_matrix(rows, cols, low_is_good=True)
+        _apply_weights(self.table)
         # Never truncate silently: a grid that quietly dropped six moves
         # reads as "these were all the options", which is a lie.
         self.note.setText(
