@@ -18,4 +18,9 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 ".venv\Scripts\python.exe" -m deimos_bridge.gui %*
-if errorlevel 1 pause
+if errorlevel 1 (
+    echo.
+    echo The window exited with an error. The traceback is above and is
+    echo also written to wizAi-crash.log in this folder -- send that file.
+    pause
+)

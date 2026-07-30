@@ -476,14 +476,20 @@ class MainWindow(QMainWindow):
         while the panels underneath are the point.
         """
         super().resizeEvent(event)
-        if self._options_pinned:
+        # Qt can deliver a resize before `_build_config` has run, and a
+        # virtual like this one aborts the process on an unhandled
+        # AttributeError rather than printing it.
+        if self._options_pinned or not hasattr(self, "more_btn"):
             return
-        want = self.height() >= self.FOLD_BELOW
-        if want != self.more_btn.isChecked():
-            self.more_btn.blockSignals(True)
-            self.more_btn.setChecked(want)
-            self.more_btn.blockSignals(False)
-            self.on_toggle_options(want, by_user=False)
+        try:
+            want = self.height() >= self.FOLD_BELOW
+            if want != self.more_btn.isChecked():
+                self.more_btn.blockSignals(True)
+                self.more_btn.setChecked(want)
+                self.more_btn.blockSignals(False)
+                self.on_toggle_options(want, by_user=False)
+        except Exception:
+            pass
 
     def _gear_line(self):
         """What the simulator thinks the wizard is wearing.
@@ -627,7 +633,10 @@ class MainWindow(QMainWindow):
         """One training checkpoint. Queued from the training thread, so
         this runs on the GUI thread and may touch widgets."""
         self.tel.record_snapshot(episode, kill, ttk)
-        self.learning.refresh()
+        try:
+            self.learning.refresh()
+        except Exception:
+            pass          # a watching panel never interrupts training
 
     def on_progress(self, ep, total, kill, ttk):
         self.status.setText(
@@ -949,6 +958,20 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     app = QApplication(sys.argv[:1])
+
+    # Before the window, so an error building it is still reported. Qt
+    # loses errors unusually well: an exception inside a virtual aborts
+    # the process outright, which from a desktop shortcut is a window
+    # vanishing with nothing written down.
+    from . import crashlog
+
+    def show_crash(text):
+        QMessageBox.critical(
+            None, "wizAi hit an error",
+            text[-2000:] + f"\n\nWritten to {crashlog.log_path()}")
+
+    crashlog.install(show=show_crash)
+
     win = MainWindow(demo_telemetry() if args.demo else None)
     if args.demo:
         win.status.setText("demo data — press Play live to use the real game")

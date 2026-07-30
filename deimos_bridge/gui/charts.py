@@ -141,16 +141,40 @@ class Chart(QWidget):
 
     # -- painting ---------------------------------------------------------
     def paintEvent(self, _event):
+        """Paint, and never take the process down doing it.
+
+        PyQt6 does not merely print an unhandled exception raised inside
+        a virtual like this one -- it calls `qFatal` and the process
+        aborts. So one chart meeting a data shape nobody anticipated
+        kills a live fight mid-duel, which is the one thing this window
+        must not do. The same reasoning already applies to panels
+        (`MainWindow.refresh_all` swallows their errors); painting was
+        the hole in it, because `refresh()` is guarded and `paintEvent`
+        is called by Qt.
+
+        The failure is drawn rather than hidden: a chart silently showing
+        nothing is indistinguishable from a chart with nothing to show.
+        """
         p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.fillRect(self.rect(), _c("surface"))
-        self._paint_headings(p)
-        if not self.has_data():
-            p.setPen(_c("muted"))
-            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
-                       self.empty_text)
-            return
-        self.paint_data(p, self.plot_rect())
+        try:
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.fillRect(self.rect(), _c("surface"))
+            self._paint_headings(p)
+            if not self.has_data():
+                p.setPen(_c("muted"))
+                p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
+                           self.empty_text)
+                return
+            self.paint_data(p, self.plot_rect())
+        except Exception as exc:
+            self._paint_failed(p, exc)
+
+    def _paint_failed(self, p, exc):
+        p.setPen(_c("bad"))
+        p.drawText(self.rect().adjusted(8, 8, -8, -8),
+                   Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
+                   f"this chart could not be drawn\n"
+                   f"{type(exc).__name__}: {exc}")
 
     def _paint_headings(self, p):
         y = PAD_T - 6
@@ -229,6 +253,15 @@ class Chart(QWidget):
         return []
 
     def mouseMoveEvent(self, event):
+        # Guarded for the same reason `paintEvent` is: an exception in a
+        # Qt virtual aborts the process, and a hover is the last thing
+        # that should be able to end a fight.
+        try:
+            self._hover(event)
+        except Exception:
+            pass
+
+    def _hover(self, event):
         pos = event.position().toPoint()
         found = None
         for rect, index in self.hits():
@@ -447,7 +480,11 @@ class Heatmap(Chart):
         self.update()
 
     def has_data(self):
-        return bool(self.rows and self.cols)
+        # Rows and columns are not enough: a row whose cells are all
+        # outside the shown columns contributes nothing, and a grid of
+        # only those rows made `min()` raise -- inside `paintEvent`,
+        # which in PyQt6 aborts the process rather than printing.
+        return bool(self.rows and self.cols and self._values())
 
     def _values(self):
         return [v for _label, cells in self.rows
@@ -522,11 +559,15 @@ class Heatmap(Chart):
         return f"{col}\n{note}" + ("\n— chosen" if chosen else "")
 
     def mousePressEvent(self, event):
-        pos = event.position().toPoint()
-        for rect, i in self.hits():
-            if rect.contains(pos):
-                self.row_picked.emit(self._cells()[i][1])
-                return
+        try:
+            pos = event.position().toPoint()
+            cells = self._cells()
+            for rect, i in self.hits():
+                if rect.contains(pos) and i < len(cells):
+                    self.row_picked.emit(cells[i][1])
+                    return
+        except Exception:
+            pass
 
 
 class RankedBars(Chart):
