@@ -149,14 +149,21 @@ async def read_quest_position(client):
 # actions
 # --------------------------------------------------------------------------
 async def advance_dialogue(client, max_clicks: int = 40,
-                           settle: float = 0.5) -> int:
-    """Click through dialogue until it stops appearing.
+                           settle: float = 0.5):
+    """(clicks, reason). Click through dialogue until it stops appearing.
 
     Bounded rather than looping until quiet: a dialogue that re-opens
     forever (a vendor, a mis-click into the wrong NPC) would otherwise
     hang the run with no way to tell from outside.
+
+    The reason exists because zero clicks had two causes and one story.
+    A click that *failed* -- the window moved, another program is over
+    the game, mouseless input never activated -- returned the same 0 as
+    "there was no dialogue", and the caller printed "no dialogue open"
+    at a wizard staring at an open dialogue box. Auto-dialogue then spun
+    on it forever in silence, movement blocked, nothing on screen.
     """
-    clicks = 0
+    clicks, reason = 0, ""
     async with client.mouse_handler:
         while clicks < max_clicks:
             button = await window_from_path(client.root_window,
@@ -165,11 +172,14 @@ async def advance_dialogue(client, max_clicks: int = 40,
                 break
             try:
                 await client.mouse_handler.click_window(button)
-            except Exception:
+            except Exception as exc:
+                reason = (f"found the dialogue but the click failed — "
+                          f"{type(exc).__name__}: {exc} (is another window "
+                          f"over the game?)")
                 break
             clicks += 1
             await asyncio.sleep(settle)
-    return clicks
+    return clicks, reason
 
 
 async def teleport_to_quest(client):
@@ -199,15 +209,27 @@ def keycode_x():
 
 
 async def press_x(client, seconds: float = 0.1):
-    """Interact — sigils, dungeon doors and quest NPCs all need it."""
+    """(ok, reason). Interact — sigils, dungeon doors and quest NPCs need it.
+
+    Every caller used to throw the answer away, so a wizard that was
+    teleporting to the right marker and then failing to interact looked
+    exactly like one that was working: the status line said "teleporting
+    to the quest marker…" every tick, forever, and the dead step was
+    reported nowhere.
+    """
     key = keycode_x()
     if key is None:
-        return False
+        return False, ("wizwalker did not provide a keycode for X, so "
+                       "interacting is disabled — sigils, dungeon doors and "
+                       "quest NPCs all need it")
     try:
         await client.send_key(key, seconds)
-        return True
-    except Exception:
-        return False
+        return True, ""
+    except Exception as exc:
+        return False, (f"could not press X to interact "
+                       f"({type(exc).__name__}: {exc}) — sigils, dungeon "
+                       f"doors and quest NPCs all need it, so nothing will "
+                       f"start")
 
 
 async def in_battle(client) -> bool:
@@ -269,7 +291,8 @@ async def at_quest_marker(client, radius: float = QUEST_RADIUS):
     return True, ""
 
 
-async def open_dialogue_if_near(client, quest_only: bool = True) -> bool:
+async def open_dialogue_if_near(client, quest_only: bool = True,
+                                on_status=None) -> bool:
     """Start the conversation, rather than waiting for one to appear.
 
     Auto-dialogue that only clicks an *already open* window still needs a
@@ -289,7 +312,10 @@ async def open_dialogue_if_near(client, quest_only: bool = True) -> bool:
         near, _ = await at_quest_marker(client)
         if not near:
             return False
-    return await press_x(client)
+    ok, reason = await press_x(client)
+    if not ok and reason and on_status:
+        on_status(reason)
+    return ok
 
 
 # --------------------------------------------------------------------------
@@ -315,11 +341,13 @@ async def hop_once(client, settle: float = 1.2, on_status=None) -> bool:
 
     # Dialogue blocks movement, so clear it before trying to move -- and
     # open it first if the game is offering.
-    if await open_dialogue_if_near(client):
+    if await open_dialogue_if_near(client, on_status=say):
         await asyncio.sleep(settle)
     if await in_dialogue(client):
         say("clicking through dialogue…")
-        await advance_dialogue(client)
+        _, why = await advance_dialogue(client)
+        if why:
+            say(why)
         await wait_until_ready(client)
         if await in_battle(client):
             return True
@@ -338,7 +366,7 @@ async def hop_once(client, settle: float = 1.2, on_status=None) -> bool:
     await asyncio.sleep(settle)
     await wait_until_ready(client)          # a door starts a zone change
 
-    if await open_dialogue_if_near(client):
+    if await open_dialogue_if_near(client, on_status=say):
         await asyncio.sleep(settle)
     if await in_dialogue(client):
         await advance_dialogue(client)
@@ -347,8 +375,12 @@ async def hop_once(client, settle: float = 1.2, on_status=None) -> bool:
         return True
 
     # Arriving is often not enough: sigils, dungeon doors and quest NPCs
-    # need an interact.
-    await press_x(client)
+    # need an interact. A failed interact is the difference between "the
+    # hop is working" and "the wizard is standing on the sigil doing
+    # nothing", so it is said rather than discarded.
+    ok, why = await press_x(client)
+    if not ok and why:
+        say(why)
     await asyncio.sleep(settle)
     await wait_until_ready(client)
     if await in_dialogue(client):
@@ -440,7 +472,9 @@ async def hop_to_next_fight(client, max_hops: int = 25, settle: float = 1.2,
 
         # Arriving is often not enough: sigils, dungeon doors and quest
         # NPCs need an interact before anything happens.
-        await press_x(client)
+        ok, why = await press_x(client)
+        if not ok and why:
+            say(why)
         await asyncio.sleep(settle)
         await wait_until_ready(client)
 

@@ -51,12 +51,44 @@ def _c(name):
     return QColor(CHART[name])
 
 
+def finite(value, default=0.0):
+    """`value` as a real number, or `default`.
+
+    Non-finite numbers are not hypothetical here. `w101_sim.evaluate`
+    returns `float("nan")` for mean turns-to-kill when a checkpoint won
+    no fights at all, and `Qt`'s coordinate calls take ints -- so a NaN
+    reaches `int()` and raises `ValueError: cannot convert float NaN to
+    integer`, `inf` raises `OverflowError`, and both do it inside
+    `paintEvent`. Everything entering a chart passes through here.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    return v if math.isfinite(v) else default
+
+
+def _finite_pairs(points):
+    """(kept, dropped) -- points whose x AND y are both real numbers."""
+    kept, dropped = [], 0
+    for x, y in points:
+        fx, fy = finite(x, None), finite(y, None)
+        if fx is None or fy is None:
+            dropped += 1
+        else:
+            kept.append((fx, fy))
+    return kept, dropped
+
+
 def nice_ticks(lo, hi, count=3):
     """`count` ticks on clean 1/2/5 numbers spanning lo..hi.
 
     Axis labels carry the values that are not directly labelled, so they
     have to be readable at a glance -- 0 / 50 / 100, not 0 / 47.3 / 94.6.
     """
+    lo, hi = finite(lo, 0.0), finite(hi, 1.0)
+    if hi < lo:
+        lo, hi = hi, lo
     if hi - lo < 1e-9:
         hi = lo + 1.0
     raw = (hi - lo) / max(1, count - 1)
@@ -133,6 +165,20 @@ class Chart(QWidget):
     def has_data(self) -> bool:
         return False
 
+    def empty_message(self) -> str:
+        """What to say when there is nothing to draw.
+
+        Overridable because "nothing to draw" and "nothing happened" are
+        not the same claim, and a chart that conflates them is lying by
+        omission. The case that made this necessary: a training run in
+        which every checkpoint won no fights produces an all-NaN
+        turns-to-kill curve, and the count of dropped samples was drawn
+        only inside `paint_data`, which the empty state never reaches --
+        so the one chart that knew the run had won nothing said "no
+        training run yet" instead.
+        """
+        return self.empty_text
+
     def plot_rect(self) -> QRect:
         top = PAD_T + (16 if self.title else 0) + (14 if self.subtitle else 0)
         return QRect(self.pad_l, top,
@@ -154,6 +200,13 @@ class Chart(QWidget):
 
         The failure is drawn rather than hidden: a chart silently showing
         nothing is indistinguishable from a chart with nothing to show.
+
+        `end()` in a `finally` rather than leaving it to the garbage
+        collector: a `QPainter` still open on a widget that is then
+        destroyed segfaults the process outright -- no traceback, no
+        qFatal line, nothing to read afterwards. Which is the same
+        outcome this method exists to prevent, arriving by the one route
+        the `except` cannot cover.
         """
         p = QPainter(self)
         try:
@@ -163,11 +216,13 @@ class Chart(QWidget):
             if not self.has_data():
                 p.setPen(_c("muted"))
                 p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
-                           self.empty_text)
+                           self.empty_message())
                 return
             self.paint_data(p, self.plot_rect())
         except Exception as exc:
             self._paint_failed(p, exc)
+        finally:
+            p.end()
 
     def _paint_failed(self, p, exc):
         p.setPen(_c("bad"))
@@ -299,15 +354,40 @@ class LineChart(Chart):
                  parent=None, height=190):
         super().__init__(title, subtitle, parent, height)
         self.points = []          # [(x, y)]
+        self.dropped = 0          # samples that had no real value
+        #: what an unplottable sample MEANS, which is chart-specific. An
+        #: undefined turns-to-kill is not missing data, it is a
+        #: checkpoint that won no fights -- worth saying in those words.
+        self.dropped_note = "{n} checkpoint(s) had no value to plot"
         self.fmt = fmt
 
     def set_points(self, points):
-        self.points = [(float(x), float(y)) for x, y in points]
+        """Real numbers only, and say how many were not.
+
+        A checkpoint that won no fights has an undefined mean
+        turns-to-kill, which `evaluate` reports as NaN. Dropping it is
+        right -- there is no value to plot -- but dropping it *silently*
+        would leave a curve with invisible holes in it.
+        """
+        self.points, self.dropped = _finite_pairs(points)
         self._hot = None
         self.update()
 
     def has_data(self):
         return len(self.points) >= 1
+
+    def empty_message(self):
+        """An all-NaN curve is a finding, not an absence.
+
+        Every sample dropped means every checkpoint had no value -- for
+        turns-to-kill, that a run of 100,000 episodes won no fights. The
+        Learning tab was showing a populated kill-rate chart reading 0%
+        directly above a turns-to-kill chart reading "no training run
+        yet", which is the opposite of what happened.
+        """
+        if self.dropped and not self.points:
+            return self.dropped_note.format(n=self.dropped)
+        return self.empty_text
 
     def _scales(self, r):
         xs = [x for x, _ in self.points]
@@ -367,6 +447,12 @@ class LineChart(Chart):
         self.x_label(p, r.left(), f"{x0:,.0f}")
         if x1 != x0:
             self.x_label(p, r.right(), f"{x1:,.0f}")
+        if self.dropped:
+            p.setPen(_c("warn"))
+            p.drawText(QRect(self.pad_l, self.height() - 16,
+                             self.width() - self.pad_l - PAD_R, 14),
+                       Qt.AlignmentFlag.AlignRight,
+                       self.dropped_note.format(n=self.dropped))
 
 
 class Scatter(Chart):
@@ -385,7 +471,10 @@ class Scatter(Chart):
         self.points = []          # [(predicted, actual, clean, label)]
 
     def set_points(self, points):
-        self.points = list(points)
+        self.points = [(finite(a), finite(b), clean, label)
+                       for a, b, clean, label in points
+                       if finite(a, None) is not None
+                       and finite(b, None) is not None]
         self._hot = None
         self.update()
 
@@ -474,7 +563,11 @@ class Heatmap(Chart):
         self.low_is_good = True
 
     def set_matrix(self, rows, cols, low_is_good=True):
-        self.rows, self.cols = list(rows), list(cols)
+        self.rows = [(label, {k: (finite(v), chosen, note)
+                              for k, (v, chosen, note) in cells.items()
+                              if finite(v, None) is not None})
+                     for label, cells in rows]
+        self.cols = list(cols)
         self.low_is_good = low_is_good
         self._hot = None
         self.update()
@@ -595,7 +688,9 @@ class RankedBars(Chart):
         self.lower_is_better = lower_is_better
 
     def set_bars(self, bars, unit=""):
-        self.bars = list(bars)
+        self.bars = [(label, finite(value), chosen, note)
+                     for label, value, chosen, note in bars
+                     if finite(value, None) is not None]
         self.unit = unit
         self._hot = None
         self.update()
@@ -682,7 +777,7 @@ class Meter(Chart):
         self.status = "muted"
 
     def set_value(self, value, caption="", status="muted"):
-        self.value = max(0.0, min(1.0, float(value)))
+        self.value = max(0.0, min(1.0, finite(value, 0.0)))
         self.caption = caption
         self.status = status
         self.update()

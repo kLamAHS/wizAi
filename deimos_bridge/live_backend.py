@@ -81,7 +81,7 @@ class WizAiBackend:
 
     def __init__(self, policy, cards, school, decklist=None, cast_time=0.3,
                  on_decision=None, rules=None, catalog=None, policy_name="",
-                 player_stats=None):
+                 player_stats=None, on_lost_round=None):
         """
         Args:
             policy:   `policy(sim, state) -> Card | str | None`, wizAi's
@@ -92,6 +92,11 @@ class WizAiBackend:
                       feature -- the client cannot report undrawn cards.
             on_decision: optional callback(PolicyDecision, LiveRead) for
                       logging a live run.
+            on_lost_round: optional callback(round number, reason) for a
+                      round whose board could not be read at all. There
+                      is no `LiveRead` to hand over in that case, which
+                      is precisely why it needs its own channel rather
+                      than being dropped.
             policy_name: what to call `policy` on screen. Purely a label;
                       the decision loop never reads it.
             player_stats: the wizard's gear, as `Sim(player_stats=...)`
@@ -114,6 +119,8 @@ class WizAiBackend:
         self.cast_time = cast_time
         self.combat = None
         self.on_decision = on_decision
+        self.on_lost_round = on_lost_round
+        self.on_failed_cast = None
         self.rules = rules
         self.resolver = NameResolver(cards, catalog)
         self.history = []          # PolicyDecision, in order
@@ -334,6 +341,35 @@ class WizAiBackend:
         if self.on_decision:
             self.on_decision(decision, read)
 
+    def report_lost_round(self, round_number, reason):
+        """A round nobody could read. Recorded, rather than only counted.
+
+        Separate from `_record` because there is no board to record: the
+        read is what failed. `on_lost_round` is wired to the telemetry so
+        the round appears in the Decisions table as the failure it was,
+        instead of leaving a gap that reads as though the round never
+        happened.
+        """
+        decision = PolicyDecision(passing=True, policy="board read failed",
+                                  reason=reason)
+        self.history.append(decision)
+        if self.on_lost_round:
+            self.on_lost_round(round_number, reason)
+
+    def report_failed_cast(self, card_name, exc):
+        """The chosen card never went out. Amend the round, do not hide it.
+
+        The record was written before the click, so by the time this is
+        known the round already claims the card was cast. The prediction
+        has to go with it -- a round in which nothing was played says
+        nothing about the damage model, and leaving it in counts the
+        misclick as the model's error.
+        """
+        reason = (f"the cast of {card_name} did not go through "
+                  f"({type(exc).__name__}: {exc}) — passed instead")
+        if self.on_failed_cast:
+            self.on_failed_cast(reason)
+
     def _deck_remaining(self, read_hand):
         """Best-effort undrawn deck. Only its *size* and the kinds in it
         matter -- `Featurizer.key` uses it for a scarcity count and
@@ -475,7 +511,17 @@ class WizAiCombatHandler:
                 # already contains policy errors; this contains the read.
                 # Losing a round is recoverable, crashing out of a live
                 # fight is not.
+                #
+                # But it goes through the decision channel rather than
+                # into a counter nothing reads. A round dropped here used
+                # to leave *no* record at all: the Decisions table went
+                # round 3, round 5, the pass was never counted, and round
+                # 5's board was differenced against round 3's -- so round
+                # 4's damage was folded into round 3's residual and
+                # scored against the damage model. A round the run could
+                # not read has to appear as exactly that.
                 self._read_failures += 1
+                await self._report_lost_round(exc)
                 await self.pass_button()
                 return
             read = self.backend.last_read
@@ -495,10 +541,37 @@ class WizAiCombatHandler:
                 self.backend.cards.get(decision.card_name))
             try:
                 await card.cast(target)
-            except Exception:
+            except Exception as exc:
                 # A misclick or a board that moved under us costs this
-                # round, not the fight.
+                # round, not the fight -- but the round has *already*
+                # been recorded, by `decide()`, as a cast that was made.
+                # Left alone, next round's board shows the target at
+                # unchanged HP, the residual settles at minus the whole
+                # prediction, and a cast that never happened is charged
+                # to the damage model as its worst miss of the run.
+                self.backend.report_failed_cast(decision.card_name, exc)
                 await self.pass_button()
+
+    async def _report_lost_round(self, exc):
+        """Put the dropped round in the record, not just in a counter.
+
+        `_read_failures` is documented as surfaced at the end of a run
+        and never was -- nothing in the package read it. Ten rounds lost
+        across a fight were invisible to the operator, who saw a policy
+        that appeared to pass with no logged reason.
+        """
+        try:
+            number = int(await self.round_number())
+        except Exception:
+            last = getattr(self._last_read, "round_number", 0) or 0
+            number = last + 1
+        try:
+            self.backend.report_lost_round(
+                number,
+                f"could not read the board ({type(exc).__name__}: {exc}) "
+                f"— passed this round")
+        except Exception:
+            pass          # reporting a lost round must not lose the fight
 
     def _pick_card(self, read, name):
         cards = read.hand_cards.get(name) or []

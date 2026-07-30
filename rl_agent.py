@@ -255,6 +255,21 @@ class QAgent:
         return turns, won
 
     def policy(self):
+        """The greedy policy, as `(card, target)` — wizAi's aimed move.
+
+        This used to match `c.name == a` against the raw action, and
+        `Featurizer.legal` emits `"Snow Serpent@1"` on a multi-enemy
+        board. So the comparison never matched, the policy returned None,
+        and the agent **passed every single turn on any board with more
+        than one mob** -- in `evaluate`, which is why a training run
+        reported a flat 0% kill rate across 100,000 episodes, and in live
+        play, where the same `policy()` is what `TrainedPolicy` calls.
+
+        `train_episode` was unaffected: it goes through `apply_action`,
+        which has always split the target. So the agent was learning a
+        table it could then not use, and the only visible symptom was a
+        kill rate that never moved.
+        """
         def pol(sim, s):
             tc_reflex(sim, s)
             legal = self.feat.legal(sim, s)
@@ -262,9 +277,14 @@ class QAgent:
             if a == PASS:
                 _dig(s)
                 return None
+            name, target = split_target(a)
             for c in s.hand:
-                if c.name == a and sim.can_cast(s, c):
-                    return c
+                if c.name == name and sim.can_cast(s, c, target):
+                    # Aimed. `Sim._normalize_action` unpacks the tuple, and
+                    # returning the bare card would throw away the target
+                    # the agent just chose -- which is most of what the
+                    # multi-enemy action space is for.
+                    return c, target
             return None
         return pol
 

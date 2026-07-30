@@ -399,6 +399,24 @@ class MainWindow(QMainWindow):
         self.dialogue_btn = QPushButton("Advance dialogue")
         self.dialogue_btn.clicked.connect(self.on_dialogue)
         quest_row.addWidget(self.dialogue_btn)
+
+        # The same two chores as buttons, not only as automatic
+        # between-fights behaviour. Automatic upkeep runs after a fight
+        # ends; nothing could top the wizard up during a long questing
+        # stretch, or when it silently was not working.
+        self.wisps_btn = QPushButton("Collect wisps")
+        self.wisps_btn.setToolTip(
+            "Sweep the health and mana wisps in range now, rather than "
+            "waiting for a fight to end. Says what it found either way.")
+        self.wisps_btn.clicked.connect(self.on_wisps)
+        quest_row.addWidget(self.wisps_btn)
+
+        self.potion_btn = QPushButton("Drink potion")
+        self.potion_btn.setToolTip(
+            "Use one potion charge now. Never buys — refilling means a "
+            "vendor trip that can strand the run.")
+        self.potion_btn.clicked.connect(self.on_potion)
+        quest_row.addWidget(self.potion_btn)
         quest_row.addStretch()
         outer.addLayout(quest_row)
 
@@ -406,7 +424,7 @@ class MainWindow(QMainWindow):
         self.use_hotkeys = QCheckBox("Hotkeys")
         self.use_hotkeys.setChecked(True)
         self.use_hotkeys.setToolTip(
-            "Do the two actions above without leaving the game. These are "
+            "Do the actions above without leaving the game. These are "
             "system-wide keys — they fire whatever window has focus, and "
             "while the run is connected the key is taken away from every "
             "other program, Wizard101 included. Pick keys the game does "
@@ -415,7 +433,9 @@ class MainWindow(QMainWindow):
 
         self.hotkey_boxes = {}
         for action, label in (("teleport", "tp to quest"),
-                              ("dialogue", "advance dialogue")):
+                              ("dialogue", "dialogue"),
+                              ("wisps", "wisps"),
+                              ("potion", "potion")):
             key_row.addWidget(QLabel(label))
             combo = QComboBox()
             combo.addItems(HOTKEY_CHOICES)
@@ -522,6 +542,32 @@ class MainWindow(QMainWindow):
         and it is expensive advice to follow before finding that out.
         The mismatches are checkable, so check them.
         """
+        # First: did training learn anything at all? A table whose kill
+        # rate never left zero has nothing to apply, and every other
+        # explanation below is a distraction from that.
+        curve = self.tel.training_curve()
+        if curve and max(k for _ep, k in curve) <= 0.0:
+            return ("cause: training never won a fight — kill rate stayed "
+                    "at 0% for every checkpoint, so the table learned "
+                    "nothing to apply. Check the Learning tab: if the "
+                    "board is unwinnable at these settings, lower mob HP "
+                    "or the mob count.")
+        # Second: was the wizard's own health ever read? The key buckets
+        # player health as a fraction of the maximum, so training against
+        # the box's default while the wizard has some other maximum makes
+        # every live board key a bucket the table never visited. This
+        # cause is invisible in the board numbers below -- mob count and
+        # mob HP can both be perfectly in range -- and its symptom looks
+        # exactly like an under-trained table, which is the one fix that
+        # cannot help.
+        if self.live is not None and getattr(self.live, "hp_known", True) \
+                is False:
+            return ("cause: your max health was never read off the client "
+                    "(the status bar said so on connect), so training used "
+                    "whatever was in the box. The key buckets health as a "
+                    "fraction of the maximum — a wrong maximum shares no "
+                    "states with the live board. Fix the health box and "
+                    "retrain.")
         seen = self.tel.observed_board()
         if not self.generalize.isChecked():
             return ("cause: trained on one fixed board. Tick 'any board' "
@@ -708,10 +754,18 @@ class MainWindow(QMainWindow):
         if self.live is None or not self.live.isRunning():
             QMessageBox.information(
                 self, "wizAi",
-                "Press Play live first — teleporting needs the hooks "
-                "installed, and the live run owns the client connection.")
+                "Press Play live first — these need the hooks installed, "
+                "and the live run owns the client connection.")
             return
-        self.live.request(coro_name)
+        # Honoured, not discarded: `request` refuses an action that is
+        # already queued or already running, and telling the user it is
+        # happening anyway is how a dropped press became "the button
+        # does nothing".
+        if not self.live.request(coro_name):
+            self.status.setText(
+                f"{coro_name} is already queued or running — it will "
+                f"finish on its own")
+            return
         self.status.setText(label)
 
     def hotkey_bindings(self):
@@ -720,19 +774,28 @@ class MainWindow(QMainWindow):
         Two actions may not share a key: `RegisterHotKey` would take the
         first and silently refuse the second, so the second action would
         appear bound and do nothing.
+
+        Every collision is collected and reported together. With four
+        actions on four default keys, retargeting one onto another's
+        default drops that *other* action -- one the user never touched
+        -- and reporting them one at a time meant each message overwrote
+        the last, so only the final collision was ever seen.
         """
         if not self.use_hotkeys.isChecked():
             return {}
-        out, taken = {}, set()
+        out, taken, clashes = {}, set(), []
         for action, box in self.hotkey_boxes.items():
             key = box.currentText()
             if key in taken:
-                self.status.setText(
-                    f"{key} is bound twice — only the first takes; give "
-                    f"'{action}' a different key")
+                clashes.append((action, key))
                 continue
             taken.add(key)
             out[action] = key
+        if clashes:
+            self.status.setText(
+                "; ".join(f"{key} is bound twice — '{action}' is unbound"
+                          for action, key in clashes)
+                + ". Give each action its own key.")
         return out
 
     def on_teleport(self):
@@ -740,6 +803,12 @@ class MainWindow(QMainWindow):
 
     def on_dialogue(self):
         self._quest_action("dialogue", "clicking through dialogue…")
+
+    def on_wisps(self):
+        self._quest_action("wisps", "sweeping for wisps…")
+
+    def on_potion(self):
+        self._quest_action("potion", "drinking a potion…")
 
     # -- live ------------------------------------------------------------
     def on_policy_changed(self, name):
