@@ -133,6 +133,11 @@ class RoundRecord:
     target_name: str = None
     passing: bool = False
     reason: str = ""
+    #: which policy played this round, and by which path -- e.g.
+    #: "trained (Q) — fallback (state not in Q table)". Per round rather
+    #: than per run because the policy can be swapped without
+    #: disconnecting, so a single run is not a single policy.
+    policy: str = ""
     hand: list = field(default_factory=list)
     alternatives: list = field(default_factory=list)
     unresolved: list = field(default_factory=list)
@@ -236,6 +241,7 @@ class Telemetry:
             target_name=target_name,
             passing=decision.passing,
             reason=decision.reason,
+            policy=getattr(decision, "policy", "") or self.policy_name,
             hand=sorted(read.hand_cards),
             alternatives=sorted(set(read.hand_cards) - {decision.card_name}),
             unresolved=sorted(read.resolver.misses),
@@ -368,6 +374,24 @@ class Telemetry:
                 counts[n] = counts.get(n, 0) + 1
         return dict(sorted(counts.items(), key=lambda kv: -kv[1]))
 
+    def policy_mix(self):
+        """Rounds played, per policy and per path within it.
+
+        Read back off the round records rather than off a counter living
+        on the policy object, because the policy can be swapped without
+        disconnecting: a counter on the policy only knows about the
+        rounds it was installed for, and says nothing about the ones
+        before or after. This is the number that answers "is the model I
+        picked actually driving?" -- a run where `trained (Q)` was
+        selected but every row reads `fallback` is the failure this
+        exists to make visible.
+        """
+        counts = {}
+        for r in self.rounds:
+            key = r.policy or "unknown"
+            counts[key] = counts.get(key, 0) + 1
+        return dict(sorted(counts.items(), key=lambda kv: -kv[1]))
+
     def summary(self):
         st = self.error_stats()
         return {
@@ -378,6 +402,7 @@ class Telemetry:
             "passes": sum(f.passes for f in self.fights),
             "wins": sum(1 for f in self.fights if f.won),
             "damage_model": st,
+            "policy_mix": self.policy_mix(),
             "unresolved": self.unresolved_names(),
             "hand_visibility": self.hand_visibility(),
             "hidden_cards": self.hidden_cards(),

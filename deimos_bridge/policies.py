@@ -139,6 +139,11 @@ class TrainedPolicy:
         self.fallback = fallback or greedy_ttk()
         self.seen = 0
         self.missed = 0
+        #: which path the LAST decision took. Surfaced per round, because
+        #: "is the model I picked actually driving?" is otherwise
+        #: unanswerable from the outside -- a trained policy and its
+        #: fallback look identical in a decision log.
+        self.last_source = ""
 
     @property
     def coverage(self) -> float:
@@ -151,6 +156,7 @@ class TrainedPolicy:
             legal = self.agent.feat.legal(sim, s)
         except Exception:
             self.missed += 1
+            self.last_source = "fallback (unreadable state)"
             return self.fallback(sim, s)
 
         # `.get`, not `[]`: QAgent.Q is a defaultdict, and indexing it
@@ -158,9 +164,11 @@ class TrainedPolicy:
         known = any(self.agent.Q.get((key, a), 0.0) for a in legal)
         if not known:
             self.missed += 1
+            self.last_source = "fallback (state not in Q table)"
             return self.fallback(sim, s)
 
         self.seen += 1
+        self.last_source = "Q table"
         return self.agent.policy()(sim, s)
 
 

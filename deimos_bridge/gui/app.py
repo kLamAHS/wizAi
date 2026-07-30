@@ -101,6 +101,7 @@ class MainWindow(QMainWindow):
         root.addWidget(self.status)
         self.setStyleSheet(stylesheet())
         self.refresh_all()
+        self._update_policy_state()
 
     # -- panel updates all happen here, on the GUI thread -----------------
     def refresh_all(self):
@@ -122,6 +123,12 @@ class MainWindow(QMainWindow):
         box = QGroupBox("run")
         outer = QVBoxLayout(box)
 
+        # Built before anything that can emit, because the policy combo's
+        # change signal ends up in `_update_policy_state`, which draws to
+        # it. Added to the layout further down, where it belongs on screen.
+        self.policy_state = _label("no rounds played yet", PALETTE["muted"])
+        self.policy_state.setWordWrap(True)
+
         row = QHBoxLayout()
         row.addWidget(QLabel("school"))
         self.school = QComboBox()
@@ -131,6 +138,11 @@ class MainWindow(QMainWindow):
         row.addWidget(QLabel("policy"))
         self.policy = QComboBox()
         self.policy.addItems(POLICIES)
+        self.policy.setToolTip(
+            "Changing this while a fight is running swaps the policy on "
+            "the next round — no reconnect. The round in flight finishes "
+            "under the policy that started it.")
+        self.policy.currentTextChanged.connect(self.on_policy_changed)
         row.addWidget(self.policy)
 
         row.addWidget(QLabel("episodes"))
@@ -149,7 +161,7 @@ class MainWindow(QMainWindow):
             "Your wizard's max health. Training uses it so the learned "
             "states match a live board — train immortal and the Q table "
             "shares no state with the real game at all, and the policy "
-            "passes every turn.")
+            "passes every turn. Filled in from the game on connect.")
         row.addWidget(self.player_hp)
 
         row.addWidget(QLabel("mob HP"))
@@ -168,6 +180,11 @@ class MainWindow(QMainWindow):
         row.addWidget(self.fights)
 
         self.train_btn = QPushButton("Train")
+        self.train_btn.setToolTip(
+            "Trains against the simulator. Works while a live run is "
+            "connected — it runs at a lower thread priority so the fight "
+            "keeps its timing — and the result is swapped in without "
+            "dropping the connection.")
         self.train_btn.clicked.connect(self.on_train)
         row.addWidget(self.train_btn)
 
@@ -259,10 +276,45 @@ class MainWindow(QMainWindow):
         outer.addLayout(script_row)
         self.script_source = ""
 
+        # The answer to "is the model I picked actually playing?". A
+        # trained policy that falls back on every board decides exactly
+        # like the heuristic it falls back to, so without this the only
+        # symptom is that the fight looks unremarkable.
+        outer.addWidget(self.policy_state)
+
         self.train_progress = QProgressBar()
         self.train_progress.setVisible(False)
         outer.addWidget(self.train_progress)
         return box
+
+    def _update_policy_state(self):
+        """Say which policy is driving, and how often it really decided."""
+        mix = self.tel.policy_mix()
+        if not mix:
+            self.policy_state.setText(
+                "policy selected: " + self.policy.currentText() +
+                " — no rounds played yet")
+            self.policy_state.setStyleSheet(f"color: {PALETTE['muted']}")
+            return
+        total = sum(mix.values())
+        parts = [f"{name} ×{n}" for name, n in mix.items()]
+        text = f"{total} round(s): " + "  ·  ".join(parts)
+
+        colour = PALETTE["muted"]
+        live = self.live if (self.live and self.live.isRunning()) else None
+        trained = getattr(live, "trained", None)
+        if trained is not None and (trained.seen + trained.missed):
+            cover = trained.coverage * 100
+            colour = (PALETTE["good"] if cover > 66 else
+                      PALETTE["warn"] if cover > 25 else PALETTE["bad"])
+            text += (f"\nQ table decided {cover:.0f}% of the boards it was "
+                     f"shown ({trained.missed} fell back to the heuristic)")
+            if cover < 25:
+                text += (" — this deck's states are mostly unvisited; train "
+                         "more episodes, or with the deck you are actually "
+                         "holding")
+        self.policy_state.setText(text)
+        self.policy_state.setStyleSheet(f"color: {colour}")
 
     # -- actions ----------------------------------------------------------
     def decklist(self):
@@ -292,8 +344,10 @@ class MainWindow(QMainWindow):
         self.train_btn.setEnabled(False)
         self.train_progress.setVisible(True)
         self.train_progress.setRange(0, 0)          # indeterminate
+        fighting = self.live is not None and self.live.isRunning()
         self.status.setText(
-            f"training {self.episodes.value():,} episodes on {len(deck)} cards…")
+            f"training {self.episodes.value():,} episodes on {len(deck)} cards…"
+            + (" (the live fight keeps playing)" if fighting else ""))
 
         self.worker = TrainWorker(cards, deck, self.school.currentText(),
                                   self.episodes.value(),
@@ -302,7 +356,12 @@ class MainWindow(QMainWindow):
         self.worker.progress.connect(self.on_progress)
         self.worker.finished_ok.connect(self.on_trained)
         self.worker.failed.connect(self.on_train_failed)
-        self.worker.start()
+        # Below the live worker, deliberately. Training is minutes of
+        # solid CPU with no I/O to yield on; at equal priority it starves
+        # the fight's event loop, and a planning phase that arrives late
+        # is a turn played by the game's timeout rather than by wizAi.
+        self.worker.start(QThread.Priority.LowPriority if fighting
+                          else QThread.Priority.InheritPriority)
 
     def on_progress(self, ep, total, kill, ttk):
         self.status.setText(
@@ -312,7 +371,18 @@ class MainWindow(QMainWindow):
         self.agent = agent
         self.train_btn.setEnabled(True)
         self.train_progress.setVisible(False)
-        self.status.setText("trained — policy ready to drive a live fight")
+        # Retrained while it was already driving: hand the new table over
+        # in place. Without this, the fight would keep playing the table
+        # that was current when Play live was pressed, and the retrain
+        # would look like it had no effect.
+        if self.live is not None and self.live.isRunning() and \
+                self.policy.currentText().startswith("trained"):
+            self.live.set_policy(self.policy.currentText(), agent=agent)
+            self.status.setText(
+                "trained — the running fight is now using the new table")
+        else:
+            self.status.setText("trained — policy ready to drive a live fight")
+        self._update_policy_state()
 
     def on_train_failed(self, message):
         self.train_btn.setEnabled(True)
@@ -376,6 +446,28 @@ class MainWindow(QMainWindow):
         self._quest_action("dialogue", "clicking through dialogue…")
 
     # -- live ------------------------------------------------------------
+    def on_policy_changed(self, name):
+        """Swap the policy on a running fight, or just remember it.
+
+        The whole point of doing this here rather than at Play live: the
+        deck picker's card list and the health the table was trained for
+        both come from what a connected run observed, so disconnecting to
+        change models throws away the inputs to the next decision.
+        """
+        if self.live is not None and self.live.isRunning():
+            self.live.set_policy(name, agent=self.agent)
+        self._update_policy_state()
+
+    def on_hp_read(self, hp):
+        """The wizard's real max health, straight off the client."""
+        if hp <= 0 or hp == self.player_hp.value():
+            return
+        self.player_hp.setMaximum(max(self.player_hp.maximum(), hp))
+        self.player_hp.setValue(hp)
+        self.status.setText(
+            f"read your max health from the game: {hp:,} — training will "
+            f"use it")
+
     def on_start_live(self):
         if self.live is not None and self.live.isRunning():
             return
@@ -385,7 +477,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self, "wizAi",
                 "No trained policy yet. Press Train first, or pick another "
-                "policy from the list.")
+                "policy from the list — you can switch to it mid-fight once "
+                "it has trained, without reconnecting.")
             return
         if policy.startswith("trained") and not deck:
             QMessageBox.warning(self, "wizAi", "A trained policy needs its deck.")
@@ -404,9 +497,14 @@ class MainWindow(QMainWindow):
         self.live.fight_done.connect(lambda n: self.refresh_all())
         self.live.failed.connect(self.on_live_failed)
         self.live.finished_ok.connect(self.on_live_finished)
+        self.live.hp_read.connect(self.on_hp_read)
+        self.live.policy_changed.connect(self.on_policy_installed)
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
-        self.train_btn.setEnabled(False)
+        # Train stays live. Every input to a useful training run -- the
+        # deck the picker learned from the last fight, the health the
+        # client reported -- only exists once connected, so requiring a
+        # disconnect to train meant training on guesses.
         self.live.start()
 
     def on_stop_live(self):
@@ -421,6 +519,21 @@ class MainWindow(QMainWindow):
     def on_round(self, _rec):
         # Queued from the worker thread, so this runs on the GUI thread.
         self.refresh_all()
+        self._update_policy_state()
+
+    def on_policy_installed(self, name):
+        """The worker says which policy it actually ended up with.
+
+        It can differ from the dropdown -- picking a trained policy with
+        nothing trained keeps the old one -- so the box is put back in
+        step with reality rather than left showing a selection that did
+        not take.
+        """
+        if name and name != self.policy.currentText():
+            self.policy.blockSignals(True)      # not a fresh user choice
+            self.policy.setCurrentText(name)
+            self.policy.blockSignals(False)
+        self._update_policy_state()
 
     def on_live_failed(self, message):
         self._live_over()
@@ -436,6 +549,7 @@ class MainWindow(QMainWindow):
         self.stop_btn.setEnabled(False)
         self.train_btn.setEnabled(True)
         self.refresh_all()
+        self._update_policy_state()
 
     def closeEvent(self, event):
         if self.live is not None and self.live.isRunning():
@@ -468,7 +582,8 @@ def demo_telemetry():
     tel = Telemetry(policy_name="blade-stack(2)", school="fire", deck=deck)
     be = WizAiBackend.from_trained(school="fire", deck=deck, cards=cards,
                                    policy=make_blade_stack(2),
-                                   catalog=catalog)
+                                   catalog=catalog,
+                                   policy_name="blade-stack(2)")
     tel.resolver = be.resolver
     be.on_decision = lambda d, r: tel.observe(d, r, sim=be._sim_for(r),
                                               cards=cards)

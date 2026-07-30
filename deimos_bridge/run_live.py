@@ -44,6 +44,7 @@ def _log_decision(log):
             "target": decision.target_index,
             "passed": decision.passing,
             "reason": decision.reason,
+            "policy": getattr(decision, "policy", ""),
             "player_hp": s.player_hp,
             "pips": [s.norm_pips, s.pow_pips],
             "hand": [c.name for c in s.hand],
@@ -54,7 +55,8 @@ def _log_decision(log):
             "enemy_wards": [h.name for h in s.enemies[0].wards] if s.enemies else [],
         })
         who = "pass" if decision.passing else decision.card_name
-        print(f"  round {read.round_number}: {who}  ({decision.reason})")
+        why = getattr(decision, "policy", "") or decision.reason
+        print(f"  round {read.round_number}: {who}  ({why})")
     return on_decision
 
 
@@ -159,7 +161,7 @@ async def run(args):
 
         backend = WizAiBackend(policy=policy, cards=cards, school=args.school,
                                decklist=deck, on_decision=_log_decision(log),
-                               catalog=catalog)
+                               catalog=catalog, policy_name=args.policy)
         # WizAiCombatHandler, not SprintyCombat: one decision must be one
         # cast, or the fight is played by a different policy than the one
         # being measured. See live_backend.WizAiCombatHandler.

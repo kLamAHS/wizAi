@@ -31,6 +31,12 @@ class LiveWorker(QThread):
     failed = pyqtSignal(str)
     #: the run stopped cleanly
     finished_ok = pyqtSignal()
+    #: the wizard's real max health, once the hooks are up. Training has
+    #: to use it or the learned states share no health bucket with a live
+    #: board, and typing it in by hand is a guess the game can answer.
+    hp_read = pyqtSignal(int)
+    #: the policy actually installed on the backend, after a swap
+    policy_changed = pyqtSignal(str)
 
     def __init__(self, telemetry, school, deck, policy_name, fights,
                  agent=None, auto_quest=False, auto_dialogue=True,
@@ -79,6 +85,54 @@ class LiveWorker(QThread):
         because the client cannot be driven from two places at once.
         """
         self._requests.append(action)
+
+    # -- swapping the policy without dropping the connection --------------
+    def set_policy(self, name, agent=None):
+        """Install a different policy on a running fight. Returns ok.
+
+        Called from the GUI thread, and unlike `request` it does *not* go
+        through the queue: building a policy touches no client and no
+        event loop -- it reads the card table and constructs a closure --
+        so there is nothing to hand to the worker. The swap itself is one
+        attribute assignment, and `WizAiBackend.decide` reads `policy`
+        into a local before calling it, so the round in flight finishes
+        under the policy it started with.
+
+        Reconnecting to change models was the alternative, and it costs
+        more than the wait: the deck picker's card list and the trained
+        policy's own health bucket both come from what the last run
+        observed, so dropping the connection throws away the inputs to
+        the next decision.
+        """
+        if agent is not None:
+            self.agent = agent
+        previous = self.policy_name
+        self.policy_name = name
+        try:
+            policy = self._build_policy()
+        except Exception as exc:
+            # Selecting "trained" with nothing trained yet lands here.
+            # Keeping the old policy beats installing nothing: the fight
+            # is still running, and a backend with no policy cannot play.
+            self.policy_name = previous
+            self.status.emit(f"kept {previous} — {exc}")
+            self.policy_changed.emit(previous)
+            return False
+
+        self.tel.policy_name = name
+        backend = self._backend
+        if backend is None:
+            # Not connected yet. `_go` builds from `policy_name`, so the
+            # selection is already recorded and will be honoured.
+            self.policy_changed.emit(name)
+            return True
+        # One call, not two attribute writes: the backend keeps the
+        # policy and its label in a single tuple precisely so a decision
+        # in flight cannot read the new name against the old callable.
+        backend.set_policy(policy, name)
+        self.status.emit(f"policy is now {name} — takes effect next round")
+        self.policy_changed.emit(name)
+        return True
 
     async def _service_loop(self, client):
         """Handle requests and auto-dialogue *while* the fight loop runs.
@@ -145,6 +199,22 @@ class LiveWorker(QThread):
                 # loop is the thing that matters.
                 await asyncio.sleep(1.0)
 
+    async def _read_max_hp(self, client):
+        """Report the wizard's real max health, once, on connect.
+
+        Training needs it: `Featurizer.key` buckets health as a fraction
+        of the maximum, so a Q table trained against a made-up 800 and
+        played on a wizard with 1,300 indexes different states for the
+        same board. The client knows the number -- there is no reason to
+        make anyone type it, and no reason for the guess to be wrong.
+        """
+        try:
+            hp = int(await client.stats.max_hitpoints())
+        except Exception:
+            return          # a nicety; never worth failing the connect
+        if hp > 0:
+            self.hp_read.emit(hp)
+
     async def _setup_questing(self, client):
         """Prefer Deimos's questing; fall back to ours if it will not import."""
         from .. import deimos_questing
@@ -206,7 +276,11 @@ class LiveWorker(QThread):
             except Exception:
                 pass
 
-    def _build_policy(self, cards):
+    def _build_policy(self):
+        # Cleared first: `self.trained` drives the coverage readout, and
+        # a stale one left over from a previous selection would report a
+        # learned policy's numbers for a heuristic that replaced it.
+        self.trained = None
         if self.policy_name.startswith("trained"):
             if self.agent is None:
                 raise RuntimeError(
@@ -251,7 +325,8 @@ class LiveWorker(QThread):
         self.status.emit("loading the card table…")
         catalog = build_catalog()
         cards = catalog["cards"]
-        policy = self._build_policy(cards)
+        built_as = self.policy_name
+        policy = self._build_policy()
 
         self.status.emit("looking for the game…")
         handler = ClientHandler()
@@ -281,15 +356,22 @@ class LiveWorker(QThread):
                     ) from exc
                 raise
 
+            await self._read_max_hp(client)
+
             self.tel.policy_name = self.policy_name
             self.tel.school = self.school
             self.tel.deck = self.deck
             backend = WizAiBackend(
                 policy=policy, cards=cards, school=self.school,
                 decklist=self.deck, catalog=catalog,
-                on_decision=self._on_decision)
+                policy_name=built_as, on_decision=self._on_decision)
             self.tel.resolver = backend.resolver
             self._backend = backend
+            if self.policy_name != built_as:
+                # The dropdown moved while the hooks were installing.
+                # `set_policy` short-circuits until `_backend` exists, so
+                # that selection is sitting in `policy_name` unapplied.
+                self.set_policy(self.policy_name)
             combat = make_combat_handler(client, backend)
 
             if self.auto_quest:
