@@ -24,28 +24,18 @@ over control, `step()` runs a single iteration, so the live worker keeps
 ownership of the fight loop.
 
 **What it costs.** `src.utils` imports
-`wizwalker.extensions.wizsprinter.wiz_navigator`, so this needs
-wizsprinter (Python 3.13+) plus `thefuzz`, `loguru`, `pyyaml` and
-`requests`. `setup-windows.bat --questing` installs them. Without them
-`available()` says so and the live worker falls back to the light
-questing in `questing.py`; nothing else in the bridge is affected.
+`wizwalker.extensions.wizsprinter.wiz_navigator`. That is *not* a PyPI
+package -- it is vendored at `Deimos/libs/wizsprinter` and overlays into
+the `wizwalker` namespace, so `deimos_path.ensure_path` puts it on the
+path rather than anyone pip-installing it. What remains are ordinary
+packages: `thefuzz`, `loguru`, `pyyaml`, `requests`, `lark`. Without them
+`available()` names the missing one and the live worker falls back to the
+light questing in `questing.py`; nothing else in the bridge is affected.
 """
 import os
-import sys
 
-DEIMOS_ROOT = os.path.join(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))), "Deimos")
-
-#: what `pip install` line to show when the import fails
-REQUIREMENTS = ("wizsprinter thefuzz loguru pyyaml requests "
-                "pypresence pyperclip")
-
-
-def _ensure_path():
-    """Deimos's modules import each other as `src.*`, so its root has to
-    be importable."""
-    if DEIMOS_ROOT not in sys.path:
-        sys.path.insert(0, DEIMOS_ROOT)
+from .deimos_path import (DEIMOS_ROOT, ensure_path as _ensure_path,
+                          install_hint)
 
 
 def available():
@@ -57,14 +47,14 @@ def available():
         from src.questing import Quester  # noqa: F401
         return True, ""
     except Exception as exc:
+        hint = install_hint(exc)
         return False, (
             f"Deimos's questing is not importable ({type(exc).__name__}: "
-            f"{exc}).\n\nInstall its requirements into this venv:\n"
-            f"    .venv\\Scripts\\python.exe -m pip install {REQUIREMENTS}\n\n"
-            "It needs wizsprinter, which requires Python 3.13+. Until then "
-            "the light questing in deimos_bridge/questing.py is used "
-            "instead — it teleports and clicks dialogue, but cannot "
-            "navigate across zones.")
+            f"{exc})."
+            + (f"\n\n{hint}" if hint else "")
+            + "\n\nUntil then the light questing in "
+              "deimos_bridge/questing.py is used instead — it teleports "
+              "and clicks dialogue, but cannot navigate across zones.")
 
 
 #: The per-client attributes `Quester` reads. Deimos sets these in

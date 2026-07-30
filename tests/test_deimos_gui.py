@@ -899,15 +899,18 @@ def test_auto_dialogue_clicks_without_being_asked(qapp):
 
 # ------------------------------------------------- Deimos's own questing
 def test_deimos_questing_reports_why_it_is_unavailable():
-    """Off Windows wizsprinter cannot import, and the fallback has to say
-    so with the install line rather than failing silently."""
+    """It has to name the module that actually failed, and must never
+    tell anyone to pip install wizsprinter -- that is not a PyPI package.
+    It is vendored at Deimos/libs/wizsprinter and overlaid onto the
+    wizwalker namespace, so the one instruction people would copy from
+    the old message could not have worked."""
     from deimos_bridge import deimos_questing
 
     ok, reason = deimos_questing.available()
     if ok:
         pytest.skip("Deimos's questing is importable here")
-    assert "pip install" in reason
-    assert "wizsprinter" in reason
+    assert "pip install wizsprinter" not in reason
+    assert "not importable" in reason
     assert "light questing" in reason
 
 
@@ -2259,3 +2262,160 @@ def test_training_scores_clearing_the_board_not_killing_the_first_mob():
     turns, won = agent.train_episode(sim, eps=1.0, dp_w=0.0)
     # mob b cannot be killed inside the horizon, so this is not a win
     assert not won
+
+
+# ------------------------------------------------ importing Deimos's own code
+def test_the_wizsprinter_overlay_never_touches_sys_path():
+    """`libs/wizsprinter/wizwalker/` has no `__init__.py`, so putting that
+    root on sys.path makes `wizwalker` resolvable as a NAMESPACE package
+    -- which shadows the real one and turns "wizsprinter is absent" into
+    "wizwalker is broken". Extending the already-imported package's
+    `__path__` can only ever add a submodule."""
+    import sys
+
+    from deimos_bridge import deimos_path
+
+    before = list(sys.path)
+    deimos_path.ensure_path()
+    added = [p for p in sys.path if p not in before]
+    assert all("wizsprinter" not in p for p in added), added
+
+
+def test_deimos_root_is_put_on_the_path():
+    """Deimos's modules import each other as `src.*`."""
+    import sys
+
+    from deimos_bridge import deimos_path
+
+    deimos_path.ensure_path()
+    assert deimos_path.DEIMOS_ROOT in sys.path
+
+
+def test_a_missing_requirement_is_named_individually():
+    from deimos_bridge import deimos_path
+
+    assert deimos_path.missing_requirement(
+        ModuleNotFoundError("no", name="yaml")) == "pyyaml"
+    assert deimos_path.missing_requirement(
+        ModuleNotFoundError("no", name="thefuzz")) == "thefuzz"
+    assert deimos_path.missing_requirement(
+        ModuleNotFoundError("no", name="lark.lexer")) == "lark"
+    # wizwalker is not something to pip install your way out of here
+    assert deimos_path.missing_requirement(
+        ModuleNotFoundError("no", name="wizwalker.extensions")) is None
+
+
+def test_no_advice_anywhere_tells_you_to_pip_install_wizsprinter():
+    """It is a workspace member, not a PyPI package. The old message
+    headed its install line with it, so the one command anybody would
+    copy could not succeed."""
+    from deimos_bridge import deimos_path, deimos_questing, scripts
+
+    hint = deimos_path.install_hint(
+        ModuleNotFoundError("no", name="wizwalker.extensions.wizsprinter"))
+    assert "pip install wizsprinter" not in hint
+    assert "vendored" in hint
+
+    for mod in (deimos_questing, scripts):
+        ok, reason = mod.available()
+        assert "pip install wizsprinter" not in reason
+
+
+# -------------------------------------------------------- quest-only dialogue
+class _Pos:
+    def __init__(self, x, y, z=0.0):
+        self.x, self.y, self.z = x, y, z
+
+
+class _Body:
+    def __init__(self, pos):
+        self._pos = pos
+
+    async def position(self):
+        return self._pos
+
+
+class _QuestPos:
+    def __init__(self, pos):
+        self._pos = pos
+
+    async def position(self):
+        if self._pos is None:
+            raise RuntimeError("quest hook not written")
+        return self._pos
+
+
+class _DialogueClient:
+    def __init__(self, here, quest):
+        self.body = _Body(here)
+        self.quest_position = _QuestPos(quest)
+
+
+def test_at_quest_marker_is_true_only_near_the_objective():
+    import asyncio
+
+    from deimos_bridge import questing
+
+    near = asyncio.run(questing.at_quest_marker(
+        _DialogueClient(_Pos(100, 100), _Pos(150, 130))))
+    assert near[0] is True
+
+    far = asyncio.run(questing.at_quest_marker(
+        _DialogueClient(_Pos(100, 100), _Pos(9000, 9000))))
+    assert far[0] is False
+    assert "not at the quest marker" in far[1]
+
+
+def test_height_alone_does_not_disqualify_a_quest_npc():
+    """Z is height. A quest NPC one storey up a ramp is still the quest
+    NPC, and counting it would refuse the unambiguous cases."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    ok, _ = asyncio.run(questing.at_quest_marker(
+        _DialogueClient(_Pos(100, 100, 0), _Pos(120, 120, 4000))))
+    assert ok is True
+
+
+def test_an_unreadable_quest_position_says_why():
+    """With the in-game quest arrow off the position never reads, so
+    nothing is ever at the marker and auto-dialogue would silently do
+    nothing. It has to be reportable."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    ok, why = asyncio.run(questing.at_quest_marker(
+        _DialogueClient(_Pos(0, 0), None)))
+    assert ok is False
+    assert "quest arrow" in why
+
+
+def test_auto_dialogue_ignores_an_npc_that_is_not_the_quest(monkeypatch):
+    """The reported annoyance: it talked to everyone walked past. The
+    game shows its press-X prompt for every interactable in range."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    pressed = []
+
+    async def _no(_c):
+        return False
+
+    async def _yes(_c):
+        return True
+
+    monkeypatch.setattr(questing, "in_dialogue", _no)
+    monkeypatch.setattr(questing, "near_interactable", _yes)
+    monkeypatch.setattr(questing, "press_x",
+                        lambda c: pressed.append(1) or _yes(c))
+
+    far = _DialogueClient(_Pos(0, 0), _Pos(9000, 9000))
+    assert asyncio.run(questing.open_dialogue_if_near(far)) is False
+    assert pressed == []
+
+    near = _DialogueClient(_Pos(0, 0), _Pos(50, 50))
+    assert asyncio.run(questing.open_dialogue_if_near(near)) is True
+    assert pressed == [1]

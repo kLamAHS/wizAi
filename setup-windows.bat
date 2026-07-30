@@ -67,17 +67,26 @@ echo.
 echo Installing Deimos's questing requirements ...
 REM Deimos/src/questing.py is the real navigator -- navmap teleports,
 REM spiral doors, dungeon entry, NPC talking -- and composes with the
-REM combat policy because auto_quest_solo no-ops during a duel. It needs
-REM src.utils, which imports wizwalker.extensions.wizsprinter, hence
-REM wizsprinter and its Python 3.13 floor. If this fails the bridge falls
-REM back to its own lighter questing and everything else still works.
-"%PY%" -m pip install --quiet "%~dp0Deimos\libs\wizsprinter" thefuzz loguru pyyaml requests pypresence pyperclip
+REM combat policy because auto_quest_solo no-ops during a duel. The same
+REM imports are what bot scripts (deimoslang) need.
+REM
+REM wizsprinter is NOT installed here. It is vendored at
+REM Deimos\libs\wizsprinter and overlays into the wizwalker namespace, and
+REM its pyproject declares requires-python >=3.13 -- so pip refuses it on
+REM 3.11/3.12 and the whole line used to fail, taking the other packages
+REM with it and leaving scripts broken with a misleading message. The
+REM floor is declared metadata, not real: those sources compile on 3.11.
+REM deimos_bridge/deimos_path.py puts them on the path at import time
+REM instead, so only genuine PyPI packages are installed below. `lark` is
+REM among them because wizsprinter needs it and nothing is resolving its
+REM dependencies for us now.
+"%PY%" -m pip install --quiet lark thefuzz loguru pyyaml requests pypresence pyperclip
 if errorlevel 1 (
     echo.
     echo NOTE: Deimos's questing requirements did not install. That is not
     echo       fatal -- the bridge will use its own lighter questing, which
-    echo       teleports and clicks dialogue but cannot navigate zones.
-    echo       Everything else works. Python 3.13+ is required for this part.
+    echo       teleports and clicks dialogue but cannot navigate zones, and
+    echo       bot scripts will be unavailable. Everything else works.
     echo.
 )
 
