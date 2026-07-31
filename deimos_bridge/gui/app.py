@@ -818,13 +818,27 @@ class MainWindow(QMainWindow):
                 bits.append(f"{st[key] * 100:.0f}% {label}")
         return "gear: " + ", ".join(bits) + " — training uses these"
 
-    def _why_coverage_is_low(self):
+    def _why_coverage_is_low(self, reasons=None):
         """Name the specific mismatch rather than saying "train more".
 
         "Train more episodes" is the wrong advice for every cause here,
         and it is expensive advice to follow before finding that out.
         The mismatches are checkable, so check them.
+
+        `reasons` are the ones the misses *recorded as they happened*,
+        and they come first because they are observations rather than
+        inferences. The run that prompted this printed "a 480 HP mob is
+        above the 94-423 band this table was trained on" on one line and
+        "the states are mostly unvisited -- raise episodes and retrain"
+        on the next: the second is guesswork, it contradicted the first,
+        and it is the one fix that could not have helped.
         """
+        if reasons:
+            why, n = next(iter(reasons.items()))
+            rest = sum(reasons.values()) - n
+            return (f"cause: {why} ({n} round(s)"
+                    + (f", plus {rest} for other reasons" if rest else "")
+                    + ")")
         # First: did training learn anything at all? A table whose kill
         # rate never left zero has nothing to apply, and every other
         # explanation below is a distraction from that.
@@ -892,16 +906,20 @@ class MainWindow(QMainWindow):
                 + "\n" + self._gear_line())
 
         colour = PALETTE["muted"]
-        live = self.live if (self.live and self.live.isRunning()) else None
-        trained = getattr(live, "trained", None)
-        if trained is not None and (trained.seen + trained.missed):
-            cover = trained.coverage * 100
+        # Off the round records, which is where the Learning tab reads
+        # it too. Taking it off the live policy object instead put two
+        # different answers to one question on screen at once, because
+        # those counters reset on every `set_policy` and the records do
+        # not.
+        decided, missed, reasons = self.tel.trained_coverage()
+        if decided + missed:
+            cover = decided * 100.0 / (decided + missed)
             colour = (PALETTE["good"] if cover > 66 else
                       PALETTE["warn"] if cover > 25 else PALETTE["bad"])
             text += (f"\nQ table decided {cover:.0f}% of the boards it was "
-                     f"shown ({trained.missed} fell back to the heuristic)")
-            if cover < 25:
-                text += "\n" + self._why_coverage_is_low()
+                     f"shown ({missed} fell back to the heuristic)")
+            if cover < 66:
+                text += "\n" + self._why_coverage_is_low(reasons)
         if self.verdict_text:
             # Under the coverage line on purpose. Coverage answers "does
             # the table recognise this board"; this answers "is it any

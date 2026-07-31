@@ -621,6 +621,7 @@ class Telemetry:
         recs = [r for r in self.rounds if r.candidates][-rounds:]
         if not recs:
             return [], [], 0
+        multi_fight = len({r.fight for r in recs}) > 1
 
         counts = {}
         for rec in recs:
@@ -646,7 +647,12 @@ class Telemetry:
                      if why else
                      f"kills in {_attr(cand, 'turns', 0):g} turn(s), ")
                     + f"{_attr(cand, 'damage', 0):,.0f} damage banked")
-            rows.append((f"r{rec.round}", cells))
+            # Fight and round. Labelling by round alone repeats "r1"
+            # once per fight, and the matrix stacks fights, so three
+            # fights showed r1/r2/r3/r1/r2/r4/r7/r1... with no way to
+            # tell which fight a row belonged to.
+            rows.append((f"f{rec.fight} r{rec.round}"
+                         if multi_fight else f"r{rec.round}", cells))
         return rows, cols, dropped
 
     def candidate_bars(self, index, rounds=14):
@@ -722,6 +728,39 @@ class Telemetry:
             key = r.policy or "unknown"
             counts[key] = counts.get(key, 0) + 1
         return dict(sorted(counts.items(), key=lambda kv: -kv[1]))
+
+    def trained_coverage(self):
+        """(decided, missed, {reason: count}) for the trained policy.
+
+        One source for a number the window was reporting twice. The
+        config line took it off `TrainedPolicy`'s own counters and the
+        Learning tab took it off the round records, and the two
+        disagreed on screen -- "decided 0% (1 fell back)" beside
+        "14%, 1 of 7 rounds" -- because the policy object's counters
+        reset every time the policy is swapped, which `set_policy` does
+        without disconnecting. Two numbers for one fact is worse than
+        either number alone.
+
+        The reasons come along because they are the actionable part: a
+        run that missed 6 boards for one stated reason has a fix, and
+        the round records already carry it.
+        """
+        decided = missed = 0
+        reasons = {}
+        for r in self.rounds:
+            name = r.policy or ""
+            if "trained" not in name:
+                continue
+            if "fallback" in name:
+                missed += 1
+                why = name.split("—", 1)[-1].strip() if "—" in name else name
+                why = why.removeprefix("fallback").strip(" —()")
+                if why and why != "state not in Q table":
+                    reasons[why] = reasons.get(why, 0) + 1
+            else:
+                decided += 1
+        return decided, missed, dict(
+            sorted(reasons.items(), key=lambda kv: -kv[1]))
 
     def summary(self):
         st = self.error_stats()

@@ -4345,3 +4345,80 @@ def test_a_miss_uses_the_band_for_the_count_on_the_board():
     assert tp.why_missed(board([900])) == ""              # fine at 1 mob
     assert "above the 40–700 band" in tp.why_missed(board([900, 900]))
     assert "above the 40–480 band" in tp.why_missed(board([600] * 3))
+
+
+# ------------------------------ the panel must not contradict itself
+def test_coverage_is_one_number_from_one_source():
+    """The config line read it off `TrainedPolicy`'s counters and the
+    Learning tab off the round records, so the window showed "decided 0%
+    (1 fell back)" beside "14%, 1 of 7 rounds" — the policy object's
+    counters reset on every swap and the records do not."""
+    from deimos_bridge.telemetry import RoundRecord, Telemetry
+
+    tel = Telemetry()
+    tel.rounds = [
+        RoundRecord(fight=1, round=1, policy="ttk-lookahead"),
+        RoundRecord(fight=1, round=2, policy="trained (Q) — Q table"),
+        RoundRecord(fight=1, round=3,
+                    policy="trained (Q) — fallback (state not in Q table)"),
+        RoundRecord(fight=1, round=4, policy="trained (Q) — fallback — a "
+                    "480 HP mob is above the 94–423 band this table was "
+                    "trained on"),
+        RoundRecord(fight=1, round=5, policy="trained (Q) — fallback — a "
+                    "480 HP mob is above the 94–423 band this table was "
+                    "trained on"),
+        RoundRecord(fight=1, round=6, policy="board read failed"),
+    ]
+    decided, missed, reasons = tel.trained_coverage()
+    assert (decided, missed) == (1, 3)
+
+    # Same denominator the Learning tab's meter uses.
+    mix = tel.policy_mix()
+    trained = sum(n for name, n in mix.items() if "trained" in name)
+    assert decided + missed == trained
+
+    # And the reason is aggregated, not merely counted.
+    top, n = next(iter(reasons.items()))
+    assert "480 HP mob is above" in top and n == 2
+
+
+def test_the_stated_cause_uses_what_the_misses_recorded(qapp):
+    """The run that prompted this printed the real cause on one line and
+    "the states are mostly unvisited — raise episodes and retrain" on the
+    next. The second contradicted the first and was the one fix that
+    could not have helped."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    said = win._why_coverage_is_low(
+        {"a 480 HP mob is above the 94–423 band this table was trained on": 3,
+         "3 mobs, trained for up to 2": 1})
+    assert "480 HP mob is above" in said
+    assert "plus 1 for other reasons" in said
+    assert "raise episodes" not in said
+
+    # With nothing recorded it still falls back to the inferred causes.
+    assert win._why_coverage_is_low({}) != ""
+    assert win._why_coverage_is_low(None) != ""
+
+
+def test_heatmap_rows_name_their_fight_when_fights_are_stacked():
+    """Labelling by round alone repeats "r1" once per fight, and the
+    matrix stacks fights: three fights showed r1/r2/r3/r1/r2/r4/r7/r1."""
+    from deimos_bridge.policies import Candidate
+    from deimos_bridge.telemetry import RoundRecord, Telemetry
+
+    def rec(fight, rnd):
+        return RoundRecord(fight=fight, round=rnd, candidates=[
+            Candidate(card="Frost Beetle", target=0, turns=5, chosen=True)])
+
+    tel = Telemetry()
+    tel.rounds = [rec(1, 1), rec(1, 2), rec(2, 1), rec(3, 1), rec(3, 7)]
+    rows, _cols, _dropped = tel.decision_matrix()
+    labels = [label for label, _cells in rows]
+    assert len(labels) == len(set(labels)), labels
+    assert labels[0] == "f1 r1" and labels[-1] == "f3 r7"
+
+    # One fight keeps the short label -- the fight number adds nothing.
+    tel.rounds = [rec(1, 1), rec(1, 2)]
+    assert [l for l, _ in tel.decision_matrix()[0]] == ["r1", "r2"]
