@@ -4264,3 +4264,84 @@ def test_a_miss_says_which_fact_it_did_not_recognise():
     # No stamp, no claim -- inventing a band would be worse than silence.
     bare = trained_policy(QAgent({}, [], "ice"))
     assert bare.why_missed(board([9999])) == ""
+
+
+# ------------------------------- the band is discovered, not typed in
+def test_the_trainable_range_is_discovered_per_mob_count(qapp):
+    """"Why do I have to train for specific healths" — you should not.
+    The band was `mob HP` x0.4 to x1.8, so typing 235 bought 94–423 and
+    a 480 HP mob fell off the end and keyed nothing at all."""
+    from deimos_bridge.gui.app import TrainWorker
+    from data_full import load_spells_full
+
+    cards = load_spells_full()
+    deck = (["Evil Snowman"] * 3 + ["Frost Beetle"] * 3 + ["Ice Trap"] * 3
+            + ["Snow Serpent"] * 3)
+    w = TrainWorker(cards, deck, "ice", 500, player_hp=1022, boss_hp=235,
+                    n_enemies=3, mob_schools=["death"], mob_damage=85)
+    bands = w.envelope(n=60)
+
+    assert set(bands) == {1, 2, 3}
+    # The whole point: the winnable span is sharply different per count,
+    # which a single band cannot express in either direction.
+    assert bands[1][1] > bands[2][1] > bands[3][1], bands
+    # ...and it reaches far past the x1.8 the box would have given (423).
+    assert bands[1][1] > 1000, bands
+    assert "clears 1 mob to" in w.describe_envelope(bands)
+
+
+def test_a_deck_that_can_clear_nothing_reports_an_empty_envelope(qapp):
+    from deimos_bridge.gui.app import TrainWorker
+    from data_full import load_spells_full
+
+    cards = load_spells_full()
+    # A deck with no damage card in it can never kill anything, at any
+    # health, so the envelope is genuinely empty rather than small.
+    w = TrainWorker(cards, ["Ice Trap"] * 4, "ice", 500, player_hp=1022,
+                    n_enemies=1, mob_schools=["death"], mob_damage=85)
+    bands = w.envelope(n=40)
+    assert bands == {}
+    assert "cannot clear" in w.describe_envelope(bands)
+
+
+def test_the_sampler_honours_a_band_per_mob_count():
+    import random
+
+    from rl_agent import make_board_sampler
+
+    sample = make_board_sampler("death", (50, 400), max_mobs=3, dmg=60,
+                                bands={1: (50, 1400), 2: (50, 700),
+                                       3: (50, 480)})
+    rng = random.Random(0)
+    seen = {}
+    for _ in range(3000):
+        boss, extra = sample(rng)
+        board = [boss] + list(extra)
+        lo, hi = seen.get(len(board), (10 ** 9, 0))
+        seen[len(board)] = (min(lo, *[b.hp for b in board]),
+                            max(hi, *[b.hp for b in board]))
+    assert set(seen) == {1, 2, 3}
+    assert seen[1][1] > 1300 and seen[2][1] <= 700 and seen[3][1] <= 480, seen
+
+
+def test_a_miss_uses_the_band_for_the_count_on_the_board():
+    """The winnable span differs by mob count, so "above the band" is a
+    different number depending on how many are up."""
+    from deimos_bridge.policies import trained_policy
+    from rl_agent import QAgent
+    from w101_sim import Actor, State
+
+    agent = QAgent({}, [], "ice")
+    agent.trained_on = {"hp": (40, 1400), "mobs": 3, "schools": ["death"],
+                        "bands": {1: (40, 1400), 2: (40, 700), 3: (40, 480)}}
+    tp = trained_policy(agent)
+
+    def board(hps):
+        me = Actor(name="W", school="ice", hp=1022, max_hp=1022, team=0)
+        foes = [Actor(name=f"m{i}", school="death", hp=h, max_hp=h, team=1)
+                for i, h in enumerate(hps)]
+        return State(me, foes)
+
+    assert tp.why_missed(board([900])) == ""              # fine at 1 mob
+    assert "above the 40–700 band" in tp.why_missed(board([900, 900]))
+    assert "above the 40–480 band" in tp.why_missed(board([600] * 3))

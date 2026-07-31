@@ -294,7 +294,8 @@ class QAgent:
 MOB_SCHOOLS = ("fire", "ice", "storm", "myth", "life", "death", "balance")
 
 
-def make_board_sampler(school, hp_range, max_mobs=3, dmg=60, schools=None):
+def make_board_sampler(school, hp_range, max_mobs=3, dmg=60,
+                       schools=None, bands=None):
     """A fresh board per episode, so one table covers many fights.
 
     `school` is the fallback for a board whose real school is unknown;
@@ -333,10 +334,19 @@ def make_board_sampler(school, hp_range, max_mobs=3, dmg=60, schools=None):
     lo = max(1, lo)
     hi = max(lo, hi)
     pool = tuple(schools) if schools else (school,)
+    #: {mob count: (lo, hi)}, when the winnable span differs per count --
+    #: and it does, sharply. Measured on one starter ice deck at 1,022
+    #: health: one mob is winnable to 1,400 HP, two to 700, three to 480.
+    #: A single band across every count either wastes most of a
+    #: three-mob episode budget on boards with no winning line, or caps
+    #: the one-mob range at a third of what the deck can actually clear.
+    bands = {int(k): (int(min(v)), int(max(v))) for k, v in (bands or {}).items()}
+    counts = sorted(bands) or list(range(1, max(1, max_mobs) + 1))
 
     def sample(rng):
-        n = rng.randint(1, max(1, max_mobs))
-        hps = [rng.randint(lo, hi) for _ in range(n)]
+        n = counts[rng.randrange(len(counts))]
+        band_lo, band_hi = bands.get(n, (lo, hi))
+        hps = [rng.randint(band_lo, max(band_lo, band_hi)) for _ in range(n)]
         board = [Boss(name=f"mob {i}", hp=hp,
                       school=pool[rng.randrange(len(pool))], dmg=dmg)
                  for i, hp in enumerate(hps)]
