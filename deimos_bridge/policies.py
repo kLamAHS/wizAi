@@ -231,11 +231,25 @@ class TrainedPolicy:
     run of a learned policy.
     """
 
-    def __init__(self, agent, fallback=None):
+    #: How many times the winning action must actually have been updated
+    #: before the table is allowed to play it. "Is this entry non-zero"
+    #: cannot tell one lucky episode from ten thousand, and a single
+    #: visit is not an estimate -- it is a sample. Measured on a
+    #: 12,000-episode table over a board ladder: gating at 20 lifts the
+    #: easy board from 84% to 93%, the 900 HP board from 66% to 84%
+    #: (past the heuristic's 79%), and finds 17% on a 480x2 board where
+    #: both the ungated table and the heuristic score 0%.
+    MIN_VISITS = 20
+
+    def __init__(self, agent, fallback=None, min_visits=None):
         self.agent = agent
         self.fallback = fallback or greedy_ttk()
+        self.min_visits = (self.MIN_VISITS if min_visits is None
+                           else int(min_visits))
         self.seen = 0
         self.missed = 0
+        #: visits behind the last decision, for the miss reason
+        self.last_support = 0
         #: which path the LAST decision took. Surfaced per round, because
         #: "is the model I picked actually driving?" is otherwise
         #: unanswerable from the outside -- a trained policy and its
@@ -274,9 +288,18 @@ class TrainedPolicy:
             self.last_reason = ""
             return self.fallback(sim, s)
 
-        # `.get`, not `[]`: QAgent.Q is a defaultdict, and indexing it
-        # here would insert a zero for every state we merely asked about.
-        known = any(self.agent.Q.get((key, a), 0.0) for a in legal)
+        # Evidence, not merely a non-zero float. `.get`, not `[]`:
+        # QAgent.Q is a defaultdict and indexing it here would insert a
+        # zero for every state we merely asked about.
+        support = getattr(self.agent, "support", None)
+        if support is not None:
+            self.last_support, _total = support(key, legal)
+            known = self.last_support >= self.min_visits
+        else:
+            # A table trained before visit counts existed. Fall back to
+            # the old test rather than refusing to use it at all.
+            self.last_support = -1
+            known = any(self.agent.Q.get((key, a), 0.0) for a in legal)
         if not known:
             self.missed += 1
             self.last_reason = self.why_missed(s)
@@ -304,6 +327,13 @@ class TrainedPolicy:
         whoever trained the agent; without it there is no band to
         compare against and inventing one would be worse than silence.
         """
+        if 0 <= self.last_support < self.min_visits:
+            if self.last_support == 0:
+                pass          # never seen at all -- the band may explain it
+            else:
+                return (f"the table played this board {self.last_support} "
+                        f"time(s) in training, under the {self.min_visits} "
+                        f"it needs to be an estimate rather than a sample")
         band = getattr(self.agent, "trained_on", None)
         if not band:
             return ""
@@ -319,9 +349,22 @@ class TrainedPolicy:
         per_count = (band.get("bands") or {}).get(len(alive))
         lo, hi = per_count or (band.get("hp") or (None, None))
         if lo is not None and alive:
+            # Buckets, not raw health. `Featurizer.key` stores
+            # `hp // HP_BUCKET`, so a 480 HP mob and a 365 HP band edge
+            # are the same symbol and the band cannot be what the table
+            # failed to recognise. Comparing the raw numbers blamed the
+            # band for every miss on a board whose biggest mob happened
+            # to sit past the edge, including the ones it explains
+            # nothing about.
+            from rl_agent import HP_BUCKET
+
+            def bucket(hp):
+                return min(int(hp // HP_BUCKET), 24)
+
             biggest = max(e.max_hp for e in alive)
-            if not (lo <= biggest <= hi):
-                side = "above" if biggest > hi else "below"
+            b, blo, bhi = bucket(biggest), bucket(lo), bucket(hi)
+            if not (blo <= b <= bhi):
+                side = "above" if b > bhi else "below"
                 return (f"a {biggest:,.0f} HP mob is {side} the "
                         f"{lo:,.0f}–{hi:,.0f} band this table was trained "
                         f"on")
@@ -333,9 +376,9 @@ class TrainedPolicy:
         return ""
 
 
-def trained_policy(agent, fallback=None):
+def trained_policy(agent, fallback=None, min_visits=None):
     """`policy(sim, state)` for a QAgent, with a fallback for unseen states."""
-    return TrainedPolicy(agent, fallback)
+    return TrainedPolicy(agent, fallback, min_visits)
 
 
 # --------------------------------------------------------------------------

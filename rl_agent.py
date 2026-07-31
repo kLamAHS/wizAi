@@ -23,6 +23,14 @@ FAIL_PENALTY = 25.0
 MAX_TURNS = 40
 PASS = "__pass__"
 
+#: Enemy health enters the state key as `hp // HP_BUCKET`, so this is the
+#: finest distinction the agent can make about how much health something
+#: has. It is exported because callers that reason about "the range this
+#: table was trained over" have to reason in buckets: a band of 40-365
+#: and a live mob of 480 are the SAME bucket, and calling that mob
+#: out-of-band describes a distinction the model does not make.
+HP_BUCKET = 250
+
 
 # ---------------------------------------------------------------- state feats
 
@@ -44,7 +52,7 @@ class Featurizer:
         the scarcity signal the DP abstraction lacks. Treasure cards in
         hand enter by name (the sideboard is small and WHICH TC is up
         decides the turn)."""
-        hb = min(int(s.boss_hp // 250), 24)
+        hb = min(int(s.boss_hp // HP_BUCKET), 24)
         p = min(s.norm_pips + 2 * s.pow_pips +
                 2 * getattr(s, 'school_pips', 0), 14)
         bmask = sum(1 << i for i, n in enumerate(self.blades) if n in s.blades)
@@ -186,14 +194,60 @@ class QAgent:
                  alpha=0.25, gamma=1.0, rng=None):
         self.feat = Featurizer(cards, decklist)
         self.Q = defaultdict(float)
+        #: how many times each (state, action) was actually updated.
+        #: A Q value alone cannot say whether it is an estimate or a
+        #: single lucky episode, and "is this entry non-zero" -- which
+        #: is how the live wrapper decided whether to trust the table --
+        #: cannot tell one visit from ten thousand.
+        self.N = defaultdict(int)
         self.school, self.alpha, self.gamma = school, alpha, gamma
         self.dp_pol = dp_pol                    # warm-start advisor
         self.rng = rng or random.Random()       # seeded => reproducible
                                                 # exploration, not just eval
 
-    def greedy(self, sim, s, legal):
+    def greedy(self, sim, s, legal, tried_only=False):
+        """Best legal action. `tried_only` is the difference between
+        exploring and playing.
+
+        Every return in this problem is negative -- `-turn_cost` per
+        turn and `-FAIL_PENALTY` on a loss -- so an entry the agent has
+        never updated sits at the defaultdict's 0.0 and outranks every
+        action it has actually measured. During training that is
+        optimistic initialisation and it is doing useful work: it drives
+        the agent to try things.
+
+        At exploitation time it is the opposite of what you want.
+        Measured on a 12,000-episode table: 14% of decisions on states
+        that *did* have data landed on an action that had never been
+        tried once, purely because 0.0 beats -3.2. So the played policy
+        restricts itself to actions with evidence, and only falls back
+        to the full legal set when the state has none at all.
+        """
         k = self.feat.key(sim, s)
-        return max(legal, key=lambda a: self.Q[(k, a)])
+        if tried_only:
+            seen = [a for a in legal if self.N.get((k, a))]
+            if seen:
+                legal = seen
+        # `.get`, not `[]`. Both are defaultdicts, so merely *asking*
+        # about an action used to insert a zero for it -- a table with
+        # 8,046 real entries had grown 21,353 keys, most of them
+        # phantoms created by looking. Reading a table should not change
+        # it.
+        return max(legal, key=lambda a: self.Q.get((k, a), 0.0))
+
+    def support(self, key, legal):
+        """(visits to the best action, visits to this state).
+
+        The evidence behind a decision, which the Q value on its own
+        does not carry. Used to decide whether the table has actually
+        learned this board or merely stumbled through it once.
+        """
+        if not legal:
+            return 0, 0
+        seen = [a for a in legal if self.N.get((key, a))] or legal
+        best = max(seen, key=lambda a: self.Q.get((key, a), 0.0))
+        return (self.N.get((key, best), 0),
+                sum(self.N.get((key, a), 0) for a in legal))
 
     def act(self, sim, s, eps, dp_w):
         legal = self.feat.legal(sim, s)
@@ -252,6 +306,7 @@ class QAgent:
             # rewards dying sooner rather than finding the win.
             G = -self.turn_cost + self.gamma * G
             self.Q[(k, a)] += self.alpha * (G - self.Q[(k, a)])
+            self.N[(k, a)] += 1
         return turns, won
 
     def policy(self):
@@ -273,7 +328,7 @@ class QAgent:
         def pol(sim, s):
             tc_reflex(sim, s)
             legal = self.feat.legal(sim, s)
-            a = self.greedy(sim, s, legal)
+            a = self.greedy(sim, s, legal, tried_only=True)
             if a == PASS:
                 _dig(s)
                 return None

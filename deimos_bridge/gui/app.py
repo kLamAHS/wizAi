@@ -210,7 +210,33 @@ class TrainWorker(QThread):
                     lo = mid
                 else:
                     hi = mid
-            bands[count] = (floor, lo)
+            # Up to the top of the bucket the frontier lands in. The
+            # key cannot tell 365 from 480 -- both are `hp // 250 == 1`
+            # -- so stopping the band at 365 trains part of a bucket and
+            # then reports a 480 mob as outside it, which is a
+            # distinction the model does not make. Costs at most one
+            # bucket of ground the deck clears less often; buys a band
+            # whose edges mean the same thing to the trainer and to the
+            # state key.
+            from rl_agent import HP_BUCKET
+            hi = (lo // HP_BUCKET + 1) * HP_BUCKET
+            # ...and at least as far as the boards you say you will meet.
+            # Typing 780 into "biggest mob HP" and being told a 480 mob
+            # is outside the trained band is the box doing nothing, and
+            # that was fair to call annoying: the envelope answered
+            # "what can this deck reliably win" when the question is
+            # "what will this table be asked about".
+            #
+            # Training past the winnable frontier used to be a bad trade
+            # -- more coverage measured as worse play -- because a state
+            # visited twice drove exactly like a state visited ten
+            # thousand times. With `TrainedPolicy.MIN_VISITS` gating on
+            # evidence, thin states hand the round to the heuristic on
+            # their own, so the only cost of reaching further is
+            # episodes.
+            want = max([int(self.boss_hp)] + [int(h) for h in self.mob_hps])
+            hi = max(hi, (want // HP_BUCKET + 1) * HP_BUCKET)
+            bands[count] = (floor, hi)
         return bands
 
     def compare(self, agent, bands, dmg, schools, n=300):
@@ -263,9 +289,9 @@ class TrainWorker(QThread):
         if not bands:
             return ("this deck cannot clear a single mob at these settings "
                     "— nothing to train")
-        parts = [f"{n} mob{'s' if n > 1 else ''} to ~{hi:,} HP"
+        parts = [f"{n} mob{'s' if n > 1 else ''} to {hi:,} HP"
                  for n, (_lo, hi) in sorted(bands.items())]
-        return "this deck clears " + ", ".join(parts)
+        return "training over " + ", ".join(parts)
 
     def school_pool(self):
         """The schools to draw training mobs from.

@@ -2562,8 +2562,16 @@ def test_the_coverage_warning_names_the_mismatch_not_more_episodes(qapp):
 
 
 # ------------------------------------------ one model, more than one fight
-def _covers(agent, mob_hps, n=12):
-    """Coverage of a trained agent on a board of these mobs."""
+def _covers(agent, mob_hps, n=12, min_visits=1):
+    """Coverage of a trained agent on a board of these mobs.
+
+    `min_visits=1` because this measures whether the table has ANY
+    experience of a board, which is what domain randomisation is for.
+    The live default is `TrainedPolicy.MIN_VISITS` (20), a much stricter
+    bar that a 1,500-episode run in a test would never clear -- and
+    which is about whether an entry is an estimate rather than whether
+    it exists.
+    """
     import random
 
     from data_full import load_spells_full
@@ -2573,7 +2581,7 @@ def _covers(agent, mob_hps, n=12):
 
     cards = load_spells_full()
     deck = ["Frost Beetle"] * 3 + ["Ice Trap"] * 3 + ["Snow Serpent"] * 3
-    wrapped = trained_policy(agent)
+    wrapped = trained_policy(agent, min_visits=min_visits)
     for seed in range(n):
         sim = Sim(cards, deck, "ice",
                   Boss(name="m0", hp=mob_hps[0], school="fire", dmg=65),
@@ -4290,7 +4298,7 @@ def test_the_trainable_range_is_discovered_per_mob_count(qapp):
     assert bands[1][1] > bands[2][1] > bands[3][1], bands
     # ...and it reaches far past the x1.8 the box would have given (423).
     assert bands[1][1] > 1000, bands
-    assert "clears 1 mob to" in w.describe_envelope(bands)
+    assert "training over 1 mob to" in w.describe_envelope(bands)
 
 
 def test_a_deck_that_can_clear_nothing_reports_an_empty_envelope(qapp):
@@ -4666,3 +4674,168 @@ def test_a_board_lost_on_time_is_diagnosed_differently_from_one_lost_on_damage(q
     assert "loses on time, not" in note
     assert "Your deck is the reason" not in note
     assert "rounds" in note
+
+
+# --------------------------- the band has to mean what the key means
+def test_a_miss_blames_the_band_only_when_the_bucket_changes():
+    """`Featurizer.key` stores `hp // 250`, so a 480 HP mob and a 365 HP
+    band edge are the SAME symbol — the band cannot be what the table
+    failed to recognise. Comparing raw health blamed it anyway, on every
+    board whose biggest mob happened to sit past the edge."""
+    from deimos_bridge.policies import trained_policy
+    from rl_agent import HP_BUCKET, QAgent
+    from w101_sim import Actor, State
+
+    agent = QAgent({}, [], "ice")
+    agent.trained_on = {"hp": (40, 365), "mobs": 2, "schools": ["balance"],
+                        "bands": {1: (40, 1900), 2: (40, 365)}}
+    tp = trained_policy(agent)
+
+    def board(hps):
+        me = Actor(name="W", school="ice", hp=1022, max_hp=1022, team=0)
+        foes = [Actor(name=f"m{i}", school="balance", hp=h, max_hp=h, team=1)
+                for i, h in enumerate(hps)]
+        return State(me, foes)
+
+    assert 480 // HP_BUCKET == 365 // HP_BUCKET       # the premise
+    assert tp.why_missed(board([480, 235])) == ""     # same bucket, no blame
+    assert tp.why_missed(board([365, 235])) == ""
+    # A genuinely different bucket still gets named.
+    assert "above" in tp.why_missed(board([900, 235]))
+    assert "900" in tp.why_missed(board([900, 235]))
+
+
+def test_the_envelope_stops_on_a_bucket_edge(qapp):
+    """Stopping at an arbitrary frontier trains part of a bucket and then
+    reports the rest of that bucket as out of band, which is a
+    distinction the model does not make."""
+    from data_full import load_spells_full
+    from deimos_bridge.gui.app import TrainWorker
+    from rl_agent import HP_BUCKET
+
+    cards = load_spells_full()
+    deck = (["Evil Snowman"] + ["Frost Beetle"] * 4 + ["Ice Trap"] * 4
+            + ["Snow Serpent"] * 4)
+    w = TrainWorker(cards, deck, "ice", 0, player_hp=1022, boss_hp=780,
+                    n_enemies=2, mob_schools=["balance"], mob_damage=147,
+                    player_stats={"damage": {"ice": 0.09}})
+    bands = w.envelope(n=60)
+    assert bands, "the deck should clear something"
+    for count, (_lo, hi) in bands.items():
+        assert hi % HP_BUCKET == 0, (count, hi)
+
+
+# ------------------ the table drives only where it has evidence
+def test_the_table_needs_evidence_not_just_a_non_zero_entry():
+    """"Is this entry non-zero" cannot tell one lucky episode from ten
+    thousand, and a single visit is a sample, not an estimate."""
+    from deimos_bridge.policies import trained_policy
+    from rl_agent import QAgent
+    from w101_sim import Actor, State
+
+    agent = QAgent({}, [], "ice")
+    tp = trained_policy(agent, min_visits=20)
+
+    key, legal = ("k",), ["a", "b"]
+    agent.Q[(key, "a")] = -3.0
+    agent.N[(key, "a")] = 4
+    # Every return is negative, so the untried "b" sits at 0.0 and would
+    # outrank the measured "a". `support` reports the action that will
+    # actually be played, which is the one with evidence.
+    assert agent.support(key, legal) == (4, 4)
+
+    # Thin evidence: the wrapper must not drive on it...
+    agent.feat.key = lambda sim, s: key
+    agent.feat.legal = lambda sim, s: legal
+    fell_back = []
+    tp.fallback = lambda sim, s: fell_back.append(1)
+
+    me = Actor(name="W", school="ice", hp=100, max_hp=100, team=0)
+    s = State(me, [Actor(name="m", school="death", hp=50, max_hp=50, team=1)])
+    tp(None, s)
+    assert fell_back == [1] and tp.missed == 1
+    assert "4 time(s) in training" in tp.why_missed(s)
+
+    # ...and must drive once the evidence is there.
+    agent.N[(key, "a")] = 40
+    agent.policy = lambda: (lambda sim, st: "played")
+    assert tp(None, s) == "played"
+    assert tp.seen == 1
+
+
+def test_a_table_without_visit_counts_still_plays():
+    """A table trained before visit counts existed must keep working —
+    refusing to use it at all would be worse than the old test."""
+    from deimos_bridge.policies import trained_policy
+    from w101_sim import Actor, State
+
+    class _Old:                       # no `support`, no `N`
+        class feat:
+            @staticmethod
+            def key(sim, s):
+                return ("k",)
+
+            @staticmethod
+            def legal(sim, s):
+                return ["a"]
+
+        Q = {(("k",), "a"): -2.0}
+
+        @staticmethod
+        def policy():
+            return lambda sim, s: "played"
+
+    tp = trained_policy(_Old())
+    me = Actor(name="W", school="ice", hp=100, max_hp=100, team=0)
+    s = State(me, [Actor(name="m", school="death", hp=50, max_hp=50, team=1)])
+    assert tp(None, s) == "played"
+    assert tp.seen == 1
+
+
+def test_the_biggest_mob_hp_box_reaches_the_trained_band(qapp):
+    """Typing 780 and being told a 480 HP mob is outside the band is the
+    box doing nothing. Training past the winnable frontier is only safe
+    because thin states now hand the round back on their own."""
+    from data_full import load_spells_full
+    from deimos_bridge.gui.app import TrainWorker
+    from rl_agent import HP_BUCKET
+
+    cards = load_spells_full()
+    deck = (["Evil Snowman"] + ["Frost Beetle"] * 4 + ["Ice Trap"] * 4
+            + ["Snow Serpent"] * 4)
+    w = TrainWorker(cards, deck, "ice", 0, player_hp=1022, boss_hp=780,
+                    n_enemies=2, mob_hps=[480, 235], mob_schools=["balance"],
+                    mob_damage=136, player_stats={"damage": {"ice": 0.09}})
+    bands = w.envelope(n=60)
+    assert bands
+    for count, (_lo, hi) in bands.items():
+        assert hi > 780, (count, hi)          # the box is covered
+        assert hi % HP_BUCKET == 0, (count, hi)
+    assert "training over" in w.describe_envelope(bands)
+
+
+def test_the_played_policy_does_not_prefer_untried_actions():
+    """Every return here is negative, so an entry the agent never updated
+    sits at the defaultdict's 0.0 and outranks everything it measured.
+    Useful while exploring; the opposite of what you want while playing.
+    Measured on a real table: 14% of decisions on states that DID have
+    data landed on an action never tried once."""
+    from rl_agent import QAgent
+
+    agent = QAgent({}, [], "ice")
+    key = ("k",)
+    agent.feat.key = lambda sim, s: key
+    agent.Q[(key, "measured")] = -3.0
+    agent.N[(key, "measured")] = 40
+
+    legal = ["measured", "never_tried"]
+    # Exploring still reaches for the unknown — that is the point of it.
+    assert agent.greedy(None, None, legal) == "never_tried"
+    # Playing does not.
+    assert agent.greedy(None, None, legal, tried_only=True) == "measured"
+
+    # A state with no evidence at all still returns something legal
+    # rather than nothing.
+    empty = ("nothing",)
+    agent.feat.key = lambda sim, s: empty
+    assert agent.greedy(None, None, legal, tried_only=True) in legal
