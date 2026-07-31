@@ -191,7 +191,7 @@ class WizAiBackend:
             if name not in self._seen:
                 self._seen.append(name)
         read.state.player.deck = self._deck_remaining(read.hand_cards)
-        self._estimate_incoming(read)
+        self._measured_incoming = self._estimate_incoming(read)
         self.last_read = read
 
         sim = self._sim_for(read)

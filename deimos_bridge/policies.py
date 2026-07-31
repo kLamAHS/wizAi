@@ -47,6 +47,13 @@ class Candidate:
     damage: float = 0.0
     pips: int = 0
     chosen: bool = False
+    #: the rollout's horizon, so a reader can tell a turn count from a
+    #: sentinel. `turns` above `horizon` is not a turn count at all --
+    #: it encodes dying, stalling, or being unplayable -- and the panel
+    #: was rendering all three as numbers. A whole board of candidates
+    #: reading "14 turns", including "pass", is `died()` at a horizon of
+    #: 12, i.e. "no line survives", and it looked like a flat tie.
+    horizon: int = 12
 
 
 #: op kinds that carry the cast's real target, in the order they decide
@@ -234,6 +241,11 @@ class TrainedPolicy:
         #: unanswerable from the outside -- a trained policy and its
         #: fallback look identical in a decision log.
         self.last_source = ""
+        #: why the last miss missed, in the operator's own terms. "it
+        #: always goes to fallback" is not actionable; "you set mob HP
+        #: 690 and walked into a 1,500 HP boss" is, and it is computable
+        #: from what training was told.
+        self.last_reason = ""
 
     @property
     def last_candidates(self):
@@ -259,6 +271,7 @@ class TrainedPolicy:
         except Exception:
             self.missed += 1
             self.last_source = "fallback (unreadable state)"
+            self.last_reason = ""
             return self.fallback(sim, s)
 
         # `.get`, not `[]`: QAgent.Q is a defaultdict, and indexing it
@@ -266,12 +279,54 @@ class TrainedPolicy:
         known = any(self.agent.Q.get((key, a), 0.0) for a in legal)
         if not known:
             self.missed += 1
-            self.last_source = "fallback (state not in Q table)"
+            self.last_reason = self.why_missed(s)
+            self.last_source = ("fallback — " + self.last_reason
+                                if self.last_reason
+                                else "fallback (state not in Q table)")
             return self.fallback(sim, s)
 
         self.seen += 1
         self.last_source = "Q table"
+        self.last_reason = ""
         return self.agent.policy()(sim, s)
+
+    def why_missed(self, s) -> str:
+        """Which fact about this board the table was never trained on.
+
+        `Featurizer.key` buckets enemy health absolutely (`hp // 250`)
+        and carries its targeting tuple only above one enemy, so a board
+        outside the trained band or above the trained mob count is not a
+        near miss -- it is a key the table has no entry of any kind for.
+        Measured: crossing the bucket edge at 1,250 HP takes the agent
+        from 63% to 0% for a 1.6% change in enemy health.
+
+        Empty when nothing can be said. `trained_on` is stamped by
+        whoever trained the agent; without it there is no band to
+        compare against and inventing one would be worse than silence.
+        """
+        band = getattr(self.agent, "trained_on", None)
+        if not band:
+            return ""
+        alive = [e for e in s.enemies if e.alive]
+        mobs = band.get("mobs")
+        if mobs and len(alive) > mobs:
+            return (f"{len(alive)} mobs, trained for up to {mobs} — the "
+                    f"state key changes shape above the trained count, so "
+                    f"nothing matches at all")
+        lo, hi = (band.get("hp") or (None, None))
+        if lo is not None and alive:
+            biggest = max(e.max_hp for e in alive)
+            if not (lo <= biggest <= hi):
+                side = "above" if biggest > hi else "below"
+                return (f"a {biggest:,.0f} HP mob is {side} the "
+                        f"{lo:,.0f}–{hi:,.0f} band this table was trained "
+                        f"on")
+        schools = band.get("schools") or []
+        here = {getattr(e, "school", "") for e in alive} - {""}
+        if schools and here and not (here & set(schools)):
+            return (f"trained against {'/'.join(sorted(schools))}, fighting "
+                    f"{'/'.join(sorted(here))}")
+        return ""
 
 
 def trained_policy(agent, fallback=None):
@@ -537,7 +592,7 @@ def greedy_ttk(max_turns: int = 12):
         strat.last_candidates = [
             Candidate(card=c.name, target=t, turns=score[0],
                       damage=-score[1], pips=c.pips,
-                      chosen=(c, t) == best_action)
+                      chosen=(c, t) == best_action, horizon=max_turns)
             for score, (c, t) in scored]
 
         # Passing is a real move -- banking a pip for a bigger hit next
@@ -551,7 +606,8 @@ def greedy_ttk(max_turns: int = 12):
         passing = pass_turns < best_score[0]
         strat.last_candidates.append(
             Candidate(card="pass", target=None, turns=pass_turns,
-                      damage=-pass_damage, pips=0, chosen=passing))
+                      damage=-pass_damage, pips=0, chosen=passing,
+                      horizon=max_turns))
         if passing:
             return None
 

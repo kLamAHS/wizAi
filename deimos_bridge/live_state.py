@@ -404,6 +404,34 @@ class LiveRead:
             (total - len(self.hidden)) / total
 
 
+async def read_school(member, default="balance") -> str:
+    """A participant's school, off the client.
+
+    This used to be the literal `"ice"` for every enemy on the board, and
+    that literal is expensive in a way that is invisible until you look
+    at the arithmetic. `Boss.resist_own` is 0.40, so a mob modelled as
+    the wizard's own school resists 40% of every hit -- the worst matchup
+    in the game. An ice wizard was therefore planning every fight against
+    mobs that were, as far as the simulator knew, ice.
+
+    Falls back to balance rather than to anything school-shaped: balance
+    is neutral in both directions, so an unreadable school costs
+    accuracy, not a fabricated resistance.
+    """
+    from .deimos_damage import SCHOOL_TO_STR
+
+    try:
+        sid = int(await member.primary_magic_school_id())
+    except Exception:
+        return default
+    name = SCHOOL_TO_STR.get(sid)
+    if name is None:
+        return default
+    name = name.lower()
+    # Star/Sun/Moon/Shadow are real school ids that no mob fights as.
+    return name if name in _SCHOOL_SLOT else default
+
+
 #: `GameStats`'s by-school vectors are indexed by Deimos's
 #: `school_list_ids` -- the same 0..15 ordering `deimos_damage` already
 #: ports. Only the seven playable schools matter here.
@@ -526,7 +554,12 @@ async def read_state(combat, resolver: NameResolver, school: str,
     async def _mk_actor(m, team):
         return Actor(
             name=await m.name(),
-            school=school if team == 0 else "ice",
+            # Read, not assumed. `"ice"` was hardcoded here for every
+            # enemy, and with `Boss.resist_own = 0.40` that told the
+            # simulator each mob resisted 40% of an ice wizard's damage
+            # -- so the rollout planned every fight against the worst
+            # matchup in the game and concluded nothing could be killed.
+            school=school if team == 0 else await read_school(m),
             hp=float(await m.health()),
             max_hp=float(await m.max_health()) or 1.0,
             team=team,

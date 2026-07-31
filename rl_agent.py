@@ -289,8 +289,20 @@ class QAgent:
         return pol
 
 
-def make_board_sampler(school, hp_range, max_mobs=3, dmg=60):
+#: The seven schools a mob can actually fight as. Star/Sun/Moon/Shadow
+#: are real school ids and no enemy uses one.
+MOB_SCHOOLS = ("fire", "ice", "storm", "myth", "life", "death", "balance")
+
+
+def make_board_sampler(school, hp_range, max_mobs=3, dmg=60, schools=None):
     """A fresh board per episode, so one table covers many fights.
+
+    `school` is the fallback for a board whose real school is unknown;
+    `schools` is the pool to draw from when it is. Passing the *wizard's*
+    school here is the single worst thing a caller can do -- `Boss` gives
+    every mob `resist_own = 0.40`, so a same-school board resists 40% of
+    every hit in the deck, and the GUI did exactly that for every mob it
+    ever trained against.
 
     Training against a single fixed board produces a table for that board
     and nothing else, because `Featurizer.key` is built from absolute
@@ -320,11 +332,13 @@ def make_board_sampler(school, hp_range, max_mobs=3, dmg=60):
     lo, hi = int(min(hp_range)), int(max(hp_range))
     lo = max(1, lo)
     hi = max(lo, hi)
+    pool = tuple(schools) if schools else (school,)
 
     def sample(rng):
         n = rng.randint(1, max(1, max_mobs))
         hps = [rng.randint(lo, hi) for _ in range(n)]
-        board = [Boss(name=f"mob {i}", hp=hp, school=school, dmg=dmg)
+        board = [Boss(name=f"mob {i}", hp=hp,
+                      school=pool[rng.randrange(len(pool))], dmg=dmg)
                  for i, hp in enumerate(hps)]
         return board[0], board[1:]
 
