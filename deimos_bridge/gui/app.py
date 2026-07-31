@@ -283,9 +283,57 @@ class TrainWorker(QThread):
         return seen or list(MOB_SCHOOLS)
 
     def board_schools(self):
-        """Schools for the fixed evaluation board, one per mob."""
+        """Schools for the fixed evaluation board, one per mob.
+
+        The wizard's own school is excluded when the real one is not
+        known. `Boss.resist_own` is 0.40, so a same-school mob is the
+        worst matchup in the game, and putting one on a *guessed* board
+        makes the guess harder than any fight it stands in for. Cycling
+        the full seven-school pool did exactly that: an ice wizard's
+        two-mob eval board came out "fire + ice".
+        """
         pool = self.school_pool()
+        if len(pool) > 1:
+            pool = [s for s in pool if s != self.school] or pool
         return [pool[i % len(pool)] for i in range(self.n_enemies)]
+
+    def damage_ceiling(self):
+        """The most damage this decklist could ever deliver, optimistically.
+
+        An upper bound, computed generously on purpose: every damage card
+        lands, gear applies, and every buff in the deck is spent on the
+        biggest hits available. Nothing in a real fight beats it -- draw
+        order, accuracy and the enemy all take away from it.
+
+        It exists because a board can be unwinnable for a reason none of
+        the knobs in this window addresses. A 9-card deck of 3 Frost
+        Beetles, 3 Ice Traps and 3 Snow Serpents tops out near 1,080
+        damage; a board of 780 + 624 has 1,404 health. No mob HP, mob
+        count, enemy school or incoming-damage setting changes that, and
+        the run that prompted this said "lower the mob HP or the mob
+        count, raise your health, or check the enemy school" -- four
+        suggestions, none of them the answer. Adding the three Evil
+        Snowmen the deck had lost takes the same board from 0% to 98%.
+        """
+        gear = 1.0 + (self.player_stats.get("damage") or {}).get(
+            self.school, 0.0)
+        hits, buffs = [], []
+        for name in self.deck:
+            card = self.cards.get(name)
+            if card is None:
+                continue
+            if card.kind in ("damage", "drain") and card.damage:
+                hits.append(card.damage * gear)
+            elif card.kind in ("blade", "trap", "prism") and card.percent > 0:
+                buffs.append(card.percent)
+        hits.sort(reverse=True)
+        buffs.sort(reverse=True)
+        total = sum(hits)
+        # Each buff spent on the biggest remaining hit. One per hit --
+        # the engine allows only one of a stacking identity per strike.
+        for i, pct in enumerate(buffs[:len(hits)]):
+            total += hits[i] * pct
+        return total
 
     def board_hps(self):
         """The fixed board, for `generalize=False` and for evaluation.
@@ -346,15 +394,41 @@ class TrainWorker(QThread):
         if kill > 0.0:
             return True, ""
         mobs = " + ".join(f"{b.hp:,} HP {b.school}" for b in [board] + extra)
+        health = sum(b.hp for b in [board] + extra)
+        head = (f"this board cannot be won at these settings, so training "
+                f"it would draw a flat 0% however long it ran.\n\n"
+                f"Board: {mobs}, each hitting for {board.dmg}/round, "
+                f"against {self.player_hp:,} HP.\n\n")
+
+        # Name the cause rather than listing the knobs. When the deck
+        # simply cannot deliver the board's health, none of the knobs is
+        # the answer and suggesting them sends you round in circles.
+        ceiling = self.damage_ceiling()
+        if ceiling < health:
+            missing = [n for n in ("Evil Snowman", "Snow Serpent",
+                                   "Frost Beetle")
+                       if n in self.cards and n not in self.deck]
+            hint = (f" You have no {missing[0]} in the deck."
+                    if missing else "")
+            return False, (
+                head +
+                f"Your deck is the reason, not the board. Every damage "
+                f"card in it, landing, with your gear, and with every "
+                f"buff spent on the biggest hits, comes to about "
+                f"{ceiling:,.0f} damage — and this board has {health:,} "
+                f"health. No play order wins that, and no mob HP, mob "
+                f"count or enemy school setting changes it.{hint}\n\n"
+                f"Add damage cards, or train against a smaller board.")
+
         return False, (
-            f"this board cannot be won at these settings, so training it "
-            f"would draw a flat 0% however long it ran.\n\n"
-            f"Board: {mobs}, each hitting for {board.dmg}/round, against "
-            f"{self.player_hp:,} HP.\n\n"
-            f"A scripted policy wins 0 of {n} fights on it. Lower the mob "
-            f"HP or the mob count, raise your health, or check that the "
-            f"enemy school is right — a mob of your own school resists "
-            f"40% of everything you cast.")
+            head +
+            f"A scripted policy wins 0 of {n} fights on it, and your deck "
+            f"could deliver about {ceiling:,.0f} damage against its "
+            f"{health:,} health — so this is a race it loses on time, not "
+            f"on damage. Lower the mob HP or the mob count, raise your "
+            f"health, or check the incoming damage: at {board.dmg}/round "
+            f"each you last {self.player_hp / max(1, board.dmg * (1 + len(extra))):.0f} "
+            f"rounds.")
 
     def run(self):
         try:

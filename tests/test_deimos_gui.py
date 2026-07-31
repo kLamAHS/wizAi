@@ -4090,7 +4090,10 @@ def test_training_refuses_a_board_nothing_can_win(qapp):
     icex = [Boss(name="m", hp=552, school="ice", dmg=71)]
     ok, note = w.preflight(ice, icex, n=80)
     assert ok is False
-    assert "cannot be won" in note and "resists" in note
+    assert "cannot be won" in note
+    # It names a cause rather than listing knobs. This deck HAS the
+    # damage for the board, so the diagnosis is the race, not the deck.
+    assert "loses on time" in note
 
     death = Boss(name="d", hp=690, school="death", dmg=71)
     deathx = [Boss(name="m", hp=552, school="death", dmg=71)]
@@ -4587,3 +4590,79 @@ def test_the_live_fight_count_is_not_labelled_like_an_episode_count(qapp):
     win = MainWindow(Telemetry())
     assert "training" in win.fights.toolTip().lower()
     assert "episodes" in win.fights.toolTip()
+
+
+# ---------------------------- the refusal has to name the actual cause
+def test_the_eval_board_never_wears_the_wizards_own_school(qapp):
+    """`Boss.resist_own` is 0.40, so a same-school mob is the worst
+    matchup in the game — putting one on a *guessed* board makes the
+    guess harder than any fight it stands in for. Cycling the seven
+    schools gave an ice wizard a "fire + ice" eval board."""
+    from deimos_bridge.gui.app import TrainWorker
+
+    for school in ("ice", "fire", "death"):
+        w = TrainWorker({}, [], school, 0, boss_hp=780, n_enemies=4)
+        assert school not in w.board_schools(), (school, w.board_schools())
+
+    # An observed board is respected even when it IS the wizard's school
+    # — that is a real fight, not a guess.
+    w = TrainWorker({}, [], "ice", 0, boss_hp=780, n_enemies=2,
+                    mob_schools=["ice", "ice"])
+    assert w.board_schools() == ["ice", "ice"]
+
+
+def test_a_deck_that_cannot_deliver_the_health_is_told_so(qapp):
+    """The run that prompted this suggested lowering mob HP, lowering the
+    mob count, raising health, and checking the enemy school. None of
+    them was the answer: the deck had lost its Evil Snowmen and could not
+    deliver 1,404 health however it was played."""
+    from data_full import load_spells_full
+    from deimos_bridge.gui.app import TrainWorker
+    from w101_sim import Boss
+
+    cards = load_spells_full()
+    nine = ["Frost Beetle"] * 3 + ["Ice Trap"] * 3 + ["Snow Serpent"] * 3
+    gear = {"damage": {"ice": 0.09}}
+
+    w = TrainWorker(cards, nine, "ice", 0, player_hp=1022, boss_hp=780,
+                    n_enemies=2, player_stats=gear)
+    # Optimistic upper bound: every card lands, every buff on the biggest
+    # hits. Nothing in a real fight beats it.
+    assert 1000 < w.damage_ceiling() < 1200
+
+    board = Boss(name="b", hp=780, school="fire", dmg=85)
+    extra = [Boss(name="m", hp=624, school="storm", dmg=85)]
+    ok, note = w.preflight(board, extra, n=60)
+    assert ok is False
+    assert "Your deck is the reason" in note
+    assert "1,404 health" in note
+    assert "no Evil Snowman" in note
+    # ...and it does not send the operator round the knobs that cannot help
+    assert "check that the enemy school" not in note
+
+    # The same board with the Snowmen back is winnable, so no refusal.
+    w.deck = nine + ["Evil Snowman"] * 3
+    assert w.damage_ceiling() > 2000
+    assert w.preflight(board, extra, n=60)[0] is True
+
+
+def test_a_board_lost_on_time_is_diagnosed_differently_from_one_lost_on_damage(qapp):
+    """A deck with the damage but not the turns is a different problem
+    with a different fix, and must not be told to add damage cards."""
+    from data_full import load_spells_full
+    from deimos_bridge.gui.app import TrainWorker
+    from w101_sim import Boss
+
+    cards = load_spells_full()
+    deck = (["Frost Beetle"] * 3 + ["Ice Trap"] * 3 + ["Snow Serpent"] * 3
+            + ["Evil Snowman"] * 3)
+    w = TrainWorker(cards, deck, "ice", 0, player_hp=400, boss_hp=900,
+                    n_enemies=2, player_stats={"damage": {"ice": 0.09}})
+
+    board = Boss(name="b", hp=900, school="fire", dmg=200)
+    extra = [Boss(name="m", hp=720, school="storm", dmg=200)]
+    ok, note = w.preflight(board, extra, n=60)
+    assert ok is False
+    assert "loses on time, not" in note
+    assert "Your deck is the reason" not in note
+    assert "rounds" in note
