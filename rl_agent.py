@@ -23,6 +23,14 @@ FAIL_PENALTY = 25.0
 MAX_TURNS = 40
 PASS = "__pass__"
 
+#: Enemy health enters the state key as `hp // HP_BUCKET`, so this is the
+#: finest distinction the agent can make about how much health something
+#: has. It is exported because callers that reason about "the range this
+#: table was trained over" have to reason in buckets: a band of 40-365
+#: and a live mob of 480 are the SAME bucket, and calling that mob
+#: out-of-band describes a distinction the model does not make.
+HP_BUCKET = 250
+
 
 # ---------------------------------------------------------------- state feats
 
@@ -44,7 +52,7 @@ class Featurizer:
         the scarcity signal the DP abstraction lacks. Treasure cards in
         hand enter by name (the sideboard is small and WHICH TC is up
         decides the turn)."""
-        hb = min(int(s.boss_hp // 250), 24)
+        hb = min(int(s.boss_hp // HP_BUCKET), 24)
         p = min(s.norm_pips + 2 * s.pow_pips +
                 2 * getattr(s, 'school_pips', 0), 14)
         bmask = sum(1 << i for i, n in enumerate(self.blades) if n in s.blades)

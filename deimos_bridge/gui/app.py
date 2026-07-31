@@ -210,7 +210,16 @@ class TrainWorker(QThread):
                     lo = mid
                 else:
                     hi = mid
-            bands[count] = (floor, lo)
+            # Up to the top of the bucket the frontier lands in. The
+            # key cannot tell 365 from 480 -- both are `hp // 250 == 1`
+            # -- so stopping the band at 365 trains part of a bucket and
+            # then reports a 480 mob as outside it, which is a
+            # distinction the model does not make. Costs at most one
+            # bucket of ground the deck clears less often; buys a band
+            # whose edges mean the same thing to the trainer and to the
+            # state key.
+            from rl_agent import HP_BUCKET
+            bands[count] = (floor, (lo // HP_BUCKET + 1) * HP_BUCKET)
         return bands
 
     def compare(self, agent, bands, dmg, schools, n=300):

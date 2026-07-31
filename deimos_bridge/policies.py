@@ -319,9 +319,22 @@ class TrainedPolicy:
         per_count = (band.get("bands") or {}).get(len(alive))
         lo, hi = per_count or (band.get("hp") or (None, None))
         if lo is not None and alive:
+            # Buckets, not raw health. `Featurizer.key` stores
+            # `hp // HP_BUCKET`, so a 480 HP mob and a 365 HP band edge
+            # are the same symbol and the band cannot be what the table
+            # failed to recognise. Comparing the raw numbers blamed the
+            # band for every miss on a board whose biggest mob happened
+            # to sit past the edge, including the ones it explains
+            # nothing about.
+            from rl_agent import HP_BUCKET
+
+            def bucket(hp):
+                return min(int(hp // HP_BUCKET), 24)
+
             biggest = max(e.max_hp for e in alive)
-            if not (lo <= biggest <= hi):
-                side = "above" if biggest > hi else "below"
+            b, blo, bhi = bucket(biggest), bucket(lo), bucket(hi)
+            if not (blo <= b <= bhi):
+                side = "above" if b > bhi else "below"
                 return (f"a {biggest:,.0f} HP mob is {side} the "
                         f"{lo:,.0f}–{hi:,.0f} band this table was trained "
                         f"on")

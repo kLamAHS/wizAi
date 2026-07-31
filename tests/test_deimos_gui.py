@@ -4666,3 +4666,52 @@ def test_a_board_lost_on_time_is_diagnosed_differently_from_one_lost_on_damage(q
     assert "loses on time, not" in note
     assert "Your deck is the reason" not in note
     assert "rounds" in note
+
+
+# --------------------------- the band has to mean what the key means
+def test_a_miss_blames_the_band_only_when_the_bucket_changes():
+    """`Featurizer.key` stores `hp // 250`, so a 480 HP mob and a 365 HP
+    band edge are the SAME symbol — the band cannot be what the table
+    failed to recognise. Comparing raw health blamed it anyway, on every
+    board whose biggest mob happened to sit past the edge."""
+    from deimos_bridge.policies import trained_policy
+    from rl_agent import HP_BUCKET, QAgent
+    from w101_sim import Actor, State
+
+    agent = QAgent({}, [], "ice")
+    agent.trained_on = {"hp": (40, 365), "mobs": 2, "schools": ["balance"],
+                        "bands": {1: (40, 1900), 2: (40, 365)}}
+    tp = trained_policy(agent)
+
+    def board(hps):
+        me = Actor(name="W", school="ice", hp=1022, max_hp=1022, team=0)
+        foes = [Actor(name=f"m{i}", school="balance", hp=h, max_hp=h, team=1)
+                for i, h in enumerate(hps)]
+        return State(me, foes)
+
+    assert 480 // HP_BUCKET == 365 // HP_BUCKET       # the premise
+    assert tp.why_missed(board([480, 235])) == ""     # same bucket, no blame
+    assert tp.why_missed(board([365, 235])) == ""
+    # A genuinely different bucket still gets named.
+    assert "above" in tp.why_missed(board([900, 235]))
+    assert "900" in tp.why_missed(board([900, 235]))
+
+
+def test_the_envelope_stops_on_a_bucket_edge(qapp):
+    """Stopping at an arbitrary frontier trains part of a bucket and then
+    reports the rest of that bucket as out of band, which is a
+    distinction the model does not make."""
+    from data_full import load_spells_full
+    from deimos_bridge.gui.app import TrainWorker
+    from rl_agent import HP_BUCKET
+
+    cards = load_spells_full()
+    deck = (["Evil Snowman"] + ["Frost Beetle"] * 4 + ["Ice Trap"] * 4
+            + ["Snow Serpent"] * 4)
+    w = TrainWorker(cards, deck, "ice", 0, player_hp=1022, boss_hp=780,
+                    n_enemies=2, mob_schools=["balance"], mob_damage=147,
+                    player_stats={"damage": {"ice": 0.09}})
+    bands = w.envelope(n=60)
+    assert bands, "the deck should clear something"
+    for count, (_lo, hi) in bands.items():
+        assert hi % HP_BUCKET == 0, (count, hi)
