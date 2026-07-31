@@ -213,6 +213,52 @@ class TrainWorker(QThread):
             bands[count] = (floor, lo)
         return bands
 
+    def compare(self, agent, bands, dmg, schools, n=300):
+        """(trained, heuristic) kill rate, where the board can tell them apart.
+
+        Scoring at one point is why "98% against 100%" read as a tie. On
+        an easy board every policy is at the ceiling and the comparison
+        ranks nothing; the same two policies on a board near the edge of
+        what the deck can clear are 30% against 76%. Measured across one
+        deck: at 235 HP x2 every policy scored 96-100%, at 480 HP x2 the
+        table scored 30% and the heuristic 76%, at 620 HP x2 it was 1%
+        against 61%.
+
+        So this walks the envelope and reports the point of **largest
+        disagreement** rather than an average or an endpoint. An average
+        would dilute the informative boards with the saturated ones,
+        which is the same mistake in a different shape.
+        """
+        from w101_sim import Boss, Sim, evaluate
+        from ..policies import school_aware_blade_stack, trained_policy
+
+        counts = sorted(bands) or [self.n_enemies]
+        probes = []
+        for count in counts:
+            lo, hi = bands.get(count, self.hp_range())
+            for frac in (0.35, 0.6, 0.85):
+                probes.append((int(lo + (hi - lo) * frac), count))
+        if not probes:
+            probes = [(self.boss_hp, self.n_enemies)]
+
+        worst = (0.0, 0.0, -1.0)          # trained, rival, gap
+        for hp, count in probes:
+            board = Boss(name="probe", hp=hp, school=schools[0], dmg=dmg)
+            extra = [Boss(name=f"probe {i}", hp=hp,
+                          school=schools[i % len(schools)], dmg=dmg)
+                     for i in range(1, count)]
+            sim = Sim(self.cards, self.deck, self.school, board,
+                      player_hp=self.player_hp,
+                      player_stats=self.player_stats, enemies=extra)
+            # The wrapped policy, because that is what plays live -- the
+            # raw table passes on an unseen state, which is not a move
+            # anyone makes on purpose.
+            t, _ = evaluate(sim, trained_policy(agent), n=n)
+            r, _ = evaluate(sim, school_aware_blade_stack(3), n=n)
+            if abs(t - r) > worst[2]:
+                worst = (t, r, abs(t - r))
+        return worst[0], worst[1]
+
     def describe_envelope(self, bands):
         if not bands:
             return ("this deck cannot clear a single mob at these settings "
@@ -385,9 +431,8 @@ class TrainWorker(QThread):
                                 # discovered: a miss can then say which
                                 # count's band it fell outside
                                 "bands": dict(bands)}
-            from ..policies import school_aware_blade_stack
-            rival, _rttk = evaluate(sim, school_aware_blade_stack(3), n=400)
-            self.verdict.emit(kill, rival)
+            tk, rk = self.compare(agent, bands, dmg, schools)
+            self.verdict.emit(tk, rk)
             self.progress.emit(self.episodes, self.episodes, kill * 100, ttk)
             self.finished_ok.emit(agent)
         except Exception as exc:

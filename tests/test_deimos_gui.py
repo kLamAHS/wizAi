@@ -4422,3 +4422,55 @@ def test_heatmap_rows_name_their_fight_when_fights_are_stacked():
     # One fight keeps the short label -- the fight number adds nothing.
     tel.rounds = [rec(1, 1), rec(1, 2)]
     assert [l for l, _ in tel.decision_matrix()[0]] == ["r1", "r2"]
+
+
+def test_the_verdict_probes_where_the_board_can_discriminate(qapp):
+    """Scoring at one point is why "98% against 100%" read as a tie: on
+    an easy board every policy is at the ceiling and the comparison ranks
+    nothing. The same two policies near the edge of the envelope are 30%
+    against 76%."""
+    from deimos_bridge.gui.app import TrainWorker
+
+    probed = []
+
+    class _Sim:
+        def __init__(self, *a, **kw):
+            probed.append((kw["enemies"], a))
+
+    w = TrainWorker({}, [], "ice", 500, player_hp=1022, boss_hp=480,
+                    n_enemies=2)
+
+    seen = []
+
+    def fake_evaluate(sim, policy, n=0):
+        # trained is flat 50%; the heuristic is good on easy boards and
+        # bad on hard ones, so the largest gap is at the hard end.
+        hp = seen[-1]
+        rival = 1.0 if hp < 300 else 0.2
+        return (rival if fake_evaluate.turn % 2 else 0.5), 5.0
+
+    fake_evaluate.turn = 0
+
+    import w101_sim
+    real_sim, real_eval = w101_sim.Sim, w101_sim.evaluate
+
+    class _S:
+        def __init__(self, cards, deck, school, boss, **kw):
+            seen.append(boss.hp)
+
+    def _ev(sim, policy, n=0):
+        fake_evaluate.turn += 1
+        return fake_evaluate(sim, policy, n)
+
+    w101_sim.Sim, w101_sim.evaluate = _S, _ev
+    try:
+        t, r = w.compare(object(), {1: (100, 1000), 2: (100, 500)}, 85,
+                         ["death"], n=10)
+    finally:
+        w101_sim.Sim, w101_sim.evaluate = real_sim, real_eval
+
+    # It walked both counts at three depths each, not one board.
+    assert len(seen) >= 6, seen
+    assert min(seen) < 400 < max(seen), seen
+    # And reported the pair that disagreed most, not the last or the mean.
+    assert abs(t - r) >= 0.29, (t, r)
