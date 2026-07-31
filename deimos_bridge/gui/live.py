@@ -497,6 +497,8 @@ class LiveWorker(QThread):
         self.player_stats = stats
         if self._backend is not None:
             self._backend.player_stats = stats
+            if stats.get("power_pip_chance"):
+                self._backend.power_pip_chance = stats["power_pip_chance"]
         self.gear_read.emit(dict(stats))
         dmg = (stats.get("damage") or {}).get(self.school, 0.0)
         line = (f"read your gear: {dmg * 100:.0f}% {self.school} damage, "

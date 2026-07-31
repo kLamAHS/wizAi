@@ -121,6 +121,10 @@ class WizAiBackend:
         self.on_decision = on_decision
         self.on_lost_round = on_lost_round
         self.on_failed_cast = None
+        #: the wizard's power-pip odds, off the client. None means never
+        #: read, and then the actor keeps whatever default it has rather
+        #: than being given a made-up number.
+        self.power_pip_chance = None
         self.rules = rules
         self.resolver = NameResolver(cards, catalog)
         self.history = []          # PolicyDecision, in order
@@ -192,6 +196,7 @@ class WizAiBackend:
                 self._seen.append(name)
         read.state.player.deck = self._deck_remaining(read.hand_cards)
         self._measured_incoming = self._estimate_incoming(read)
+        self._apply_player_stats(read)
         self.last_read = read
 
         sim = self._sim_for(read)
@@ -335,6 +340,46 @@ class WizAiBackend:
         for enemy in read.state.enemies:
             enemy.flat_hit = per_enemy
         return per_enemy
+
+    def _apply_player_stats(self, read):
+        """Put the wizard's real gear and power pips on the read player.
+
+        `read_state._mk_actor` builds a bare `Actor`, and every stat the
+        simulator prices a hit with lives on the actor: `damage_bonus`,
+        `accuracy_bonus`, `power_pip_chance`. `Sim._build_player` is the
+        only thing that applies `player_stats`, and the live path never
+        calls it -- so `_sim_for` carefully carried the gear to a `Sim`
+        that then handed the policy a naked wizard.
+
+        It decides real moves. On a 258 HP mob with a 40% Ice Trap up,
+        Snow Serpent's midpoint is 175: 175 x 1.4 = 245, which does not
+        kill, so the lookahead scores the trap line at three turns and
+        weighs a different opening. With 9% ice damage the same line is
+        175 x 1.4 x 1.09 = 267, which does, and it is two turns. The
+        gear was the difference between "this kills it" and "this does
+        not", and the rollout never saw the gear.
+
+        Power pips matter for the same reason in the other direction:
+        at `power_pip_chance = 0` a two-pip Snow Serpent is a turn-two
+        card and a three-pip Snowman a turn-three card, so every line
+        that opens with a buff is scored as though the payoff were a
+        turn later than it is.
+        """
+        player = read.state.player
+        stats = self.player_stats or {}
+        damage = stats.get("damage") or {}
+        if damage:
+            player.damage_bonus = dict(damage)
+        if stats.get("accuracy"):
+            player.accuracy_bonus = stats["accuracy"]
+        if stats.get("pierce"):
+            player.pierce = stats["pierce"]
+        if stats.get("crit"):
+            player.crit_chance = stats["crit"]
+        if stats.get("resist"):
+            player.resist = dict(stats["resist"])
+        if self.power_pip_chance is not None:
+            player.power_pip_chance = self.power_pip_chance
 
     def _record(self, decision, read):
         self.history.append(decision)
