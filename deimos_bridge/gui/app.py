@@ -468,6 +468,8 @@ class MainWindow(QMainWindow):
         #: a different fight from the played one.
         self.observed_schools = []
         self.observed_incoming = 0.0
+        #: whether the incoming number came off a real fight
+        self.mob_damage_measured = False
         #: the wizard's gear, filled in from the client on connect.
         #: Training uses it, which is the whole point: a Q table learned
         #: for a naked wizard is solving a fight nobody will play.
@@ -548,11 +550,17 @@ class MainWindow(QMainWindow):
         self.policy.currentTextChanged.connect(self.on_policy_changed)
         row.addWidget(self.policy)
 
-        row.addWidget(QLabel("fights"))
+        # "live fights", not "fights": it sits beside the training
+        # controls and reads as an episode count otherwise, which is the
+        # one thing it is not.
+        row.addWidget(QLabel("live fights"))
         self.fights = QSpinBox()
         self.fights.setRange(0, 999)
         self.fights.setValue(0)
-        self.fights.setToolTip("0 = keep playing until you press Stop")
+        self.fights.setToolTip(
+            "How many real duels to play after pressing Play live. "
+            "0 = keep playing until you press Stop. Nothing to do with "
+            "training — that is 'episodes'.")
         row.addWidget(self.fights)
 
         self.train_btn = QPushButton("Train")
@@ -623,15 +631,21 @@ class MainWindow(QMainWindow):
             "passes every turn. Filled in from the game on connect.")
         train_row.addWidget(self.player_hp)
 
-        train_row.addWidget(QLabel("mob HP"))
+        train_row.addWidget(QLabel("biggest mob HP"))
         self.boss_hp = QSpinBox()
         self.boss_hp.setRange(100, 60000)
         self.boss_hp.setSingleStep(250)
         self.boss_hp.setValue(1200)
         self.boss_hp.setToolTip(
-            "Typical mob health. With 'any board' on this only centres "
-            "the range trained over (roughly 0.4x to 1.8x of it), so it "
-            "does not have to be exact. Filled in from the last fight.")
+            "The biggest mob on the board. The rest of the training "
+            "board is filled in around it — after a real fight from the "
+            "healths actually seen, so a 690 boss beside a 255 minion is "
+            "trained as exactly that, and before one at 100%/80%/60% of "
+            "this number.\n\n"
+            "With 'any board' on, the range trained over is discovered "
+            "rather than derived from this: the run measures what your "
+            "deck can actually clear at each mob count and trains that "
+            "span. The board line below says what it settled on.")
         train_row.addWidget(self.boss_hp)
 
         train_row.addWidget(QLabel("up to mobs"))
@@ -839,6 +853,35 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _board_line(self):
+        """The board training will actually build, spelled out.
+
+        One spinbox cannot say "a 690 HP boss beside a 255 HP minion",
+        and the box does not have to: after a real fight the healths are
+        taken from what was seen, and `board_hps` uses them whenever the
+        count matches. What was missing was any way to *tell* -- the box
+        showed one number and the board was derived silently, so a
+        mismatched board looked like a typo in a field that was not
+        being used.
+        """
+        worker = TrainWorker(
+            {}, [], self.school.currentText(), 0,
+            player_hp=self.player_hp.value(), boss_hp=self.boss_hp.value(),
+            n_enemies=self.n_enemies.value(), mob_hps=self.observed_hps,
+            mob_schools=self.observed_schools,
+            mob_damage=int(self.observed_incoming))
+        hps = worker.board_hps()
+        schools = worker.board_schools()
+        board = " + ".join(f"{hp:,} {sc}" for hp, sc in zip(hps, schools))
+        source = ("from your last fight" if
+                  len(self.observed_hps) == self.n_enemies.value()
+                  else "spread around the biggest")
+        dmg = worker.enemy_damage()
+        how = ("measured live" if self.mob_damage_measured
+               else "estimated — no fight measured yet")
+        return (f"training board: {board}, {dmg}/round each "
+                f"({how}) — {source}")
+
     def _gear_line(self):
         """What the simulator thinks the wizard is wearing.
 
@@ -948,7 +991,8 @@ class MainWindow(QMainWindow):
         total = sum(mix.values())
         parts = [f"{name} ×{n}" for name, n in mix.items()]
         text = (f"{total} round(s): " + "  ·  ".join(parts)
-                + "\n" + self._gear_line())
+                + "\n" + self._gear_line()
+                + "\n" + self._board_line())
 
         colour = PALETTE["muted"]
         # Off the round records, which is where the Learning tab reads
@@ -1331,6 +1375,7 @@ class MainWindow(QMainWindow):
         self.observed_hps = self.tel.observed_mob_hps()
         self.observed_schools = self.tel.observed_mob_schools()
         self.observed_incoming = self.tel.observed_incoming()
+        self.mob_damage_measured = self.observed_incoming > 0
         self.n_enemies.setValue(min(max(int(n), 1), self.n_enemies.maximum()))
         self.boss_hp.setValue(min(max(int(hp), self.boss_hp.minimum()),
                                   self.boss_hp.maximum()))

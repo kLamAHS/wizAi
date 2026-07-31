@@ -511,6 +511,11 @@ async def read_player_stats(client, school: str) -> dict:
                        await one("dmg_reduce_percent_all"))
     crit = await one("critical_hit_percent_all")
     block = await one("block_percent_all")
+    # Power-pip odds. Not gear in the damage sense, but it decides WHEN
+    # a card becomes affordable, and the live path was handing the
+    # policy a wizard with none -- so a two-pip Snow Serpent was scored
+    # as a turn-two card and a three-pip Snowman as turn three.
+    pip = await one("power_pip_base") + await one("power_pip_bonus_percent_all")
 
     out = {}
     if dmg:
@@ -528,6 +533,8 @@ async def read_player_stats(client, school: str) -> dict:
         out["crit"] = crit
     if 0.0 < block <= 1.0:
         out["block"] = block
+    if 0.0 < pip <= 1.0:
+        out["power_pip_chance"] = pip
     if unread and out:
         # Only when something else read: an entirely failed read already
         # returns {} and is reported by the caller as such. This is the

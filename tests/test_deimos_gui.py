@@ -4474,3 +4474,116 @@ def test_the_verdict_probes_where_the_board_can_discriminate(qapp):
     assert min(seen) < 400 < max(seen), seen
     # And reported the pair that disagreed most, not the last or the mean.
     assert abs(t - r) >= 0.29, (t, r)
+
+
+# ------------------------------ the rollout has to play the wizard you have
+def test_the_live_rollout_gets_the_wizard_s_gear_and_power_pips():
+    """`_mk_actor` builds a bare Actor and `Sim._build_player` — the only
+    thing that applies player_stats — is never called on the live path,
+    so `_sim_for` carried the gear to a Sim that handed the policy a
+    naked wizard."""
+    from deimos_bridge.live_backend import WizAiBackend
+    from w101_sim import Actor, State
+
+    be = WizAiBackend(policy=lambda sim, s: None, cards={}, school="ice",
+                      player_stats={"damage": {"ice": 0.09},
+                                    "accuracy": 0.05, "pierce": 0.04})
+    be.power_pip_chance = 0.85
+
+    class _Read:
+        def __init__(self):
+            me = Actor(name="W", school="ice", hp=1022, max_hp=1022, team=0)
+            self.state = State(me, [Actor(name="m", school="death", hp=258,
+                                          max_hp=258, team=1)])
+
+    read = _Read()
+    assert read.state.player.damage_bonus == {}      # as the live path builds it
+    assert read.state.player.power_pip_chance == 0.0
+
+    be._apply_player_stats(read)
+    p = read.state.player
+    assert p.damage_bonus == {"ice": 0.09}
+    assert p.accuracy_bonus == 0.05
+    assert p.pierce == 0.04
+    assert p.power_pip_chance == 0.85
+
+
+def test_gear_flips_a_two_turn_kill_the_lookahead_was_calling_three():
+    """The operator's arithmetic, and the reason the sim disagreed. Snow
+    Serpent's midpoint is 175 under a 40% Ice Trap: 175 x 1.4 = 245 does
+    not kill a 258 HP mob, so the line scores three turns. With 9% ice
+    damage the same line is 267 and kills, which is two."""
+    from data_full import load_spells_full
+    from deimos_bridge.live_backend import WizAiBackend
+    from deimos_bridge.policies import greedy_ttk
+    from w101_sim import Actor, Boss, Sim, State
+
+    cards = load_spells_full()
+    deck = (["Evil Snowman"] * 3 + ["Frost Beetle"] * 3 + ["Ice Trap"] * 3
+            + ["Snow Serpent"] * 3)
+
+    def best_turns(geared):
+        me = Actor(name="W", school="ice", hp=1022, max_hp=1022, team=0,
+                   norm_pips=1)
+        foe = Actor(name="Mob", school="death", hp=258, max_hp=258, team=1)
+        foe.flat_hit = 85.0
+        me.hand = [cards[n] for n in ("Frost Beetle", "Ice Trap",
+                                      "Snow Serpent", "Evil Snowman",
+                                      "Frost Beetle")]
+        me.deck = [cards[n] for n in deck]
+
+        class _Read:
+            pass
+
+        read = _Read()
+        read.state = State(me, [foe])
+        if geared:
+            be = WizAiBackend(policy=None, cards=cards, school="ice",
+                              player_stats={"damage": {"ice": 0.09}})
+            be.power_pip_chance = 0.85
+            be._apply_player_stats(read)
+
+        sim = Sim(cards, deck, "ice",
+                  Boss(name="Mob", hp=258, school="death", dmg=0),
+                  player_hp=1022, player_stats={"damage": {"ice": 0.09}})
+        pol = greedy_ttk()
+        pol(sim, read.state)
+        return min(c.turns for c in pol.last_candidates)
+
+    assert best_turns(geared=False) == 3
+    assert best_turns(geared=True) == 2
+
+
+def test_the_window_spells_out_the_board_it_will_train(qapp):
+    """One spinbox cannot say "a 690 HP boss beside a 255 HP minion".
+    It does not have to — after a fight the healths come from what was
+    seen — but nothing said so, so a derived board looked like a typo in
+    a field that was not being used."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.boss_hp.setValue(690)
+    win.n_enemies.setValue(2)
+    win.player_hp.setValue(1022)
+
+    before = win._board_line()
+    assert "690" in before and "552" in before        # 100% / 80%
+    assert "spread around the biggest" in before
+    assert "no fight measured yet" in before
+
+    win.observed_hps = [690, 255]
+    win.observed_schools = ["death", "death"]
+    win.observed_incoming = 87.0
+    win.mob_damage_measured = True
+    after = win._board_line()
+    assert "690 death + 255 death" in after           # the real board
+    assert "87/round" in after and "measured live" in after
+    assert "from your last fight" in after
+
+
+def test_the_live_fight_count_is_not_labelled_like_an_episode_count(qapp):
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    assert "training" in win.fights.toolTip().lower()
+    assert "episodes" in win.fights.toolTip()
