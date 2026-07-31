@@ -313,7 +313,11 @@ class TrainedPolicy:
             return (f"{len(alive)} mobs, trained for up to {mobs} — the "
                     f"state key changes shape above the trained count, so "
                     f"nothing matches at all")
-        lo, hi = (band.get("hp") or (None, None))
+        # Per-count first: the winnable span differs sharply by mob
+        # count, so "above the band" means a different number depending
+        # on how many are on the board.
+        per_count = (band.get("bands") or {}).get(len(alive))
+        lo, hi = per_count or (band.get("hp") or (None, None))
         if lo is not None and alive:
             biggest = max(e.max_hp for e in alive)
             if not (lo <= biggest <= hi):

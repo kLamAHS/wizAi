@@ -151,6 +151,76 @@ class TrainWorker(QThread):
             hi = max(hi, int(max(self.mob_hps) * 1.6))
         return max(1, lo), max(lo + 1, hi)
 
+    #: Below this kill rate a board has effectively no winning line, so
+    #: episodes spent there collect no reward and teach nothing. Not zero:
+    #: a board the deck clears one time in twenty is still a board, and
+    #: the edge of the envelope is exactly where the interesting states
+    #: are.
+    ENVELOPE_FLOOR = 0.15
+
+    def envelope(self, dmg=None, n=140, on_probe=None):
+        """{mob count: (lo, hi)} the deck can actually win.
+
+        The answer to "why do I have to train for a specific health".
+        You should not: the band was `mob HP` x0.4 to x1.8, so typing 235
+        bought 94-423 and a 480 HP mob fell off the end and keyed nothing.
+
+        The right band is not a wider guess either -- it is the range
+        this deck, at this health, can actually clear, and that is
+        measurable. It is also sharply different per mob count: measured
+        on one starter ice deck at 1,022 health, one mob is winnable to
+        1,400 HP, two to 700, three to 480. A single band across all
+        counts either spends most of a three-mob budget on boards with no
+        winning line -- the same zero-reward trap the hardcoded school
+        was -- or caps the one-mob range at a third of what the deck can
+        clear.
+
+        Found by bisection on a scripted policy rather than by training,
+        because it is a property of the deck and the wizard, not of the
+        table. Costs about a second per mob count.
+        """
+        from w101_sim import Boss, Sim, evaluate
+        from ..policies import school_aware_blade_stack
+
+        dmg = self.enemy_damage() if dmg is None else dmg
+        schools = self.school_pool()
+        policy = school_aware_blade_stack(3)
+
+        def wins(hp, count):
+            board = Boss(name="probe", hp=hp, school=schools[0], dmg=dmg)
+            extra = [Boss(name=f"probe {i}", hp=hp,
+                          school=schools[i % len(schools)], dmg=dmg)
+                     for i in range(1, count)]
+            sim = Sim(self.cards, self.deck, self.school, board,
+                      player_hp=self.player_hp,
+                      player_stats=self.player_stats, enemies=extra)
+            kill, _ = evaluate(sim, policy, n=n)
+            if on_probe:
+                on_probe(count, hp, kill)
+            return kill >= self.ENVELOPE_FLOOR
+
+        bands, floor = {}, 40
+        for count in range(1, self.n_enemies + 1):
+            if not wins(floor, count):
+                continue          # cannot clear even the smallest board
+            lo, hi = floor, 6000
+            while hi - lo > 60:
+                mid = (lo + hi) // 2
+                if wins(mid, count):
+                    lo = mid
+                else:
+                    hi = mid
+            bands[count] = (floor, lo)
+        return bands
+
+    def describe_envelope(self, bands):
+        if not bands:
+            return ("this deck cannot clear a single mob at these settings "
+                    "— nothing to train")
+        parts = [f"{n} mob{'s' if n > 1 else ''} to ~{hi:,} HP"
+                 for n, (_lo, hi) in sorted(bands.items())]
+        return "this deck clears " + ", ".join(parts)
+
     def school_pool(self):
         """The schools to draw training mobs from.
 
@@ -254,11 +324,16 @@ class TrainWorker(QThread):
             hps = self.board_hps()
             schools = self.board_schools()
             sampler = None
+            bands = {}
             if self.generalize:
                 from rl_agent import make_board_sampler
+                # Discovered, not typed. See `envelope`.
+                self.stage.emit("finding what this deck can clear")
+                bands = self.envelope(dmg)
+                self.stage.emit(self.describe_envelope(bands))
                 sampler = make_board_sampler(
                     schools[0], self.hp_range(), max_mobs=self.n_enemies,
-                    dmg=dmg, schools=self.school_pool())
+                    dmg=dmg, schools=self.school_pool(), bands=bands)
 
             board = Boss(name="training dummy", hp=hps[0],
                          school=schools[0], dmg=dmg)
@@ -305,7 +380,11 @@ class TrainWorker(QThread):
             lo, hi = self.hp_range()
             agent.trained_on = {"hp": (lo, hi), "mobs": self.n_enemies,
                                 "schools": list(self.school_pool()),
-                                "player_hp": self.player_hp}
+                                "player_hp": self.player_hp,
+                                # per-count, when the envelope was
+                                # discovered: a miss can then say which
+                                # count's band it fell outside
+                                "bands": dict(bands)}
             from ..policies import school_aware_blade_stack
             rival, _rttk = evaluate(sim, school_aware_blade_stack(3), n=400)
             self.verdict.emit(kill, rival)
