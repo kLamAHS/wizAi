@@ -5091,8 +5091,9 @@ def test_choose_search_sweeps_continuations_and_horizons():
             cards, deck, "ice", [(350, 2, "death")], n=8, dmg=55)
         assert name in P.CONTINUATIONS
         assert horizon in P.HORIZONS
-        # continuations x horizons, plus the driver probe's own entry
-        assert len(scores) == len(P.CONTINUATIONS) * len(P.HORIZONS) + 1
+        # continuations x horizons, plus one entry per search width
+        assert len(scores) == (len(P.CONTINUATIONS) * len(P.HORIZONS)
+                               + len(P.SEARCH_WIDTHS))
         assert P.search_horizon() == horizon      # installed, not reported
         assert P.continuation_name() == name
     finally:
@@ -5218,8 +5219,10 @@ def test_the_tuner_also_picks_the_driver():
     try:
         _n, _h, scores = P.choose_search(cards, deck, "ice",
                                          [(350, 2, "death")], n=9, dmg=55)
-        assert "search(k=6)" in scores
-        assert P.driver_name() in ("ttk", "search(k=6)")
+        assert all(f"search(k={k})" in scores for k in P.SEARCH_WIDTHS)
+        assert (P.driver_name() == "ttk"
+                or P.driver_name() in {f"search(k={k})"
+                                       for k in P.SEARCH_WIDTHS})
         assert callable(P.tuned_driver())
     finally:
         P.set_search_horizon(None)

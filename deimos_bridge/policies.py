@@ -26,6 +26,8 @@ default without invalidating any published table.
 """
 
 
+import re
+
 from dataclasses import dataclass
 
 
@@ -482,6 +484,12 @@ def continuation_name():
 #: patience that long setup lines (the buff-spam) are made of.
 HORIZONS = (6, 12)
 
+#: Determinization widths the driver probe sweeps. More sampled draw
+#: orders answer the hidden-hand question better and cost linearly;
+#: which width pays is deck-dependent like everything else here, and
+#: k=6 was the only one ever measured before this sweep existed.
+SEARCH_WIDTHS = (4, 6, 10)
+
 
 def choose_search(cards, deck, school, boards, n=60, on_probe=None,
                   dmg=0):
@@ -531,18 +539,20 @@ def choose_search(cards, deck, school, boards, n=60, on_probe=None,
     from w101_sim import Boss, Sim, evaluate
 
     ttk_score = scores[best]
-    total = 0.0
-    for hp, mobs, mob_school in boards:
-        boss = Boss(name="probe", hp=hp, school=mob_school, dmg=dmg)
-        extra = [Boss(name=f"probe {i}", hp=hp, school=mob_school, dmg=dmg)
-                 for i in range(1, mobs)]
-        sim = Sim(cards, deck, school, boss, enemies=extra)
-        total += evaluate(sim, make_search_policy(k=6),
-                          n=max(20, n // 3))[0]
-    scores["search(k=6)"] = total / max(1, len(boards))
+    for k in SEARCH_WIDTHS:
+        total = 0.0
+        for hp, mobs, mob_school in boards:
+            boss = Boss(name="probe", hp=hp, school=mob_school, dmg=dmg)
+            extra = [Boss(name=f"probe {i}", hp=hp, school=mob_school,
+                          dmg=dmg) for i in range(1, mobs)]
+            sim = Sim(cards, deck, school, boss, enemies=extra)
+            total += evaluate(sim, make_search_policy(k=k),
+                              n=max(20, n // 3))[0]
+        scores[f"search(k={k})"] = total / max(1, len(boards))
     global _DRIVER
-    _DRIVER = ("search(k=6)"
-               if scores["search(k=6)"] > ttk_score + 0.02 else "ttk")
+    top_k = max(SEARCH_WIDTHS, key=lambda k: scores[f"search(k={k})"])
+    _DRIVER = (f"search(k={top_k})"
+               if scores[f"search(k={top_k})"] > ttk_score + 0.02 else "ttk")
     return best_name, int(best_h), scores
 
 
@@ -554,9 +564,10 @@ _DRIVER = "ttk"
 
 def tuned_driver():
     """The measured-best driver for the tuned deck."""
-    if _DRIVER == "search(k=6)":
+    m = re.match(r"search\(k=(\d+)\)$", _DRIVER or "")
+    if m:
         from search_policy import make_search_policy
-        return make_search_policy(k=6)
+        return make_search_policy(k=int(m.group(1)))
     return greedy_ttk()
 
 
@@ -567,7 +578,8 @@ def driver_name():
 def set_driver(name):
     """Install the tuned driver by name; anything unknown means ttk."""
     global _DRIVER
-    _DRIVER = name if name == "search(k=6)" else "ttk"
+    _DRIVER = (name if re.match(r"search\(k=\d+\)$", str(name or ""))
+               else "ttk")
     return _DRIVER
 
 
