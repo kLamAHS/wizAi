@@ -45,7 +45,7 @@ import numpy as np
 
 #: bump when the feature vector changes; a weights file trained on a
 #: different layout must refuse to load rather than silently misread
-FEATURE_VERSION = 1
+FEATURE_VERSION = 2
 
 #: feature names, in vector order -- the export guard checks these
 FEATURES = (
@@ -54,13 +54,22 @@ FEATURES = (
     "p_blade_mult", "p_hand_frac", "p_deck_frac", "p_incoming_frac",
     # board (4)
     "b_alive", "b_hp_vs_player", "b_focus_share", "b_dot_share",
+    # hand (6) -- v2. The v1 net summarised the hand as a COUNT, but
+    # the teacher's signature decisions (bank pips for the Snowman,
+    # do not lead with the big hit) hinge on hand composition: what is
+    # the biggest hit held, can it be paid for yet, how much of the
+    # hand is damage at all.
+    "h_best_hit", "h_best_afford", "h_holding_bigger",
+    "h_damage_cards", "h_charm_cards", "h_support_cards",
     # target (8)
     "t_hp_frac", "t_hp_share", "t_school_mult", "t_ward_mult",
     "t_threat_frac", "t_dot_frac", "t_is_focus", "t_alive",
-    # card (13)
+    # card (15) -- v2 adds the two relative facts: this card's damage
+    # against the biggest held, and whether it IS the best affordable
+    # hit right now.
     "c_damage", "c_drain", "c_blade", "c_trap", "c_shield", "c_heal",
     "c_debuff", "c_other", "c_pips", "c_dmg_vs_target", "c_dmg_vs_board",
-    "c_accuracy", "c_aoe",
+    "c_accuracy", "c_aoe", "c_vs_best_held", "c_is_best_afford",
     # action (1)
     "is_pass",
 )
@@ -104,8 +113,41 @@ def _clip(x, hi=4.0):
     return float(max(0.0, min(x, hi)))
 
 
+def _hand_scan(sim, s):
+    """(best hit held, best affordable hit, counts) off the hand.
+
+    Damage numbers are RAW card damage (x-pip cards priced at the
+    current effective pips); resist and charms are already features of
+    the target and player blocks, so pricing them in twice would let
+    one fact vote twice.
+    """
+    p = s.player
+    eff = p.norm_pips + 2 * p.pow_pips
+    foes = [i for i, e in enumerate(s.enemies) if e.alive]
+    t0 = foes[0] if foes else 0
+    best = afford = 0.0
+    n_dmg = n_charm = n_support = 0
+    for c in s.hand:
+        if c.kind in ("damage", "drain"):
+            n_dmg += 1
+            dmg = c.damage * max(eff, 1) if c.x_pips else c.damage
+            best = max(best, dmg)
+            try:
+                if sim.can_cast(s, c, t0):
+                    afford = max(afford, dmg)
+            except Exception:
+                pass
+        elif c.kind in ("blade", "trap"):
+            n_charm += 1
+        elif c.kind in ("shield", "heal"):
+            n_support += 1
+    return best, afford, n_dmg, n_charm, n_support
+
+
 def state_context(sim, s):
-    """The [player | board] block, shared by every action this turn."""
+    """The [player | board | hand] block, shared by every action this
+    turn. Returns (feature vector, hand-scan aux) -- the aux feeds the
+    per-card relative features without re-scanning the hand per row."""
     p = s.player
     school = sim.school
     alive = [e for e in s.enemies if e.alive]
@@ -113,7 +155,8 @@ def state_context(sim, s):
     incoming = sum(getattr(e, "flat_hit", 0.0) or 0.0 for e in alive)
     eff = p.norm_pips + 2 * p.pow_pips
     focus_hp = min((e.hp for e in alive), default=0.0)
-    return np.array([
+    best, afford, n_dmg, n_charm, n_support = _hand_scan(sim, s)
+    vec = np.array([
         _clip(p.hp / max(p.max_hp, 1.0), 1.0),
         _clip(p.norm_pips / 7.0, 1.0),
         _clip(p.pow_pips / 7.0, 1.0),
@@ -126,7 +169,14 @@ def state_context(sim, s):
         _clip(board_hp / max(p.hp, 1.0)) / 4.0,
         _clip(focus_hp / board_hp, 1.0),
         _clip(sum(_dot_total(e) for e in alive) / board_hp, 1.0),
+        _clip(best / max(focus_hp, 1.0)) / 4.0,
+        _clip(afford / max(focus_hp, 1.0)) / 4.0,
+        1.0 if best > afford else 0.0,     # holding a hit unpaid for
+        _clip(n_dmg / 8.0, 1.0),
+        _clip(n_charm / 8.0, 1.0),
+        _clip(n_support / 8.0, 1.0),
     ])
+    return vec, (best, afford)
 
 
 def target_block(sim, s, t):
@@ -154,8 +204,8 @@ def target_block(sim, s, t):
 _KINDS = ("damage", "drain", "blade", "trap", "shield", "heal")
 
 
-def card_block(sim, s, card, t):
-    """The 13 card features, priced against target `t`."""
+def card_block(sim, s, card, t, aux=(0.0, 0.0)):
+    """The 15 card features, priced against target `t`."""
     school = sim.school
     p = s.player
     kind = np.zeros(8)
@@ -172,6 +222,10 @@ def card_block(sim, s, card, t):
                * _charm_mult(p, card.school) * _ward_mult(e, card.school))
     alive = [x for x in s.enemies if x.alive]
     board_hp = sum(max(x.hp, 0.0) for x in alive) or 1.0
+    best, afford = aux
+    eff = p.norm_pips + 2 * p.pow_pips
+    raw = (card.damage * max(eff, 1) if card.x_pips else card.damage) \
+        if card.kind in ("damage", "drain") else 0.0
     return np.concatenate([kind, [
         _clip(card.pips / 14.0, 1.0),
         _clip(dmg / max(e.hp, 1.0), 2.0) / 2.0 if e is not None else 0.0,
@@ -179,18 +233,20 @@ def card_block(sim, s, card, t):
               2.0) / 2.0,
         _clip(card.accuracy, 1.0),
         1.0 if card.aoe else 0.0,
+        _clip(raw / (best + 1.0), 1.0),
+        1.0 if raw and raw == afford else 0.0,
     ]])
 
 
 def action_features(sim, s, card, t, ctx=None):
-    ctx = state_context(sim, s) if ctx is None else ctx
-    return np.concatenate([ctx, target_block(sim, s, t),
-                           card_block(sim, s, card, t), [0.0]])
+    vec, aux = state_context(sim, s) if ctx is None else ctx
+    return np.concatenate([vec, target_block(sim, s, t),
+                           card_block(sim, s, card, t, aux), [0.0]])
 
 
 def pass_features(sim, s, ctx=None):
-    ctx = state_context(sim, s) if ctx is None else ctx
-    return np.concatenate([ctx, np.zeros(8), np.zeros(13), [1.0]])
+    vec, _aux = state_context(sim, s) if ctx is None else ctx
+    return np.concatenate([vec, np.zeros(8), np.zeros(15), [1.0]])
 
 
 def candidate_actions(sim, s):
@@ -219,7 +275,7 @@ def decision_matrix(sim, s):
     """(candidates, feature matrix) for one decision -- the shared
     path between data generation, training and inference."""
     cands = candidate_actions(sim, s)
-    ctx = state_context(sim, s)
+    ctx = state_context(sim, s)          # (vector, hand-scan aux)
     rows = [pass_features(sim, s, ctx) if card is None
             else action_features(sim, s, card, t, ctx)
             for card, t in cands]
