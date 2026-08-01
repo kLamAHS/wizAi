@@ -5611,3 +5611,23 @@ def test_the_board_panel_shows_the_threat_model(qapp):
     panel.render(rec)
     assert "casts Banshee" in panel.enemies.item(0, 2).text()
     assert "~136/round" in panel.enemies.item(1, 2).text()
+
+
+def test_probe_boards_can_carry_named_casters():
+    """The 4-tuple probe form builds the catalog casting boss at the
+    probe's health; unnamed slots and unknown names stay the flat mob.
+    (The GUI deliberately does NOT use this -- caster probes measured
+    equivalent to flat ones, see the _probe_mobs docstring -- but the
+    hook must keep working for the day a per-boss tuner needs it.)"""
+    from deimos_bridge.policies import _probe_mobs
+
+    boss, extra = _probe_mobs((800, 2, "death", ["Lord Nightshade"]), 90)
+    assert boss.pool and boss.dmg == 0 and boss.hp == 800
+    assert len(extra) == 1 and extra[0].pool is None and extra[0].dmg == 90
+
+    flat, extra = _probe_mobs((500, 1, "storm"), 55)
+    assert flat.pool is None and flat.dmg == 55
+
+    unknown, _ = _probe_mobs((500, 1, "storm", ["No Such Creature XYZ"]),
+                             55)
+    assert unknown.pool is None and unknown.dmg == 55

@@ -491,15 +491,60 @@ HORIZONS = (6, 12)
 SEARCH_WIDTHS = (4, 6, 10)
 
 
+def _probe_mobs(board, dmg):
+    """(boss, extras) for one probe board spec.
+
+    A spec is `(hp, n_mobs, school)` -- flat mobs hitting for `dmg` --
+    or `(hp, n_mobs, school, names)` carrying observed enemy names, in
+    which case every named mob that resolves in the catalog becomes the
+    casting boss it is in the live fight (spell pool, opening pips,
+    exact defences) at the probe's health.
+
+    MEASURED NULL, recorded so the next session does not redo it: since
+    live rollouts price named enemies as casters, tuning on caster
+    probes instead of flat ones looks like it should matter -- and on
+    three boards (weak caster, spike caster, 6-pip opener) it changed
+    the pick twice (nuke-asap -> school-aware(0)) without ever changing
+    the outcome. Ketil@1300: 51.5% flat-tuned vs 50.1% caster-tuned at
+    n=800. Jack of Knaves@1100 (opens with 6 pips, the regime flat
+    probes cannot express at all): 35.6/37.9/39.4 vs 40.6/37.8/38.1
+    across three n=800 evaluations. Two single-run deltas (+8.7 at
+    n=300, +5.0 at n=800) both collapsed on replication -- the
+    selection-noise trap, again. So the GUI keeps tuning on flat probes
+    (2x faster, measured equivalent); the named form exists because a
+    future per-boss tuner needs exactly this hook and the experiment
+    should not have to be rebuilt to rerun.
+    """
+    from w101_sim import Boss
+
+    hp, mobs, mob_school = board[:3]
+    names = list(board[3]) if len(board) > 3 and board[3] else []
+    out = []
+    for i in range(mobs):
+        b = None
+        if i < len(names) and names[i]:
+            try:
+                from .bestiary import full_boss
+                b = full_boss(names[i], hp)
+            except Exception:
+                b = None
+        if b is None or not b.pool:
+            b = Boss(name=f"probe {i}" if i else "probe", hp=hp,
+                     school=mob_school, dmg=dmg)
+        out.append(b)
+    return out[0], out[1:]
+
+
 def choose_search(cards, deck, school, boards, n=60, on_probe=None,
                   dmg=0):
     """The best (continuation, horizon) for this deck, measured.
 
-    `boards` is [(hp, n_mobs, school)]. Ten probes of a few seconds each
-    -- against 12,000 episodes for a table that then only works on one
-    deck at one health band. That ratio is the whole argument for this
-    shape of learning: the search is the model, and the per-deck
-    learning is a handful of measured choices about how to run it.
+    `boards` is [(hp, n_mobs, school)] -- see `_probe_mobs` for the
+    named-caster form. Ten probes of a few seconds each -- against
+    12,000 episodes for a table that then only works on one deck at one
+    health band. That ratio is the whole argument for this shape of
+    learning: the search is the model, and the per-deck learning is a
+    handful of measured choices about how to run it.
 
     `dmg` puts incoming pressure on the probe boards. At zero the wizard
     is never punished for patience, so every horizon ties and the sweep
@@ -507,17 +552,15 @@ def choose_search(cards, deck, school, boards, n=60, on_probe=None,
 
     Returns (continuation, horizon, {"name@h6": kill rate, ...}).
     """
-    from w101_sim import Boss, Sim, evaluate
+    from w101_sim import Sim, evaluate
 
     scores = {}
     for name in CONTINUATIONS:
         set_continuation(name)
         for horizon in HORIZONS:
             total = 0.0
-            for hp, mobs, mob_school in boards:
-                boss = Boss(name="probe", hp=hp, school=mob_school, dmg=dmg)
-                extra = [Boss(name=f"probe {i}", hp=hp, school=mob_school,
-                              dmg=dmg) for i in range(1, mobs)]
+            for board in boards:
+                boss, extra = _probe_mobs(board, dmg)
                 sim = Sim(cards, deck, school, boss, enemies=extra)
                 total += evaluate(sim, greedy_ttk(horizon), n=n)[0]
             key = f"{name}@h{horizon}"
@@ -536,15 +579,13 @@ def choose_search(cards, deck, school, boards, n=60, on_probe=None,
     # measurement on the same probe boards. It is ~12x slower per
     # decision, which is nothing against a ~30 s live planning phase.
     from search_policy import make_search_policy
-    from w101_sim import Boss, Sim, evaluate
+    from w101_sim import Sim, evaluate
 
     ttk_score = scores[best]
     for k in SEARCH_WIDTHS:
         total = 0.0
-        for hp, mobs, mob_school in boards:
-            boss = Boss(name="probe", hp=hp, school=mob_school, dmg=dmg)
-            extra = [Boss(name=f"probe {i}", hp=hp, school=mob_school,
-                          dmg=dmg) for i in range(1, mobs)]
+        for board in boards:
+            boss, extra = _probe_mobs(board, dmg)
             sim = Sim(cards, deck, school, boss, enemies=extra)
             # The tuned continuation, so the probe measures the driver
             # that would actually play. choose_search installed it just
