@@ -550,30 +550,40 @@ def choose_search(cards, deck, school, boards, n=60, on_probe=None,
     is never punished for patience, so every horizon ties and the sweep
     cannot see the one thing it exists to decide.
 
+    Every candidate is measured on the SAME seed stream
+    (`evaluate_paired` -- common random numbers), because the pick is an
+    argmax over differences and shared seeds cancel the shared luck: a
+    stream of bad draws hits every candidate equally instead of sinking
+    whichever one happened to be under measurement. The probes stay the
+    same size; only the comparison gets sharper.
+
     Returns (continuation, horizon, {"name@h6": kill rate, ...}).
     """
-    from w101_sim import Sim, evaluate
+    from w101_sim import Sim, evaluate_paired
 
-    scores = {}
+    # Explicit, never installed: the GUI runs this sweep while the live
+    # fight keeps playing, and a sweep that set the global per candidate
+    # had live decisions rolling out with whatever probe setting
+    # happened to be under measurement at that moment. Only the winner
+    # is installed, once, below.
+    candidates = {}
     for name in CONTINUATIONS:
-        # Explicit, never installed: the GUI runs this sweep while the
-        # live fight keeps playing, and a sweep that set the global per
-        # candidate had live decisions rolling out with whatever probe
-        # setting happened to be under measurement at that moment. Only
-        # the winner is installed, once, below.
         cont = build_continuation(name)
         for horizon in HORIZONS:
-            total = 0.0
-            for board in boards:
-                boss, extra = _probe_mobs(board, dmg)
-                sim = Sim(cards, deck, school, boss, enemies=extra)
-                total += evaluate(sim, greedy_ttk(horizon,
-                                                  continuation=cont),
-                                  n=n)[0]
-            key = f"{name}@h{horizon}"
-            scores[key] = total / max(1, len(boards))
-            if on_probe:
-                on_probe(key, scores[key])
+            candidates[f"{name}@h{horizon}"] = greedy_ttk(
+                horizon, continuation=cont)
+
+    totals = {k: 0.0 for k in candidates}
+    for board in boards:
+        boss, extra = _probe_mobs(board, dmg)
+        sim = Sim(cards, deck, school, boss, enemies=extra)
+        for k, st in evaluate_paired(sim, candidates, n=n).items():
+            totals[k] += st["win_rate"]
+    scores = {}
+    for key in candidates:
+        scores[key] = totals[key] / max(1, len(boards))
+        if on_probe:
+            on_probe(key, scores[key])
     best = max(scores, key=lambda k: scores[k])
     best_name, best_h = best.rsplit("@h", 1)
     set_continuation(best_name)
@@ -586,26 +596,34 @@ def choose_search(cards, deck, school, boards, n=60, on_probe=None,
     # measurement on the same probe boards. It is ~12x slower per
     # decision, which is nothing against a ~30 s live planning phase.
     from search_policy import make_search_policy
-    from w101_sim import Sim, evaluate
 
-    ttk_score = scores[best]
+    # The tuned continuation, so the probe measures the driver that
+    # would actually play -- passed explicitly rather than read from
+    # the global, same hygiene as the sweep above. The tuned lookahead
+    # rides in the SAME paired call: the old comparison put the ttk
+    # number from one seed stream at full n against search numbers from
+    # another at n/3, and the +0.02 threshold was carrying that
+    # mismatch as well as the noise it was meant for.
     tuned_cont = build_continuation(best_name)
+    rivals = {"ttk": greedy_ttk(int(best_h), continuation=tuned_cont)}
     for k in SEARCH_WIDTHS:
-        total = 0.0
-        for board in boards:
-            boss, extra = _probe_mobs(board, dmg)
-            sim = Sim(cards, deck, school, boss, enemies=extra)
-            # The tuned continuation, so the probe measures the driver
-            # that would actually play -- passed explicitly rather than
-            # read from the global, same hygiene as the sweep above.
-            total += evaluate(sim, make_search_policy(base=tuned_cont,
-                                                      k=k),
-                              n=max(20, n // 3))[0]
-        scores[f"search(k={k})"] = total / max(1, len(boards))
+        rivals[f"search(k={k})"] = make_search_policy(base=tuned_cont, k=k)
+    totals = {k: 0.0 for k in rivals}
+    for board in boards:
+        boss, extra = _probe_mobs(board, dmg)
+        sim = Sim(cards, deck, school, boss, enemies=extra)
+        for k, st in evaluate_paired(sim, rivals,
+                                     n=max(20, n // 3)).items():
+            totals[k] += st["win_rate"]
+    ttk_paired = totals["ttk"] / max(1, len(boards))
+    for k in SEARCH_WIDTHS:
+        scores[f"search(k={k})"] = totals[f"search(k={k})"] \
+            / max(1, len(boards))
     global _DRIVER
     top_k = max(SEARCH_WIDTHS, key=lambda k: scores[f"search(k={k})"])
     _DRIVER = (f"search(k={top_k})"
-               if scores[f"search(k={top_k})"] > ttk_score + 0.02 else "ttk")
+               if scores[f"search(k={top_k})"] > ttk_paired + 0.02
+               else "ttk")
     return best_name, int(best_h), scores
 
 
@@ -646,19 +664,23 @@ def set_driver(name):
 def choose_continuation(cards, deck, school, boards, n=60, on_probe=None):
     """Back-compatible wrapper over `choose_search`, horizon fixed at the
     default. Prefer `choose_search`."""
-    from w101_sim import Boss, Sim, evaluate
+    from w101_sim import Boss, Sim, evaluate_paired
 
+    # explicit continuations, never installed; paired seeds, same as
+    # choose_search
+    candidates = {name: greedy_ttk(continuation=build_continuation(name))
+                  for name in CONTINUATIONS}
+    totals = {k: 0.0 for k in candidates}
+    for hp, mobs, mob_school in boards:
+        boss = Boss(name="probe", hp=hp, school=mob_school, dmg=0)
+        extra = [Boss(name=f"probe {i}", hp=hp, school=mob_school, dmg=0)
+                 for i in range(1, mobs)]
+        sim = Sim(cards, deck, school, boss, enemies=extra)
+        for k, st in evaluate_paired(sim, candidates, n=n).items():
+            totals[k] += st["win_rate"]
     scores = {}
-    for name in CONTINUATIONS:
-        cont = build_continuation(name)     # explicit, never installed
-        total = 0.0
-        for hp, mobs, mob_school in boards:
-            boss = Boss(name="probe", hp=hp, school=mob_school, dmg=0)
-            extra = [Boss(name=f"probe {i}", hp=hp, school=mob_school, dmg=0)
-                     for i in range(1, mobs)]
-            sim = Sim(cards, deck, school, boss, enemies=extra)
-            total += evaluate(sim, greedy_ttk(continuation=cont), n=n)[0]
-        scores[name] = total / max(1, len(boards))
+    for name in candidates:
+        scores[name] = totals[name] / max(1, len(boards))
         if on_probe:
             on_probe(name, scores[name])
     best = max(scores, key=lambda k: scores[k])
