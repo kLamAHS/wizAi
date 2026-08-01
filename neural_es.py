@@ -24,7 +24,7 @@ checkpoint faces the shipped v1 weights on the canonical held-out
 boards at n=800 paired, fresh streams, and must keep the storm win
 that earned the seat.
 
-    python3 neural_es.py GENERATIONS OUT.json [SEED]
+    python3 neural_es.py GENERATIONS OUT.json [SEED] [SEED_WEIGHTS.json]
 """
 import json
 import random
@@ -117,9 +117,10 @@ def fitness(theta, shapes, base_seed, n):
     return total / len(BOARDS)
 
 
-def main(generations, out_path, seed=0):
+def main(generations, out_path, seed=0, seed_weights=None):
     rng = np.random.RandomState(seed)
-    base = Net.load(DEFAULT_WEIGHTS)
+    # resume a killed campaign from its own best checkpoint
+    base = Net.load(seed_weights or DEFAULT_WEIGHTS)
     shapes = [(W.shape[0], W.shape[1]) for W, _ in base.layers]
     theta = _flatten(base)
 
@@ -155,4 +156,5 @@ def main(generations, out_path, seed=0):
 
 if __name__ == "__main__":
     main(int(sys.argv[1]), sys.argv[2],
-         int(sys.argv[3]) if len(sys.argv) > 3 else 0)
+         int(sys.argv[3]) if len(sys.argv) > 3 else 0,
+         sys.argv[4] if len(sys.argv) > 4 else None)
