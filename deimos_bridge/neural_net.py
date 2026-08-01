@@ -26,17 +26,24 @@ continuation that flips coins makes every rollout its own noise
 source, and the sweeps that would pick it are paired precisely to
 strip that noise out.
 
-MEASURED (the shipped weights: 81k behaviour-cloned decisions plus a
-60k DAgger round -- student drives, teacher labels -- which fixed the
-round-one collapse on hard boards, 7.0 -> 17.5): as a DIRECT policy it
-keeps the search's reflexes and loses its calculation (-38 on a
-contested two-mob board, +5 on a single-mob one) at 146x the speed. In
-the CONTINUATION seat it is first on the storm deck's hard board on
-three seed streams out of three (+5.0/+3.2/+2.6 over the best
-hand-coded, paired n=800), second within noise on the buff-heavy deck,
-last on the starter deck -- so it sits in CONTINUATIONS and the
-per-deck paired probes decide where it drives, like every other
-candidate.
+MEASURED. The shipped weights are two optimizers deep:
+
+1. Behaviour cloning (81k teacher decisions) plus a 60k DAgger round
+   (student drives, teacher labels), which fixed BC's collapse on hard
+   boards (7.0 -> 17.5) and earned the first sweep seat: first on the
+   storm deck's hard board on three seed streams of three
+   (+5.0/+3.2/+2.6 over the best hand-coded, paired n=800).
+2. Evolution strategies on top (neural_es.py): 25 generations of
+   optimizing the SEAT's own objective -- paired win rate of
+   greedy_ttk(6, continuation=net) -- from the BC seed, no torch, no
+   teacher. Held out at n=800 paired against v1 and the hand-coded
+   five: storm 700x2 29.9/31.5 (v1 18.1/18.4; best hand-coded 15.8)
+   on two streams, low 700x2 22.4/22.1 (v1 7.5; best hand-coded 17.1)
+   on two streams, low 600x2 65.5 (tied with the 65.8 leader, v1
+   54.0), buffy 600x2 52.4 (second), buffy 700x2 9.1 -- LAST, against
+   24.1. Deck-specific with a real weakness, which is exactly what
+   the per-deck sweep routes around: where neural measures best it is
+   installed, and on the buff-heavy deck it never will be.
 
 TRIED AND REVERTED, recorded so it is not retried blind: a v2
 featurizer added six hand-composition facts and two per-card
