@@ -25,6 +25,18 @@ card]; the policy plays the argmax. Deterministic on purpose: a
 continuation that flips coins makes every rollout its own noise
 source, and the sweeps that would pick it are paired precisely to
 strip that noise out.
+
+MEASURED (the shipped weights: 81k behaviour-cloned decisions plus a
+60k DAgger round -- student drives, teacher labels -- which fixed the
+round-one collapse on hard boards, 7.0 -> 17.5): as a DIRECT policy it
+keeps the search's reflexes and loses its calculation (-38 on a
+contested two-mob board, +5 on a single-mob one) at 146x the speed. In
+the CONTINUATION seat it is first on the storm deck's hard board on
+three seed streams out of three (+5.0/+3.2/+2.6 over the best
+hand-coded, paired n=800), second within noise on the buff-heavy deck,
+last on the starter deck -- so it sits in CONTINUATIONS and the
+per-deck paired probes decide where it drives, like every other
+candidate.
 """
 import json
 import os
