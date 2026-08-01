@@ -637,6 +637,89 @@ class TrainWorker(QThread):
             self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
+class DeckWorker(QThread):
+    """Runs `deck_builder.build_deck` for the observed board.
+
+    The last lever: 19 of 32 game-spanning boards were lost by every
+    policy in the repo, and no amount of better play buys one of them --
+    those fights are lost in the deck box. The repo has had a two-stage
+    deck search all along (`build_deck`: sample the legal pool, screen by
+    simulation, fine-rank the survivors); what it never had was the real
+    fight to build FOR. The live run now measures the board -- healths,
+    schools, incoming damage, the wizard's health and gear -- so the
+    search can finally optimise the deck for the fight being farmed
+    rather than a hypothetical one.
+    """
+
+    status = pyqtSignal(str)
+    finished_ok = pyqtSignal(object, float, float)   # deck, win, ttk
+    failed = pyqtSignal(str)
+
+    def __init__(self, cards, school, player_hp, player_stats,
+                 mob_hps, mob_schools, mob_damage, boss_hp, n_enemies):
+        super().__init__()
+        self.cards, self.school = cards, school
+        self.player_hp = player_hp
+        self.player_stats = dict(player_stats or {})
+        self.mob_hps = list(mob_hps or [])
+        self.mob_schools = list(mob_schools or [])
+        self.mob_damage = int(mob_damage or 0)
+        self.boss_hp, self.n_enemies = boss_hp, n_enemies
+
+    def level_guess(self):
+        """The wizard's level, inverted from their health curve.
+
+        `legal_pool` gates by level so the search cannot propose a spell
+        the wizard has not trained -- but nothing in the window knows the
+        level. The health curve does, near enough: `school_hp` maps
+        level to base health, so the measured maximum inverts to a level
+        within a few of the truth, and a few levels of slack only ever
+        UNDER-gates. Erring low can only hide a card the wizard has;
+        erring high proposes one they do not, which is worse.
+        """
+        try:
+            from player_curves import school_hp
+
+            for level in range(1, 121):
+                if school_hp(self.school, level) >= self.player_hp:
+                    return max(1, level - 2)
+            return 120
+        except Exception:
+            return None
+
+    def run(self):
+        try:
+            from deck_builder import build_deck
+            from w101_sim import Boss
+
+            hps = self.mob_hps or [self.boss_hp] + [
+                int(self.boss_hp * 0.8)] * (self.n_enemies - 1)
+            schools = (self.mob_schools
+                       or ["balance"] * len(hps))
+            dmg = self.mob_damage or max(30, self.player_hp // 12)
+            boss = Boss(name="observed boss", hp=int(max(hps)),
+                        school=schools[hps.index(max(hps))], dmg=dmg)
+            rest = [Boss(name=f"observed mob {i}", hp=int(h), school=sc,
+                         dmg=dmg)
+                    for i, (h, sc) in enumerate(zip(hps, schools), 1)
+                    if h != max(hps) or hps.index(h) != hps.index(max(hps))]
+            level = self.level_guess()
+            self.status.emit(
+                f"searching decks for {boss.hp:,} {boss.school}"
+                + (f" + {len(rest)} mob(s)" if rest else "")
+                + (f", level ~{level}" if level else ""))
+            deck, win, ttk, _table = build_deck(
+                self.cards, self.school, boss, enemies=rest or None,
+                n_candidates=48, top_k=4, level=level,
+                player_hp=self.player_hp, player_stats=self.player_stats,
+                log=lambda *a: self.status.emit(
+                    " ".join(str(x) for x in a)[:120]))
+            self.finished_ok.emit(list(deck), float(win), float(ttk))
+        except Exception as exc:
+            self.failed.emit(f"deck search failed — "
+                             f"{type(exc).__name__}: {exc}")
+
+
 class MainWindow(QMainWindow):
     #: the last training checkpoint's numbers, appended to the progress
     #: bar. A class attribute so the bar can be driven before a run has
@@ -892,6 +975,15 @@ class MainWindow(QMainWindow):
         self.deck_btn = QPushButton("Choose…")
         self.deck_btn.clicked.connect(self.on_pick_deck)
         deck_row.addWidget(self.deck_btn)
+        self.build_btn = QPushButton("Build deck…")
+        self.build_btn.setToolTip(
+            "Search this school's legal card pool for the strongest deck "
+            "against the board the live run measured (or the boxes above, "
+            "before a fight). Takes a couple of minutes; the result lands "
+            "in the deck box to accept or edit — nothing is applied until "
+            "you train or play with it.")
+        self.build_btn.clicked.connect(self.on_build_deck)
+        deck_row.addWidget(self.build_btn)
         outer.addLayout(deck_row)
 
         quest_row = QHBoxLayout()
@@ -1395,6 +1487,40 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "wizAi", message)
 
     # -- deck ------------------------------------------------------------
+    def on_build_deck(self):
+        """Search for the strongest deck against the measured board."""
+        if getattr(self, "deck_worker", None) is not None \
+                and self.deck_worker.isRunning():
+            return
+        try:
+            from ..live_state import build_catalog
+            cards = build_catalog()["cards"]
+        except Exception as exc:
+            QMessageBox.critical(self, "wizAi", f"card table failed: {exc}")
+            return
+        self.build_btn.setEnabled(False)
+        self.deck_worker = DeckWorker(
+            cards, self.school.currentText(), self.player_hp.value(),
+            self.player_stats, self.observed_hps, self.observed_schools,
+            int(self.observed_incoming), self.boss_hp.value(),
+            self.n_enemies.value())
+        self.deck_worker.status.connect(self.status.setText)
+        self.deck_worker.finished_ok.connect(self.on_deck_built)
+        self.deck_worker.failed.connect(self.on_deck_build_failed)
+        self.deck_worker.start()
+
+    def on_deck_built(self, deck, win, ttk):
+        self.build_btn.setEnabled(True)
+        self.deck.setText(",".join(deck))
+        self.status.setText(
+            f"built a {len(deck)}-card deck — wins {win * 100:.0f}% of the "
+            f"measured fight at {ttk:.1f} turns. It is in the deck box; "
+            f"edit it freely, then Train or Play live.")
+
+    def on_deck_build_failed(self, message):
+        self.build_btn.setEnabled(True)
+        self.status.setText(message)
+
     def on_pick_deck(self):
         try:
             from ..live_state import build_catalog

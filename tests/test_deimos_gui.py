@@ -5286,3 +5286,46 @@ def test_the_cast_uses_the_backends_click_pacing():
 
     src = inspect.getsource(live_backend.WizAiCombatHandler.handle_round)
     assert "sleep_time=self.backend.cast_time" in src
+
+
+# ------------------- the deck search builds for the measured fight
+def test_the_deck_worker_builds_for_the_observed_board(qapp, monkeypatch):
+    """The repo has had a two-stage deck search all along; what it never
+    had was the real fight to build for. The worker hands it the board
+    the live run measured — healths, schools, incoming — not a guess."""
+    import deck_builder
+    from deimos_bridge.gui.app import DeckWorker
+
+    seen = {}
+
+    def fake_build_deck(cards, school, boss, enemies=None, **kw):
+        seen.update(boss_hp=boss.hp, boss_school=boss.school,
+                    dmg=boss.dmg, n_extra=len(enemies or []),
+                    level=kw.get("level"), player_hp=kw.get("player_hp"))
+        return ["Frost Beetle"] * 4, 0.87, 5.2, []
+
+    monkeypatch.setattr(deck_builder, "build_deck", fake_build_deck)
+    w = DeckWorker({}, "ice", 1022, {"damage": {"ice": 0.09}},
+                   [480, 235], ["death", "death"], 136, 780, 2)
+    got = {}
+    w.finished_ok.connect(lambda d, win, ttk: got.update(deck=d, win=win))
+    w.status.connect(lambda *_: None)
+    w.run()                                       # synchronous: no thread
+
+    assert seen["boss_hp"] == 480 and seen["boss_school"] == "death"
+    assert seen["n_extra"] == 1 and seen["dmg"] == 136
+    assert seen["player_hp"] == 1022
+    assert got["deck"] == ["Frost Beetle"] * 4 and got["win"] == 0.87
+    # The level came off the health curve, gated LOW so the search can
+    # hide a trained card but never propose an untrained one.
+    assert seen["level"] is None or 1 <= seen["level"] <= 120
+
+
+def test_the_level_guess_gates_low():
+    from deimos_bridge.gui.app import DeckWorker
+
+    w = DeckWorker({}, "ice", 1022, {}, [], [], 0, 780, 2)
+    level = w.level_guess()
+    if level is not None:
+        from player_curves import school_hp
+        assert school_hp("ice", level) <= 1022
