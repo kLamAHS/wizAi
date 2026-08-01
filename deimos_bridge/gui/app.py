@@ -26,6 +26,12 @@ from .panels import (BoardPanel, DecisionsPanel, LearningPanel, ModelPanel,
 from .theme import PALETTE, stylesheet
 
 SCHOOLS = ["fire", "ice", "storm", "myth", "life", "death", "balance"]
+#: `ttk-lookahead` first, so it is what the window starts on. It keys on
+#: nothing -- it simulates the fight rather than looking it up -- so it
+#: cannot be out of band on a game with 1,912 creatures in it, and it
+#: measured best across a real-creature benchmark (63.4% on trained
+#: boards, 68.1% on held-out ones, at 61 ms a fight). The table stays on
+#: the menu as an overlay for a board you have actually trained.
 POLICIES = ["ttk-lookahead", "school-aware", "blade-stack(3)",
             "blade-stack(2)", "nuke-asap", "trained (Q)"]
 
@@ -58,6 +64,8 @@ class TrainWorker(QThread):
     tick = pyqtSignal(int, int, float)
     #: what the run is doing when it is not counting episodes
     stage = pyqtSignal(str)
+    #: (chosen rollout continuation, {name: kill rate}) for this deck
+    continuation = pyqtSignal(str, object)
     #: (trained kill rate, heuristic kill rate) on the same eval board.
     #: The comparison the window never made — a table that keys 95% of
     #: boards and plays them worse than the fallback reads as a success
@@ -285,6 +293,23 @@ class TrainWorker(QThread):
                 worst = (t, r, abs(t - r))
         return worst[0], worst[1]
 
+    def probe_boards(self, bands, schools, fracs=(0.55, 0.8)):
+        """Boards to compare policies on: hard enough to tell them apart.
+
+        Taken from the envelope rather than from the settings, because a
+        board every candidate clears ranks nothing. Measured directly:
+        on probe boards near the ceiling the five continuations scored
+        97.5-99.0% -- a 1.5 point spread that is noise -- while on
+        boards near the edge of the same deck's envelope the spread was
+        60.0-68.0%.
+        """
+        out = []
+        for count, (lo, hi) in sorted((bands or {}).items()):
+            for frac in fracs:
+                hp = max(lo, int(lo + (hi - lo) * frac))
+                out.append((hp, count, schools[0]))
+        return out or [(self.boss_hp, self.n_enemies, schools[0])]
+
     def describe_envelope(self, bands):
         if not bands:
             return ("this deck cannot clear a single mob at these settings "
@@ -495,10 +520,30 @@ class TrainWorker(QThread):
             # arithmetically impossible". Three seconds of checking beats
             # twenty minutes of it.
             feasible, note = self.preflight(board, extra)
-            self.stage.emit(note if note else "training")
             if not feasible:
+                self.stage.emit(note)
                 self.failed.emit(note)
                 return
+
+            # The rollout's continuation, picked for this deck. It is one
+            # small policy reused on every board and every rollout, so it
+            # needs no coverage of anything -- which makes it the one
+            # place learning fits a game with 1,912 creatures in it.
+            # Measured worth ~14 points of kill rate, and deck-specific:
+            # the choice that is +5.2 on one deck is -7.6 on another.
+            # Seconds, against episodes.
+            self.stage.emit("picking the rollout continuation for this deck")
+            try:
+                from ..policies import choose_continuation
+                picked, scores = choose_continuation(
+                    self.cards, self.deck, self.school,
+                    self.probe_boards(bands, schools), n=60)
+                self.continuation.emit(picked, dict(scores))
+                self.stage.emit(f"rollout continuation: {picked}")
+            except Exception:
+                pass          # a nicety; never worth failing a train over
+
+            self.stage.emit("training")
 
             agent, sim = train_agent(
                 self.cards, self.deck, self.school, board, enemies=extra,
@@ -549,6 +594,10 @@ class MainWindow(QMainWindow):
     verdict_text = ""
     trained_kill = 0.0
     rival_kill = 0.0
+    #: the rollout continuation picked for the current deck, if a train
+    #: has run. Deck-scoped: the choice that is +5.2 points on one deck
+    #: is -7.6 on another, so there is no global answer to store.
+    continuation = ""
 
     def __init__(self, telemetry=None):
         super().__init__()
@@ -1178,6 +1227,7 @@ class MainWindow(QMainWindow):
         self.worker.tick.connect(self.on_tick)
         self.worker.stage.connect(self.on_stage)
         self.worker.verdict.connect(self.on_verdict)
+        self.worker.continuation.connect(self.on_continuation)
         self.worker.finished_ok.connect(self.on_trained)
         self.worker.failed.connect(self.on_train_failed)
         # Below the live worker, deliberately. Training is minutes of
@@ -1223,6 +1273,20 @@ class MainWindow(QMainWindow):
         if self._last_checkpoint:
             text += f" — {self._last_checkpoint}"
         self.train_progress.setFormat(text)
+
+    def on_continuation(self, name, scores):
+        """The rollout continuation picked for this deck.
+
+        Kept on the window rather than in a module global so a live run
+        can be handed it, and so changing decks changes it.
+        """
+        self.continuation = name
+        ranked = sorted((scores or {}).items(), key=lambda kv: -kv[1])
+        spread = ((ranked[0][1] - ranked[-1][1]) * 100) if len(ranked) > 1 else 0
+        self.status.setText(
+            f"rollout continuation for this deck: {name} "
+            f"({spread:.0f} points better than the worst of "
+            f"{len(ranked)} tried)")
 
     def on_verdict(self, kill, rival):
         """Is the table worth playing, against the heuristic it displaces?
@@ -1428,7 +1492,8 @@ class MainWindow(QMainWindow):
                                use_potions=self.use_potions.isChecked(),
                                script=(self.script_source
                                        if self.use_script.isChecked() else ""),
-                               hotkeys=self.hotkey_bindings())
+                               hotkeys=self.hotkey_bindings(),
+                               continuation=self.continuation)
         self.live.status.connect(self.on_live_status)
         self.live.round_done.connect(self.on_round)
         self.live.fight_done.connect(self.on_fight_done)

@@ -416,14 +416,100 @@ class _Fixed:
         return list(population)[:k]
 
 
+#: The candidates for the policy a rollout plays after its first move.
+#: This is the one place learning fits an engine this size: the
+#: continuation is a single small policy reused on every board and every
+#: rollout, so improving it improves every decision without needing to
+#: have *seen* the board. Measured across 30 real-creature boards,
+#: swapping only the continuation and holding `greedy_ttk` fixed moves
+#: kill rate 40.0% -> 55.3%, and the shipped choice sits 6.9 points below
+#: the best -- it over-buffs inside the rollout, spending horizon on
+#: traps the line never cashes.
+#:
+#: Fitting one bought nothing: a 17-weight CEM-trained continuation tied
+#: the five-line heuristic exactly (55.300% vs 55.300%), and a depth-2
+#: inner search beat it by 0.3 points for 11x the cost. The headroom is
+#: in WHICH, not in fitting -- so this is a five-way choice, not a model.
+CONTINUATIONS = ("nuke-asap", "school-aware(3)", "school-aware(0)",
+                 "blade-stack(2)", "blade-stack(3)")
+
+#: The shipped default, kept because the right answer is deck-specific
+#: and the alternative is right only on some decks: the same swap that
+#: is +5.2 on one deck is -7.6 on another. See `choose_continuation`.
+DEFAULT_CONTINUATION = "school-aware(3)"
+
 _CONTINUATION = None
+_CONTINUATION_NAME = None
+
+
+def build_continuation(name):
+    """One of `CONTINUATIONS`, as a policy."""
+    from w101_sim import make_blade_stack, strat_nuke_asap
+
+    if name == "nuke-asap":
+        return strat_nuke_asap
+    if name == "school-aware(0)":
+        return school_aware_blade_stack(0)
+    if name == "blade-stack(2)":
+        return make_blade_stack(2)
+    if name == "blade-stack(3)":
+        return make_blade_stack(3)
+    return school_aware_blade_stack(3)
+
+
+def set_continuation(name):
+    """Choose the rollout's continuation for this deck. Returns the name.
+
+    Deck-scoped rather than global because the measurement says so: the
+    continuation that is +5.2 points on one deck is -7.6 on another, so
+    there is no universal answer to hardcode.
+    """
+    global _CONTINUATION, _CONTINUATION_NAME
+    name = name if name in CONTINUATIONS else DEFAULT_CONTINUATION
+    _CONTINUATION_NAME = name
+    _CONTINUATION = build_continuation(name)
+    return name
+
+
+def continuation_name():
+    return _CONTINUATION_NAME or DEFAULT_CONTINUATION
+
+
+def choose_continuation(cards, deck, school, boards, n=60, on_probe=None):
+    """The best continuation for this deck, measured rather than assumed.
+
+    `boards` is [(hp, n_mobs, school)]. About five seconds per candidate
+    on a handful of probe boards -- against 12,000 episodes for a table
+    that then only works on one deck at one health band. That ratio is
+    the whole argument for this shape of learning.
+
+    Returns (name, {name: kill rate}).
+    """
+    from w101_sim import Boss, Sim, evaluate
+
+    scores = {}
+    for name in CONTINUATIONS:
+        set_continuation(name)
+        total = 0.0
+        for hp, mobs, mob_school in boards:
+            boss = Boss(name="probe", hp=hp, school=mob_school, dmg=0)
+            extra = [Boss(name=f"probe {i}", hp=hp, school=mob_school, dmg=0)
+                     for i in range(1, mobs)]
+            sim = Sim(cards, deck, school, boss, enemies=extra)
+            total += evaluate(sim, greedy_ttk(), n=n)[0]
+        scores[name] = total / max(1, len(boards))
+        if on_probe:
+            on_probe(name, scores[name])
+    best = max(scores, key=lambda k: scores[k])
+    set_continuation(best)
+    return best, scores
 
 
 def _continuation():
     """The policy a rollout plays after its first move. Built once."""
     global _CONTINUATION
     if _CONTINUATION is None:
-        _CONTINUATION = school_aware_blade_stack(3)
+        set_continuation(DEFAULT_CONTINUATION)
     return _CONTINUATION
 
 
