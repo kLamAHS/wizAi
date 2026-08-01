@@ -25,6 +25,7 @@ boards at n=800 paired, fresh streams, and must keep the storm win
 that earned the seat.
 
     python3 neural_es.py GENERATIONS OUT.json [SEED] [SEED_WEIGHTS.json]
+                         [BOARD_SET]
 """
 import json
 import random
@@ -70,15 +71,38 @@ _STORM = (["Thunder Snake"] * 4 + ["Lightning Bats"] * 4
           + ["Storm Shark"] * 4 + ["Stormblade"] * 2)
 _FIRE = (["Fire Cat"] * 4 + ["Fire Elf"] * 4 + ["Sunbird"] * 4
          + ["Fireblade"] * 2)
-BOARDS = (
-    (_LOW, "ice", 1022, 0.09, 620, 2, 82),
-    (_LOW, "ice", 1022, 0.09, 730, 2, 92),
-    (_BUFFY, "ice", 1022, 0.09, 620, 2, 82),
-    (_BUFFY, "ice", 1022, 0.09, 730, 2, 92),
-    (_STORM, "storm", 800, 0.05, 620, 2, 82),
-    (_STORM, "storm", 800, 0.05, 1250, 1, 105),
-    (_FIRE, "fire", 900, 0.07, 620, 2, 82),
-)
+#: the defensive deck: shields and heals the hand-coded continuations
+#: never cast inside a rollout
+_MID = (["Colossus"] * 4 + ["Ice Wyvern"] * 4 + ["Iceblade"] * 4
+        + ["Tower Shield"] * 3 + ["Sprite"] * 2)
+
+#: An 8th element names a CATALOG boss: the board becomes the casting
+#: encounter (pool, opening pips) at the probe health -- the opponent
+#: the live rollouts actually price since _apply_pool.
+BOARD_SETS = {
+    "wide": (
+        (_LOW, "ice", 1022, 0.09, 620, 2, 82),
+        (_LOW, "ice", 1022, 0.09, 730, 2, 92),
+        (_BUFFY, "ice", 1022, 0.09, 620, 2, 82),
+        (_BUFFY, "ice", 1022, 0.09, 730, 2, 92),
+        (_STORM, "storm", 800, 0.05, 620, 2, 82),
+        (_STORM, "storm", 800, 0.05, 1250, 1, 105),
+        (_FIRE, "fire", 900, 0.07, 620, 2, 82),
+    ),
+    # campaign 3: survival play against CASTING bosses -- the ground
+    # no hand-coded continuation covers (none of the five ever casts a
+    # shield or a heal inside a rollout) and the shipped specialist
+    # was never trained on. Verdict boards use different healths
+    # (Ketil 1300, Jack of Knaves 1100) and stay held out.
+    "defense": (
+        (_MID, "ice", 1800, 0.25, 1000, 1, 0, "Ketil Blackheart"),
+        (_MID, "ice", 1800, 0.25, 1450, 1, 0, "Ketil Blackheart"),
+        (_MID, "ice", 1800, 0.25, 950, 1, 0, "Jack of Knaves"),
+        (_MID, "ice", 1800, 0.25, 4300, 1, 0, "Tomugawa the Evil"),
+        (_LOW, "ice", 1022, 0.09, 640, 2, 88),
+    ),
+}
+BOARDS = BOARD_SETS["wide"]
 
 N_FIT = 30          # fights per board per candidate
 N_VAL = 100         # fights per board for the validation score
@@ -112,16 +136,29 @@ def _policy(net):
     return strat
 
 
-def fitness(theta, shapes, base_seed, n):
-    cont = _policy(_unflatten(theta, shapes))
-    total = 0.0
-    for deck, school, php, dmgb, hp, mobs, dmg in BOARDS:
+def _board_sim(board):
+    deck, school, php, dmgb = board[:4]
+    hp, mobs, dmg = board[4:7]
+    name = board[7] if len(board) > 7 else None
+    if name:
+        from deimos_bridge.bestiary import full_boss
+        boss = full_boss(name, hp)
+        extra = []
+    else:
         boss = Boss(name="p", hp=hp, school="death", dmg=dmg)
         extra = [Boss(name=f"p{i}", hp=hp, school="death", dmg=dmg)
                  for i in range(1, mobs)]
-        sim = Sim(CARDS, list(deck), school, boss, enemies=extra,
-                  player_hp=php, player_stats={"damage": {"*": dmgb}},
-                  rules=LIVE_RULES)
+    return Sim(CARDS, list(deck), school, boss, enemies=extra,
+               player_hp=php, player_stats={"damage": {"*": dmgb}},
+               rules=LIVE_RULES)
+
+
+def fitness(theta, shapes, base_seed, n, boards=None):
+    cont = _policy(_unflatten(theta, shapes))
+    boards = BOARDS if boards is None else boards
+    total = 0.0
+    for board in boards:
+        sim = _board_sim(board)
         pol = P.greedy_ttk(6, continuation=cont)
         wins = 0
         for i in range(n):
@@ -129,30 +166,34 @@ def fitness(theta, shapes, base_seed, n):
             _, won, _ = sim.run(pol, max_turns=25)
             wins += won
         total += wins / n
-    return total / len(BOARDS)
+    return total / len(boards)
 
 
-def main(generations, out_path, seed=0, seed_weights=None):
+def main(generations, out_path, seed=0, seed_weights=None,
+         board_set="wide"):
     rng = np.random.RandomState(seed)
+    boards = BOARD_SETS[board_set]
     # resume a killed campaign from its own best checkpoint
     base = Net.load(seed_weights or DEFAULT_WEIGHTS)
     shapes = [(W.shape[0], W.shape[1]) for W, _ in base.layers]
     theta = _flatten(base)
 
-    val0 = fitness(theta, shapes, 999_999, N_VAL)
+    val0 = fitness(theta, shapes, 999_999, N_VAL, boards)
     best_val, best_theta = val0, theta.copy()
-    print(f"gen 0 (BC seed): val {val0 * 100:.1f}", flush=True)
+    print(f"gen 0 ({board_set} seed): val {val0 * 100:.1f}", flush=True)
 
     for gen in range(1, generations + 1):
         gen_seed = 1_000_000 + 10_000 * gen        # fresh per generation
         grad = np.zeros_like(theta)
         for _ in range(PAIRS):
             eps = rng.randn(len(theta))
-            fp = fitness(theta + SIGMA * eps, shapes, gen_seed, N_FIT)
-            fm = fitness(theta - SIGMA * eps, shapes, gen_seed, N_FIT)
+            fp = fitness(theta + SIGMA * eps, shapes, gen_seed, N_FIT,
+                         boards)
+            fm = fitness(theta - SIGMA * eps, shapes, gen_seed, N_FIT,
+                         boards)
             grad += (fp - fm) * eps
         theta = theta + ALPHA * grad / (2 * PAIRS * SIGMA)
-        val = fitness(theta, shapes, 999_999, N_VAL)
+        val = fitness(theta, shapes, 999_999, N_VAL, boards)
         mark = ""
         if val > best_val:
             best_val, best_theta = val, theta.copy()
@@ -172,4 +213,5 @@ def main(generations, out_path, seed=0, seed_weights=None):
 if __name__ == "__main__":
     main(int(sys.argv[1]), sys.argv[2],
          int(sys.argv[3]) if len(sys.argv) > 3 else 0,
-         sys.argv[4] if len(sys.argv) > 4 else None)
+         sys.argv[4] if len(sys.argv) > 4 else None,
+         sys.argv[5] if len(sys.argv) > 5 else "wide")
