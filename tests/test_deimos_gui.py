@@ -4962,3 +4962,138 @@ def test_the_losing_board_ranking_is_pluggable_and_defaults_to_shipped():
         assert P._lost_score(14, 0.0, 0, 12)[0] > 12
     finally:
         P.LOST_RANKING = original
+
+
+# ---------------- the leaf value, the horizon, and the tuned search
+def test_leaf_features_are_scale_free():
+    """The property the tabular key lacks and the one levelling applies
+    constantly: multiply every health and damage by k and the state is
+    the same fight. The key is 0% invariant to it; phi must be 100%."""
+    import dataclasses
+
+    import numpy as np
+
+    from data_full import load_spells_full
+    from deimos_bridge.leaf_value import phi
+    from w101_sim import Actor, State
+
+    cards = load_spells_full()
+
+    def board(k):
+        me = Actor(name="W", school="ice", hp=800 * k, max_hp=1000 * k,
+                   team=0, norm_pips=3)
+        me.hand = [dataclasses.replace(cards["Frost Beetle"],
+                                       damage=85.0 * k),
+                   dataclasses.replace(cards["Ice Trap"])]
+        me.deck = [dataclasses.replace(cards["Snow Serpent"],
+                                       damage=175.0 * k)]
+        foes = [Actor(name="m", school="death", hp=400.0 * k,
+                      max_hp=500.0 * k, team=1)]
+        foes[0].flat_hit = 60.0 * k
+        return State(me, foes)
+
+    a, b = phi(None, board(1)), phi(None, board(20))
+    assert np.allclose(a, b), (a, b)
+
+
+def test_the_committed_leaf_weights_load_and_predict():
+    from deimos_bridge.leaf_value import FEATURES, LeafValue
+
+    model = LeafValue.load()
+    assert len(model.w) == len(FEATURES)
+
+    class _E:
+        def __init__(self, hp, mx):
+            self.hp, self.max_hp, self.alive = hp, mx, hp > 0
+            self.wards = []
+            self.flat_hit = 50.0
+
+    class _P:
+        hp, max_hp = 900.0, 1000.0
+        charms = []
+
+    class _S:
+        player = _P()
+        enemies = [_E(50.0, 500.0)]
+        hand, deck = [], []
+        norm_pips, pow_pips = 6, 2
+
+    nearly_won = model(None, _S())
+    _S.enemies = [_E(500.0, 500.0), _E(500.0, 500.0), _E(500.0, 500.0)]
+    _S.player.hp = 100.0
+    nearly_lost = model(None, _S())
+    assert 0.0 <= nearly_lost < nearly_won <= 1.0, (nearly_lost, nearly_won)
+
+
+def test_the_leaf_reranks_only_the_stalled_bucket():
+    """When installed, a rollout that runs out of horizon alive is ranked
+    by what the surviving position is worth; wins and deaths untouched."""
+    from data_full import load_spells_full
+    from deimos_bridge import policies as P
+    from w101_sim import Boss, Sim
+
+    cards = load_spells_full()
+    deck = ["Frost Beetle"] * 4 + ["Ice Trap"] * 4
+    sim = Sim(cards, deck, "ice",
+              Boss(name="wall", hp=50000, school="death", dmg=0),
+              player_hp=1000)
+    s = sim.new_state()
+
+    base = P._rollout(sim, s, None, max_turns=2)
+    try:
+        assert P.load_leaf_value() is not None
+        with_leaf = P._rollout(sim, s, None, max_turns=2)
+    finally:
+        P.set_leaf_value(None)
+    assert base[0] == with_leaf[0] == 3          # both stalled (2 + 1)
+    assert with_leaf[1] != base[1]               # ranked differently
+
+
+def test_ev_pricing_exists_but_is_off_by_default():
+    """Measured: EV accuracy alone is -4.0 points, EV + leaf is -5.0.
+    The knob stays so the numbers are re-checkable; the default must
+    remain the shipped optimistic rollout."""
+    from data_full import load_spells_full
+    from deimos_bridge import policies as P
+
+    assert P.ROLLOUT_ACCURACY == "optimistic"
+    cards = load_spells_full()
+    cat = P.ev_card(cards["Fire Cat"])
+    assert cat.accuracy == 1.0 and cat.damage == 75.0       # 100 x 0.75
+    elf = P.ev_card(cards["Fire Elf"])
+    dot = next(o for o in elf.ops if o["op"] == "dot")
+    assert dot["total"] == 157.5                            # 210 x 0.75
+    blade = P.ev_card(cards["Fireblade"])
+    assert blade.percent == 0.35 and blade is cards["Fireblade"]
+
+
+def test_the_search_horizon_is_deck_scoped():
+    from deimos_bridge import policies as P
+
+    assert P.DEFAULT_HORIZON == 12
+    assert P.search_horizon() == 12
+    try:
+        assert P.set_search_horizon(6) == 6
+        assert P.search_horizon() == 6
+    finally:
+        P.set_search_horizon(None)
+    assert P.search_horizon() == 12
+
+
+def test_choose_search_sweeps_continuations_and_horizons():
+    from data_full import load_spells_full
+    from deimos_bridge import policies as P
+
+    cards = load_spells_full()
+    deck = ["Frost Beetle"] * 3 + ["Ice Trap"] * 3 + ["Snow Serpent"] * 3
+    try:
+        name, horizon, scores = P.choose_search(
+            cards, deck, "ice", [(350, 2, "death")], n=8, dmg=55)
+        assert name in P.CONTINUATIONS
+        assert horizon in P.HORIZONS
+        assert len(scores) == len(P.CONTINUATIONS) * len(P.HORIZONS)
+        assert P.search_horizon() == horizon      # installed, not reported
+        assert P.continuation_name() == name
+    finally:
+        P.set_search_horizon(None)
+        P.set_continuation(P.DEFAULT_CONTINUATION)

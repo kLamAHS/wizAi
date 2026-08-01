@@ -532,14 +532,16 @@ class TrainWorker(QThread):
             # Measured worth ~14 points of kill rate, and deck-specific:
             # the choice that is +5.2 on one deck is -7.6 on another.
             # Seconds, against episodes.
-            self.stage.emit("picking the rollout continuation for this deck")
+            self.stage.emit("tuning the search for this deck")
             try:
-                from ..policies import choose_continuation
-                picked, scores = choose_continuation(
+                from ..policies import choose_search
+                picked, horizon, scores = choose_search(
                     self.cards, self.deck, self.school,
-                    self.probe_boards(bands, schools), n=60)
-                self.continuation.emit(picked, dict(scores))
-                self.stage.emit(f"rollout continuation: {picked}")
+                    self.probe_boards(bands, schools), n=60, dmg=dmg)
+                self.continuation.emit(f"{picked} @ horizon {horizon}",
+                                       dict(scores))
+                self.stage.emit(
+                    f"search tuned: {picked}, horizon {horizon}")
             except Exception:
                 pass          # a nicety; never worth failing a train over
 

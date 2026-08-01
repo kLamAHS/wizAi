@@ -475,16 +475,57 @@ def continuation_name():
     return _CONTINUATION_NAME or DEFAULT_CONTINUATION
 
 
-def choose_continuation(cards, deck, school, boards, n=60, on_probe=None):
-    """The best continuation for this deck, measured rather than assumed.
+#: Horizons the per-deck pick sweeps. Two, not a range: 12 is the
+#: shipped default and 6 is the one with a measured, reproduced win --
+#: +10.3 points on a two-mob attrition board, three independent
+#: reproductions -- because a shorter horizon denies the rollout the
+#: patience that long setup lines (the buff-spam) are made of.
+HORIZONS = (6, 12)
 
-    `boards` is [(hp, n_mobs, school)]. About five seconds per candidate
-    on a handful of probe boards -- against 12,000 episodes for a table
-    that then only works on one deck at one health band. That ratio is
-    the whole argument for this shape of learning.
 
-    Returns (name, {name: kill rate}).
+def choose_search(cards, deck, school, boards, n=60, on_probe=None,
+                  dmg=0):
+    """The best (continuation, horizon) for this deck, measured.
+
+    `boards` is [(hp, n_mobs, school)]. Ten probes of a few seconds each
+    -- against 12,000 episodes for a table that then only works on one
+    deck at one health band. That ratio is the whole argument for this
+    shape of learning: the search is the model, and the per-deck
+    learning is a handful of measured choices about how to run it.
+
+    `dmg` puts incoming pressure on the probe boards. At zero the wizard
+    is never punished for patience, so every horizon ties and the sweep
+    cannot see the one thing it exists to decide.
+
+    Returns (continuation, horizon, {"name@h6": kill rate, ...}).
     """
+    from w101_sim import Boss, Sim, evaluate
+
+    scores = {}
+    for name in CONTINUATIONS:
+        set_continuation(name)
+        for horizon in HORIZONS:
+            total = 0.0
+            for hp, mobs, mob_school in boards:
+                boss = Boss(name="probe", hp=hp, school=mob_school, dmg=dmg)
+                extra = [Boss(name=f"probe {i}", hp=hp, school=mob_school,
+                              dmg=dmg) for i in range(1, mobs)]
+                sim = Sim(cards, deck, school, boss, enemies=extra)
+                total += evaluate(sim, greedy_ttk(horizon), n=n)[0]
+            key = f"{name}@h{horizon}"
+            scores[key] = total / max(1, len(boards))
+            if on_probe:
+                on_probe(key, scores[key])
+    best = max(scores, key=lambda k: scores[k])
+    best_name, best_h = best.rsplit("@h", 1)
+    set_continuation(best_name)
+    set_search_horizon(int(best_h))
+    return best_name, int(best_h), scores
+
+
+def choose_continuation(cards, deck, school, boards, n=60, on_probe=None):
+    """Back-compatible wrapper over `choose_search`, horizon fixed at the
+    default. Prefer `choose_search`."""
     from w101_sim import Boss, Sim, evaluate
 
     scores = {}
@@ -548,6 +589,78 @@ def _split(action):
 #: the losing-board objective.
 LOST_RANKING = "damage"
 
+#: The learned leaf value, if one is installed. `None` keeps the shipped
+#: behaviour bit-for-bit. When set, a rollout that runs out of horizon
+#: still alive is ranked by what the LEAF is worth -- P(win) from
+#: scale-free features -- instead of by damage banked, which cannot tell
+#: a nearly-won board from a nearly-lost one at the same total.
+_LEAF = None
+
+
+def set_leaf_value(model):
+    """Install (or clear, with None) the leaf evaluator."""
+    global _LEAF
+    _LEAF = model
+    return model
+
+
+def load_leaf_value():
+    """The committed weights, installed. Returns the model or None."""
+    try:
+        from .leaf_value import LeafValue
+        return set_leaf_value(LeafValue.load())
+    except Exception:
+        return None
+
+
+#: How the rollout prices a cast that can miss. "optimistic" is what
+#: shipped: the deterministic rollout lands every cast, so a 75% Fire
+#: Cat is planned exactly like a 100% card -- at level five nothing in a
+#: fire deck is above 75%, so the whole plan is built on damage that
+#: only arrives three times in four. "expected" prices each uncertain
+#: hit at accuracy x damage instead: still deterministic, no random
+#: fizzles polluting the comparison, but a blade's certain cost is
+#: finally weighed against a hit's uncertain payoff.
+#:
+#: Measured alone, "expected" LOSES 4.3 points: the honest answer to a
+#: discounted board is "I lose this", the sentinel rate triples, and the
+#: sentinel's damage ranking is a bad judge. It is only safe to turn on
+#: together with the leaf value, which gives the rollout something
+#: better to say at exactly the states honesty produces more of.
+ROLLOUT_ACCURACY = "optimistic"
+
+_EV_CARDS = {}
+
+
+def ev_card(card):
+    """`card` priced at expected value: lands always, worth acc x damage.
+
+    Buffs, shields and traps are left untouched -- a Fireblade really is
+    100% accurate -- which is the point of the whole exercise.
+    """
+    acc = max(0.0, min(1.0, float(getattr(card, "accuracy", 1.0) or 1.0)))
+    if acc >= 1.0 or card.kind not in ("damage", "drain"):
+        return card
+    priced = _EV_CARDS.get(card.name)
+    if priced is None:
+        import dataclasses
+
+        def scale(op):
+            out = dict(op)
+            for field in ("amount", "total"):
+                if isinstance(out.get(field), (int, float)):
+                    out[field] = out[field] * acc
+            if isinstance(out.get("outcomes"), (list, tuple)):
+                out["outcomes"] = [v * acc for v in out["outcomes"]]
+            return out
+
+        priced = dataclasses.replace(
+            card, accuracy=1.0, damage=(card.damage or 0) * acc,
+            ops=[scale(o) if o.get("op") in ("hit", "dot") else dict(o)
+                 for o in (card.ops or [])])
+        _EV_CARDS[card.name] = priced
+    return priced
+
 
 def _lost_score(rank, dealt, kills, turn):
     """A 2-tuple, always: the caller unpacks (turns, neg_damage).
@@ -593,6 +706,9 @@ def _rollout(sim, state, first_action, max_turns=12, target=0):
     probe = copy.copy(sim)
     probe.rng = _Fixed()
     s = copy.deepcopy(state)
+    if ROLLOUT_ACCURACY == "expected":
+        s.player.hand[:] = [ev_card(c) for c in s.player.hand]
+        s.player.deck[:] = [ev_card(c) for c in s.player.deck]
 
     def enemy_alive():
         return any(e.alive for e in s.enemies)
@@ -611,6 +727,7 @@ def _rollout(sim, state, first_action, max_turns=12, target=0):
         return sum(max(e.hp, 0.0) for e in s.enemies)
 
     dealt = 0.0
+    start_board = board_hp() or 1.0
     #: Ranks worse than any line that clears the board, and worse than
     #: one that merely runs out of horizon while alive. `unplayable` is
     #: for a move that cannot be made at all.
@@ -639,6 +756,18 @@ def _rollout(sim, state, first_action, max_turns=12, target=0):
         return _lost_score(max_turns + 2, dealt, kills(), turn)
 
     def stalled(turn=0):
+        if _LEAF is not None:
+            # Ranked by what the surviving position is worth, not by
+            # damage banked. The value rides in the damage slot scaled
+            # to board units, so the tuple shape and the panel's display
+            # stay intact; within the stalled bucket only these compare
+            # against each other, so the units only have to be
+            # consistent, and they are.
+            try:
+                worth = _LEAF(probe, s)
+            except Exception:
+                worth = 0.0
+            return (max_turns + 1, -(dealt + worth * start_board))
         return _lost_score(max_turns + 1, dealt, kills(), turn)
 
     # find the copied card matching the chosen one
@@ -685,8 +814,34 @@ def _rollout(sim, state, first_action, max_turns=12, target=0):
     return stalled(max_turns)
 
 
-def greedy_ttk(max_turns: int = 12):
+#: The rollout horizon `greedy_ttk` uses when the caller does not say.
+#: Deck-scoped for the same reason the continuation is: measured on a
+#: 12-cell grid at n=400, horizon 6 is +10.3 points on a two-mob
+#: attrition board (reproduced three times: +17, +9, +10.3), never worse
+#: than 2 anywhere, and a null on the mean -- a long horizon buys the
+#: rollout patience for long setup lines, and on a board that punishes
+#: patience that patience is the buff-spam. `choose_search` picks it per
+#: deck on envelope probes; this is only the fallback.
+DEFAULT_HORIZON = 12
+_HORIZON = None
+
+
+def set_search_horizon(h):
+    """Choose the rollout horizon for this deck. None restores default."""
+    global _HORIZON
+    _HORIZON = int(h) if h else None
+    return _HORIZON or DEFAULT_HORIZON
+
+
+def search_horizon():
+    return _HORIZON or DEFAULT_HORIZON
+
+
+def greedy_ttk(max_turns: int = None):
     """Pick the move that kills soonest, by simulating each candidate.
+
+    `max_turns=None` takes the deck-scoped horizon -- see
+    `set_search_horizon`.
 
     `school_aware_blade_stack` stacks a *fixed* number of buffs and only
     then looks for a hit, which is wrong in both directions and both were
@@ -719,8 +874,10 @@ def greedy_ttk(max_turns: int = 12):
     rollouts per decision -- which is still nothing next to a live
     planning phase.
     """
+    fixed = max_turns
 
     def strat(sim, s):
+        max_turns = fixed if fixed is not None else search_horizon()
         from w101_sim import castable
 
         foes = [i for i, e in enumerate(s.enemies) if e.alive]
