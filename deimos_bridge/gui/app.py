@@ -195,13 +195,24 @@ class TrainWorker(QThread):
         policy = school_aware_blade_stack(3)
 
         def wins(hp, count):
+            import random as _random
+
             board = Boss(name="probe", hp=hp, school=schools[0], dmg=dmg)
             extra = [Boss(name=f"probe {i}", hp=hp,
                           school=schools[i % len(schools)], dmg=dmg)
                      for i in range(1, count)]
             sim = Sim(self.cards, self.deck, self.school, board,
                       player_hp=self.player_hp,
-                      player_stats=self.player_stats, enemies=extra)
+                      player_stats=self.player_stats, enemies=extra,
+                      # Seeded per probe point, so the same deck at the
+                      # same settings bisects to the SAME bands every
+                      # run. The bands are stamped onto the trained
+                      # table and quoted back at the operator ("above
+                      # the 40-1,500 band this table was trained on");
+                      # edges that wobbled with each run's evaluation
+                      # luck made those messages disagree between
+                      # sessions about what the deck could clear.
+                      rng=_random.Random(hash((count, hp))))
             kill, _ = evaluate(sim, policy, n=n)
             if on_probe:
                 on_probe(count, hp, kill)
@@ -263,7 +274,7 @@ class TrainWorker(QThread):
         would dilute the informative boards with the saturated ones,
         which is the same mistake in a different shape.
         """
-        from w101_sim import Boss, Sim, evaluate
+        from w101_sim import Boss, Sim, evaluate_paired
         from ..policies import school_aware_blade_stack, trained_policy
 
         counts = sorted(bands) or [self.n_enemies]
@@ -286,9 +297,16 @@ class TrainWorker(QThread):
                       player_stats=self.player_stats, enemies=extra)
             # The wrapped policy, because that is what plays live -- the
             # raw table passes on an unseen state, which is not a move
-            # anyone makes on purpose.
-            t, _ = evaluate(sim, trained_policy(agent), n=n)
-            r, _ = evaluate(sim, school_aware_blade_stack(3), n=n)
+            # anyone makes on purpose. Paired seeds, because both the
+            # verdict AND the choice of which probe to report ride on
+            # the trained-minus-rival difference: on independent streams
+            # a lucky run inflates a gap and the largest-disagreement
+            # rule then reports the probe with the loudest noise.
+            stats = evaluate_paired(
+                sim, {"trained": trained_policy(agent),
+                      "rival": school_aware_blade_stack(3)}, n=n)
+            t = stats["trained"]["win_rate"]
+            r = stats["rival"]["win_rate"]
             if abs(t - r) > worst[2]:
                 worst = (t, r, abs(t - r))
         return worst[0], worst[1]

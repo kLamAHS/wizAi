@@ -4454,32 +4454,28 @@ def test_the_verdict_probes_where_the_board_can_discriminate(qapp):
 
     seen = []
 
-    def fake_evaluate(sim, policy, n=0):
-        # trained is flat 50%; the heuristic is good on easy boards and
-        # bad on hard ones, so the largest gap is at the hard end.
-        hp = seen[-1]
-        rival = 1.0 if hp < 300 else 0.2
-        return (rival if fake_evaluate.turn % 2 else 0.5), 5.0
-
-    fake_evaluate.turn = 0
-
     import w101_sim
-    real_sim, real_eval = w101_sim.Sim, w101_sim.evaluate
+    real_sim, real_eval = w101_sim.Sim, w101_sim.evaluate_paired
 
     class _S:
         def __init__(self, cards, deck, school, boss, **kw):
             seen.append(boss.hp)
 
-    def _ev(sim, policy, n=0):
-        fake_evaluate.turn += 1
-        return fake_evaluate(sim, policy, n)
+    def _ep(sim, policies, n=0):
+        # trained is flat 50%; the heuristic is good on easy boards and
+        # bad on hard ones, so the largest gap is at the hard end. One
+        # call per probe now -- both policies ride the same seed stream.
+        hp = seen[-1]
+        rival = 1.0 if hp < 300 else 0.2
+        return {"trained": {"win_rate": 0.5},
+                "rival": {"win_rate": rival}}
 
-    w101_sim.Sim, w101_sim.evaluate = _S, _ev
+    w101_sim.Sim, w101_sim.evaluate_paired = _S, _ep
     try:
         t, r = w.compare(object(), {1: (100, 1000), 2: (100, 500)}, 85,
                          ["death"], n=10)
     finally:
-        w101_sim.Sim, w101_sim.evaluate = real_sim, real_eval
+        w101_sim.Sim, w101_sim.evaluate_paired = real_sim, real_eval
 
     # It walked both counts at three depths each, not one board.
     assert len(seen) >= 6, seen
@@ -5706,6 +5702,25 @@ def test_a_fight_on_an_untuned_deck_tunes_itself(qapp, monkeypatch):
     win._autotune = None                  # the thread object is done
     win._maybe_autotune()
     assert len(started) == 1              # tuned deck: no second run
+
+
+def test_the_envelope_is_the_same_band_every_run(qapp):
+    """Band edges are stamped onto the trained table and quoted back at
+    the operator ("above the 40-1,500 band this table was trained on");
+    edges that wobbled with each run's evaluation luck made those
+    messages disagree between sessions about what the same deck could
+    clear. Probes are seeded per (count, hp): same deck, same settings,
+    same bands."""
+    from data_full import load_spells_full
+    from deimos_bridge.gui.app import TrainWorker
+
+    cards = load_spells_full()
+    deck = ["Frost Beetle"] * 4 + ["Snow Serpent"] * 4
+    w = TrainWorker(cards, deck, "ice", 10, player_hp=1022, boss_hp=690,
+                    n_enemies=1, mob_schools=["death"])
+    a = w.envelope(dmg=55, n=60)
+    b = w.envelope(dmg=55, n=60)
+    assert a and a == b
 
 
 def test_the_sweep_never_installs_what_it_is_measuring():
