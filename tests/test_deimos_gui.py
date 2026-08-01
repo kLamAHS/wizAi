@@ -5497,3 +5497,78 @@ def test_the_deck_search_fights_the_casting_boss(qapp, monkeypatch):
     assert seen["dmg"] == 0               # its damage IS the pool
     assert seen["pips"] >= 1
     assert seen["hp"] == 690 and seen["school"] == "death"
+
+
+def test_enemy_pips_are_read_not_zeroed():
+    """The client reports every member's pip rack; the read used to
+    zero it for enemies -- a real observation thrown away. "The boss
+    has six pips" is the difference between shielding this round and
+    shielding after the Wraith lands."""
+    import asyncio
+
+    from data_full import load_spells_full
+    from deimos_bridge.live_backend import NameResolver
+    from deimos_bridge.live_state import read_state
+    from deimos_bridge.mock_client import MockCard, MockCombat, MockMember
+
+    cards = load_spells_full()
+    me = MockMember("W", 800, client=True, normal_pips=2)
+    foe = MockMember("Lord Nightshade", 690, monster=True,
+                     normal_pips=4, power_pips=1)
+    combat = MockCombat([me, foe], [MockCard("Frost Beetle")])
+    read = asyncio.new_event_loop().run_until_complete(
+        read_state(combat, NameResolver(cards), "ice"))
+    e = read.state.enemies[0]
+    assert (e.norm_pips, e.pow_pips) == (4, 1)
+
+
+def test_named_enemies_cast_in_the_rollouts():
+    """`_apply_pool` puts the catalog spell pool on a named read enemy
+    so rollouts price its actual casts against its actual pips, with
+    the measured flat hit kept underneath as the fallback. Measured in
+    belief_probe.py: +8 to +10 points of kill rate on hitter pools,
+    a wash inside noise on debuffer pools."""
+    from data_full import load_spells_full
+    from deimos_bridge.live_backend import WizAiBackend
+    from w101_sim import Actor, State
+
+    cards = load_spells_full()
+    me = Actor(name="W", school="ice", hp=800, max_hp=800, team=0)
+
+    def read_for(actor):
+        class _Read:
+            state = State(me, [actor])
+        return _Read()
+
+    be = WizAiBackend(policy=lambda sim, s: None, cards=cards,
+                      school="ice")
+    boss = Actor(name="Lord Nightshade", school="death", hp=690,
+                 max_hp=690, team=1, flat_hit=136.0)
+    be._apply_pool(read_for(boss))
+    assert boss.spell_pool                # it casts in rollouts now
+    assert boss.archetype == "debuffer"
+    assert boss.power_pip_chance > 0
+    assert boss.flat_hit == 136.0         # the fallback stays measured
+
+    # An unknown mob keeps the flat model untouched.
+    nobody = Actor(name="No Such Creature XYZ", school="fire", hp=300,
+                   max_hp=300, team=1, flat_hit=90.0)
+    be._apply_pool(read_for(nobody))
+    assert nobody.spell_pool is None
+
+    # A pool the card table cannot resolve to a single damage spell is
+    # NOT stamped: `_enemy_choose` would find nothing to cast and the
+    # boss would deal zero all rollout -- worse than the flat model.
+    be_bare = WizAiBackend(policy=lambda sim, s: None, cards={},
+                           school="ice")
+    boss2 = Actor(name="Lord Nightshade", school="death", hp=690,
+                  max_hp=690, team=1, flat_hit=136.0)
+    be_bare._apply_pool(read_for(boss2))
+    assert boss2.spell_pool is None
+
+    # The knob turns it off wholesale.
+    be.use_pool_model = False
+    boss3 = Actor(name="Lord Nightshade", school="death", hp=690,
+                  max_hp=690, team=1)
+    be._apply_pool(read_for(boss3))
+    assert boss3.spell_pool is None

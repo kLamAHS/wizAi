@@ -603,8 +603,14 @@ async def read_state(combat, resolver: NameResolver, school: str,
             hp=float(await m.health()),
             max_hp=float(await m.max_health()) or 1.0,
             team=team,
-            norm_pips=int(await m.normal_pips()) if team == 0 else 0,
-            pow_pips=int(await m.power_pips()) if team == 0 else 0,
+            # Enemy pips used to be zeroed here -- a real observation
+            # thrown away. The client reports every member's rack, and
+            # "the boss has six pips" is the difference between shielding
+            # this round and shielding after the Wraith lands: with the
+            # catalog spell pool on the enemy (live_backend._apply_pool)
+            # the rollout knows exactly which casts are legal RIGHT NOW.
+            norm_pips=int(await m.normal_pips()),
+            pow_pips=int(await m.power_pips()),
         )
 
     unreadable = []

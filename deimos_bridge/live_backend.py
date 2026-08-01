@@ -142,6 +142,10 @@ class WizAiBackend:
         self._hp_seen = None
         self._round_seen = None
         self._enemies_seen = 1
+        #: rollouts model named enemies as CASTERS (catalog spell pool +
+        #: the pips read off the client) instead of a flat measured hit.
+        #: See `_apply_pool` for the measurement behind the default.
+        self.use_pool_model = True
 
     # -- the policy, swappable mid-fight ----------------------------------
     @property
@@ -201,6 +205,7 @@ class WizAiBackend:
         self._measured_incoming = self._estimate_incoming(read)
         self._apply_player_stats(read)
         self._apply_bestiary(read)
+        self._apply_pool(read)
         self.last_read = read
 
         sim = self._sim_for(read)
@@ -412,6 +417,64 @@ class WizAiBackend:
                 enemy.resist = dict(resist)
             if boost and not enemy.boost:
                 enemy.boost = dict(boost)
+
+    def _apply_pool(self, read):
+        """Named enemies become CASTERS in the rollouts.
+
+        The flat measured hit gets the average right and the SHAPE
+        wrong: a boss saving six pips for a Wraith deals nothing for
+        three rounds and then a third of the wizard's health at once,
+        and shield-or-race is decided exactly by that shape. The client
+        reports every member's pip rack (`read_state` now keeps it) and
+        the catalog knows what 1,795 creatures cast, so the sim's
+        living-boss layer -- `_enemy_turn`'s pool branch, pip economy
+        and all -- can price "the Wraith is legal RIGHT NOW" instead of
+        a constant drizzle.
+
+        Measured (belief-vs-truth A/B, greedy_ttk vs casting catalog
+        bosses, N=250 paired seeds, contested boards only): the pool
+        belief wins +8 to +10 points of kill rate on hitter pools
+        (storm Ketil band +10.0/+2.8/+8.0/+9.2, fire Usunoki +8.4) and
+        is a wash inside the ~2.4-point noise floor on debuffer/DoT
+        pools (myth -0.8, death -2.0). In-sim the belief's pool is
+        exact, so those are upper bounds of the live gain -- but no
+        board showed a significant loss, and the measured flat hit
+        stays on every enemy as the fallback the sim uses the moment a
+        pool is absent.
+
+        A pool the card table cannot resolve to at least one damage
+        spell is NOT stamped: `_enemy_choose` would find nothing to
+        cast and the boss would deal zero for the whole rollout, which
+        is strictly worse than the measured flat model.
+        """
+        if not self.use_pool_model:
+            return
+        try:
+            from .bestiary import full_boss
+        except Exception:
+            return
+        for enemy in read.state.enemies:
+            if getattr(enemy, "spell_pool", None) is not None:
+                continue
+            try:
+                b = full_boss(enemy.name, enemy.max_hp)
+            except Exception:
+                continue
+            if b is None or not b.pool:
+                continue
+            known = [n for n in b.pool if n in self.cards]
+            if not any(self.cards[n].kind in ("damage", "drain")
+                       for n in known):
+                continue
+            enemy.spell_pool = list(b.pool)
+            enemy.archetype = b.archetype
+            enemy.discipline = b.discipline
+            enemy.power_pip_chance = b.pip_chance
+            # gear-like scraped extras, never over an observed fact
+            if b.outgoing_bonus and not enemy.damage_bonus:
+                enemy.damage_bonus = {"*": b.outgoing_bonus}
+            if b.pierce and not enemy.pierce:
+                enemy.pierce = b.pierce
 
     def _record(self, decision, read):
         self.history.append(decision)
