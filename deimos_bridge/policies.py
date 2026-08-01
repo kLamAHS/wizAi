@@ -433,13 +433,16 @@ class _Fixed:
 #: inner search beat it by 0.3 points for 11x the cost. The headroom is
 #: in WHICH, not in fitting -- so this was a five-way choice, not a
 #: model, until the sixth candidate EARNED a seat: "neural" is the
-#: search distilled into an entity net (deimos_bridge/neural_net.py,
-#: trained by neural_bc.py -- behaviour cloning plus one DAgger round).
-#: Measured first on the storm deck's hard board on three seed streams
-#: out of three (+5.0/+3.2/+2.6 over the best hand-coded, paired
-#: n=800), second within noise on the buff-heavy deck, last on the
-#: starter deck -- deck-specific like every other candidate, which is
-#: why the per-deck paired probes decide where it actually drives.
+#: search distilled into an entity net (deimos_bridge/neural_net.py;
+#: neural_bc.py behaviour-clones plus a DAgger round, then
+#: neural_es.py optimizes the seat's own objective by evolution
+#: strategies from that seed). Held out at n=800 paired: first on the
+#: storm deck's hard board on two fresh streams (29.9/31.5 against
+#: 15.8 for the best hand-coded) and on the starter deck's hard board
+#: (22.4/22.1 against 17.1), tied-first at 65.5 on the starter's mid
+#: board -- and LAST on the buff-heavy deck's hard board (9.1 against
+#: 24.1). Deck-specific like every other candidate, which is why the
+#: per-deck paired probes decide where it actually drives.
 CONTINUATIONS = ("nuke-asap", "school-aware(3)", "school-aware(0)",
                  "blade-stack(2)", "blade-stack(3)", "neural")
 
