@@ -596,8 +596,10 @@ class LiveWorker(QThread):
             self.trained = trained_policy(self.agent)
             return self.trained
         if self.policy_name.startswith("ttk"):
-            from ..policies import greedy_ttk
-            return greedy_ttk()
+            # The tuned driver: plain lookahead, or determinized search
+            # where the per-deck probes measured it ahead.
+            from ..policies import tuned_driver
+            return tuned_driver()
         if self.policy_name.startswith("school-aware"):
             from ..policies import school_aware_blade_stack
             return school_aware_blade_stack(3)
@@ -626,9 +628,19 @@ class LiveWorker(QThread):
         from ..live_state import build_catalog
 
         if self.continuation:
-            from ..policies import set_continuation
+            from ..policies import (driver_name, search_horizon,
+                                    set_continuation, set_driver,
+                                    set_search_horizon)
+            name = self.continuation
+            if " @ driver " in name:
+                name, drv = name.rsplit(" @ driver ", 1)
+                set_driver(drv)
+            if " @ horizon " in name:
+                name, h = name.rsplit(" @ horizon ", 1)
+                set_search_horizon(int(h))
             self.status.emit(
-                f"rollout continuation: {set_continuation(self.continuation)}")
+                f"search: {set_continuation(name)} continuation, "
+                f"horizon {search_horizon()}, driver {driver_name()}")
         self.status.emit("loading the card table…")
         catalog = build_catalog()
         cards = catalog["cards"]

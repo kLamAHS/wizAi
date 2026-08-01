@@ -195,13 +195,24 @@ class TrainWorker(QThread):
         policy = school_aware_blade_stack(3)
 
         def wins(hp, count):
+            import random as _random
+
             board = Boss(name="probe", hp=hp, school=schools[0], dmg=dmg)
             extra = [Boss(name=f"probe {i}", hp=hp,
                           school=schools[i % len(schools)], dmg=dmg)
                      for i in range(1, count)]
             sim = Sim(self.cards, self.deck, self.school, board,
                       player_hp=self.player_hp,
-                      player_stats=self.player_stats, enemies=extra)
+                      player_stats=self.player_stats, enemies=extra,
+                      # Seeded per probe point, so the same deck at the
+                      # same settings bisects to the SAME bands every
+                      # run. The bands are stamped onto the trained
+                      # table and quoted back at the operator ("above
+                      # the 40-1,500 band this table was trained on");
+                      # edges that wobbled with each run's evaluation
+                      # luck made those messages disagree between
+                      # sessions about what the deck could clear.
+                      rng=_random.Random(hash((count, hp))))
             kill, _ = evaluate(sim, policy, n=n)
             if on_probe:
                 on_probe(count, hp, kill)
@@ -263,7 +274,7 @@ class TrainWorker(QThread):
         would dilute the informative boards with the saturated ones,
         which is the same mistake in a different shape.
         """
-        from w101_sim import Boss, Sim, evaluate
+        from w101_sim import Boss, Sim, evaluate_paired
         from ..policies import school_aware_blade_stack, trained_policy
 
         counts = sorted(bands) or [self.n_enemies]
@@ -286,9 +297,16 @@ class TrainWorker(QThread):
                       player_stats=self.player_stats, enemies=extra)
             # The wrapped policy, because that is what plays live -- the
             # raw table passes on an unseen state, which is not a move
-            # anyone makes on purpose.
-            t, _ = evaluate(sim, trained_policy(agent), n=n)
-            r, _ = evaluate(sim, school_aware_blade_stack(3), n=n)
+            # anyone makes on purpose. Paired seeds, because both the
+            # verdict AND the choice of which probe to report ride on
+            # the trained-minus-rival difference: on independent streams
+            # a lucky run inflates a gap and the largest-disagreement
+            # rule then reports the probe with the loudest noise.
+            stats = evaluate_paired(
+                sim, {"trained": trained_policy(agent),
+                      "rival": school_aware_blade_stack(3)}, n=n)
+            t = stats["trained"]["win_rate"]
+            r = stats["rival"]["win_rate"]
             if abs(t - r) > worst[2]:
                 worst = (t, r, abs(t - r))
         return worst[0], worst[1]
@@ -421,6 +439,59 @@ class TrainWorker(QThread):
             return int(self.mob_damage)
         return max(30, self.player_hp // 12)
 
+    def deck_advice(self, deficit):
+        """Name cards that would close a damage deficit, from the pool.
+
+        The boards no policy can win are lost in the deck box, not in
+        play -- 19 of 32 game-spanning boards were lost by every policy
+        in the repo, and better play cannot buy a single one of them.
+        `deck_builder.legal_pool` knows what this school can actually
+        put in a deck, so the refusal can say "add these" instead of
+        "add damage cards", which is the difference between advice and
+        a shrug.
+        """
+        try:
+            from deck_builder import legal_pool
+
+            pool = legal_pool(self.cards, self.school)
+        except Exception:
+            pool = {n: c for n, c in self.cards.items()
+                    if getattr(c, "school", "") == self.school}
+        gear = 1.0 + (self.player_stats.get("damage") or {}).get(
+            self.school, 0.0)
+        have = {}
+        for name in self.deck:
+            have[name] = have.get(name, 0) + 1
+        picks, closed = [], 0.0
+        # Cheap pips first, biggest damage within a cost. Sorting by
+        # raw damage suggested Lord of Winter to a level-5 wizard --
+        # the pool is not level-gated, but pip cost is a decent proxy
+        # for "castable by whoever is running this deck".
+        hitters = sorted(
+            (c for n, c in pool.items()
+             if c.kind in ("damage", "drain") and c.damage
+             and not c.x_pips and c.pips <= 4
+             and have.get(c.name, 0) < 3),
+            key=lambda c: (c.pips, -c.damage))
+        for c in hitters:
+            room = 3 - have.get(c.name, 0)
+            take = min(room, max(1, int(deficit // max(1, c.damage * gear))))
+            for _ in range(take):
+                if closed >= deficit * 1.15:
+                    break
+                picks.append(c.name)
+                closed += c.damage * gear
+            if closed >= deficit * 1.15:
+                break
+        if not picks:
+            return ""
+        counts = {}
+        for n in picks:
+            counts[n] = counts.get(n, 0) + 1
+        listed = ", ".join(f"{v}x {k}" for k, v in counts.items())
+        return (f" Adding {listed} would close the ~{deficit:,.0f} damage "
+                f"gap with room to spare.")
+
     def preflight(self, board, extra, n=200):
         """(feasible, note) -- can anything win this board?
 
@@ -456,11 +527,7 @@ class TrainWorker(QThread):
         # the answer and suggesting them sends you round in circles.
         ceiling = self.damage_ceiling()
         if ceiling < health:
-            missing = [n for n in ("Evil Snowman", "Snow Serpent",
-                                   "Frost Beetle")
-                       if n in self.cards and n not in self.deck]
-            hint = (f" You have no {missing[0]} in the deck."
-                    if missing else "")
+            hint = self.deck_advice(health - ceiling)
             return False, (
                 head +
                 f"Your deck is the reason, not the board. Every damage "
@@ -532,14 +599,18 @@ class TrainWorker(QThread):
             # Measured worth ~14 points of kill rate, and deck-specific:
             # the choice that is +5.2 on one deck is -7.6 on another.
             # Seconds, against episodes.
-            self.stage.emit("picking the rollout continuation for this deck")
+            self.stage.emit("tuning the search for this deck")
             try:
-                from ..policies import choose_continuation
-                picked, scores = choose_continuation(
+                from ..policies import choose_search
+                picked, horizon, scores = choose_search(
                     self.cards, self.deck, self.school,
-                    self.probe_boards(bands, schools), n=60)
-                self.continuation.emit(picked, dict(scores))
-                self.stage.emit(f"rollout continuation: {picked}")
+                    self.probe_boards(bands, schools), n=60, dmg=dmg)
+                from ..policies import driver_name
+                self.continuation.emit(
+                    f"{picked} @ horizon {horizon} @ driver {driver_name()}",
+                    dict(scores))
+                self.stage.emit(
+                    f"search tuned: {picked}, horizon {horizon}")
             except Exception:
                 pass          # a nicety; never worth failing a train over
 
@@ -584,6 +655,210 @@ class TrainWorker(QThread):
             self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
+class DeckWorker(QThread):
+    """Runs `deck_builder.build_deck` for the observed board.
+
+    The last lever: 19 of 32 game-spanning boards were lost by every
+    policy in the repo, and no amount of better play buys one of them --
+    those fights are lost in the deck box. The repo has had a two-stage
+    deck search all along (`build_deck`: sample the legal pool, screen by
+    simulation, fine-rank the survivors); what it never had was the real
+    fight to build FOR. The live run now measures the board -- healths,
+    schools, incoming damage, the wizard's health and gear -- so the
+    search can finally optimise the deck for the fight being farmed
+    rather than a hypothetical one.
+    """
+
+    status = pyqtSignal(str)
+    finished_ok = pyqtSignal(object, float, float)   # deck, win, ttk
+    failed = pyqtSignal(str)
+
+    def __init__(self, cards, school, player_hp, player_stats,
+                 mob_hps, mob_schools, mob_damage, boss_hp, n_enemies,
+                 mob_names=None, encounter_name=""):
+        super().__init__()
+        self.cards, self.school = cards, school
+        self.player_hp = player_hp
+        self.player_stats = dict(player_stats or {})
+        self.mob_hps = list(mob_hps or [])
+        self.mob_schools = list(mob_schools or [])
+        self.mob_names = list(mob_names or [])
+        self.mob_damage = int(mob_damage or 0)
+        self.boss_hp, self.n_enemies = boss_hp, n_enemies
+        #: build for a NAMED catalog fight instead of the measured one:
+        #: the boss and the creatures the catalog says fight beside it,
+        #: before ever walking in
+        self.encounter_name = str(encounter_name or "").strip()
+
+    def level_guess(self):
+        """The wizard's level, inverted from their health curve.
+
+        `legal_pool` gates by level so the search cannot propose a spell
+        the wizard has not trained -- but nothing in the window knows the
+        level. The health curve does, near enough: `school_hp` maps
+        level to base health, so the measured maximum inverts to a level
+        within a few of the truth, and a few levels of slack only ever
+        UNDER-gates. Erring low can only hide a card the wizard has;
+        erring high proposes one they do not, which is worse.
+        """
+        try:
+            from player_curves import school_hp
+
+            for level in range(1, 121):
+                if school_hp(self.school, level) >= self.player_hp:
+                    return max(1, level - 2)
+            return 120
+        except Exception:
+            return None
+
+    def run(self):
+        try:
+            from deck_builder import build_deck
+            from w101_sim import Boss
+
+            hps = self.mob_hps or [self.boss_hp] + [
+                int(self.boss_hp * 0.8)] * (self.n_enemies - 1)
+            schools = (list(self.mob_schools)
+                       + ["balance"] * len(hps))[:len(hps)]
+            dmg = self.mob_damage or max(30, self.player_hp // 12)
+            names = (self.mob_names + [""] * len(hps))[:len(hps)]
+            board = sorted(zip(hps, schools, names), key=lambda t: -t[0])
+
+            def mk(hp, sc, name, i):
+                """A Boss carrying the catalog's exact defences.
+
+                Resist decides which school of damage a deck should
+                slot at all, so a search that priced Lord Nightshade as
+                a generic death mob would happily fill the deck with
+                the one school he halves. And a named catalog boss is a
+                CASTING boss: it fights with its scraped spell pool and
+                opening pips instead of a flat hit, so the search prices
+                the round-one Wraith a 6-pip opener makes legal -- the
+                exact tempo a shield-or-race deck choice hangs on.
+                Observed health and school stay authoritative; only the
+                flat-damage stand-ins use the measured per-round hit,
+                because a casting boss's damage IS its pool.
+                """
+                if name:
+                    try:
+                        from ..bestiary import full_boss
+                        b = full_boss(name, hp)
+                        if b is not None:
+                            b.school = sc or b.school
+                            if not b.pool:
+                                b.dmg = dmg   # measured beats rank guess
+                            return b
+                    except Exception:
+                        pass
+                resist_map = boost_map = None
+                if name:
+                    try:
+                        from ..bestiary import stat_overrides
+                        found = stat_overrides(name, hp)
+                        if found:
+                            resist_map = dict(found[0]) or None
+                            boost_map = dict(found[1]) or None
+                    except Exception:
+                        pass
+                return Boss(name=name or f"observed mob {i}", hp=int(hp),
+                            school=sc, dmg=dmg, resist_map=resist_map,
+                            boost_map=boost_map)
+
+            if self.encounter_name:
+                # A NAMED fight, before ever walking in: the catalog
+                # boss and the creatures it says fight beside it. The
+                # observed path below knows more once a fight has
+                # happened; this one knows the whole encounter first.
+                from ..bestiary import cheat_warning, full_encounter
+                self.status.emit(
+                    f"looking up '{self.encounter_name}' in the catalog…")
+                found = full_encounter(self.encounter_name,
+                                       self.boss_hp or None)
+                if not found:
+                    self.failed.emit(
+                        f"'{self.encounter_name}' is not in the catalog "
+                        f"— check the spelling, or fight it once and "
+                        f"build from the measured board")
+                    return
+                boss, rest = found
+                warn = cheat_warning(self.encounter_name,
+                                     self.boss_hp or None)
+                if warn:
+                    self.status.emit(warn)
+            else:
+                if any(nm for _, _, nm in board):
+                    # the first catalog hit loads the full registry
+                    # (~2s); without a line the button just looks dead
+                    self.status.emit("pricing the board against the "
+                                     "boss catalog…")
+                boss = mk(board[0][0], board[0][1], board[0][2], 0)
+                rest = [mk(h, sc, nm, i)
+                        for i, (h, sc, nm) in enumerate(board[1:], 1)]
+            level = self.level_guess()
+            self.status.emit(
+                f"searching decks for {boss.hp:,} {boss.school}"
+                + (f" + {len(rest)} mob(s)" if rest else "")
+                + (f", level ~{level}" if level else ""))
+            deck, win, ttk, _table = build_deck(
+                self.cards, self.school, boss, enemies=rest or None,
+                n_candidates=48, top_k=4, level=level,
+                player_hp=self.player_hp, player_stats=self.player_stats,
+                log=lambda *a: self.status.emit(
+                    " ".join(str(x) for x in a)[:120]))
+            self.finished_ok.emit(list(deck), float(win), float(ttk))
+        except Exception as exc:
+            self.failed.emit(f"deck search failed — "
+                             f"{type(exc).__name__}: {exc}")
+
+
+class TuneWorker(QThread):
+    """Tunes the search quartet for the observed fight, in the background.
+
+    The quartet -- continuation, horizon, driver, width -- is worth ~14
+    points of kill rate and deck-specific, but it was only ever picked
+    during a TRAIN. A wizard who connects and just fights on an
+    untrained deck plays the untuned defaults indefinitely, on the
+    exact boards the run is measuring for it. Round one hands over
+    everything the tuner needs (healths, schools, incoming damage),
+    and with the sweep no longer installing candidates globally it is
+    safe to run under the live fight: about a minute at low priority,
+    against every subsequent fight played with a measured pick.
+    """
+
+    tuned = pyqtSignal(str, object)     # wire format, {probe: kill rate}
+    failed = pyqtSignal(str)
+
+    def __init__(self, school, deck, mob_hps, mob_schools, mob_damage):
+        super().__init__()
+        self.school, self.deck = school, list(deck)
+        self.mob_hps = list(mob_hps or [])
+        self.mob_schools = list(mob_schools or [])
+        self.mob_damage = int(mob_damage or 0)
+
+    def run(self):
+        try:
+            from ..live_state import build_catalog
+            from ..policies import choose_search, driver_name
+
+            cards = build_catalog()["cards"]
+            hp = int(max(self.mob_hps))
+            count = len(self.mob_hps)
+            sch = (self.mob_schools or ["balance"])[0]
+            # The observed fight and a softer cousin: probes at a single
+            # ceiling rank nothing, and 0.7x is the envelope lesson
+            # applied without an envelope to bisect.
+            boards = [(hp, count, sch),
+                      (max(1, int(hp * 0.7)), count, sch)]
+            picked, horizon, scores = choose_search(
+                cards, self.deck, self.school, boards, n=60,
+                dmg=self.mob_damage)
+            self.tuned.emit(
+                f"{picked} @ horizon {horizon} @ driver {driver_name()}",
+                dict(scores))
+        except Exception as exc:
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
 class MainWindow(QMainWindow):
     #: the last training checkpoint's numbers, appended to the progress
     #: bar. A class attribute so the bar can be driven before a run has
@@ -598,9 +873,18 @@ class MainWindow(QMainWindow):
     #: has run. Deck-scoped: the choice that is +5.2 points on one deck
     #: is -7.6 on another, so there is no global answer to store.
     continuation = ""
+    #: which deck the installed quartet was measured for, so the
+    #: auto-tuner knows an untuned deck when it sees one and never
+    #: re-tunes a deck a train already tuned
+    _tuned_deck = None
+    _tuning_deck = None
+    #: cheat warnings already shown, so a farmed boss is announced once
+    #: per session rather than once per fight
+    _cheats_warned = None
 
     def __init__(self, telemetry=None):
         super().__init__()
+        self._cheats_warned = set()
         self.setWindowTitle("wizAi — live combat lab")
         self.resize(1180, 800)
         self.tel = telemetry or Telemetry()
@@ -616,6 +900,7 @@ class MainWindow(QMainWindow):
         #: each of those was on its own enough to make the trained board
         #: a different fight from the played one.
         self.observed_schools = []
+        self.observed_names = []
         self.observed_incoming = 0.0
         #: whether the incoming number came off a real fight
         self.mob_damage_measured = False
@@ -839,6 +1124,25 @@ class MainWindow(QMainWindow):
         self.deck_btn = QPushButton("Choose…")
         self.deck_btn.clicked.connect(self.on_pick_deck)
         deck_row.addWidget(self.deck_btn)
+        self.boss_name = QLineEdit()
+        self.boss_name.setPlaceholderText("boss name (optional)")
+        self.boss_name.setMaximumWidth(170)
+        self.boss_name.setToolTip(
+            "Type a boss's name to build the deck for its CATALOG "
+            "encounter — the real casting boss plus the creatures the "
+            "catalog says fight beside it — before ever walking in. "
+            "Leave empty to build for the measured board instead.")
+        deck_row.addWidget(self.boss_name)
+        self.build_btn = QPushButton("Build deck…")
+        self.build_btn.setToolTip(
+            "Search this school's legal card pool for the strongest deck "
+            "against the board the live run measured (or the boxes above, "
+            "before a fight). With a boss name typed, it builds for that "
+            "boss's catalog encounter instead. Takes a couple of minutes; "
+            "the result lands in the deck box to accept or edit — nothing "
+            "is applied until you train or play with it.")
+        self.build_btn.clicked.connect(self.on_build_deck)
+        deck_row.addWidget(self.build_btn)
         outer.addLayout(deck_row)
 
         quest_row = QHBoxLayout()
@@ -1194,6 +1498,7 @@ class MainWindow(QMainWindow):
                 "play them:\n\n  " + "\n  ".join(missing))
             return
 
+        self._tuning_deck = list(deck)
         self.train_btn.setEnabled(False)
         self.train_progress.setVisible(True)
         # Indeterminate only until the first tick. The warm-start solve
@@ -1281,6 +1586,8 @@ class MainWindow(QMainWindow):
         can be handed it, and so changing decks changes it.
         """
         self.continuation = name
+        self._tuned_deck = tuple(sorted(self._tuning_deck
+                                        or self.decklist()))
         ranked = sorted((scores or {}).items(), key=lambda kv: -kv[1])
         spread = ((ranked[0][1] - ranked[-1][1]) * 100) if len(ranked) > 1 else 0
         self.status.setText(
@@ -1342,6 +1649,41 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "wizAi", message)
 
     # -- deck ------------------------------------------------------------
+    def on_build_deck(self):
+        """Search for the strongest deck against the measured board."""
+        if getattr(self, "deck_worker", None) is not None \
+                and self.deck_worker.isRunning():
+            return
+        try:
+            from ..live_state import build_catalog
+            cards = build_catalog()["cards"]
+        except Exception as exc:
+            QMessageBox.critical(self, "wizAi", f"card table failed: {exc}")
+            return
+        self.build_btn.setEnabled(False)
+        self.deck_worker = DeckWorker(
+            cards, self.school.currentText(), self.player_hp.value(),
+            self.player_stats, self.observed_hps, self.observed_schools,
+            int(self.observed_incoming), self.boss_hp.value(),
+            self.n_enemies.value(), mob_names=self.observed_names,
+            encounter_name=self.boss_name.text())
+        self.deck_worker.status.connect(self.status.setText)
+        self.deck_worker.finished_ok.connect(self.on_deck_built)
+        self.deck_worker.failed.connect(self.on_deck_build_failed)
+        self.deck_worker.start()
+
+    def on_deck_built(self, deck, win, ttk):
+        self.build_btn.setEnabled(True)
+        self.deck.setText(",".join(deck))
+        self.status.setText(
+            f"built a {len(deck)}-card deck — wins {win * 100:.0f}% of the "
+            f"measured fight at {ttk:.1f} turns. It is in the deck box; "
+            f"edit it freely, then Train or Play live.")
+
+    def on_deck_build_failed(self, message):
+        self.build_btn.setEnabled(True)
+        self.status.setText(message)
+
     def on_pick_deck(self):
         try:
             from ..live_state import build_catalog
@@ -1539,6 +1881,7 @@ class MainWindow(QMainWindow):
         # start equal never produce the opening state a real board has.
         self.observed_hps = self.tel.observed_mob_hps()
         self.observed_schools = self.tel.observed_mob_schools()
+        self.observed_names = self.tel.observed_mob_names()
         self.observed_incoming = self.tel.observed_incoming()
         self.mob_damage_measured = self.observed_incoming > 0
         self.n_enemies.setValue(min(max(int(n), 1), self.n_enemies.maximum()))
@@ -1546,10 +1889,32 @@ class MainWindow(QMainWindow):
                                   self.boss_hp.maximum()))
         return changed
 
-    def on_round(self, _rec):
+    def on_round(self, rec):
         # Queued from the worker thread, so this runs on the GUI thread.
+        if getattr(rec, "round", 0) == 1:
+            self._warn_cheats(rec)
         self.refresh_all()
         self._update_policy_state()
+
+    def _warn_cheats(self, rec):
+        """Say so when the catalog knows this enemy cheats.
+
+        The catalog has carried scraped cheat notes for 1,912 creatures
+        the whole time, and the run reads enemy names every round; the
+        two just never met. The sim cannot model an arbitrary cheat, but
+        the operator can be told -- a known interrupt is survivable in a
+        way a surprise one is not.
+        """
+        from ..bestiary import cheat_warning
+
+        for e in getattr(rec, "enemies", []) or []:
+            try:
+                line = cheat_warning(e.name, e.max_hp)
+            except Exception:
+                continue
+            if line and line not in self._cheats_warned:
+                self._cheats_warned.add(line)
+                self.status.setText(line)
 
     def on_fight_done(self, _n):
         if self.adopt_observed_board():
@@ -1557,8 +1922,52 @@ class MainWindow(QMainWindow):
                 f"training range centred on that fight: up to "
                 f"{self.n_enemies.value()} mob(s) around "
                 f"{self.boss_hp.value():,} HP")
+        self._maybe_autotune()
         self.refresh_all()
         self._update_policy_state()
+
+    def _maybe_autotune(self):
+        """Tune the quartet for the observed fight when nothing has.
+
+        A train tunes as part of its run; this covers the wizard who
+        connects and just fights. It fires once per deck, off the first
+        finished fight's measured board, at low priority under the live
+        run -- which the sweep is safe for now that it never installs
+        the candidate it is measuring.
+        """
+        deck = self.decklist()
+        if not deck or not self.observed_hps:
+            return
+        if self.live is None or not self.live.isRunning():
+            return
+        if self.worker is not None and self.worker.isRunning():
+            return                    # the train will tune on its own
+        if tuple(sorted(deck)) == self._tuned_deck:
+            return
+        if getattr(self, "_autotune", None) is not None \
+                and self._autotune.isRunning():
+            return
+        dmg = int(self.observed_incoming) or max(
+            30, self.player_hp.value() // 12)
+        self._autotune = TuneWorker(self.school.currentText(), deck,
+                                    self.observed_hps,
+                                    self.observed_schools, dmg)
+        self._autotune.tuned.connect(self.on_autotuned)
+        self._autotune.failed.connect(lambda _m: None)   # a nicety;
+        self._autotune.start(QThread.Priority.LowPriority)  # stay quiet
+        self.status.setText(
+            "tuning the search for the observed fight (in the "
+            "background — the fight keeps playing)…")
+
+    def on_autotuned(self, wire, scores):
+        self._tuning_deck = self.decklist()
+        # A driver change only takes effect through a rebuilt policy
+        # closure; reinstalling the current name does exactly that
+        # without dropping the connection. Before on_continuation, so
+        # the status line the operator is left with is the tuned pick.
+        if self.live is not None and self.live.isRunning():
+            self.live.set_policy(self.live.policy_name)
+        self.on_continuation(wire, scores)
 
     def on_policy_installed(self, name):
         """The worker says which policy it actually ended up with.

@@ -116,6 +116,9 @@ class WizAiBackend:
         #: settable after construction -- the stats are read once the
         #: hooks are up, which is after the backend exists
         self.player_stats = dict(player_stats or {})
+        #: seconds wizwalker pauses after each click while casting --
+        #: twice per cast. Consumed by the combat handler; raise it if
+        #: the status bar starts reporting casts that did not go through.
         self.cast_time = cast_time
         self.combat = None
         self.on_decision = on_decision
@@ -139,6 +142,10 @@ class WizAiBackend:
         self._hp_seen = None
         self._round_seen = None
         self._enemies_seen = 1
+        #: rollouts model named enemies as CASTERS (catalog spell pool +
+        #: the pips read off the client) instead of a flat measured hit.
+        #: See `_apply_pool` for the measurement behind the default.
+        self.use_pool_model = True
 
     # -- the policy, swappable mid-fight ----------------------------------
     @property
@@ -197,6 +204,8 @@ class WizAiBackend:
         read.state.player.deck = self._deck_remaining(read.hand_cards)
         self._measured_incoming = self._estimate_incoming(read)
         self._apply_player_stats(read)
+        self._apply_bestiary(read)
+        self._apply_pool(read)
         self.last_read = read
 
         sim = self._sim_for(read)
@@ -380,6 +389,92 @@ class WizAiBackend:
             player.resist = dict(stats["resist"])
         if self.power_pip_chance is not None:
             player.power_pip_chance = self.power_pip_chance
+
+    def _apply_bestiary(self, read):
+        """Exact per-boss resist and boost, off the scraped catalog.
+
+        The read infers a mob's school and nothing else about its
+        defences; the catalog KNOWS them for named creatures -- "50% to
+        Death, +20% to Life" is the difference between a death wizard's
+        hit landing at half and a life wizard's landing at 1.2x, and the
+        sim's `_resist_mult` consumes exactly these two dicts. Observed
+        facts are never overwritten: only empty fields are filled, so a
+        live-read shield or boost stays authoritative.
+        """
+        try:
+            from .bestiary import stat_overrides
+        except Exception:
+            return
+        for enemy in read.state.enemies:
+            try:
+                found = stat_overrides(enemy.name, enemy.max_hp)
+            except Exception:
+                continue
+            if not found:
+                continue
+            resist, boost, _stunable = found
+            if resist and not enemy.resist:
+                enemy.resist = dict(resist)
+            if boost and not enemy.boost:
+                enemy.boost = dict(boost)
+
+    def _apply_pool(self, read):
+        """Named enemies become CASTERS in the rollouts.
+
+        The flat measured hit gets the average right and the SHAPE
+        wrong: a boss saving six pips for a Wraith deals nothing for
+        three rounds and then a third of the wizard's health at once,
+        and shield-or-race is decided exactly by that shape. The client
+        reports every member's pip rack (`read_state` now keeps it) and
+        the catalog knows what 1,795 creatures cast, so the sim's
+        living-boss layer -- `_enemy_turn`'s pool branch, pip economy
+        and all -- can price "the Wraith is legal RIGHT NOW" instead of
+        a constant drizzle.
+
+        Measured (belief-vs-truth A/B, greedy_ttk vs casting catalog
+        bosses, N=250 paired seeds, contested boards only): the pool
+        belief wins +8 to +10 points of kill rate on hitter pools
+        (storm Ketil band +10.0/+2.8/+8.0/+9.2, fire Usunoki +8.4) and
+        is a wash inside the ~2.4-point noise floor on debuffer/DoT
+        pools (myth -0.8, death -2.0). In-sim the belief's pool is
+        exact, so those are upper bounds of the live gain -- but no
+        board showed a significant loss, and the measured flat hit
+        stays on every enemy as the fallback the sim uses the moment a
+        pool is absent.
+
+        A pool the card table cannot resolve to at least one damage
+        spell is NOT stamped: `_enemy_choose` would find nothing to
+        cast and the boss would deal zero for the whole rollout, which
+        is strictly worse than the measured flat model.
+        """
+        if not self.use_pool_model:
+            return
+        try:
+            from .bestiary import full_boss
+        except Exception:
+            return
+        for enemy in read.state.enemies:
+            if getattr(enemy, "spell_pool", None) is not None:
+                continue
+            try:
+                b = full_boss(enemy.name, enemy.max_hp)
+            except Exception:
+                continue
+            if b is None or not b.pool:
+                continue
+            known = [n for n in b.pool if n in self.cards]
+            if not any(self.cards[n].kind in ("damage", "drain")
+                       for n in known):
+                continue
+            enemy.spell_pool = list(b.pool)
+            enemy.archetype = b.archetype
+            enemy.discipline = b.discipline
+            enemy.power_pip_chance = b.pip_chance
+            # gear-like scraped extras, never over an observed fact
+            if b.outgoing_bonus and not enemy.damage_bonus:
+                enemy.damage_bonus = {"*": b.outgoing_bonus}
+            if b.pierce and not enemy.pierce:
+                enemy.pierce = b.pierce
 
     def _record(self, decision, read):
         self.history.append(decision)
@@ -585,7 +680,17 @@ class WizAiCombatHandler:
                 read, decision.target_index,
                 self.backend.cards.get(decision.card_name))
             try:
-                await card.cast(target)
+                # `sleep_time` is per pause and wizwalker pauses twice --
+                # after clicking the card and after aiming -- so the
+                # default 1.0 costs ~2 s of standing still per cast, ~12 s
+                # of dead time in a six-round fight. `cast_time` is the
+                # backend's own knob for exactly this and nothing ever
+                # consumed it. 0.3 is not reckless because a miss is no
+                # longer silent: a cast that does not go through is
+                # reported and amended in telemetry, so if this machine
+                # needs slower clicks the operator sees it immediately
+                # instead of wondering.
+                await card.cast(target, sleep_time=self.backend.cast_time)
             except Exception as exc:
                 # A misclick or a board that moved under us costs this
                 # round, not the fight -- but the round has *already*

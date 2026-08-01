@@ -3384,6 +3384,7 @@ def _stub_handler(decide, read, card=None):
 
     class _Backend:
         cards = {}
+        cast_time = 0.3
         last_read = read
         failed = []
         lost = []
@@ -3424,7 +3425,7 @@ def test_the_handler_reports_a_failed_cast_rather_than_swallowing_it():
     from deimos_bridge.live_backend import PolicyDecision
 
     class _Card:
-        async def cast(self, target):
+        async def cast(self, target, **kw):
             raise RuntimeError("the board moved")
 
     async def _decide():
@@ -4453,32 +4454,28 @@ def test_the_verdict_probes_where_the_board_can_discriminate(qapp):
 
     seen = []
 
-    def fake_evaluate(sim, policy, n=0):
-        # trained is flat 50%; the heuristic is good on easy boards and
-        # bad on hard ones, so the largest gap is at the hard end.
-        hp = seen[-1]
-        rival = 1.0 if hp < 300 else 0.2
-        return (rival if fake_evaluate.turn % 2 else 0.5), 5.0
-
-    fake_evaluate.turn = 0
-
     import w101_sim
-    real_sim, real_eval = w101_sim.Sim, w101_sim.evaluate
+    real_sim, real_eval = w101_sim.Sim, w101_sim.evaluate_paired
 
     class _S:
         def __init__(self, cards, deck, school, boss, **kw):
             seen.append(boss.hp)
 
-    def _ev(sim, policy, n=0):
-        fake_evaluate.turn += 1
-        return fake_evaluate(sim, policy, n)
+    def _ep(sim, policies, n=0):
+        # trained is flat 50%; the heuristic is good on easy boards and
+        # bad on hard ones, so the largest gap is at the hard end. One
+        # call per probe now -- both policies ride the same seed stream.
+        hp = seen[-1]
+        rival = 1.0 if hp < 300 else 0.2
+        return {"trained": {"win_rate": 0.5},
+                "rival": {"win_rate": rival}}
 
-    w101_sim.Sim, w101_sim.evaluate = _S, _ev
+    w101_sim.Sim, w101_sim.evaluate_paired = _S, _ep
     try:
         t, r = w.compare(object(), {1: (100, 1000), 2: (100, 500)}, 85,
                          ["death"], n=10)
     finally:
-        w101_sim.Sim, w101_sim.evaluate = real_sim, real_eval
+        w101_sim.Sim, w101_sim.evaluate_paired = real_sim, real_eval
 
     # It walked both counts at three depths each, not one board.
     assert len(seen) >= 6, seen
@@ -4644,7 +4641,7 @@ def test_a_deck_that_cannot_deliver_the_health_is_told_so(qapp):
     assert ok is False
     assert "Your deck is the reason" in note
     assert "1,404 health" in note
-    assert "no Evil Snowman" in note
+    assert "would close" in note          # concrete cards, not a shrug
     # ...and it does not send the operator round the knobs that cannot help
     assert "check that the enemy school" not in note
 
@@ -4962,3 +4959,887 @@ def test_the_losing_board_ranking_is_pluggable_and_defaults_to_shipped():
         assert P._lost_score(14, 0.0, 0, 12)[0] > 12
     finally:
         P.LOST_RANKING = original
+
+
+# ---------------- the leaf value, the horizon, and the tuned search
+def test_leaf_features_are_scale_free():
+    """The property the tabular key lacks and the one levelling applies
+    constantly: multiply every health and damage by k and the state is
+    the same fight. The key is 0% invariant to it; phi must be 100%."""
+    import dataclasses
+
+    import numpy as np
+
+    from data_full import load_spells_full
+    from deimos_bridge.leaf_value import phi
+    from w101_sim import Actor, State
+
+    cards = load_spells_full()
+
+    def board(k):
+        me = Actor(name="W", school="ice", hp=800 * k, max_hp=1000 * k,
+                   team=0, norm_pips=3)
+        me.hand = [dataclasses.replace(cards["Frost Beetle"],
+                                       damage=85.0 * k),
+                   dataclasses.replace(cards["Ice Trap"])]
+        me.deck = [dataclasses.replace(cards["Snow Serpent"],
+                                       damage=175.0 * k)]
+        foes = [Actor(name="m", school="death", hp=400.0 * k,
+                      max_hp=500.0 * k, team=1)]
+        foes[0].flat_hit = 60.0 * k
+        return State(me, foes)
+
+    a, b = phi(None, board(1)), phi(None, board(20))
+    assert np.allclose(a, b), (a, b)
+
+
+def test_the_committed_leaf_weights_load_and_predict():
+    from deimos_bridge.leaf_value import FEATURES, LeafValue
+
+    model = LeafValue.load()
+    assert len(model.w) == len(FEATURES)
+
+    class _E:
+        def __init__(self, hp, mx):
+            self.hp, self.max_hp, self.alive = hp, mx, hp > 0
+            self.wards = []
+            self.flat_hit = 50.0
+
+    class _P:
+        hp, max_hp = 900.0, 1000.0
+        charms = []
+
+    class _S:
+        player = _P()
+        enemies = [_E(50.0, 500.0)]
+        hand, deck = [], []
+        norm_pips, pow_pips = 6, 2
+
+    nearly_won = model(None, _S())
+    _S.enemies = [_E(500.0, 500.0), _E(500.0, 500.0), _E(500.0, 500.0)]
+    _S.player.hp = 100.0
+    nearly_lost = model(None, _S())
+    assert 0.0 <= nearly_lost < nearly_won <= 1.0, (nearly_lost, nearly_won)
+
+
+def test_the_leaf_reranks_only_the_stalled_bucket():
+    """When installed, a rollout that runs out of horizon alive is ranked
+    by what the surviving position is worth; wins and deaths untouched."""
+    from data_full import load_spells_full
+    from deimos_bridge import policies as P
+    from w101_sim import Boss, Sim
+
+    cards = load_spells_full()
+    deck = ["Frost Beetle"] * 4 + ["Ice Trap"] * 4
+    sim = Sim(cards, deck, "ice",
+              Boss(name="wall", hp=50000, school="death", dmg=0),
+              player_hp=1000)
+    s = sim.new_state()
+
+    base = P._rollout(sim, s, None, max_turns=2)
+    try:
+        assert P.load_leaf_value() is not None
+        with_leaf = P._rollout(sim, s, None, max_turns=2)
+    finally:
+        P.set_leaf_value(None)
+    assert base[0] == with_leaf[0] == 3          # both stalled (2 + 1)
+    assert with_leaf[1] != base[1]               # ranked differently
+
+
+def test_ev_pricing_exists_but_is_off_by_default():
+    """Measured: EV accuracy alone is -4.0 points, EV + leaf is -5.0.
+    The knob stays so the numbers are re-checkable; the default must
+    remain the shipped optimistic rollout."""
+    from data_full import load_spells_full
+    from deimos_bridge import policies as P
+
+    assert P.ROLLOUT_ACCURACY == "optimistic"
+    cards = load_spells_full()
+    cat = P.ev_card(cards["Fire Cat"])
+    assert cat.accuracy == 1.0 and cat.damage == 75.0       # 100 x 0.75
+    elf = P.ev_card(cards["Fire Elf"])
+    dot = next(o for o in elf.ops if o["op"] == "dot")
+    assert dot["total"] == 157.5                            # 210 x 0.75
+    blade = P.ev_card(cards["Fireblade"])
+    assert blade.percent == 0.35 and blade is cards["Fireblade"]
+
+
+def test_the_search_horizon_is_deck_scoped():
+    from deimos_bridge import policies as P
+
+    assert P.DEFAULT_HORIZON == 12
+    assert P.search_horizon() == 12
+    try:
+        assert P.set_search_horizon(6) == 6
+        assert P.search_horizon() == 6
+    finally:
+        P.set_search_horizon(None)
+    assert P.search_horizon() == 12
+
+
+def test_choose_search_sweeps_continuations_and_horizons():
+    from data_full import load_spells_full
+    from deimos_bridge import policies as P
+
+    cards = load_spells_full()
+    deck = ["Frost Beetle"] * 3 + ["Ice Trap"] * 3 + ["Snow Serpent"] * 3
+    try:
+        name, horizon, scores = P.choose_search(
+            cards, deck, "ice", [(350, 2, "death")], n=8, dmg=55)
+        assert name in P.CONTINUATIONS
+        assert horizon in P.HORIZONS
+        # continuations x horizons, plus one entry per search width
+        assert len(scores) == (len(P.CONTINUATIONS) * len(P.HORIZONS)
+                               + len(P.SEARCH_WIDTHS))
+        assert P.search_horizon() == horizon      # installed, not reported
+        assert P.continuation_name() == name
+    finally:
+        P.set_search_horizon(None)
+        P.set_continuation(P.DEFAULT_CONTINUATION)
+
+
+# ---------------- the live reader stops dropping scheduled damage
+def test_a_live_dot_lands_on_the_actors_schedule():
+    """The reader mapped four effect kinds and dropped the rest, so a
+    mob carrying a Fire Elf's remaining 200 damage looked identical to a
+    healthy one — "it does not understand DoTs", caused not by the model
+    but by the model never being told."""
+    import asyncio
+
+    from deimos_bridge.live_state import NameResolver, read_state
+    from deimos_bridge.mock_client import (MockCard, MockCombat, MockEffect,
+                                           MockMember)
+    from data_full import load_spells_full
+
+    cards = load_spells_full()
+    me = MockMember("W", 800, client=True, normal_pips=2)
+    burning = MockMember("Burning", 180, monster=True, hangings=[
+        MockEffect("damage_over_time", 200.0, 2343174, 999, num_rounds=2)])
+    combat = MockCombat([me, burning], [MockCard("Frost Beetle")])
+    read = asyncio.new_event_loop().run_until_complete(
+        read_state(combat, NameResolver(cards), "ice"))
+
+    e = read.state.enemies[0]
+    assert [(o.kind, o.per_tick, o.rounds_left) for o in e.over_time] == \
+        [("dot", 100.0, 2)]
+    assert all(h.kind != "damage" or h.percent for h in e.wards)
+
+
+def test_a_live_dot_changes_the_target():
+    """Two identical mobs, one already dying from a DoT: the lookahead
+    must spend its hit on the other one."""
+    import asyncio
+
+    from deimos_bridge.live_state import NameResolver, read_state
+    from deimos_bridge.mock_client import (MockCard, MockCombat, MockEffect,
+                                           MockMember)
+    from deimos_bridge.policies import greedy_ttk
+    from data_full import load_spells_full
+    from w101_sim import Boss, Sim
+
+    cards = load_spells_full()
+
+    def board(dot):
+        me = MockMember("W", 800, client=True, normal_pips=2)
+        hang = ([MockEffect("damage_over_time", 200.0, 2343174, 999,
+                            num_rounds=2)] if dot else [])
+        return MockCombat(
+            [me, MockMember("Burning", 180, monster=True, hangings=hang),
+             MockMember("Healthy", 180, monster=True)],
+            [MockCard("Frost Beetle"), MockCard("Snow Serpent")])
+
+    run = asyncio.new_event_loop().run_until_complete
+    r = NameResolver(cards)
+    sim = Sim(cards, ["Frost Beetle"] * 3 + ["Snow Serpent"] * 3, "ice",
+              Boss(name="B", hp=180, school="death", dmg=0), player_hp=800)
+
+    targets = {}
+    for dot in (False, True):
+        move = greedy_ttk()(sim, run(read_state(board(dot), r, "ice")).state)
+        targets[dot] = move[1] if isinstance(move, tuple) else 0
+    assert targets[False] == 0          # nothing scheduled: hit the first
+    assert targets[True] == 1           # it is already dying: hit the other
+
+
+def test_a_live_mantle_reaches_the_accuracy_charms():
+    import asyncio
+
+    from deimos_bridge.live_state import NameResolver, read_state
+    from deimos_bridge.mock_client import (MockCard, MockCombat, MockEffect,
+                                           MockMember)
+    from data_full import load_spells_full
+
+    cards = load_spells_full()
+    me = MockMember("W", 800, client=True, normal_pips=2,
+                    hangings=[MockEffect("modify_accuracy", -45.0,
+                                         80289, 555)])
+    combat = MockCombat([me, MockMember("m", 180, monster=True)],
+                        [MockCard("Frost Beetle")])
+    read = asyncio.new_event_loop().run_until_complete(
+        read_state(combat, NameResolver(cards), "ice"))
+    acc = [h for h in read.state.player.charms if h.kind == "accuracy"]
+    assert len(acc) == 1 and acc[0].percent == -0.45
+
+
+def test_the_board_panel_shows_the_burn():
+    from deimos_bridge.live_backend import PolicyDecision
+    from deimos_bridge.telemetry import Telemetry
+    from w101_sim import Actor, OverTime, State
+
+    tel = Telemetry()
+    tel.start_fight()
+    me = Actor(name="W", school="ice", hp=800, max_hp=800, team=0)
+    foe = Actor(name="m", school="death", hp=400, max_hp=400, team=1)
+    foe.over_time.append(OverTime("live:999", "dot", "fire", 70.0, 3))
+
+    class _Read:
+        state = State(me, [foe])
+        round_number = 1
+        hand_cards = {}
+        resolver = type("R", (), {"misses": set()})()
+        hidden = []
+        hand_visibility = 1.0
+
+    rec = tel.observe(PolicyDecision(passing=True, reason="x"), _Read())
+    assert any("70/tick x3 dot" in w for w in rec.enemies[0].wards)
+
+
+def test_the_tuner_also_picks_the_driver():
+    """search(k=6) beat the lookahead by +2.8/+3.3 on richer decks and
+    lost by 3.6 on a starter — deck-dependent like the continuation and
+    the horizon, so it is chosen the same way: measured on the probes."""
+    from data_full import load_spells_full
+    from deimos_bridge import policies as P
+
+    cards = load_spells_full()
+    deck = ["Frost Beetle"] * 3 + ["Ice Trap"] * 3 + ["Snow Serpent"] * 3
+    try:
+        _n, _h, scores = P.choose_search(cards, deck, "ice",
+                                         [(350, 2, "death")], n=9, dmg=55)
+        assert all(f"search(k={k})" in scores for k in P.SEARCH_WIDTHS)
+        assert (P.driver_name() == "ttk"
+                or P.driver_name() in {f"search(k={k})"
+                                       for k in P.SEARCH_WIDTHS})
+        assert callable(P.tuned_driver())
+    finally:
+        P.set_search_horizon(None)
+        P.set_continuation(P.DEFAULT_CONTINUATION)
+        P._DRIVER = "ttk"
+
+
+def test_the_tuned_trio_survives_the_wire():
+    """Continuation, horizon AND driver ride the same string, so a
+    restart between Train and Play live keeps all three choices."""
+    from deimos_bridge import policies as P
+
+    wire = "nuke-asap @ horizon 6 @ driver search(k=6)"
+    name = wire
+    if " @ driver " in name:
+        name, drv = name.rsplit(" @ driver ", 1)
+        P.set_driver(drv)
+    if " @ horizon " in name:
+        name, h = name.rsplit(" @ horizon ", 1)
+        P.set_search_horizon(int(h))
+    try:
+        assert P.set_continuation(name) == "nuke-asap"
+        assert P.search_horizon() == 6
+        assert P.driver_name() == "search(k=6)"
+        assert P.set_driver("nonsense") == "ttk"   # unknown -> safe default
+    finally:
+        P.set_search_horizon(None)
+        P.set_continuation(P.DEFAULT_CONTINUATION)
+        P.set_driver("ttk")
+
+
+def test_deck_advice_names_castable_cards(qapp):
+    """The boards no policy can win are lost in the deck box; the advice
+    must name real, cheap-pip additions, not a max-level spell a level-5
+    wizard cannot cast."""
+    from data_full import load_spells_full
+    from deimos_bridge.gui.app import TrainWorker
+
+    cards = load_spells_full()
+    nine = ["Frost Beetle"] * 3 + ["Ice Trap"] * 3 + ["Snow Serpent"] * 3
+    w = TrainWorker(cards, nine, "ice", 0, player_hp=1022, boss_hp=780,
+                    n_enemies=2, player_stats={"damage": {"ice": 0.09}})
+    hint = w.deck_advice(325)
+    assert "would close" in hint
+    named = [part.split("x ", 1)[1] for part in
+             hint.split("Adding ", 1)[1].split(" would")[0].split(", ")]
+    for name in named:
+        card = cards[name]
+        assert card.pips <= 4 and card.school == "ice", (name, card.pips)
+    assert w.deck_advice(0) == "" or "would close" in w.deck_advice(0)
+
+
+def test_the_cast_uses_the_backends_click_pacing():
+    """wizwalker pauses `sleep_time` twice per cast and defaults it to
+    1.0 — ~2 s of standing still per cast, ~12 s per fight. The backend
+    has always declared `cast_time` for this; nothing consumed it."""
+    import inspect
+
+    from deimos_bridge import live_backend
+
+    src = inspect.getsource(live_backend.WizAiCombatHandler.handle_round)
+    assert "sleep_time=self.backend.cast_time" in src
+
+
+# ------------------- the deck search builds for the measured fight
+def test_the_deck_worker_builds_for_the_observed_board(qapp, monkeypatch):
+    """The repo has had a two-stage deck search all along; what it never
+    had was the real fight to build for. The worker hands it the board
+    the live run measured — healths, schools, incoming — not a guess."""
+    import deck_builder
+    from deimos_bridge.gui.app import DeckWorker
+
+    seen = {}
+
+    def fake_build_deck(cards, school, boss, enemies=None, **kw):
+        seen.update(boss_hp=boss.hp, boss_school=boss.school,
+                    dmg=boss.dmg, n_extra=len(enemies or []),
+                    level=kw.get("level"), player_hp=kw.get("player_hp"))
+        return ["Frost Beetle"] * 4, 0.87, 5.2, []
+
+    monkeypatch.setattr(deck_builder, "build_deck", fake_build_deck)
+    w = DeckWorker({}, "ice", 1022, {"damage": {"ice": 0.09}},
+                   [480, 235], ["death", "death"], 136, 780, 2)
+    got = {}
+    w.finished_ok.connect(lambda d, win, ttk: got.update(deck=d, win=win))
+    w.status.connect(lambda *_: None)
+    w.run()                                       # synchronous: no thread
+
+    assert seen["boss_hp"] == 480 and seen["boss_school"] == "death"
+    assert seen["n_extra"] == 1 and seen["dmg"] == 136
+    assert seen["player_hp"] == 1022
+    assert got["deck"] == ["Frost Beetle"] * 4 and got["win"] == 0.87
+    # The level came off the health curve, gated LOW so the search can
+    # hide a trained card but never propose an untrained one.
+    assert seen["level"] is None or 1 <= seen["level"] <= 120
+
+
+def test_the_level_guess_gates_low():
+    from deimos_bridge.gui.app import DeckWorker
+
+    w = DeckWorker({}, "ice", 1022, {}, [], [], 0, 780, 2)
+    level = w.level_guess()
+    if level is not None:
+        from player_curves import school_hp
+        assert school_hp("ice", level) <= 1022
+
+
+# ---------------------- the catalog's cheat notes finally get read
+def test_the_bestiary_matches_names_and_tiers():
+    from deimos_bridge.bestiary import cheat_warning, lookup
+
+    r = lookup("Lord Nightshade", 690)
+    assert r and r["school"] == "death" and r["health"] == 690
+    # Tier disambiguation by observed health.
+    high = lookup("Lord Nightshade", 13200)
+    assert high and high["health"] != 690
+    assert lookup("No Such Creature XYZ") is None
+    assert cheat_warning("No Such Creature XYZ") == ""
+
+
+def test_a_known_cheater_is_announced_once(qapp):
+    """750 creatures in the catalog cheat, with scraped notes; the run
+    reads enemy names every round and never looked them up. The operator
+    is told once per boss per session — a known interrupt is survivable
+    in a way a surprise one is not."""
+    import json
+
+    from deimos_bridge.gui.app import MainWindow
+    from deimos_bridge.telemetry import EnemyView, RoundRecord
+
+    cheater = next(x for x in json.load(open("bosses_clean.json"))
+                   if x.get("has_cheats") and x.get("cheat_notes"))
+    win = MainWindow(Telemetry())
+    rec = RoundRecord(fight=1, round=1, enemies=[
+        EnemyView(cheater["name"], cheater["health"], cheater["health"])])
+    win.on_round(rec)
+    assert "cheats" in win.status.text()
+    first = win.status.text()
+
+    win.status.setText("something else")
+    win.on_round(rec)                     # same boss again: no re-announce
+    assert win.status.text() == "something else"
+    assert first in win._cheats_warned
+
+
+def test_the_catalogs_boss_stats_reach_the_read_actor():
+    """The read infers a mob's school and nothing else about its
+    defences; the catalog KNOWS them for named creatures. Lord
+    Nightshade halves death damage and takes +20% from life — the
+    difference between a hit landing at 0.5x and 1.2x, and the sim's
+    _resist_mult consumes exactly these dicts."""
+    from deimos_bridge.bestiary import stat_overrides
+    from deimos_bridge.live_backend import WizAiBackend
+    from w101_sim import Actor, State
+
+    assert stat_overrides("Lord Nightshade", 690) == \
+        ({"death": 0.5}, {"life": 0.2}, False)
+
+    be = WizAiBackend(policy=lambda sim, s: None, cards={}, school="ice")
+    me = Actor(name="W", school="ice", hp=800, max_hp=800, team=0)
+    boss = Actor(name="Lord Nightshade", school="death", hp=690,
+                 max_hp=690, team=1)
+
+    class _Read:
+        state = State(me, [boss])
+
+    be._apply_bestiary(_Read())
+    assert boss.resist == {"death": 0.5}
+    assert boss.boost == {"life": 0.2}
+
+    # Observed facts stay authoritative: a live-read resist is kept.
+    boss2 = Actor(name="Lord Nightshade", school="death", hp=690,
+                  max_hp=690, team=1)
+    boss2.resist = {"*": 0.1}
+    _Read.state = State(me, [boss2])
+    be._apply_bestiary(_Read())
+    assert boss2.resist == {"*": 0.1}
+
+
+def test_the_deck_search_prices_the_named_boss(qapp, monkeypatch):
+    """Resist decides which school of damage a deck should slot at all;
+    a search that priced Lord Nightshade as a generic death mob would
+    happily fill the deck with the one school he halves."""
+    import deck_builder
+    from deimos_bridge.gui.app import DeckWorker
+
+    seen = {}
+
+    def fake_build_deck(cards, school, boss, enemies=None, **kw):
+        seen.update(name=boss.name, resist=boss.resist_map,
+                    boost=boss.boost_map)
+        return ["Frost Beetle"] * 4, 0.9, 5.0, []
+
+    monkeypatch.setattr(deck_builder, "build_deck", fake_build_deck)
+    w = DeckWorker({}, "ice", 1022, {}, [690], ["death"], 136, 690, 1,
+                   mob_names=["Lord Nightshade"])
+    w.status.connect(lambda *_: None)
+    w.finished_ok.connect(lambda *_: None)
+    w.run()
+    assert seen["name"] == "Lord Nightshade"
+    assert seen["resist"] == {"death": 0.5}
+    assert seen["boost"] == {"life": 0.2}
+
+
+def test_the_bestiary_reads_universal_resist():
+    """The scrape stores universal resist in two shapes stat_overrides
+    used to drop entirely: a bare number with no note (44 creatures,
+    the Nightshade tiers among them) and a "to all schools" note (226
+    more). The sim reads resist["*"] on every hit, so dropping them
+    priced a 60%-resist boss at zero."""
+    from deimos_bridge.bestiary import stat_overrides
+
+    resist, boost, _ = stat_overrides("Lord Nightshade", 13200)
+    assert resist == {"*": 0.6} and boost == {}
+    # String-shaped stats parse too: "+25 to [Fire][Myth]" carries both
+    # the value and the schools.
+    _, boost, _ = stat_overrides("Cake Mimic")
+    assert boost == {"fire": 0.25, "myth": 0.25}
+
+
+def test_the_full_boss_is_a_casting_boss():
+    """`full_boss` hands back the repo's real boss model — spell pool,
+    opening pips, exact defences — with the observed health stamped on,
+    because the client read is the ground truth for the fight actually
+    in progress."""
+    from deimos_bridge.bestiary import full_boss
+
+    b = full_boss("Lord Nightshade", 690)
+    assert b is not None and b.school == "death"
+    assert b.pool and b.dmg == 0          # casts, does not auto-attack
+    assert b.start_pips >= 1
+    assert b.resist_map == {"death": 0.5} and b.boost_map == {"life": 0.2}
+    assert b.hp == 690
+
+    high = full_boss("Lord Nightshade", 13200)
+    assert high.hp == 13200               # observed health is stamped
+    assert high.resist_map == {"*": 0.6}  # ...and picked the tier
+    assert high.start_pips == 5
+
+    # The returned boss is a copy: one fight's edits stay its own.
+    high.pool.append("XXX")
+    high.resist_map["fire"] = 9.9
+    again = full_boss("Lord Nightshade", 13200)
+    assert "XXX" not in again.pool and "fire" not in again.resist_map
+
+    assert full_boss("No Such Creature XYZ") is None
+
+
+def test_the_deck_search_fights_the_casting_boss(qapp, monkeypatch):
+    """A named catalog boss reaches build_deck with its spell pool and
+    opening pips, so the search prices the heavy hit an opener makes
+    legal — the exact tempo a shield-or-race deck choice hangs on —
+    instead of a flat per-round hit."""
+    import deck_builder
+    from deimos_bridge.gui.app import DeckWorker
+
+    seen = {}
+
+    def fake_build_deck(cards, school, boss, enemies=None, **kw):
+        seen.update(pool=boss.pool, dmg=boss.dmg, hp=boss.hp,
+                    pips=boss.start_pips, school=boss.school)
+        return ["Frost Beetle"] * 4, 0.9, 5.0, []
+
+    monkeypatch.setattr(deck_builder, "build_deck", fake_build_deck)
+    w = DeckWorker({}, "ice", 1022, {}, [690], ["death"], 136, 690, 1,
+                   mob_names=["Lord Nightshade"])
+    w.status.connect(lambda *_: None)
+    w.finished_ok.connect(lambda *_: None)
+    w.run()
+    assert seen["pool"], "catalog boss lost its spell pool on the way in"
+    assert seen["dmg"] == 0               # its damage IS the pool
+    assert seen["pips"] >= 1
+    assert seen["hp"] == 690 and seen["school"] == "death"
+
+
+def test_enemy_pips_are_read_not_zeroed():
+    """The client reports every member's pip rack; the read used to
+    zero it for enemies -- a real observation thrown away. "The boss
+    has six pips" is the difference between shielding this round and
+    shielding after the Wraith lands."""
+    import asyncio
+
+    from data_full import load_spells_full
+    from deimos_bridge.live_backend import NameResolver
+    from deimos_bridge.live_state import read_state
+    from deimos_bridge.mock_client import MockCard, MockCombat, MockMember
+
+    cards = load_spells_full()
+    me = MockMember("W", 800, client=True, normal_pips=2)
+    foe = MockMember("Lord Nightshade", 690, monster=True,
+                     normal_pips=4, power_pips=1)
+    combat = MockCombat([me, foe], [MockCard("Frost Beetle")])
+    read = asyncio.new_event_loop().run_until_complete(
+        read_state(combat, NameResolver(cards), "ice"))
+    e = read.state.enemies[0]
+    assert (e.norm_pips, e.pow_pips) == (4, 1)
+
+
+def test_named_enemies_cast_in_the_rollouts():
+    """`_apply_pool` puts the catalog spell pool on a named read enemy
+    so rollouts price its actual casts against its actual pips, with
+    the measured flat hit kept underneath as the fallback. Measured in
+    belief_probe.py: +8 to +10 points of kill rate on hitter pools,
+    a wash inside noise on debuffer pools."""
+    from data_full import load_spells_full
+    from deimos_bridge.live_backend import WizAiBackend
+    from w101_sim import Actor, State
+
+    cards = load_spells_full()
+    me = Actor(name="W", school="ice", hp=800, max_hp=800, team=0)
+
+    def read_for(actor):
+        class _Read:
+            state = State(me, [actor])
+        return _Read()
+
+    be = WizAiBackend(policy=lambda sim, s: None, cards=cards,
+                      school="ice")
+    boss = Actor(name="Lord Nightshade", school="death", hp=690,
+                 max_hp=690, team=1, flat_hit=136.0)
+    be._apply_pool(read_for(boss))
+    assert boss.spell_pool                # it casts in rollouts now
+    assert boss.archetype == "debuffer"
+    assert boss.power_pip_chance > 0
+    assert boss.flat_hit == 136.0         # the fallback stays measured
+
+    # An unknown mob keeps the flat model untouched.
+    nobody = Actor(name="No Such Creature XYZ", school="fire", hp=300,
+                   max_hp=300, team=1, flat_hit=90.0)
+    be._apply_pool(read_for(nobody))
+    assert nobody.spell_pool is None
+
+    # A pool the card table cannot resolve to a single damage spell is
+    # NOT stamped: `_enemy_choose` would find nothing to cast and the
+    # boss would deal zero all rollout -- worse than the flat model.
+    be_bare = WizAiBackend(policy=lambda sim, s: None, cards={},
+                           school="ice")
+    boss2 = Actor(name="Lord Nightshade", school="death", hp=690,
+                  max_hp=690, team=1, flat_hit=136.0)
+    be_bare._apply_pool(read_for(boss2))
+    assert boss2.spell_pool is None
+
+    # The knob turns it off wholesale.
+    be.use_pool_model = False
+    boss3 = Actor(name="Lord Nightshade", school="death", hp=690,
+                  max_hp=690, team=1)
+    be._apply_pool(read_for(boss3))
+    assert boss3.spell_pool is None
+
+
+def test_the_board_panel_shows_the_threat_model(qapp):
+    """Whether the policy shields before the spike or races through the
+    drizzle hangs on which offence model priced the mob -- the catalog
+    caster with its read pips, or the measured flat hit -- and neither
+    was visible anywhere in the window."""
+    from deimos_bridge.gui.panels import BoardPanel
+    from deimos_bridge.live_backend import PolicyDecision
+    from deimos_bridge.telemetry import Telemetry
+    from w101_sim import Actor, State
+
+    tel = Telemetry()
+    tel.start_fight()
+    me = Actor(name="W", school="ice", hp=800, max_hp=800, team=0)
+    caster = Actor(name="Lord Nightshade", school="death", hp=690,
+                   max_hp=690, team=1, norm_pips=4, pow_pips=1,
+                   spell_pool=["Banshee", "Ghoul", "Dark Sprite",
+                               "Death Trap"])
+    drizzle = Actor(name="minion", school="fire", hp=300, max_hp=300,
+                    team=1, norm_pips=2, flat_hit=136.0)
+
+    class _Read:
+        state = State(me, [caster, drizzle])
+        round_number = 1
+        hand_cards = {}
+        resolver = type("R", (), {"misses": set()})()
+        hidden = []
+        hand_visibility = 1.0
+
+    rec = tel.observe(PolicyDecision(passing=True, reason="x"), _Read())
+    assert rec.enemies[0].threat == "4+1p · casts Banshee, Ghoul, " \
+                                    "Dark Sprite…"
+    assert rec.enemies[1].threat == "2p · ~136/round"
+
+    panel = BoardPanel(tel)
+    panel.render(rec)
+    assert "casts Banshee" in panel.enemies.item(0, 2).text()
+    assert "~136/round" in panel.enemies.item(1, 2).text()
+
+
+def test_probe_boards_can_carry_named_casters():
+    """The 4-tuple probe form builds the catalog casting boss at the
+    probe's health; unnamed slots and unknown names stay the flat mob.
+    (The GUI deliberately does NOT use this -- caster probes measured
+    equivalent to flat ones, see the _probe_mobs docstring -- but the
+    hook must keep working for the day a per-boss tuner needs it.)"""
+    from deimos_bridge.policies import _probe_mobs
+
+    boss, extra = _probe_mobs((800, 2, "death", ["Lord Nightshade"]), 90)
+    assert boss.pool and boss.dmg == 0 and boss.hp == 800
+    assert len(extra) == 1 and extra[0].pool is None and extra[0].dmg == 90
+
+    flat, extra = _probe_mobs((500, 1, "storm"), 55)
+    assert flat.pool is None and flat.dmg == 55
+
+    unknown, _ = _probe_mobs((500, 1, "storm", ["No Such Creature XYZ"]),
+                             55)
+    assert unknown.pool is None and unknown.dmg == 55
+
+
+def test_the_tune_worker_probes_the_observed_fight(qapp, monkeypatch):
+    """The auto-tuner measures the quartet on the fight actually being
+    farmed: the observed board and a 0.7x cousin (probes at a single
+    ceiling rank nothing), under the measured incoming damage."""
+    from deimos_bridge import policies
+    from deimos_bridge.gui import app as app_mod
+
+    seen = {}
+
+    def fake_choose_search(cards, deck, school, boards, n=60, dmg=0,
+                           **kw):
+        seen.update(deck=list(deck), school=school,
+                    boards=list(boards), dmg=dmg)
+        return "nuke-asap", 6, {"nuke-asap@h6": 0.8}
+
+    monkeypatch.setattr(policies, "choose_search", fake_choose_search)
+    got = []
+    w = app_mod.TuneWorker("ice", ["Frost Beetle"] * 4, [690, 300],
+                           ["death", "fire"], 136)
+    w.tuned.connect(lambda wire, scores: got.append((wire, scores)))
+    w.failed.connect(lambda m: got.append(("FAILED", m)))
+    w.run()
+    assert got and got[0][0] == "nuke-asap @ horizon 6 @ driver ttk"
+    assert seen["boards"] == [(690, 2, "death"), (482, 2, "death")]
+    assert seen["dmg"] == 136 and seen["school"] == "ice"
+
+
+def test_a_fight_on_an_untuned_deck_tunes_itself(qapp, monkeypatch):
+    """A wizard who connects and just fights played the untuned
+    defaults indefinitely -- the quartet was only ever picked during a
+    train. The first finished fight on an untuned deck now starts the
+    tuner in the background; a deck the train already tuned does not."""
+    from deimos_bridge.gui import app as app_mod
+    from deimos_bridge.gui.app import MainWindow
+
+    started = []
+    monkeypatch.setattr(app_mod.TuneWorker, "start",
+                        lambda self, *a, **k: started.append(self))
+
+    win = MainWindow(Telemetry())
+    win.deck.setText("Frost Beetle,Snow Serpent")
+    win.observed_hps = [690]
+    win.observed_schools = ["death"]
+    win.observed_incoming = 136
+
+    class _Live:
+        def isRunning(self):
+            return True
+
+        policy_name = "ttk-lookahead"
+        swapped = []
+
+        def set_policy(self, name, agent=None):
+            self.swapped.append(name)
+            return True
+
+    # Not connected: nothing fires.
+    win._maybe_autotune()
+    assert not started
+
+    win.live = _Live()
+    win._maybe_autotune()
+    assert len(started) == 1
+    assert started[0].deck == ["Frost Beetle", "Snow Serpent"]
+    assert started[0].mob_damage == 136
+
+    # The tuned result installs, and the same deck never re-tunes.
+    win.on_autotuned("nuke-asap @ horizon 6 @ driver ttk", {})
+    assert win.continuation == "nuke-asap @ horizon 6 @ driver ttk"
+    assert win.live.swapped == ["ttk-lookahead"]
+    win._autotune = None                  # the thread object is done
+    win._maybe_autotune()
+    assert len(started) == 1              # tuned deck: no second run
+
+
+def test_the_whole_caster_chain_survives_a_real_decide(qapp):
+    """End to end through the genuine backend and the mock client: a
+    named boss holding pips must reach the policy as a caster holding
+    those pips. The pieces are unit-tested; this guards the CHAIN --
+    read_state keeps the enemy rack, _estimate_incoming leaves the
+    measured fallback, _apply_pool stamps the catalog pool -- in the
+    order decide() actually runs them."""
+    import asyncio
+
+    from deimos_bridge.mock_client import MockCard, MockCombat, MockMember
+
+    seen = {}
+
+    def spy_policy(sim, s):
+        e = s.enemies[0]
+        seen.update(pool=e.spell_pool, pips=(e.norm_pips, e.pow_pips),
+                    flat=e.flat_hit, arch=e.archetype)
+        return None
+
+    be = _real_backend()
+    be.set_policy(spy_policy, "spy")
+    be.attach_combat(MockCombat(
+        [MockMember("Wizard", 800, client=True, team_id=0, normal_pips=2),
+         MockMember("Lord Nightshade", 690, monster=True, team_id=1,
+                    normal_pips=4, power_pips=1)],
+        [MockCard("Frost Beetle")]))
+    d = asyncio.run(be.decide())
+    assert d.passing                       # the spy passes; that is fine
+    assert seen["pool"], "the catalog pool never reached the policy"
+    assert seen["pips"] == (4, 1)
+    assert seen["flat"] > 0                # measured fallback intact
+    assert seen["arch"] == "debuffer"
+
+
+def test_the_catalog_knows_the_whole_encounter():
+    """419 bosses carry the scraped names of the creatures that fight
+    beside them; `full_encounter` resolves the fight a deck can be
+    built for BEFORE ever walking in."""
+    from deimos_bridge.bestiary import full_encounter
+
+    found = full_encounter("Malificus Mangemort")
+    assert found is not None
+    boss, rest = found
+    assert boss.name == "Malificus Mangemort" and boss.pool
+    assert rest and all(r.hp > 0 for r in rest)
+
+    assert full_encounter("No Such Creature XYZ") is None
+
+
+def test_build_deck_by_boss_name(qapp, monkeypatch):
+    """A typed boss name builds for the catalog encounter -- the
+    casting boss plus its companions -- instead of the measured board;
+    a name the catalog does not know fails with a message rather than
+    silently building for the wrong fight."""
+    import deck_builder
+    from deimos_bridge.gui.app import DeckWorker
+
+    seen = {}
+
+    def fake_build_deck(cards, school, boss, enemies=None, **kw):
+        seen.update(name=boss.name, pool=boss.pool,
+                    n_extra=len(enemies or []))
+        return ["Frost Beetle"] * 4, 0.9, 5.0, []
+
+    monkeypatch.setattr(deck_builder, "build_deck", fake_build_deck)
+    # Observed board present but IGNORED: the named fight wins.
+    w = DeckWorker({}, "ice", 1022, {}, [690], ["death"], 136, 0, 1,
+                   mob_names=["Lord Nightshade"],
+                   encounter_name="Malificus Mangemort")
+    w.status.connect(lambda *_: None)
+    w.finished_ok.connect(lambda *_: None)
+    w.run()
+    assert seen["name"] == "Malificus Mangemort"
+    assert seen["pool"] and seen["n_extra"] >= 1
+
+    failures = []
+    w2 = DeckWorker({}, "ice", 1022, {}, [], [], 0, 0, 1,
+                    encounter_name="No Such Creature XYZ")
+    w2.status.connect(lambda *_: None)
+    w2.failed.connect(failures.append)
+    w2.run()
+    assert failures and "not in the catalog" in failures[0]
+
+
+def test_the_boss_name_field_reaches_the_deck_worker(qapp, monkeypatch):
+    from deimos_bridge.gui import app as app_mod
+    from deimos_bridge.gui.app import MainWindow
+
+    monkeypatch.setattr(app_mod.DeckWorker, "start",
+                        lambda self, *a, **k: None)
+    win = MainWindow(Telemetry())
+    win.boss_name.setText("  Lord Nightshade  ")
+    win.on_build_deck()
+    assert win.deck_worker.encounter_name == "Lord Nightshade"
+
+
+def test_the_envelope_is_the_same_band_every_run(qapp):
+    """Band edges are stamped onto the trained table and quoted back at
+    the operator ("above the 40-1,500 band this table was trained on");
+    edges that wobbled with each run's evaluation luck made those
+    messages disagree between sessions about what the same deck could
+    clear. Probes are seeded per (count, hp): same deck, same settings,
+    same bands."""
+    from data_full import load_spells_full
+    from deimos_bridge.gui.app import TrainWorker
+
+    cards = load_spells_full()
+    deck = ["Frost Beetle"] * 4 + ["Snow Serpent"] * 4
+    w = TrainWorker(cards, deck, "ice", 10, player_hp=1022, boss_hp=690,
+                    n_enemies=1, mob_schools=["death"])
+    a = w.envelope(dmg=55, n=60)
+    b = w.envelope(dmg=55, n=60)
+    assert a and a == b
+
+
+def test_the_sweep_never_installs_what_it_is_measuring():
+    """The GUI runs choose_search while the live fight keeps playing,
+    and the sweep used to install each candidate continuation globally
+    to measure it -- so a live decision landing mid-sweep rolled out
+    with whatever probe setting happened to be under measurement.
+    Candidates are passed explicitly now; only the winner is installed,
+    once, at the end."""
+    from data_full import load_spells_full
+    from deimos_bridge import policies as P
+
+    cards = load_spells_full()
+    deck = ["Frost Beetle"] * 3 + ["Snow Serpent"] * 3
+    P.set_continuation("nuke-asap")
+    seen = []
+    try:
+        picked, _horizon, _scores = P.choose_search(
+            cards, deck, "ice", [(300, 1, "death")], n=6, dmg=40,
+            on_probe=lambda k, v: seen.append(P.continuation_name()))
+        assert seen and all(nm == "nuke-asap" for nm in seen)
+        assert P.continuation_name() == picked    # winner, installed once
+    finally:
+        P.set_continuation(P.DEFAULT_CONTINUATION)
+        P.set_search_horizon(None)
+        P.set_driver("ttk")
