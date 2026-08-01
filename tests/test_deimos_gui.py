@@ -5097,3 +5097,109 @@ def test_choose_search_sweeps_continuations_and_horizons():
     finally:
         P.set_search_horizon(None)
         P.set_continuation(P.DEFAULT_CONTINUATION)
+
+
+# ---------------- the live reader stops dropping scheduled damage
+def test_a_live_dot_lands_on_the_actors_schedule():
+    """The reader mapped four effect kinds and dropped the rest, so a
+    mob carrying a Fire Elf's remaining 200 damage looked identical to a
+    healthy one — "it does not understand DoTs", caused not by the model
+    but by the model never being told."""
+    import asyncio
+
+    from deimos_bridge.live_state import NameResolver, read_state
+    from deimos_bridge.mock_client import (MockCard, MockCombat, MockEffect,
+                                           MockMember)
+    from data_full import load_spells_full
+
+    cards = load_spells_full()
+    me = MockMember("W", 800, client=True, normal_pips=2)
+    burning = MockMember("Burning", 180, monster=True, hangings=[
+        MockEffect("damage_over_time", 200.0, 2343174, 999, num_rounds=2)])
+    combat = MockCombat([me, burning], [MockCard("Frost Beetle")])
+    read = asyncio.new_event_loop().run_until_complete(
+        read_state(combat, NameResolver(cards), "ice"))
+
+    e = read.state.enemies[0]
+    assert [(o.kind, o.per_tick, o.rounds_left) for o in e.over_time] == \
+        [("dot", 100.0, 2)]
+    assert all(h.kind != "damage" or h.percent for h in e.wards)
+
+
+def test_a_live_dot_changes_the_target():
+    """Two identical mobs, one already dying from a DoT: the lookahead
+    must spend its hit on the other one."""
+    import asyncio
+
+    from deimos_bridge.live_state import NameResolver, read_state
+    from deimos_bridge.mock_client import (MockCard, MockCombat, MockEffect,
+                                           MockMember)
+    from deimos_bridge.policies import greedy_ttk
+    from data_full import load_spells_full
+    from w101_sim import Boss, Sim
+
+    cards = load_spells_full()
+
+    def board(dot):
+        me = MockMember("W", 800, client=True, normal_pips=2)
+        hang = ([MockEffect("damage_over_time", 200.0, 2343174, 999,
+                            num_rounds=2)] if dot else [])
+        return MockCombat(
+            [me, MockMember("Burning", 180, monster=True, hangings=hang),
+             MockMember("Healthy", 180, monster=True)],
+            [MockCard("Frost Beetle"), MockCard("Snow Serpent")])
+
+    run = asyncio.new_event_loop().run_until_complete
+    r = NameResolver(cards)
+    sim = Sim(cards, ["Frost Beetle"] * 3 + ["Snow Serpent"] * 3, "ice",
+              Boss(name="B", hp=180, school="death", dmg=0), player_hp=800)
+
+    targets = {}
+    for dot in (False, True):
+        move = greedy_ttk()(sim, run(read_state(board(dot), r, "ice")).state)
+        targets[dot] = move[1] if isinstance(move, tuple) else 0
+    assert targets[False] == 0          # nothing scheduled: hit the first
+    assert targets[True] == 1           # it is already dying: hit the other
+
+
+def test_a_live_mantle_reaches_the_accuracy_charms():
+    import asyncio
+
+    from deimos_bridge.live_state import NameResolver, read_state
+    from deimos_bridge.mock_client import (MockCard, MockCombat, MockEffect,
+                                           MockMember)
+    from data_full import load_spells_full
+
+    cards = load_spells_full()
+    me = MockMember("W", 800, client=True, normal_pips=2,
+                    hangings=[MockEffect("modify_accuracy", -45.0,
+                                         80289, 555)])
+    combat = MockCombat([me, MockMember("m", 180, monster=True)],
+                        [MockCard("Frost Beetle")])
+    read = asyncio.new_event_loop().run_until_complete(
+        read_state(combat, NameResolver(cards), "ice"))
+    acc = [h for h in read.state.player.charms if h.kind == "accuracy"]
+    assert len(acc) == 1 and acc[0].percent == -0.45
+
+
+def test_the_board_panel_shows_the_burn():
+    from deimos_bridge.live_backend import PolicyDecision
+    from deimos_bridge.telemetry import Telemetry
+    from w101_sim import Actor, OverTime, State
+
+    tel = Telemetry()
+    tel.start_fight()
+    me = Actor(name="W", school="ice", hp=800, max_hp=800, team=0)
+    foe = Actor(name="m", school="death", hp=400, max_hp=400, team=1)
+    foe.over_time.append(OverTime("live:999", "dot", "fire", 70.0, 3))
+
+    class _Read:
+        state = State(me, [foe])
+        round_number = 1
+        hand_cards = {}
+        resolver = type("R", (), {"misses": set()})()
+        hidden = []
+        hand_visibility = 1.0
+
+    rec = tel.observe(PolicyDecision(passing=True, reason="x"), _Read())
+    assert any("70/tick x3 dot" in w for w in rec.enemies[0].wards)

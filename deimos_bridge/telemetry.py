@@ -337,7 +337,15 @@ class Telemetry:
             player_charms=[describe_hanging(h) for h in s.player.charms],
             enemies=[EnemyView(e.name, e.hp, e.max_hp,
                                [describe_hanging(h) for h in e.charms],
-                               [describe_hanging(h) for h in e.wards],
+                               [describe_hanging(h) for h in e.wards]
+                               # Scheduled damage rides in the ward
+                               # column: the Board panel shows the burn,
+                               # and `_settle`'s DoT-confound check --
+                               # which greps this list -- starts firing
+                               # for live DoTs instead of never.
+                               + [f"{o.per_tick:,.0f}/tick x{o.rounds_left} "
+                                  f"{o.kind}"
+                                  for o in getattr(e, "over_time", [])],
                                getattr(e, "school", "") or "")
                      for e in s.enemies],
         )

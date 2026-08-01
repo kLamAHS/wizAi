@@ -256,6 +256,22 @@ OUTGOING_DAMAGE = {"modify_outgoing_damage"}
 INCOMING_DAMAGE = {"modify_incoming_damage"}
 INCOMING_PRISM = {"modify_incoming_damage_type"}
 INCOMING_ABSORB = {"absorb_damage"}
+#: Scheduled damage and healing, hanging on the target. `effect_param`
+#: is the REMAINING total -- Deimos's own `reduce_over_time` subtracts
+#: from it and `detonate` pops it whole -- so per-tick is param over the
+#: rounds left. Dropping these was the reader's costliest gap: a mob
+#: carrying a Fire Elf's 157 scheduled damage looked identical to a
+#: healthy one, so the policy would spend a whole hit re-killing
+#: something that was already dead in two ticks -- the exact "it does
+#: not understand DoT damage" failure, caused not by the model but by
+#: the model never being told.
+OVER_TIME_DOT = {"damage_over_time", "deferred_damage"}
+OVER_TIME_HOT = {"heal_over_time"}
+#: Accuracy charms -- mantles when negative, aims when positive. The sim
+#: has always modelled them (`Hanging(kind="accuracy")` feeds the fizzle
+#: roll); the reader silently dropped them, so a Black Mantle's -45% on
+#: the wizard's next cast was invisible to every prediction.
+OUTGOING_ACCURACY = {"modify_accuracy", "modify_outgoing_accuracy"}
 
 _SCHOOL_BY_ID = {
     2343174: "fire", 72777: "ice", 83375795: "storm", 2448141: "myth",
@@ -331,6 +347,23 @@ async def read_hangings(member, slot: str) -> list:
         elif slot == "ward" and kind_name in INCOMING_ABSORB:
             out.append(Hanging(name=f"live:{tid}", slot="ward", kind="absorb",
                                amount=param, source="live", sub=tid))
+        elif slot == "charm" and kind_name in OUTGOING_ACCURACY:
+            out.append(Hanging(name=f"live:{tid}", slot="charm",
+                               kind="accuracy", percent=param / 100.0,
+                               schools=schools, source="live", sub=tid))
+        elif slot == "ward" and kind_name in (OVER_TIME_DOT | OVER_TIME_HOT):
+            from w101_sim import OverTime
+
+            try:
+                rounds = max(1, int(await e.num_rounds()))
+            except Exception:
+                rounds = 3
+            school = _SCHOOL_BY_ID.get(dtype, "fire")
+            out.append(OverTime(
+                name=f"live:{tid}",
+                kind="dot" if kind_name in OVER_TIME_DOT else "hot",
+                school=school, per_tick=abs(param) / rounds,
+                rounds_left=rounds, caster="live"))
     return out
 
 
@@ -576,16 +609,27 @@ async def read_state(combat, resolver: NameResolver, school: str,
 
     unreadable = []
 
-    async def _hangings(m, slot, who):
+    async def _hangings(m, slot, who, actor=None):
+        """Hangings for `slot`; DoTs/HoTs land on `actor.over_time`.
+
+        Split by type because they live on different fields of the
+        actor: a trap is consulted when a hit resolves, a DoT ticks in
+        `end_round` whether anyone acts or not.
+        """
+        from w101_sim import OverTime
+
         effects = await read_hangings(m, slot)
         if read_hangings.last_error:
             unreadable.append(f"{who}'s {slot}s "
                               f"({read_hangings.last_error})")
-        return effects
+        scheduled = [e for e in effects if isinstance(e, OverTime)]
+        if actor is not None and scheduled:
+            actor.over_time.extend(scheduled)
+        return [e for e in effects if not isinstance(e, OverTime)]
 
     player = await _mk_actor(me, 0)
-    player.charms = await _hangings(me, "charm", "you")
-    player.wards = await _hangings(me, "ward", "you")
+    player.charms = await _hangings(me, "charm", "you", actor=player)
+    player.wards = await _hangings(me, "ward", "you", actor=player)
 
     enemies, allies, enemy_members = [], [], []
     me_name = await me.name()
@@ -597,8 +641,8 @@ async def read_state(combat, resolver: NameResolver, school: str,
             continue
         hostile = await _is_hostile(m, my_team)
         actor = await _mk_actor(m, 1 if hostile else 0)
-        actor.charms = await _hangings(m, "charm", actor.name)
-        actor.wards = await _hangings(m, "ward", actor.name)
+        actor.charms = await _hangings(m, "charm", actor.name, actor=actor)
+        actor.wards = await _hangings(m, "ward", actor.name, actor=actor)
         actor.is_minion = bool(await m.is_minion())
         if hostile:
             enemies.append(actor)

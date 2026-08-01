@@ -35,6 +35,7 @@ class MockEffect:
     effect_param: float = 0.0
     damage_type: int = 80289
     spell_template_id: int = 0
+    num_rounds: int = 3
 
     def __post_init__(self):
         class _Enum:
@@ -44,6 +45,7 @@ class MockEffect:
             "effect_param": self.effect_param,
             "damage_type": self.damage_type,
             "spell_template_id": self.spell_template_id,
+            "num_rounds": self.num_rounds,
         })
 
 
