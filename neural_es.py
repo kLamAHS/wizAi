@@ -46,7 +46,22 @@ CARDS = load_spells_full()
 #: since the second campaign, WIDE: both mob counts per deck, the
 #: buff-heavy deck the first campaign's winner measured worst on, and
 #: a fourth school so the net cannot mistake ice-and-storm for the
-#: whole game
+#: whole game.
+#:
+#: CAMPAIGN 2 VERDICT -- rejected, recorded: the wide objective did
+#: exactly what averaging does. Its best checkpoint (+2.6 wide-board
+#: validation over the campaign-1 winner) fixed the buff-heavy board
+#: completely (9.1 -> 23.9 held out) and PAID for it with both crowns:
+#: storm 700x2 fell 29.9/31.5 -> 16.9/18.9 and low 700x2 22.4 -> 18.4.
+#: Under per-deck routing that trade buys nothing -- on the buff-heavy
+#: deck the sweep already installs school-aware(3) at 24.1, so 23.9
+#: there is redundant, while storm is the one deck where the neural
+#: candidate IS the pick. The shipped net therefore stays the
+#: campaign-1 specialist. Lesson for campaign 3: with per-deck routing,
+#: the one shipped net should specialise in what the hand-coded five
+#: do NOT cover; a broad fitness set optimises toward redundancy. More
+#: coverage means MORE seats (per-specialisation weights files), not a
+#: wider objective on one.
 _LOW = (["Frost Beetle"] * 4 + ["Ice Trap"] * 2 + ["Snow Serpent"] * 4
         + ["Evil Snowman"] * 4 + ["Tower Shield"] * 2)
 _BUFFY = (["Iceblade"] * 4 + ["Ice Trap"] * 4 + ["Evil Snowman"] * 4
