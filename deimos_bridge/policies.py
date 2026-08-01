@@ -526,6 +526,45 @@ def _split(action):
     return action, 0
 
 
+#: How to rank candidates on a board the rollout thinks it loses. This
+#: branch is not an edge case -- it fires on 17% of candidates on a
+#: level-5 board and on 37-100% of them on a hard one -- so it was worth
+#: asking whether "bank the most damage" is the right bet.
+#:
+#: Measured, and it is a NULL RESULT. Three rankings over 3 decks x 4
+#: boards, 400 fights a cell:
+#:
+#:     damage (shipped)  67.5%   -- bank the most damage
+#:     kills             68.2%   +0.75 pts, better on 7 boards, worse on 3
+#:     survive           67.4%   -0.06 pts, better on 5, worse on 5
+#:
+#: +0.75 is well inside this repo's own noise floor (~2.4 points across
+#: seed streams, ~6.9 for selection), so none of these is a result. The
+#: knob stays because the branch is load-bearing enough to be worth
+#: keeping testable, and because the measurement is worth not repeating.
+#:
+#: The same run also killed a hypothesis: buff rate is flat at 23-47%
+#: across ALL THREE rankings, so whatever drives over-buffing, it is not
+#: the losing-board objective.
+LOST_RANKING = "damage"
+
+
+def _lost_score(rank, dealt, kills, turn):
+    """A 2-tuple, always: the caller unpacks (turns, neg_damage).
+
+    The extra ordering rides in the RANK rather than as a third element,
+    so the second stays real banked damage and the decision panel keeps
+    showing a number that means something. The offsets are small enough
+    that a lost line can never outrank a won one: at most 4 kills x 0.4
+    is 1.6, against the +1 that separates `stalled` from a clean win.
+    """
+    if LOST_RANKING == "kills":
+        return (rank - 0.4 * kills, -dealt)
+    if LOST_RANKING == "survive":
+        return (rank - 0.05 * turn, -dealt)
+    return (rank, -dealt)
+
+
 def _rollout(sim, state, first_action, max_turns=12, target=0):
     """Score playing `first_action` now: (turns_to_kill, -damage_dealt).
 
@@ -577,7 +616,10 @@ def _rollout(sim, state, first_action, max_turns=12, target=0):
     #: for a move that cannot be made at all.
     unplayable = (max_turns + 3, 0.0)
 
-    def died():
+    def kills():
+        return sum(1 for e in s.enemies if not e.alive)
+
+    def died(turn=0):
         """Dying still banked whatever it banked.
 
         This used to return a flat constant, and that was the bug behind
@@ -587,11 +629,17 @@ def _rollout(sim, state, first_action, max_turns=12, target=0):
         picks the cheapest card, and an Ice Trap costs zero pips. A
         policy in trouble should still play the line that gets furthest,
         not the one that costs least.
-        """
-        return (max_turns + 2, -dealt)
 
-    def stalled():
-        return (max_turns + 1, -dealt)
+        Which "furthest" is the right one is `LOST_RANKING`, and it
+        matters more than it looks: this branch fires on 17% of
+        candidates on a level-5 board and on 37-100% of them on a hard
+        one, so it is not an edge case -- it is a large fraction of every
+        decision the lookahead makes.
+        """
+        return _lost_score(max_turns + 2, dealt, kills(), turn)
+
+    def stalled(turn=0):
+        return _lost_score(max_turns + 1, dealt, kills(), turn)
 
     # find the copied card matching the chosen one
     action = None
@@ -622,11 +670,11 @@ def _rollout(sim, state, first_action, max_turns=12, target=0):
         try:
             probe.end_round(s)
         except Exception:
-            return stalled()
+            return stalled(turn)
         if not enemy_alive():
             return turn, -dealt
         if not s.player.alive:
-            return died()
+            return died(turn)
 
         action, target = _split(continuation(probe, s))
         if not (0 <= target < len(s.enemies)) or not s.enemies[target].alive:
@@ -634,7 +682,7 @@ def _rollout(sim, state, first_action, max_turns=12, target=0):
             # continuation re-aim rather than casting into a corpse.
             target = focus_target(s)
 
-    return stalled()
+    return stalled(max_turns)
 
 
 def greedy_ttk(max_turns: int = 12):

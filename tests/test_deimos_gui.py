@@ -4933,3 +4933,32 @@ def test_search_does_not_stand_still_on_a_board_it_cannot_win():
             break
     assert casts > 0, "it stood still through a losing fight"
     assert passes <= casts, (passes, casts)
+
+
+def test_the_losing_board_ranking_is_pluggable_and_defaults_to_shipped():
+    """This branch fires on 17% of candidates on a level-5 board and on
+    37-100% of them on a hard one, so it is worth keeping testable. The
+    default must stay bit-identical to what shipped — the alternatives
+    measured as a null (+0.75 pts, inside a 2.4-point noise floor)."""
+    import deimos_bridge.policies as P
+
+    assert P.LOST_RANKING == "damage"
+    # Shipped: rank untouched, second element is real banked damage.
+    assert P._lost_score(14, 250.0, 2, 5) == (14, -250.0)
+
+    original = P.LOST_RANKING
+    try:
+        P.LOST_RANKING = "kills"
+        rank, dealt = P._lost_score(14, 250.0, 2, 5)
+        assert dealt == -250.0, "damage must stay real for the panel"
+        assert rank < 14, "more kills must rank better"
+        # A lost line can never outrank a won one: 4 kills is the most
+        # the game offers and the win/stall gap is a whole point.
+        assert P._lost_score(14, 0.0, 4, 0)[0] > 12
+
+        P.LOST_RANKING = "survive"
+        rank, dealt = P._lost_score(14, 250.0, 0, 9)
+        assert dealt == -250.0 and rank < 14
+        assert P._lost_score(14, 0.0, 0, 12)[0] > 12
+    finally:
+        P.LOST_RANKING = original
