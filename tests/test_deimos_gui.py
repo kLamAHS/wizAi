@@ -5426,3 +5426,74 @@ def test_the_deck_search_prices_the_named_boss(qapp, monkeypatch):
     assert seen["name"] == "Lord Nightshade"
     assert seen["resist"] == {"death": 0.5}
     assert seen["boost"] == {"life": 0.2}
+
+
+def test_the_bestiary_reads_universal_resist():
+    """The scrape stores universal resist in two shapes stat_overrides
+    used to drop entirely: a bare number with no note (44 creatures,
+    the Nightshade tiers among them) and a "to all schools" note (226
+    more). The sim reads resist["*"] on every hit, so dropping them
+    priced a 60%-resist boss at zero."""
+    from deimos_bridge.bestiary import stat_overrides
+
+    resist, boost, _ = stat_overrides("Lord Nightshade", 13200)
+    assert resist == {"*": 0.6} and boost == {}
+    # String-shaped stats parse too: "+25 to [Fire][Myth]" carries both
+    # the value and the schools.
+    _, boost, _ = stat_overrides("Cake Mimic")
+    assert boost == {"fire": 0.25, "myth": 0.25}
+
+
+def test_the_full_boss_is_a_casting_boss():
+    """`full_boss` hands back the repo's real boss model — spell pool,
+    opening pips, exact defences — with the observed health stamped on,
+    because the client read is the ground truth for the fight actually
+    in progress."""
+    from deimos_bridge.bestiary import full_boss
+
+    b = full_boss("Lord Nightshade", 690)
+    assert b is not None and b.school == "death"
+    assert b.pool and b.dmg == 0          # casts, does not auto-attack
+    assert b.start_pips >= 1
+    assert b.resist_map == {"death": 0.5} and b.boost_map == {"life": 0.2}
+    assert b.hp == 690
+
+    high = full_boss("Lord Nightshade", 13200)
+    assert high.hp == 13200               # observed health is stamped
+    assert high.resist_map == {"*": 0.6}  # ...and picked the tier
+    assert high.start_pips == 5
+
+    # The returned boss is a copy: one fight's edits stay its own.
+    high.pool.append("XXX")
+    high.resist_map["fire"] = 9.9
+    again = full_boss("Lord Nightshade", 13200)
+    assert "XXX" not in again.pool and "fire" not in again.resist_map
+
+    assert full_boss("No Such Creature XYZ") is None
+
+
+def test_the_deck_search_fights_the_casting_boss(qapp, monkeypatch):
+    """A named catalog boss reaches build_deck with its spell pool and
+    opening pips, so the search prices the heavy hit an opener makes
+    legal — the exact tempo a shield-or-race deck choice hangs on —
+    instead of a flat per-round hit."""
+    import deck_builder
+    from deimos_bridge.gui.app import DeckWorker
+
+    seen = {}
+
+    def fake_build_deck(cards, school, boss, enemies=None, **kw):
+        seen.update(pool=boss.pool, dmg=boss.dmg, hp=boss.hp,
+                    pips=boss.start_pips, school=boss.school)
+        return ["Frost Beetle"] * 4, 0.9, 5.0, []
+
+    monkeypatch.setattr(deck_builder, "build_deck", fake_build_deck)
+    w = DeckWorker({}, "ice", 1022, {}, [690], ["death"], 136, 690, 1,
+                   mob_names=["Lord Nightshade"])
+    w.status.connect(lambda *_: None)
+    w.finished_ok.connect(lambda *_: None)
+    w.run()
+    assert seen["pool"], "catalog boss lost its spell pool on the way in"
+    assert seen["dmg"] == 0               # its damage IS the pool
+    assert seen["pips"] >= 1
+    assert seen["hp"] == 690 and seen["school"] == "death"

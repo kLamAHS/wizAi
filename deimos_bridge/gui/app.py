@@ -708,9 +708,26 @@ class DeckWorker(QThread):
                 Resist decides which school of damage a deck should
                 slot at all, so a search that priced Lord Nightshade as
                 a generic death mob would happily fill the deck with
-                the one school he halves. `resist_map` overrides the
-                sim's resist_own convention with the scraped table.
+                the one school he halves. And a named catalog boss is a
+                CASTING boss: it fights with its scraped spell pool and
+                opening pips instead of a flat hit, so the search prices
+                the round-one Wraith a 6-pip opener makes legal -- the
+                exact tempo a shield-or-race deck choice hangs on.
+                Observed health and school stay authoritative; only the
+                flat-damage stand-ins use the measured per-round hit,
+                because a casting boss's damage IS its pool.
                 """
+                if name:
+                    try:
+                        from ..bestiary import full_boss
+                        b = full_boss(name, hp)
+                        if b is not None:
+                            b.school = sc or b.school
+                            if not b.pool:
+                                b.dmg = dmg   # measured beats rank guess
+                            return b
+                    except Exception:
+                        pass
                 resist_map = boost_map = None
                 if name:
                     try:
@@ -725,6 +742,11 @@ class DeckWorker(QThread):
                             school=sc, dmg=dmg, resist_map=resist_map,
                             boost_map=boost_map)
 
+            if any(nm for _, _, nm in board):
+                # the first catalog hit loads the full registry (~2s);
+                # without a line the button just looks dead for it
+                self.status.emit("pricing the board against the boss "
+                                 "catalog…")
             boss = mk(board[0][0], board[0][1], board[0][2], 0)
             rest = [mk(h, sc, nm, i)
                     for i, (h, sc, nm) in enumerate(board[1:], 1)]

@@ -77,6 +77,20 @@ def test_spell_notes_yield_real_card_names():
     assert all(n in CARDS for n in got)
 
 
+def test_precompiled_patterns_change_nothing_but_the_clock():
+    """The pattern cache exists because 765k uncached re.search calls
+    were 93% of a 29-second build_pools; the pools must come out
+    identical either way."""
+    from boss_pools import _note_patterns
+
+    pats = _note_patterns(CARDS)
+    noted = [r for r in RAW if r.get("spell_notes")][:25]
+    noted.append(next(r for r in RAW if r["name"] == "Broken Branch Queen"))
+    for rec in noted:
+        assert pool_from_notes(rec, CARDS) == \
+            pool_from_notes(rec, CARDS, _patterns=pats), rec["name"]
+
+
 def test_school_pool_respects_the_level_gate():
     lo = pool_from_school("storm", 20, CARDS, TRAINED)
     hi = pool_from_school("storm", 120, CARDS, TRAINED)

@@ -108,19 +108,36 @@ _STOP = {"Damage", "Round", "Rounds", "Aura", "Shield", "Blade", "Trap",
          "Random", "All", "The", "This", "That"}
 
 
-def pool_from_notes(record, cards):
-    """Spell names the scrape's free text actually mentions."""
-    text = " ".join(record.get("spell_notes") or [])
-    if not text:
-        return []
-    found = []
+def _note_patterns(cards):
+    """[(name, compiled pattern)] in the match order pool_from_notes uses.
+
+    Compiled ONCE per registry because the alternative was the whole
+    load: ~400 candidate names tried against 1,911 creatures is 765k
+    `re.search` calls, and with more distinct patterns than the re
+    module's cache holds, every single one recompiled. That recompiling
+    was 93% of a 29-second `build_pools` — the pools themselves cost
+    about a second.
+    """
+    out = []
     # longest names first so "Storm Lord" wins over "Storm"
     for name in sorted(cards, key=len, reverse=True):
         if " - " in name or name.startswith("NA ") or "@" in name:
             continue
         if len(name) < 5 or name in _STOP:
             continue
-        if re.search(r"\b" + re.escape(name) + r"\b", text):
+        out.append((name, re.compile(r"\b" + re.escape(name) + r"\b")))
+    return out
+
+
+def pool_from_notes(record, cards, _patterns=None):
+    """Spell names the scrape's free text actually mentions."""
+    text = " ".join(record.get("spell_notes") or [])
+    if not text:
+        return []
+    found = []
+    for name, pat in (_patterns if _patterns is not None
+                      else _note_patterns(cards)):
+        if pat.search(text):
             if name not in found and not any(name in f for f in found):
                 found.append(name)
     return found[:6]
@@ -162,6 +179,7 @@ def build_pools(records, cards, trained, level_mode="world"):
     """
     from enemy_ranks import spell_level
     rank_fit = fit_rank_to_level(records)
+    patterns = _note_patterns(cards)
     out = {}
     for r in records:
         name, school = r.get("name"), r.get("school")
@@ -171,7 +189,7 @@ def build_pools(records, cards, trained, level_mode="world"):
             level, how = spell_level(r["rank"], "boss"), "rank-heuristic"
         else:
             level, how = estimate_level(r, rank_fit)
-        pool = pool_from_notes(r, cards)
+        pool = pool_from_notes(r, cards, _patterns=patterns)
         source = "spell_notes"
         if len(pool) < 3:
             # a note like "Casts a version of Storm Lord" names ONE

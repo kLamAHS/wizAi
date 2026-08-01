@@ -13,12 +13,14 @@ Matching is exact-name first. The catalog keeps tier variants
 base, the observed max health picks the closest tier, because the tiers
 differ by health more reliably than by anything else.
 """
+import copy
 import json
 import os
 import re
 import unicodedata
 
 _INDEX = None
+_FULL = None
 
 
 def _normal(name):
@@ -91,6 +93,29 @@ def _note_schools(note):
     return [sc for sc in _SCHOOLS if sc in str(note or "").lower()]
 
 
+def _stat_value(v):
+    """(number, schools-text) from the scrape's three shapes.
+
+    `{"value": 50, "note": "to [Death"}` is the common one, but 44
+    resists are a bare `60` (no note -- universal), and 34 more are
+    strings like `"+25 to [Ice][Myth]"` that carry both the number and
+    the schools. Strings with no number at all ("?? to [Storm]",
+    "Immune to [Global]") stay dropped -- an unknown value is not a
+    fact to stamp.
+    """
+    if isinstance(v, dict):
+        try:
+            return float(v.get("value") or 0), str(v.get("note") or "")
+        except (TypeError, ValueError):
+            return 0.0, ""
+    if isinstance(v, (int, float)):
+        return float(v), ""
+    if isinstance(v, str):
+        m = re.search(r"-?\d+(?:\.\d+)?", v)
+        return (float(m.group()) if m else 0.0), v
+    return 0.0, ""
+
+
 def stat_overrides(name, max_hp=None):
     """(resist dict, boost dict, stunable) for a named creature, or None.
 
@@ -108,14 +133,84 @@ def stat_overrides(name, max_hp=None):
         return None
     stats = rec.get("stats") or {}
     resist, boost = {}, {}
-    r = stats.get("resist")
-    if isinstance(r, dict) and r.get("value"):
-        for sc in _note_schools(r.get("note")):
-            resist[sc] = float(r["value"]) / 100.0
-    b = stats.get("incoming_boost")
-    if isinstance(b, dict) and b.get("value"):
-        for sc in _note_schools(b.get("note")):
-            boost[sc] = float(b["value"]) / 100.0
+    val, note = _stat_value(stats.get("resist"))
+    if val:
+        schools = _note_schools(note)
+        if schools and "all school" not in note.lower():
+            for sc in schools:
+                resist[sc] = val / 100.0
+        else:
+            # Universal resist. It arrives in two shapes -- a note
+            # saying "to all schools", or (44 creatures, the Nightshade
+            # tiers among them) a BARE NUMBER with no note at all --
+            # and both were dropped on the floor, so a 60%-resist boss
+            # was priced at zero. The sim reads resist["*"] on every
+            # hit (`_resist_mult`); named schools win unless the note
+            # says "all school", the same rule data_full applies.
+            resist["*"] = val / 100.0
+    val, note = _stat_value(stats.get("incoming_boost"))
+    if val:
+        # no universal boost: the sim's boost read is per-school only
+        for sc in _note_schools(note):
+            boost[sc] = val / 100.0
     if not resist and not boost and stats.get("stunable") is None:
         return None
     return resist, boost, stats.get("stunable")
+
+
+def _full_registry():
+    """name -> casting Boss for the whole catalog, loaded once.
+
+    `load_bosses_full(spell_pools=True)` is the repo's real boss model:
+    spell pools for 1,795 creatures, starting pips at 98.8% coverage,
+    pierce, outgoing bonus, and the resist/boost tables with the
+    universal "*" entries `stat_overrides` cannot always express. It
+    costs about two seconds once (it was thirty before the boss_pools
+    pattern cache), which is why this is lazy and cached rather than an
+    import-time load the GUI would pay on startup.
+    """
+    global _FULL
+    if _FULL is not None:
+        return _FULL
+    try:
+        from data_full import load_bosses_full, load_spells_full
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        cards = load_spells_full(os.path.join(root, "spells_full.json"),
+                                 os.path.join(root, "cards_clean.json"))
+        bosses, _ = load_bosses_full(
+            os.path.join(root, "bosses_clean.json"),
+            spell_pools=True, cards=cards)
+    except Exception:
+        bosses = {}  # no catalog is a quiet no-op, never a crash
+    _FULL = bosses
+    return _FULL
+
+
+def full_boss(name, max_hp=None):
+    """The catalog's CASTING Boss for a live enemy name, or None.
+
+    Everything `stat_overrides` returns and then the rest of the model:
+    a spell pool (bosses cast, they do not auto-attack), the pips the
+    boss opens the fight with (397 of them start at 6 -- a legal
+    heavy hit on round one, which a from-zero pip model prices as six
+    rounds away), pierce, and outgoing bonus. Tier disambiguation is
+    `lookup`'s: the observed max health picks the variant actually in
+    progress, and then OVERRIDES the scraped health, because the client
+    read is the ground truth for this fight.
+
+    Returns a copy -- callers stamp observed school and health onto it,
+    and the cached registry must not inherit one fight's observations.
+    """
+    rec = lookup(name, max_hp)
+    if not rec:
+        return None
+    b = _full_registry().get(rec.get("name"))
+    if b is None:
+        return None
+    b = copy.copy(b)
+    b.pool = list(b.pool) if b.pool else None
+    b.resist_map = dict(b.resist_map) if b.resist_map else None
+    b.boost_map = dict(b.boost_map) if b.boost_map else None
+    if max_hp:
+        b.hp = int(max_hp)
+    return b
