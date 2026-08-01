@@ -564,6 +564,13 @@ def driver_name():
     return _DRIVER
 
 
+def set_driver(name):
+    """Install the tuned driver by name; anything unknown means ttk."""
+    global _DRIVER
+    _DRIVER = name if name == "search(k=6)" else "ttk"
+    return _DRIVER
+
+
 def choose_continuation(cards, deck, school, boards, n=60, on_probe=None):
     """Back-compatible wrapper over `choose_search`, horizon fixed at the
     default. Prefer `choose_search`."""

@@ -628,15 +628,19 @@ class LiveWorker(QThread):
         from ..live_state import build_catalog
 
         if self.continuation:
-            from ..policies import (search_horizon, set_continuation,
+            from ..policies import (driver_name, search_horizon,
+                                    set_continuation, set_driver,
                                     set_search_horizon)
             name = self.continuation
+            if " @ driver " in name:
+                name, drv = name.rsplit(" @ driver ", 1)
+                set_driver(drv)
             if " @ horizon " in name:
                 name, h = name.rsplit(" @ horizon ", 1)
                 set_search_horizon(int(h))
             self.status.emit(
                 f"search: {set_continuation(name)} continuation, "
-                f"horizon {search_horizon()}")
+                f"horizon {search_horizon()}, driver {driver_name()}")
         self.status.emit("loading the card table…")
         catalog = build_catalog()
         cards = catalog["cards"]

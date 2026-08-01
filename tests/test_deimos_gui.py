@@ -5225,3 +5225,27 @@ def test_the_tuner_also_picks_the_driver():
         P.set_search_horizon(None)
         P.set_continuation(P.DEFAULT_CONTINUATION)
         P._DRIVER = "ttk"
+
+
+def test_the_tuned_trio_survives_the_wire():
+    """Continuation, horizon AND driver ride the same string, so a
+    restart between Train and Play live keeps all three choices."""
+    from deimos_bridge import policies as P
+
+    wire = "nuke-asap @ horizon 6 @ driver search(k=6)"
+    name = wire
+    if " @ driver " in name:
+        name, drv = name.rsplit(" @ driver ", 1)
+        P.set_driver(drv)
+    if " @ horizon " in name:
+        name, h = name.rsplit(" @ horizon ", 1)
+        P.set_search_horizon(int(h))
+    try:
+        assert P.set_continuation(name) == "nuke-asap"
+        assert P.search_horizon() == 6
+        assert P.driver_name() == "search(k=6)"
+        assert P.set_driver("nonsense") == "ttk"   # unknown -> safe default
+    finally:
+        P.set_search_horizon(None)
+        P.set_continuation(P.DEFAULT_CONTINUATION)
+        P.set_driver("ttk")

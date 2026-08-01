@@ -538,8 +538,10 @@ class TrainWorker(QThread):
                 picked, horizon, scores = choose_search(
                     self.cards, self.deck, self.school,
                     self.probe_boards(bands, schools), n=60, dmg=dmg)
-                self.continuation.emit(f"{picked} @ horizon {horizon}",
-                                       dict(scores))
+                from ..policies import driver_name
+                self.continuation.emit(
+                    f"{picked} @ horizon {horizon} @ driver {driver_name()}",
+                    dict(scores))
                 self.stage.emit(
                     f"search tuned: {picked}, horizon {horizon}")
             except Exception:
