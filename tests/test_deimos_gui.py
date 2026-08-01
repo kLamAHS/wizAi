@@ -5704,6 +5704,68 @@ def test_a_fight_on_an_untuned_deck_tunes_itself(qapp, monkeypatch):
     assert len(started) == 1              # tuned deck: no second run
 
 
+def test_the_catalog_knows_the_whole_encounter():
+    """419 bosses carry the scraped names of the creatures that fight
+    beside them; `full_encounter` resolves the fight a deck can be
+    built for BEFORE ever walking in."""
+    from deimos_bridge.bestiary import full_encounter
+
+    found = full_encounter("Malificus Mangemort")
+    assert found is not None
+    boss, rest = found
+    assert boss.name == "Malificus Mangemort" and boss.pool
+    assert rest and all(r.hp > 0 for r in rest)
+
+    assert full_encounter("No Such Creature XYZ") is None
+
+
+def test_build_deck_by_boss_name(qapp, monkeypatch):
+    """A typed boss name builds for the catalog encounter -- the
+    casting boss plus its companions -- instead of the measured board;
+    a name the catalog does not know fails with a message rather than
+    silently building for the wrong fight."""
+    import deck_builder
+    from deimos_bridge.gui.app import DeckWorker
+
+    seen = {}
+
+    def fake_build_deck(cards, school, boss, enemies=None, **kw):
+        seen.update(name=boss.name, pool=boss.pool,
+                    n_extra=len(enemies or []))
+        return ["Frost Beetle"] * 4, 0.9, 5.0, []
+
+    monkeypatch.setattr(deck_builder, "build_deck", fake_build_deck)
+    # Observed board present but IGNORED: the named fight wins.
+    w = DeckWorker({}, "ice", 1022, {}, [690], ["death"], 136, 0, 1,
+                   mob_names=["Lord Nightshade"],
+                   encounter_name="Malificus Mangemort")
+    w.status.connect(lambda *_: None)
+    w.finished_ok.connect(lambda *_: None)
+    w.run()
+    assert seen["name"] == "Malificus Mangemort"
+    assert seen["pool"] and seen["n_extra"] >= 1
+
+    failures = []
+    w2 = DeckWorker({}, "ice", 1022, {}, [], [], 0, 0, 1,
+                    encounter_name="No Such Creature XYZ")
+    w2.status.connect(lambda *_: None)
+    w2.failed.connect(failures.append)
+    w2.run()
+    assert failures and "not in the catalog" in failures[0]
+
+
+def test_the_boss_name_field_reaches_the_deck_worker(qapp, monkeypatch):
+    from deimos_bridge.gui import app as app_mod
+    from deimos_bridge.gui.app import MainWindow
+
+    monkeypatch.setattr(app_mod.DeckWorker, "start",
+                        lambda self, *a, **k: None)
+    win = MainWindow(Telemetry())
+    win.boss_name.setText("  Lord Nightshade  ")
+    win.on_build_deck()
+    assert win.deck_worker.encounter_name == "Lord Nightshade"
+
+
 def test_the_envelope_is_the_same_band_every_run(qapp):
     """Band edges are stamped onto the trained table and quoted back at
     the operator ("above the 40-1,500 band this table was trained on");

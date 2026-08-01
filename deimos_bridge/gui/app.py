@@ -675,7 +675,7 @@ class DeckWorker(QThread):
 
     def __init__(self, cards, school, player_hp, player_stats,
                  mob_hps, mob_schools, mob_damage, boss_hp, n_enemies,
-                 mob_names=None):
+                 mob_names=None, encounter_name=""):
         super().__init__()
         self.cards, self.school = cards, school
         self.player_hp = player_hp
@@ -685,6 +685,10 @@ class DeckWorker(QThread):
         self.mob_names = list(mob_names or [])
         self.mob_damage = int(mob_damage or 0)
         self.boss_hp, self.n_enemies = boss_hp, n_enemies
+        #: build for a NAMED catalog fight instead of the measured one:
+        #: the boss and the creatures the catalog says fight beside it,
+        #: before ever walking in
+        self.encounter_name = str(encounter_name or "").strip()
 
     def level_guess(self):
         """The wizard's level, inverted from their health curve.
@@ -760,14 +764,36 @@ class DeckWorker(QThread):
                             school=sc, dmg=dmg, resist_map=resist_map,
                             boost_map=boost_map)
 
-            if any(nm for _, _, nm in board):
-                # the first catalog hit loads the full registry (~2s);
-                # without a line the button just looks dead for it
-                self.status.emit("pricing the board against the boss "
-                                 "catalog…")
-            boss = mk(board[0][0], board[0][1], board[0][2], 0)
-            rest = [mk(h, sc, nm, i)
-                    for i, (h, sc, nm) in enumerate(board[1:], 1)]
+            if self.encounter_name:
+                # A NAMED fight, before ever walking in: the catalog
+                # boss and the creatures it says fight beside it. The
+                # observed path below knows more once a fight has
+                # happened; this one knows the whole encounter first.
+                from ..bestiary import cheat_warning, full_encounter
+                self.status.emit(
+                    f"looking up '{self.encounter_name}' in the catalog…")
+                found = full_encounter(self.encounter_name,
+                                       self.boss_hp or None)
+                if not found:
+                    self.failed.emit(
+                        f"'{self.encounter_name}' is not in the catalog "
+                        f"— check the spelling, or fight it once and "
+                        f"build from the measured board")
+                    return
+                boss, rest = found
+                warn = cheat_warning(self.encounter_name,
+                                     self.boss_hp or None)
+                if warn:
+                    self.status.emit(warn)
+            else:
+                if any(nm for _, _, nm in board):
+                    # the first catalog hit loads the full registry
+                    # (~2s); without a line the button just looks dead
+                    self.status.emit("pricing the board against the "
+                                     "boss catalog…")
+                boss = mk(board[0][0], board[0][1], board[0][2], 0)
+                rest = [mk(h, sc, nm, i)
+                        for i, (h, sc, nm) in enumerate(board[1:], 1)]
             level = self.level_guess()
             self.status.emit(
                 f"searching decks for {boss.hp:,} {boss.school}"
@@ -1098,13 +1124,23 @@ class MainWindow(QMainWindow):
         self.deck_btn = QPushButton("Choose…")
         self.deck_btn.clicked.connect(self.on_pick_deck)
         deck_row.addWidget(self.deck_btn)
+        self.boss_name = QLineEdit()
+        self.boss_name.setPlaceholderText("boss name (optional)")
+        self.boss_name.setMaximumWidth(170)
+        self.boss_name.setToolTip(
+            "Type a boss's name to build the deck for its CATALOG "
+            "encounter — the real casting boss plus the creatures the "
+            "catalog says fight beside it — before ever walking in. "
+            "Leave empty to build for the measured board instead.")
+        deck_row.addWidget(self.boss_name)
         self.build_btn = QPushButton("Build deck…")
         self.build_btn.setToolTip(
             "Search this school's legal card pool for the strongest deck "
             "against the board the live run measured (or the boxes above, "
-            "before a fight). Takes a couple of minutes; the result lands "
-            "in the deck box to accept or edit — nothing is applied until "
-            "you train or play with it.")
+            "before a fight). With a boss name typed, it builds for that "
+            "boss's catalog encounter instead. Takes a couple of minutes; "
+            "the result lands in the deck box to accept or edit — nothing "
+            "is applied until you train or play with it.")
         self.build_btn.clicked.connect(self.on_build_deck)
         deck_row.addWidget(self.build_btn)
         outer.addLayout(deck_row)
@@ -1629,7 +1665,8 @@ class MainWindow(QMainWindow):
             cards, self.school.currentText(), self.player_hp.value(),
             self.player_stats, self.observed_hps, self.observed_schools,
             int(self.observed_incoming), self.boss_hp.value(),
-            self.n_enemies.value(), mob_names=self.observed_names)
+            self.n_enemies.value(), mob_names=self.observed_names,
+            encounter_name=self.boss_name.text())
         self.deck_worker.status.connect(self.status.setText)
         self.deck_worker.finished_ok.connect(self.on_deck_built)
         self.deck_worker.failed.connect(self.on_deck_build_failed)

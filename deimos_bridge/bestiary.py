@@ -214,3 +214,35 @@ def full_boss(name, max_hp=None):
     if max_hp:
         b.hp = int(max_hp)
     return b
+
+
+def full_encounter(name, max_hp=None):
+    """(casting boss, [companions]) for a named fight, or None.
+
+    The pre-fight complement to `full_boss`: 419 catalog bosses carry
+    the scraped names of the creatures that fight beside them, and
+    `data_full.encounter` resolves those into real stats when the
+    companion has its own page and a rank-derived stand-in when it is a
+    generic mob. The observed-board path knows more once a fight has
+    happened; this is what knows the whole encounter FIRST, so a deck
+    can be built for a boss before ever walking in. `max_hp` picks the
+    tier, as everywhere in this module; the catalog's health is kept --
+    before the fight, the catalog is the best information there is.
+    """
+    rec = lookup(name, max_hp)
+    if not rec:
+        return None
+    reg = _full_registry()
+    key = rec.get("name")
+    if key not in reg:
+        return None
+    try:
+        from data_full import encounter
+        boss, rest = encounter(key, reg)
+    except Exception:
+        return None
+    boss = copy.copy(boss)
+    boss.pool = list(boss.pool) if boss.pool else None
+    boss.resist_map = dict(boss.resist_map) if boss.resist_map else None
+    boss.boost_map = dict(boss.boost_map) if boss.boost_map else None
+    return boss, rest
