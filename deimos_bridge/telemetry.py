@@ -565,6 +565,23 @@ class Telemetry:
             return [getattr(e, "school", "") or "" for e in rec.enemies]
         return []
 
+    def observed_mob_names(self):
+        """Each mob's name, from the opening round of the last fight.
+
+        The deck search needs them: the bestiary's per-boss resist and
+        boost tables are keyed by name, and resist is the most decisive
+        stat a deck choice has -- it decides which school of damage to
+        slot at all.
+        """
+        for rec in reversed(self.rounds):
+            if not rec.enemies:
+                continue
+            if rec.round != 1 and any(r.fight == rec.fight and r.round == 1
+                                      for r in self.rounds):
+                continue
+            return [e.name for e in rec.enemies]
+        return []
+
     def observed_incoming(self):
         """Measured damage per enemy per round, over the whole run.
 

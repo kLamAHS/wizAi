@@ -5401,3 +5401,28 @@ def test_the_catalogs_boss_stats_reach_the_read_actor():
     _Read.state = State(me, [boss2])
     be._apply_bestiary(_Read())
     assert boss2.resist == {"*": 0.1}
+
+
+def test_the_deck_search_prices_the_named_boss(qapp, monkeypatch):
+    """Resist decides which school of damage a deck should slot at all;
+    a search that priced Lord Nightshade as a generic death mob would
+    happily fill the deck with the one school he halves."""
+    import deck_builder
+    from deimos_bridge.gui.app import DeckWorker
+
+    seen = {}
+
+    def fake_build_deck(cards, school, boss, enemies=None, **kw):
+        seen.update(name=boss.name, resist=boss.resist_map,
+                    boost=boss.boost_map)
+        return ["Frost Beetle"] * 4, 0.9, 5.0, []
+
+    monkeypatch.setattr(deck_builder, "build_deck", fake_build_deck)
+    w = DeckWorker({}, "ice", 1022, {}, [690], ["death"], 136, 690, 1,
+                   mob_names=["Lord Nightshade"])
+    w.status.connect(lambda *_: None)
+    w.finished_ok.connect(lambda *_: None)
+    w.run()
+    assert seen["name"] == "Lord Nightshade"
+    assert seen["resist"] == {"death": 0.5}
+    assert seen["boost"] == {"life": 0.2}

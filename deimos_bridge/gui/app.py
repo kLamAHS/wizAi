@@ -656,13 +656,15 @@ class DeckWorker(QThread):
     failed = pyqtSignal(str)
 
     def __init__(self, cards, school, player_hp, player_stats,
-                 mob_hps, mob_schools, mob_damage, boss_hp, n_enemies):
+                 mob_hps, mob_schools, mob_damage, boss_hp, n_enemies,
+                 mob_names=None):
         super().__init__()
         self.cards, self.school = cards, school
         self.player_hp = player_hp
         self.player_stats = dict(player_stats or {})
         self.mob_hps = list(mob_hps or [])
         self.mob_schools = list(mob_schools or [])
+        self.mob_names = list(mob_names or [])
         self.mob_damage = int(mob_damage or 0)
         self.boss_hp, self.n_enemies = boss_hp, n_enemies
 
@@ -694,15 +696,38 @@ class DeckWorker(QThread):
 
             hps = self.mob_hps or [self.boss_hp] + [
                 int(self.boss_hp * 0.8)] * (self.n_enemies - 1)
-            schools = (self.mob_schools
-                       or ["balance"] * len(hps))
+            schools = (list(self.mob_schools)
+                       + ["balance"] * len(hps))[:len(hps)]
             dmg = self.mob_damage or max(30, self.player_hp // 12)
-            boss = Boss(name="observed boss", hp=int(max(hps)),
-                        school=schools[hps.index(max(hps))], dmg=dmg)
-            rest = [Boss(name=f"observed mob {i}", hp=int(h), school=sc,
-                         dmg=dmg)
-                    for i, (h, sc) in enumerate(zip(hps, schools), 1)
-                    if h != max(hps) or hps.index(h) != hps.index(max(hps))]
+            names = (self.mob_names + [""] * len(hps))[:len(hps)]
+            board = sorted(zip(hps, schools, names), key=lambda t: -t[0])
+
+            def mk(hp, sc, name, i):
+                """A Boss carrying the catalog's exact defences.
+
+                Resist decides which school of damage a deck should
+                slot at all, so a search that priced Lord Nightshade as
+                a generic death mob would happily fill the deck with
+                the one school he halves. `resist_map` overrides the
+                sim's resist_own convention with the scraped table.
+                """
+                resist_map = boost_map = None
+                if name:
+                    try:
+                        from ..bestiary import stat_overrides
+                        found = stat_overrides(name, hp)
+                        if found:
+                            resist_map = dict(found[0]) or None
+                            boost_map = dict(found[1]) or None
+                    except Exception:
+                        pass
+                return Boss(name=name or f"observed mob {i}", hp=int(hp),
+                            school=sc, dmg=dmg, resist_map=resist_map,
+                            boost_map=boost_map)
+
+            boss = mk(board[0][0], board[0][1], board[0][2], 0)
+            rest = [mk(h, sc, nm, i)
+                    for i, (h, sc, nm) in enumerate(board[1:], 1)]
             level = self.level_guess()
             self.status.emit(
                 f"searching decks for {boss.hp:,} {boss.school}"
@@ -756,6 +781,7 @@ class MainWindow(QMainWindow):
         #: each of those was on its own enough to make the trained board
         #: a different fight from the played one.
         self.observed_schools = []
+        self.observed_names = []
         self.observed_incoming = 0.0
         #: whether the incoming number came off a real fight
         self.mob_damage_measured = False
@@ -1507,7 +1533,7 @@ class MainWindow(QMainWindow):
             cards, self.school.currentText(), self.player_hp.value(),
             self.player_stats, self.observed_hps, self.observed_schools,
             int(self.observed_incoming), self.boss_hp.value(),
-            self.n_enemies.value())
+            self.n_enemies.value(), mob_names=self.observed_names)
         self.deck_worker.status.connect(self.status.setText)
         self.deck_worker.finished_ok.connect(self.on_deck_built)
         self.deck_worker.failed.connect(self.on_deck_build_failed)
@@ -1722,6 +1748,7 @@ class MainWindow(QMainWindow):
         # start equal never produce the opening state a real board has.
         self.observed_hps = self.tel.observed_mob_hps()
         self.observed_schools = self.tel.observed_mob_schools()
+        self.observed_names = self.tel.observed_mob_names()
         self.observed_incoming = self.tel.observed_incoming()
         self.mob_damage_measured = self.observed_incoming > 0
         self.n_enemies.setValue(min(max(int(n), 1), self.n_enemies.maximum()))
