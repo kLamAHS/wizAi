@@ -3384,6 +3384,7 @@ def _stub_handler(decide, read, card=None):
 
     class _Backend:
         cards = {}
+        cast_time = 0.3
         last_read = read
         failed = []
         lost = []
