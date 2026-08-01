@@ -482,6 +482,14 @@ def continuation_name():
 #: +10.3 points on a two-mob attrition board, three independent
 #: reproductions -- because a shorter horizon denies the rollout the
 #: patience that long setup lines (the buff-spam) are made of.
+#:
+#: A finer grid was measured and rejected (n=300 paired truth tables
+#: over the full continuation x (4,6,8,12) grid, four contested boards,
+#: two deck profiles): h8 never beat max(h6, h12), and h4 was +2.7 on
+#: one board while 9-11 points WORSE on its neighbours -- a horizon
+#: that cannot see the second mob's worth of fight ranks lines by
+#: their opening. Two candidates keep the sweep half the cost of four
+#: and lose nothing real.
 HORIZONS = (6, 12)
 
 #: Determinization widths the driver probe sweeps. More sampled draw

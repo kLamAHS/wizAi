@@ -5704,6 +5704,40 @@ def test_a_fight_on_an_untuned_deck_tunes_itself(qapp, monkeypatch):
     assert len(started) == 1              # tuned deck: no second run
 
 
+def test_the_whole_caster_chain_survives_a_real_decide(qapp):
+    """End to end through the genuine backend and the mock client: a
+    named boss holding pips must reach the policy as a caster holding
+    those pips. The pieces are unit-tested; this guards the CHAIN --
+    read_state keeps the enemy rack, _estimate_incoming leaves the
+    measured fallback, _apply_pool stamps the catalog pool -- in the
+    order decide() actually runs them."""
+    import asyncio
+
+    from deimos_bridge.mock_client import MockCard, MockCombat, MockMember
+
+    seen = {}
+
+    def spy_policy(sim, s):
+        e = s.enemies[0]
+        seen.update(pool=e.spell_pool, pips=(e.norm_pips, e.pow_pips),
+                    flat=e.flat_hit, arch=e.archetype)
+        return None
+
+    be = _real_backend()
+    be.set_policy(spy_policy, "spy")
+    be.attach_combat(MockCombat(
+        [MockMember("Wizard", 800, client=True, team_id=0, normal_pips=2),
+         MockMember("Lord Nightshade", 690, monster=True, team_id=1,
+                    normal_pips=4, power_pips=1)],
+        [MockCard("Frost Beetle")]))
+    d = asyncio.run(be.decide())
+    assert d.passing                       # the spy passes; that is fine
+    assert seen["pool"], "the catalog pool never reached the policy"
+    assert seen["pips"] == (4, 1)
+    assert seen["flat"] > 0                # measured fallback intact
+    assert seen["arch"] == "debuffer"
+
+
 def test_the_catalog_knows_the_whole_encounter():
     """419 bosses carry the scraped names of the creatures that fight
     beside them; `full_encounter` resolves the fight a deck can be
