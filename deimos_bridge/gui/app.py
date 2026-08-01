@@ -734,9 +734,13 @@ class MainWindow(QMainWindow):
     #: has run. Deck-scoped: the choice that is +5.2 points on one deck
     #: is -7.6 on another, so there is no global answer to store.
     continuation = ""
+    #: cheat warnings already shown, so a farmed boss is announced once
+    #: per session rather than once per fight
+    _cheats_warned = None
 
     def __init__(self, telemetry=None):
         super().__init__()
+        self._cheats_warned = set()
         self.setWindowTitle("wizAi — live combat lab")
         self.resize(1180, 800)
         self.tel = telemetry or Telemetry()
@@ -1725,10 +1729,32 @@ class MainWindow(QMainWindow):
                                   self.boss_hp.maximum()))
         return changed
 
-    def on_round(self, _rec):
+    def on_round(self, rec):
         # Queued from the worker thread, so this runs on the GUI thread.
+        if getattr(rec, "round", 0) == 1:
+            self._warn_cheats(rec)
         self.refresh_all()
         self._update_policy_state()
+
+    def _warn_cheats(self, rec):
+        """Say so when the catalog knows this enemy cheats.
+
+        The catalog has carried scraped cheat notes for 1,912 creatures
+        the whole time, and the run reads enemy names every round; the
+        two just never met. The sim cannot model an arbitrary cheat, but
+        the operator can be told -- a known interrupt is survivable in a
+        way a surprise one is not.
+        """
+        from ..bestiary import cheat_warning
+
+        for e in getattr(rec, "enemies", []) or []:
+            try:
+                line = cheat_warning(e.name, e.max_hp)
+            except Exception:
+                continue
+            if line and line not in self._cheats_warned:
+                self._cheats_warned.add(line)
+                self.status.setText(line)
 
     def on_fight_done(self, _n):
         if self.adopt_observed_board():

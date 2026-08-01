@@ -5329,3 +5329,41 @@ def test_the_level_guess_gates_low():
     if level is not None:
         from player_curves import school_hp
         assert school_hp("ice", level) <= 1022
+
+
+# ---------------------- the catalog's cheat notes finally get read
+def test_the_bestiary_matches_names_and_tiers():
+    from deimos_bridge.bestiary import cheat_warning, lookup
+
+    r = lookup("Lord Nightshade", 690)
+    assert r and r["school"] == "death" and r["health"] == 690
+    # Tier disambiguation by observed health.
+    high = lookup("Lord Nightshade", 13200)
+    assert high and high["health"] != 690
+    assert lookup("No Such Creature XYZ") is None
+    assert cheat_warning("No Such Creature XYZ") == ""
+
+
+def test_a_known_cheater_is_announced_once(qapp):
+    """750 creatures in the catalog cheat, with scraped notes; the run
+    reads enemy names every round and never looked them up. The operator
+    is told once per boss per session — a known interrupt is survivable
+    in a way a surprise one is not."""
+    import json
+
+    from deimos_bridge.gui.app import MainWindow
+    from deimos_bridge.telemetry import EnemyView, RoundRecord
+
+    cheater = next(x for x in json.load(open("bosses_clean.json"))
+                   if x.get("has_cheats") and x.get("cheat_notes"))
+    win = MainWindow(Telemetry())
+    rec = RoundRecord(fight=1, round=1, enemies=[
+        EnemyView(cheater["name"], cheater["health"], cheater["health"])])
+    win.on_round(rec)
+    assert "cheats" in win.status.text()
+    first = win.status.text()
+
+    win.status.setText("something else")
+    win.on_round(rec)                     # same boss again: no re-announce
+    assert win.status.text() == "something else"
+    assert first in win._cheats_warned

@@ -546,7 +546,11 @@ def choose_search(cards, deck, school, boards, n=60, on_probe=None,
             extra = [Boss(name=f"probe {i}", hp=hp, school=mob_school,
                           dmg=dmg) for i in range(1, mobs)]
             sim = Sim(cards, deck, school, boss, enemies=extra)
-            total += evaluate(sim, make_search_policy(k=k),
+            # The tuned continuation, so the probe measures the driver
+            # that would actually play. choose_search installed it just
+            # above, before this sweep runs.
+            total += evaluate(sim, make_search_policy(base=_continuation(),
+                                                      k=k),
                               n=max(20, n // 3))[0]
         scores[f"search(k={k})"] = total / max(1, len(boards))
     global _DRIVER
@@ -563,11 +567,18 @@ _DRIVER = "ttk"
 
 
 def tuned_driver():
-    """The measured-best driver for the tuned deck."""
+    """The measured-best driver for the tuned deck.
+
+    The search drives with the TUNED continuation as its rollout policy,
+    not `make_search_policy`'s hardcoded blade-stack default -- the
+    continuation choice is worth ~14 points inside a rollout, and a
+    driver that ignored it would play a different game from the one the
+    probes measured.
+    """
     m = re.match(r"search\(k=(\d+)\)$", _DRIVER or "")
     if m:
         from search_policy import make_search_policy
-        return make_search_policy(k=int(m.group(1)))
+        return make_search_policy(base=_continuation(), k=int(m.group(1)))
     return greedy_ttk()
 
 
