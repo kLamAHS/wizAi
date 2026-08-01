@@ -116,6 +116,9 @@ class WizAiBackend:
         #: settable after construction -- the stats are read once the
         #: hooks are up, which is after the backend exists
         self.player_stats = dict(player_stats or {})
+        #: seconds wizwalker pauses after each click while casting --
+        #: twice per cast. Consumed by the combat handler; raise it if
+        #: the status bar starts reporting casts that did not go through.
         self.cast_time = cast_time
         self.combat = None
         self.on_decision = on_decision
@@ -585,7 +588,17 @@ class WizAiCombatHandler:
                 read, decision.target_index,
                 self.backend.cards.get(decision.card_name))
             try:
-                await card.cast(target)
+                # `sleep_time` is per pause and wizwalker pauses twice --
+                # after clicking the card and after aiming -- so the
+                # default 1.0 costs ~2 s of standing still per cast, ~12 s
+                # of dead time in a six-round fight. `cast_time` is the
+                # backend's own knob for exactly this and nothing ever
+                # consumed it. 0.3 is not reckless because a miss is no
+                # longer silent: a cast that does not go through is
+                # reported and amended in telemetry, so if this machine
+                # needs slower clicks the operator sees it immediately
+                # instead of wondering.
+                await card.cast(target, sleep_time=self.backend.cast_time)
             except Exception as exc:
                 # A misclick or a board that moved under us costs this
                 # round, not the fight -- but the round has *already*

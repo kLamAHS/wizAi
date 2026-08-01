@@ -3424,7 +3424,7 @@ def test_the_handler_reports_a_failed_cast_rather_than_swallowing_it():
     from deimos_bridge.live_backend import PolicyDecision
 
     class _Card:
-        async def cast(self, target):
+        async def cast(self, target, **kw):
             raise RuntimeError("the board moved")
 
     async def _decide():
@@ -5273,3 +5273,15 @@ def test_deck_advice_names_castable_cards(qapp):
         card = cards[name]
         assert card.pips <= 4 and card.school == "ice", (name, card.pips)
     assert w.deck_advice(0) == "" or "would close" in w.deck_advice(0)
+
+
+def test_the_cast_uses_the_backends_click_pacing():
+    """wizwalker pauses `sleep_time` twice per cast and defaults it to
+    1.0 — ~2 s of standing still per cast, ~12 s per fight. The backend
+    has always declared `cast_time` for this; nothing consumed it."""
+    import inspect
+
+    from deimos_bridge import live_backend
+
+    src = inspect.getsource(live_backend.WizAiCombatHandler.handle_round)
+    assert "sleep_time=self.backend.cast_time" in src
