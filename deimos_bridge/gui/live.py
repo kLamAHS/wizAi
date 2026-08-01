@@ -45,7 +45,7 @@ class LiveWorker(QThread):
     def __init__(self, telemetry, school, deck, policy_name, fights,
                  agent=None, auto_quest=False, auto_dialogue=True,
                  collect_wisps=True, use_potions=True, script="",
-                 hotkeys=None):
+                 hotkeys=None, continuation=""):
         super().__init__()
         self.tel = telemetry
         self.school = school
@@ -78,6 +78,11 @@ class LiveWorker(QThread):
         #: and not.
         self.hotkeys = dict(hotkeys or {})
         self._hotkeys = None
+        #: the rollout continuation picked for this deck, if training has
+        #: chosen one. Every lookahead decision in the run plays it out,
+        #: so it is worth more than it looks -- measured at ~14 points of
+        #: kill rate between the best and worst choice.
+        self.continuation = continuation or ""
         #: the wizard's gear, read off the client on connect
         self.player_stats = {}
         #: said once, not every half-second, when the quest arrow is off
@@ -620,6 +625,10 @@ class LiveWorker(QThread):
         from ..live_backend import WizAiBackend, make_combat_handler
         from ..live_state import build_catalog
 
+        if self.continuation:
+            from ..policies import set_continuation
+            self.status.emit(
+                f"rollout continuation: {set_continuation(self.continuation)}")
         self.status.emit("loading the card table…")
         catalog = build_catalog()
         cards = catalog["cards"]

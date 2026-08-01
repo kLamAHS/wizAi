@@ -61,20 +61,38 @@ def _apply(sim, s, a):
 
 
 def _rollout(sim, s, pol, max_turns, fail):
-    """Finish the duel from mid-turn (candidate already applied)."""
+    """Finish the duel from mid-turn (candidate already applied).
+
+    A losing line still reports how far it got. Without that every
+    candidate on an unwinnable board returns the identical
+    `-(turn + fail)`, the argmax collapses, and the first candidate wins
+    the tie -- which was `None`, i.e. pass. Measured: a 90% pass rate on
+    boards nothing can win, removing 3.9% of the enemy's health where
+    `greedy_ttk` removes 42%. A policy in trouble should still play the
+    line that gets furthest, not stand still and die.
+
+    The tiebreak is a fraction in [0, 1), so it can only order losses
+    against each other and never lifts one past a win.
+    """
+    start = sum(max(e.hp, 0.0) for e in s.enemies) or 1.0
+
+    def progress():
+        left = sum(max(e.hp, 0.0) for e in s.enemies)
+        return max(0.0, min(0.999, (start - left) / start))
+
     while True:
         if not any(e.alive for e in s.enemies):
             return -(s.turn + 1)
         sim.end_round(s)
         if s.player.hp <= 0:
-            return -(s.turn + fail)
+            return -(s.turn + fail) + progress()
         if not any(e.alive for e in s.enemies):
             return -s.turn
         if s.turn >= max_turns:
-            return -(max_turns + fail)
+            return -(max_turns + fail) + progress()
         sim._tick_over_time(s, s.player)
         if s.player.hp <= 0:
-            return -(s.turn + fail)
+            return -(s.turn + fail) + progress()
         if s.player.stunned > 0:
             s.player.stunned -= 1
         else:
@@ -88,7 +106,10 @@ def make_search_policy(base=None, k=6, fail_penalty=25.0, max_turns=40):
 
     def policy(sim, s):
         multi = len(s.living_enemies()) > 1
-        cands, seen = [None], set()
+        # Cards first, `None` last. Ties are settled by "first candidate
+        # wins", so passing at the head of the list meant passing won
+        # every tie -- including the ones where every option loses.
+        cands, seen = [], set()
         for c in s.hand:
             if c.name in seen or not sim.can_cast(s, c):
                 continue
@@ -98,8 +119,9 @@ def make_search_policy(base=None, k=6, fail_penalty=25.0, max_turns=40):
                              if e.alive)
             else:
                 cands.append(c)
-        if len(cands) == 1:
+        if not cands:
             return None
+        cands.append(None)
         best, best_v = None, -float("inf")
         for cand in cands:
             v = 0.0

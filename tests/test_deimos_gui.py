@@ -4839,3 +4839,97 @@ def test_the_played_policy_does_not_prefer_untried_actions():
     empty = ("nothing",)
     agent.feat.key = lambda sim, s: empty
     assert agent.greedy(None, None, legal, tried_only=True) in legal
+
+
+# ------------------- learning that needs no coverage: the continuation
+def test_the_rollout_continuation_is_a_deck_scoped_choice():
+    """One small policy reused on every board and every rollout, so it
+    needs coverage of nothing — which is what fits a game with 1,912
+    creatures in it. Measured worth ~14 points between best and worst,
+    and deck-specific: the choice that is +5.2 on one deck is -7.6 on
+    another, so there is no global answer to hardcode."""
+    from deimos_bridge import policies
+
+    original = policies.continuation_name()
+    try:
+        for name in policies.CONTINUATIONS:
+            assert policies.set_continuation(name) == name
+            assert policies.continuation_name() == name
+            assert callable(policies.build_continuation(name))
+        # An unknown name falls back rather than breaking the rollout.
+        assert policies.set_continuation("nonsense") == \
+            policies.DEFAULT_CONTINUATION
+        # And `_continuation()` reflects the choice.
+        policies.set_continuation("nuke-asap")
+        from w101_sim import strat_nuke_asap
+        assert policies._continuation() is strat_nuke_asap
+    finally:
+        policies.set_continuation(original)
+
+
+def test_choosing_a_continuation_ranks_all_the_candidates():
+    from data_full import load_spells_full
+    from deimos_bridge import policies
+
+    cards = load_spells_full()
+    deck = ["Frost Beetle"] * 3 + ["Ice Trap"] * 3 + ["Snow Serpent"] * 3
+    original = policies.continuation_name()
+    try:
+        best, scores = policies.choose_continuation(
+            cards, deck, "ice", [(500, 1, "death")], n=12)
+        assert set(scores) == set(policies.CONTINUATIONS)
+        assert best in policies.CONTINUATIONS
+        assert scores[best] == max(scores.values())
+        # The winner is installed, not merely reported.
+        assert policies.continuation_name() == best
+    finally:
+        policies.set_continuation(original)
+
+
+def test_probe_boards_come_from_the_envelope_not_the_ceiling(qapp):
+    """A board every candidate clears ranks nothing. Measured: near the
+    ceiling the five continuations scored 97.5-99.0%, a spread that is
+    noise; near the edge of the same deck's envelope, 60.0-68.0%."""
+    from deimos_bridge.gui.app import TrainWorker
+
+    w = TrainWorker({}, [], "ice", 0, boss_hp=780, n_enemies=2)
+    boards = w.probe_boards({1: (40, 1000), 2: (40, 500)}, ["death"])
+    assert len(boards) == 4                       # two depths per count
+    hps = [hp for hp, _n, _s in boards]
+    assert max(hps) < 1000 and min(hps) > 40      # inside, not at the edges
+    assert {n for _hp, n, _s in boards} == {1, 2}
+    # With no envelope it still returns something usable.
+    assert w.probe_boards({}, ["death"]) == [(780, 2, "death")]
+
+
+def test_search_does_not_stand_still_on_a_board_it_cannot_win():
+    """Every candidate returned the identical -(turn + fail), the argmax
+    collapsed, and `None` sat at the head of the candidate list — so it
+    passed. Measured at a 90% pass rate on unwinnable boards, removing
+    3.9% of enemy health where greedy_ttk removes 42%."""
+    from data_full import load_spells_full
+    from search_policy import make_search_policy
+    from w101_sim import Boss, Sim
+
+    cards = load_spells_full()
+    deck = ["Frost Beetle"] * 3 + ["Ice Trap"] * 3 + ["Snow Serpent"] * 3
+    sim = Sim(cards, deck, "ice",
+              Boss(name="b", hp=1400, school="death", dmg=140), player_hp=1022,
+              enemies=[Boss(name="m", hp=1400, school="death", dmg=140)])
+    policy = make_search_policy(k=4)
+
+    s = sim.new_state()
+    passes = casts = 0
+    for _ in range(6):
+        move = policy(sim, s)
+        if move is None:
+            passes += 1
+        else:
+            card, target = (move if isinstance(move, tuple) else (move, 0))
+            sim.cast(s, card, target)
+            casts += 1
+        sim.end_round(s)
+        if s.player_hp <= 0 or not any(e.alive for e in s.enemies):
+            break
+    assert casts > 0, "it stood still through a losing fight"
+    assert passes <= casts, (passes, casts)
