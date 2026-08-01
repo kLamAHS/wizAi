@@ -98,3 +98,34 @@ def test_missing_weights_raise_rather_than_guess(tmp_path):
         raise AssertionError("loaded weights that do not exist")
     except (OSError, ValueError):
         pass
+
+
+def test_neural_holds_a_sweep_seat():
+    """The sixth continuation candidate: in the sweep, buildable, and
+    installable -- so choose_search prices it per deck like the five
+    hand-coded ones."""
+    from deimos_bridge import policies as P
+
+    assert "neural" in P.CONTINUATIONS
+    pol = P.build_continuation("neural")
+    sim = _sim()
+    s = sim.new_state()
+    move = pol(sim, s)
+    assert move is None or sim.can_cast(s, move[0], move[1])
+    assert P.set_continuation("neural") == "neural"
+    P.set_continuation(P.DEFAULT_CONTINUATION)
+
+
+def test_unloadable_weights_cost_the_candidate_not_the_sweep(monkeypatch):
+    """A missing or stale weights file must never break a sweep or a
+    live fight -- build_continuation("neural") quietly hands back the
+    default heuristic instead."""
+    from deimos_bridge import neural_net, policies as P
+
+    monkeypatch.setattr(neural_net, "DEFAULT_WEIGHTS",
+                        "/nonexistent/weights.json")
+    pol = P.build_continuation("neural")
+    sim = _sim()
+    s = sim.new_state()
+    move = pol(sim, s)                     # the fallback still plays
+    assert move is None or sim.can_cast(s, move[0], move[1])

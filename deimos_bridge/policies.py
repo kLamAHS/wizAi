@@ -431,9 +431,17 @@ class _Fixed:
 #: Fitting one bought nothing: a 17-weight CEM-trained continuation tied
 #: the five-line heuristic exactly (55.300% vs 55.300%), and a depth-2
 #: inner search beat it by 0.3 points for 11x the cost. The headroom is
-#: in WHICH, not in fitting -- so this is a five-way choice, not a model.
+#: in WHICH, not in fitting -- so this was a five-way choice, not a
+#: model, until the sixth candidate EARNED a seat: "neural" is the
+#: search distilled into an entity net (deimos_bridge/neural_net.py,
+#: trained by neural_bc.py -- behaviour cloning plus one DAgger round).
+#: Measured first on the storm deck's hard board on three seed streams
+#: out of three (+5.0/+3.2/+2.6 over the best hand-coded, paired
+#: n=800), second within noise on the buff-heavy deck, last on the
+#: starter deck -- deck-specific like every other candidate, which is
+#: why the per-deck paired probes decide where it actually drives.
 CONTINUATIONS = ("nuke-asap", "school-aware(3)", "school-aware(0)",
-                 "blade-stack(2)", "blade-stack(3)")
+                 "blade-stack(2)", "blade-stack(3)", "neural")
 
 #: The shipped default, kept because the right answer is deck-specific
 #: and the alternative is right only on some decks: the same swap that
@@ -456,6 +464,15 @@ def build_continuation(name):
         return make_blade_stack(2)
     if name == "blade-stack(3)":
         return make_blade_stack(3)
+    if name == "neural":
+        # Falls back to the default heuristic if the weights cannot
+        # load: a missing or stale file must never break a sweep or a
+        # live fight -- it just costs this candidate its chance.
+        try:
+            from .neural_net import net_policy
+            return net_policy()
+        except Exception:
+            return school_aware_blade_stack(3)
     return school_aware_blade_stack(3)
 
 

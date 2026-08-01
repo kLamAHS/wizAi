@@ -25,6 +25,30 @@ card]; the policy plays the argmax. Deterministic on purpose: a
 continuation that flips coins makes every rollout its own noise
 source, and the sweeps that would pick it are paired precisely to
 strip that noise out.
+
+MEASURED (the shipped weights: 81k behaviour-cloned decisions plus a
+60k DAgger round -- student drives, teacher labels -- which fixed the
+round-one collapse on hard boards, 7.0 -> 17.5): as a DIRECT policy it
+keeps the search's reflexes and loses its calculation (-38 on a
+contested two-mob board, +5 on a single-mob one) at 146x the speed. In
+the CONTINUATION seat it is first on the storm deck's hard board on
+three seed streams out of three (+5.0/+3.2/+2.6 over the best
+hand-coded, paired n=800), second within noise on the buff-heavy deck,
+last on the starter deck -- so it sits in CONTINUATIONS and the
+per-deck paired probes decide where it drives, like every other
+candidate.
+
+TRIED AND REVERTED, recorded so it is not retried blind: a v2
+featurizer added six hand-composition facts and two per-card
+relatives (42 features; git f77d36a..f8a5739), on the theory that the
+teacher's pip-banking decisions need to see the hand. It raised
+teacher-match (68.1% -> 70.0% held out) and LOWERED seat strength --
+the storm win fell from 18.1/18.4 (first on both streams) to
+16.6/15.5 (first, then third), buffy 54.0 -> 49.9, same BC+DAgger
+pipeline at the same scale. Mimicry accuracy and playing strength
+are different objectives, and the extra capacity bought the former at
+the latter's expense. A future variant should be judged in the seat
+from the start; teacher-match is only a training diagnostic.
 """
 import json
 import os
