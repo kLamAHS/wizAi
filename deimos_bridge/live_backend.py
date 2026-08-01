@@ -200,6 +200,7 @@ class WizAiBackend:
         read.state.player.deck = self._deck_remaining(read.hand_cards)
         self._measured_incoming = self._estimate_incoming(read)
         self._apply_player_stats(read)
+        self._apply_bestiary(read)
         self.last_read = read
 
         sim = self._sim_for(read)
@@ -383,6 +384,34 @@ class WizAiBackend:
             player.resist = dict(stats["resist"])
         if self.power_pip_chance is not None:
             player.power_pip_chance = self.power_pip_chance
+
+    def _apply_bestiary(self, read):
+        """Exact per-boss resist and boost, off the scraped catalog.
+
+        The read infers a mob's school and nothing else about its
+        defences; the catalog KNOWS them for named creatures -- "50% to
+        Death, +20% to Life" is the difference between a death wizard's
+        hit landing at half and a life wizard's landing at 1.2x, and the
+        sim's `_resist_mult` consumes exactly these two dicts. Observed
+        facts are never overwritten: only empty fields are filled, so a
+        live-read shield or boost stays authoritative.
+        """
+        try:
+            from .bestiary import stat_overrides
+        except Exception:
+            return
+        for enemy in read.state.enemies:
+            try:
+                found = stat_overrides(enemy.name, enemy.max_hp)
+            except Exception:
+                continue
+            if not found:
+                continue
+            resist, boost, _stunable = found
+            if resist and not enemy.resist:
+                enemy.resist = dict(resist)
+            if boost and not enemy.boost:
+                enemy.boost = dict(boost)
 
     def _record(self, decision, read):
         self.history.append(decision)

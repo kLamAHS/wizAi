@@ -81,3 +81,41 @@ def cheat_warning(name, max_hp=None):
     detail = notes[0] if notes else ", ".join(
         (rec.get("cheats") or [])[:3]) or "cheats (no notes scraped)"
     return f"⚠ {rec['name']} cheats: {detail}"
+
+
+_SCHOOLS = ("fire", "ice", "storm", "myth", "life", "death", "balance")
+
+
+def _note_schools(note):
+    """'to [Myth][Life][Death' -> ['myth', 'life', 'death']."""
+    return [sc for sc in _SCHOOLS if sc in str(note or "").lower()]
+
+
+def stat_overrides(name, max_hp=None):
+    """(resist dict, boost dict, stunable) for a named creature, or None.
+
+    The catalog's per-boss tables are exact where the live read can only
+    infer: `resist {"value": 50, "note": "to [Death"}` is the scraped
+    wiki fact that this boss halves death damage, and `incoming_boost
+    {"value": 20, "note": "to [Life"}` that life hits land 20% harder.
+    The sim consumes both natively -- `_resist_mult` reads
+    `target.resist` and `target.boost` by school -- so stamping them
+    onto the read actor makes every prediction and rollout price this
+    exact boss instead of a school-typical one.
+    """
+    rec = lookup(name, max_hp)
+    if not rec:
+        return None
+    stats = rec.get("stats") or {}
+    resist, boost = {}, {}
+    r = stats.get("resist")
+    if isinstance(r, dict) and r.get("value"):
+        for sc in _note_schools(r.get("note")):
+            resist[sc] = float(r["value"]) / 100.0
+    b = stats.get("incoming_boost")
+    if isinstance(b, dict) and b.get("value"):
+        for sc in _note_schools(b.get("note")):
+            boost[sc] = float(b["value"]) / 100.0
+    if not resist and not boost and stats.get("stunable") is None:
+        return None
+    return resist, boost, stats.get("stunable")

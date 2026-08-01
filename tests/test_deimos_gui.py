@@ -5367,3 +5367,37 @@ def test_a_known_cheater_is_announced_once(qapp):
     win.on_round(rec)                     # same boss again: no re-announce
     assert win.status.text() == "something else"
     assert first in win._cheats_warned
+
+
+def test_the_catalogs_boss_stats_reach_the_read_actor():
+    """The read infers a mob's school and nothing else about its
+    defences; the catalog KNOWS them for named creatures. Lord
+    Nightshade halves death damage and takes +20% from life — the
+    difference between a hit landing at 0.5x and 1.2x, and the sim's
+    _resist_mult consumes exactly these dicts."""
+    from deimos_bridge.bestiary import stat_overrides
+    from deimos_bridge.live_backend import WizAiBackend
+    from w101_sim import Actor, State
+
+    assert stat_overrides("Lord Nightshade", 690) == \
+        ({"death": 0.5}, {"life": 0.2}, False)
+
+    be = WizAiBackend(policy=lambda sim, s: None, cards={}, school="ice")
+    me = Actor(name="W", school="ice", hp=800, max_hp=800, team=0)
+    boss = Actor(name="Lord Nightshade", school="death", hp=690,
+                 max_hp=690, team=1)
+
+    class _Read:
+        state = State(me, [boss])
+
+    be._apply_bestiary(_Read())
+    assert boss.resist == {"death": 0.5}
+    assert boss.boost == {"life": 0.2}
+
+    # Observed facts stay authoritative: a live-read resist is kept.
+    boss2 = Actor(name="Lord Nightshade", school="death", hp=690,
+                  max_hp=690, team=1)
+    boss2.resist = {"*": 0.1}
+    _Read.state = State(me, [boss2])
+    be._apply_bestiary(_Read())
+    assert boss2.resist == {"*": 0.1}
