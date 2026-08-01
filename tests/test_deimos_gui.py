@@ -5633,6 +5633,81 @@ def test_probe_boards_can_carry_named_casters():
     assert unknown.pool is None and unknown.dmg == 55
 
 
+def test_the_tune_worker_probes_the_observed_fight(qapp, monkeypatch):
+    """The auto-tuner measures the quartet on the fight actually being
+    farmed: the observed board and a 0.7x cousin (probes at a single
+    ceiling rank nothing), under the measured incoming damage."""
+    from deimos_bridge import policies
+    from deimos_bridge.gui import app as app_mod
+
+    seen = {}
+
+    def fake_choose_search(cards, deck, school, boards, n=60, dmg=0,
+                           **kw):
+        seen.update(deck=list(deck), school=school,
+                    boards=list(boards), dmg=dmg)
+        return "nuke-asap", 6, {"nuke-asap@h6": 0.8}
+
+    monkeypatch.setattr(policies, "choose_search", fake_choose_search)
+    got = []
+    w = app_mod.TuneWorker("ice", ["Frost Beetle"] * 4, [690, 300],
+                           ["death", "fire"], 136)
+    w.tuned.connect(lambda wire, scores: got.append((wire, scores)))
+    w.failed.connect(lambda m: got.append(("FAILED", m)))
+    w.run()
+    assert got and got[0][0] == "nuke-asap @ horizon 6 @ driver ttk"
+    assert seen["boards"] == [(690, 2, "death"), (482, 2, "death")]
+    assert seen["dmg"] == 136 and seen["school"] == "ice"
+
+
+def test_a_fight_on_an_untuned_deck_tunes_itself(qapp, monkeypatch):
+    """A wizard who connects and just fights played the untuned
+    defaults indefinitely -- the quartet was only ever picked during a
+    train. The first finished fight on an untuned deck now starts the
+    tuner in the background; a deck the train already tuned does not."""
+    from deimos_bridge.gui import app as app_mod
+    from deimos_bridge.gui.app import MainWindow
+
+    started = []
+    monkeypatch.setattr(app_mod.TuneWorker, "start",
+                        lambda self, *a, **k: started.append(self))
+
+    win = MainWindow(Telemetry())
+    win.deck.setText("Frost Beetle,Snow Serpent")
+    win.observed_hps = [690]
+    win.observed_schools = ["death"]
+    win.observed_incoming = 136
+
+    class _Live:
+        def isRunning(self):
+            return True
+
+        policy_name = "ttk-lookahead"
+        swapped = []
+
+        def set_policy(self, name, agent=None):
+            self.swapped.append(name)
+            return True
+
+    # Not connected: nothing fires.
+    win._maybe_autotune()
+    assert not started
+
+    win.live = _Live()
+    win._maybe_autotune()
+    assert len(started) == 1
+    assert started[0].deck == ["Frost Beetle", "Snow Serpent"]
+    assert started[0].mob_damage == 136
+
+    # The tuned result installs, and the same deck never re-tunes.
+    win.on_autotuned("nuke-asap @ horizon 6 @ driver ttk", {})
+    assert win.continuation == "nuke-asap @ horizon 6 @ driver ttk"
+    assert win.live.swapped == ["ttk-lookahead"]
+    win._autotune = None                  # the thread object is done
+    win._maybe_autotune()
+    assert len(started) == 1              # tuned deck: no second run
+
+
 def test_the_sweep_never_installs_what_it_is_measuring():
     """The GUI runs choose_search while the live fight keeps playing,
     and the sweep used to install each candidate continuation globally

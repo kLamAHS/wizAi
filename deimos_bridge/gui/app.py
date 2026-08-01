@@ -767,6 +767,54 @@ class DeckWorker(QThread):
                              f"{type(exc).__name__}: {exc}")
 
 
+class TuneWorker(QThread):
+    """Tunes the search quartet for the observed fight, in the background.
+
+    The quartet -- continuation, horizon, driver, width -- is worth ~14
+    points of kill rate and deck-specific, but it was only ever picked
+    during a TRAIN. A wizard who connects and just fights on an
+    untrained deck plays the untuned defaults indefinitely, on the
+    exact boards the run is measuring for it. Round one hands over
+    everything the tuner needs (healths, schools, incoming damage),
+    and with the sweep no longer installing candidates globally it is
+    safe to run under the live fight: about a minute at low priority,
+    against every subsequent fight played with a measured pick.
+    """
+
+    tuned = pyqtSignal(str, object)     # wire format, {probe: kill rate}
+    failed = pyqtSignal(str)
+
+    def __init__(self, school, deck, mob_hps, mob_schools, mob_damage):
+        super().__init__()
+        self.school, self.deck = school, list(deck)
+        self.mob_hps = list(mob_hps or [])
+        self.mob_schools = list(mob_schools or [])
+        self.mob_damage = int(mob_damage or 0)
+
+    def run(self):
+        try:
+            from ..live_state import build_catalog
+            from ..policies import choose_search, driver_name
+
+            cards = build_catalog()["cards"]
+            hp = int(max(self.mob_hps))
+            count = len(self.mob_hps)
+            sch = (self.mob_schools or ["balance"])[0]
+            # The observed fight and a softer cousin: probes at a single
+            # ceiling rank nothing, and 0.7x is the envelope lesson
+            # applied without an envelope to bisect.
+            boards = [(hp, count, sch),
+                      (max(1, int(hp * 0.7)), count, sch)]
+            picked, horizon, scores = choose_search(
+                cards, self.deck, self.school, boards, n=60,
+                dmg=self.mob_damage)
+            self.tuned.emit(
+                f"{picked} @ horizon {horizon} @ driver {driver_name()}",
+                dict(scores))
+        except Exception as exc:
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
 class MainWindow(QMainWindow):
     #: the last training checkpoint's numbers, appended to the progress
     #: bar. A class attribute so the bar can be driven before a run has
@@ -781,6 +829,11 @@ class MainWindow(QMainWindow):
     #: has run. Deck-scoped: the choice that is +5.2 points on one deck
     #: is -7.6 on another, so there is no global answer to store.
     continuation = ""
+    #: which deck the installed quartet was measured for, so the
+    #: auto-tuner knows an untuned deck when it sees one and never
+    #: re-tunes a deck a train already tuned
+    _tuned_deck = None
+    _tuning_deck = None
     #: cheat warnings already shown, so a farmed boss is announced once
     #: per session rather than once per fight
     _cheats_warned = None
@@ -1391,6 +1444,7 @@ class MainWindow(QMainWindow):
                 "play them:\n\n  " + "\n  ".join(missing))
             return
 
+        self._tuning_deck = list(deck)
         self.train_btn.setEnabled(False)
         self.train_progress.setVisible(True)
         # Indeterminate only until the first tick. The warm-start solve
@@ -1478,6 +1532,8 @@ class MainWindow(QMainWindow):
         can be handed it, and so changing decks changes it.
         """
         self.continuation = name
+        self._tuned_deck = tuple(sorted(self._tuning_deck
+                                        or self.decklist()))
         ranked = sorted((scores or {}).items(), key=lambda kv: -kv[1])
         spread = ((ranked[0][1] - ranked[-1][1]) * 100) if len(ranked) > 1 else 0
         self.status.setText(
@@ -1811,8 +1867,52 @@ class MainWindow(QMainWindow):
                 f"training range centred on that fight: up to "
                 f"{self.n_enemies.value()} mob(s) around "
                 f"{self.boss_hp.value():,} HP")
+        self._maybe_autotune()
         self.refresh_all()
         self._update_policy_state()
+
+    def _maybe_autotune(self):
+        """Tune the quartet for the observed fight when nothing has.
+
+        A train tunes as part of its run; this covers the wizard who
+        connects and just fights. It fires once per deck, off the first
+        finished fight's measured board, at low priority under the live
+        run -- which the sweep is safe for now that it never installs
+        the candidate it is measuring.
+        """
+        deck = self.decklist()
+        if not deck or not self.observed_hps:
+            return
+        if self.live is None or not self.live.isRunning():
+            return
+        if self.worker is not None and self.worker.isRunning():
+            return                    # the train will tune on its own
+        if tuple(sorted(deck)) == self._tuned_deck:
+            return
+        if getattr(self, "_autotune", None) is not None \
+                and self._autotune.isRunning():
+            return
+        dmg = int(self.observed_incoming) or max(
+            30, self.player_hp.value() // 12)
+        self._autotune = TuneWorker(self.school.currentText(), deck,
+                                    self.observed_hps,
+                                    self.observed_schools, dmg)
+        self._autotune.tuned.connect(self.on_autotuned)
+        self._autotune.failed.connect(lambda _m: None)   # a nicety;
+        self._autotune.start(QThread.Priority.LowPriority)  # stay quiet
+        self.status.setText(
+            "tuning the search for the observed fight (in the "
+            "background — the fight keeps playing)…")
+
+    def on_autotuned(self, wire, scores):
+        self._tuning_deck = self.decklist()
+        # A driver change only takes effect through a rebuilt policy
+        # closure; reinstalling the current name does exactly that
+        # without dropping the connection. Before on_continuation, so
+        # the status line the operator is left with is the tuned pick.
+        if self.live is not None and self.live.isRunning():
+            self.live.set_policy(self.live.policy_name)
+        self.on_continuation(wire, scores)
 
     def on_policy_installed(self, name):
         """The worker says which policy it actually ended up with.
