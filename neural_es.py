@@ -41,22 +41,32 @@ from w101_sim import Boss, Sim
 
 CARDS = load_spells_full()
 
-#: near the canonical contested set but not identical to it -- the
-#: held-out verdict happens on the canonical boards, not these
+#: near the canonical contested set but never ON it (the held-out
+#: verdict happens at hp 600/700/1300; fitness never does) -- and,
+#: since the second campaign, WIDE: both mob counts per deck, the
+#: buff-heavy deck the first campaign's winner measured worst on, and
+#: a fourth school so the net cannot mistake ice-and-storm for the
+#: whole game
+_LOW = (["Frost Beetle"] * 4 + ["Ice Trap"] * 2 + ["Snow Serpent"] * 4
+        + ["Evil Snowman"] * 4 + ["Tower Shield"] * 2)
+_BUFFY = (["Iceblade"] * 4 + ["Ice Trap"] * 4 + ["Evil Snowman"] * 4
+          + ["Frost Beetle"] * 4)
+_STORM = (["Thunder Snake"] * 4 + ["Lightning Bats"] * 4
+          + ["Storm Shark"] * 4 + ["Stormblade"] * 2)
+_FIRE = (["Fire Cat"] * 4 + ["Fire Elf"] * 4 + ["Sunbird"] * 4
+         + ["Fireblade"] * 2)
 BOARDS = (
-    (["Frost Beetle"] * 4 + ["Ice Trap"] * 2 + ["Snow Serpent"] * 4
-     + ["Evil Snowman"] * 4 + ["Tower Shield"] * 2,
-     "ice", 1022, 0.09, 650, 2, 85),
-    (["Iceblade"] * 4 + ["Ice Trap"] * 4 + ["Evil Snowman"] * 4
-     + ["Frost Beetle"] * 4, "ice", 1022, 0.09, 650, 2, 85),
-    (["Thunder Snake"] * 4 + ["Lightning Bats"] * 4 + ["Storm Shark"] * 4
-     + ["Stormblade"] * 2, "storm", 800, 0.05, 650, 2, 85),
-    (["Thunder Snake"] * 4 + ["Lightning Bats"] * 4 + ["Storm Shark"] * 4
-     + ["Stormblade"] * 2, "storm", 800, 0.05, 1300, 1, 110),
+    (_LOW, "ice", 1022, 0.09, 620, 2, 82),
+    (_LOW, "ice", 1022, 0.09, 730, 2, 92),
+    (_BUFFY, "ice", 1022, 0.09, 620, 2, 82),
+    (_BUFFY, "ice", 1022, 0.09, 730, 2, 92),
+    (_STORM, "storm", 800, 0.05, 620, 2, 82),
+    (_STORM, "storm", 800, 0.05, 1250, 1, 105),
+    (_FIRE, "fire", 900, 0.07, 620, 2, 82),
 )
 
-N_FIT = 40          # fights per board per candidate
-N_VAL = 120         # fights per board for the validation score
+N_FIT = 30          # fights per board per candidate
+N_VAL = 100         # fights per board for the validation score
 SIGMA = 0.05
 ALPHA = 0.03
 PAIRS = 8           # antithetic pairs per generation
