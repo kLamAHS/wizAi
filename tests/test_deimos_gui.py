@@ -5631,3 +5631,29 @@ def test_probe_boards_can_carry_named_casters():
     unknown, _ = _probe_mobs((500, 1, "storm", ["No Such Creature XYZ"]),
                              55)
     assert unknown.pool is None and unknown.dmg == 55
+
+
+def test_the_sweep_never_installs_what_it_is_measuring():
+    """The GUI runs choose_search while the live fight keeps playing,
+    and the sweep used to install each candidate continuation globally
+    to measure it -- so a live decision landing mid-sweep rolled out
+    with whatever probe setting happened to be under measurement.
+    Candidates are passed explicitly now; only the winner is installed,
+    once, at the end."""
+    from data_full import load_spells_full
+    from deimos_bridge import policies as P
+
+    cards = load_spells_full()
+    deck = ["Frost Beetle"] * 3 + ["Snow Serpent"] * 3
+    P.set_continuation("nuke-asap")
+    seen = []
+    try:
+        picked, _horizon, _scores = P.choose_search(
+            cards, deck, "ice", [(300, 1, "death")], n=6, dmg=40,
+            on_probe=lambda k, v: seen.append(P.continuation_name()))
+        assert seen and all(nm == "nuke-asap" for nm in seen)
+        assert P.continuation_name() == picked    # winner, installed once
+    finally:
+        P.set_continuation(P.DEFAULT_CONTINUATION)
+        P.set_search_horizon(None)
+        P.set_driver("ttk")

@@ -556,13 +556,20 @@ def choose_search(cards, deck, school, boards, n=60, on_probe=None,
 
     scores = {}
     for name in CONTINUATIONS:
-        set_continuation(name)
+        # Explicit, never installed: the GUI runs this sweep while the
+        # live fight keeps playing, and a sweep that set the global per
+        # candidate had live decisions rolling out with whatever probe
+        # setting happened to be under measurement at that moment. Only
+        # the winner is installed, once, below.
+        cont = build_continuation(name)
         for horizon in HORIZONS:
             total = 0.0
             for board in boards:
                 boss, extra = _probe_mobs(board, dmg)
                 sim = Sim(cards, deck, school, boss, enemies=extra)
-                total += evaluate(sim, greedy_ttk(horizon), n=n)[0]
+                total += evaluate(sim, greedy_ttk(horizon,
+                                                  continuation=cont),
+                                  n=n)[0]
             key = f"{name}@h{horizon}"
             scores[key] = total / max(1, len(boards))
             if on_probe:
@@ -582,15 +589,16 @@ def choose_search(cards, deck, school, boards, n=60, on_probe=None,
     from w101_sim import Sim, evaluate
 
     ttk_score = scores[best]
+    tuned_cont = build_continuation(best_name)
     for k in SEARCH_WIDTHS:
         total = 0.0
         for board in boards:
             boss, extra = _probe_mobs(board, dmg)
             sim = Sim(cards, deck, school, boss, enemies=extra)
             # The tuned continuation, so the probe measures the driver
-            # that would actually play. choose_search installed it just
-            # above, before this sweep runs.
-            total += evaluate(sim, make_search_policy(base=_continuation(),
+            # that would actually play -- passed explicitly rather than
+            # read from the global, same hygiene as the sweep above.
+            total += evaluate(sim, make_search_policy(base=tuned_cont,
                                                       k=k),
                               n=max(20, n // 3))[0]
         scores[f"search(k={k})"] = total / max(1, len(boards))
@@ -642,14 +650,14 @@ def choose_continuation(cards, deck, school, boards, n=60, on_probe=None):
 
     scores = {}
     for name in CONTINUATIONS:
-        set_continuation(name)
+        cont = build_continuation(name)     # explicit, never installed
         total = 0.0
         for hp, mobs, mob_school in boards:
             boss = Boss(name="probe", hp=hp, school=mob_school, dmg=0)
             extra = [Boss(name=f"probe {i}", hp=hp, school=mob_school, dmg=0)
                      for i in range(1, mobs)]
             sim = Sim(cards, deck, school, boss, enemies=extra)
-            total += evaluate(sim, greedy_ttk(), n=n)[0]
+            total += evaluate(sim, greedy_ttk(continuation=cont), n=n)[0]
         scores[name] = total / max(1, len(boards))
         if on_probe:
             on_probe(name, scores[name])
@@ -790,7 +798,8 @@ def _lost_score(rank, dealt, kills, turn):
     return (rank, -dealt)
 
 
-def _rollout(sim, state, first_action, max_turns=12, target=0):
+def _rollout(sim, state, first_action, max_turns=12, target=0,
+             continuation=None):
     """Score playing `first_action` now: (turns_to_kill, -damage_dealt).
 
     Lower is better on both, so `min` ranks them.
@@ -814,7 +823,11 @@ def _rollout(sim, state, first_action, max_turns=12, target=0):
     """
     import copy
 
-    continuation = _continuation()
+    # Explicit beats global: the tuning sweeps evaluate candidate
+    # continuations while a live fight may be deciding, and a sweep that
+    # installed each candidate globally had the live rollout playing
+    # whatever the probe happened to be measuring.
+    continuation = continuation or _continuation()
     probe = copy.copy(sim)
     probe.rng = _Fixed()
     s = copy.deepcopy(state)
@@ -949,11 +962,13 @@ def search_horizon():
     return _HORIZON or DEFAULT_HORIZON
 
 
-def greedy_ttk(max_turns: int = None):
+def greedy_ttk(max_turns: int = None, continuation=None):
     """Pick the move that kills soonest, by simulating each candidate.
 
     `max_turns=None` takes the deck-scoped horizon -- see
-    `set_search_horizon`.
+    `set_search_horizon`. `continuation=None` takes the deck-scoped
+    continuation; the tuning sweeps pass one explicitly so measuring a
+    candidate never means installing it globally under a live fight.
 
     `school_aware_blade_stack` stacks a *fixed* number of buffs and only
     then looks for a hit, which is wrong in both directions and both were
@@ -987,6 +1002,7 @@ def greedy_ttk(max_turns: int = None):
     planning phase.
     """
     fixed = max_turns
+    fixed_continuation = continuation
 
     def strat(sim, s):
         max_turns = fixed if fixed is not None else search_horizon()
@@ -1027,7 +1043,8 @@ def greedy_ttk(max_turns: int = None):
         # for being large.
         scored = []
         for card, target in candidates:
-            turns, neg_damage = _rollout(sim, s, card, max_turns, target)
+            turns, neg_damage = _rollout(sim, s, card, max_turns, target,
+                                         continuation=fixed_continuation)
             scored.append(((turns, neg_damage, card.pips, card.damage,
                             target), (card, target)))
         best_score, best_action = min(scored, key=lambda sc: sc[0])
@@ -1052,7 +1069,8 @@ def greedy_ttk(max_turns: int = None):
         # the damage tiebreak instead made it pass almost every turn: a
         # line that skips a turn accumulates pips and so does more total
         # damage later, which is not a reason to do nothing now.
-        pass_turns, pass_damage = _rollout(sim, s, None, max_turns)
+        pass_turns, pass_damage = _rollout(sim, s, None, max_turns,
+                                           continuation=fixed_continuation)
         passing = pass_turns < best_score[0]
         strat.last_candidates.append(
             Candidate(card="pass", target=None, turns=pass_turns,
