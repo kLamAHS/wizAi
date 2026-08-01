@@ -596,8 +596,10 @@ class LiveWorker(QThread):
             self.trained = trained_policy(self.agent)
             return self.trained
         if self.policy_name.startswith("ttk"):
-            from ..policies import greedy_ttk
-            return greedy_ttk()
+            # The tuned driver: plain lookahead, or determinized search
+            # where the per-deck probes measured it ahead.
+            from ..policies import tuned_driver
+            return tuned_driver()
         if self.policy_name.startswith("school-aware"):
             from ..policies import school_aware_blade_stack
             return school_aware_blade_stack(3)

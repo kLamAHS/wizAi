@@ -5091,7 +5091,8 @@ def test_choose_search_sweeps_continuations_and_horizons():
             cards, deck, "ice", [(350, 2, "death")], n=8, dmg=55)
         assert name in P.CONTINUATIONS
         assert horizon in P.HORIZONS
-        assert len(scores) == len(P.CONTINUATIONS) * len(P.HORIZONS)
+        # continuations x horizons, plus the driver probe's own entry
+        assert len(scores) == len(P.CONTINUATIONS) * len(P.HORIZONS) + 1
         assert P.search_horizon() == horizon      # installed, not reported
         assert P.continuation_name() == name
     finally:
@@ -5203,3 +5204,24 @@ def test_the_board_panel_shows_the_burn():
 
     rec = tel.observe(PolicyDecision(passing=True, reason="x"), _Read())
     assert any("70/tick x3 dot" in w for w in rec.enemies[0].wards)
+
+
+def test_the_tuner_also_picks_the_driver():
+    """search(k=6) beat the lookahead by +2.8/+3.3 on richer decks and
+    lost by 3.6 on a starter — deck-dependent like the continuation and
+    the horizon, so it is chosen the same way: measured on the probes."""
+    from data_full import load_spells_full
+    from deimos_bridge import policies as P
+
+    cards = load_spells_full()
+    deck = ["Frost Beetle"] * 3 + ["Ice Trap"] * 3 + ["Snow Serpent"] * 3
+    try:
+        _n, _h, scores = P.choose_search(cards, deck, "ice",
+                                         [(350, 2, "death")], n=9, dmg=55)
+        assert "search(k=6)" in scores
+        assert P.driver_name() in ("ttk", "search(k=6)")
+        assert callable(P.tuned_driver())
+    finally:
+        P.set_search_horizon(None)
+        P.set_continuation(P.DEFAULT_CONTINUATION)
+        P._DRIVER = "ttk"

@@ -520,7 +520,48 @@ def choose_search(cards, deck, school, boards, n=60, on_probe=None,
     best_name, best_h = best.rsplit("@h", 1)
     set_continuation(best_name)
     set_search_horizon(int(best_h))
+
+    # Third choice: the driver itself. Determinized search (k=6) beat
+    # the plain lookahead by +2.8 and +3.3 points on richer decks and
+    # lost by 3.6 on a starter deck -- deck-dependent, exactly like the
+    # continuation and the horizon, so it is picked the same way: by
+    # measurement on the same probe boards. It is ~12x slower per
+    # decision, which is nothing against a ~30 s live planning phase.
+    from search_policy import make_search_policy
+    from w101_sim import Boss, Sim, evaluate
+
+    ttk_score = scores[best]
+    total = 0.0
+    for hp, mobs, mob_school in boards:
+        boss = Boss(name="probe", hp=hp, school=mob_school, dmg=dmg)
+        extra = [Boss(name=f"probe {i}", hp=hp, school=mob_school, dmg=dmg)
+                 for i in range(1, mobs)]
+        sim = Sim(cards, deck, school, boss, enemies=extra)
+        total += evaluate(sim, make_search_policy(k=6),
+                          n=max(20, n // 3))[0]
+    scores["search(k=6)"] = total / max(1, len(boards))
+    global _DRIVER
+    _DRIVER = ("search(k=6)"
+               if scores["search(k=6)"] > ttk_score + 0.02 else "ttk")
     return best_name, int(best_h), scores
+
+
+#: Which policy actually drives when the GUI says "ttk-lookahead":
+#: the plain lookahead, or determinized search when the per-deck probes
+#: measured it ahead by more than noise (+2 points on the probe mean).
+_DRIVER = "ttk"
+
+
+def tuned_driver():
+    """The measured-best driver for the tuned deck."""
+    if _DRIVER == "search(k=6)":
+        from search_policy import make_search_policy
+        return make_search_policy(k=6)
+    return greedy_ttk()
+
+
+def driver_name():
+    return _DRIVER
 
 
 def choose_continuation(cards, deck, school, boards, n=60, on_probe=None):
