@@ -421,6 +421,59 @@ class TrainWorker(QThread):
             return int(self.mob_damage)
         return max(30, self.player_hp // 12)
 
+    def deck_advice(self, deficit):
+        """Name cards that would close a damage deficit, from the pool.
+
+        The boards no policy can win are lost in the deck box, not in
+        play -- 19 of 32 game-spanning boards were lost by every policy
+        in the repo, and better play cannot buy a single one of them.
+        `deck_builder.legal_pool` knows what this school can actually
+        put in a deck, so the refusal can say "add these" instead of
+        "add damage cards", which is the difference between advice and
+        a shrug.
+        """
+        try:
+            from deck_builder import legal_pool
+
+            pool = legal_pool(self.cards, self.school)
+        except Exception:
+            pool = {n: c for n, c in self.cards.items()
+                    if getattr(c, "school", "") == self.school}
+        gear = 1.0 + (self.player_stats.get("damage") or {}).get(
+            self.school, 0.0)
+        have = {}
+        for name in self.deck:
+            have[name] = have.get(name, 0) + 1
+        picks, closed = [], 0.0
+        # Cheap pips first, biggest damage within a cost. Sorting by
+        # raw damage suggested Lord of Winter to a level-5 wizard --
+        # the pool is not level-gated, but pip cost is a decent proxy
+        # for "castable by whoever is running this deck".
+        hitters = sorted(
+            (c for n, c in pool.items()
+             if c.kind in ("damage", "drain") and c.damage
+             and not c.x_pips and c.pips <= 4
+             and have.get(c.name, 0) < 3),
+            key=lambda c: (c.pips, -c.damage))
+        for c in hitters:
+            room = 3 - have.get(c.name, 0)
+            take = min(room, max(1, int(deficit // max(1, c.damage * gear))))
+            for _ in range(take):
+                if closed >= deficit * 1.15:
+                    break
+                picks.append(c.name)
+                closed += c.damage * gear
+            if closed >= deficit * 1.15:
+                break
+        if not picks:
+            return ""
+        counts = {}
+        for n in picks:
+            counts[n] = counts.get(n, 0) + 1
+        listed = ", ".join(f"{v}x {k}" for k, v in counts.items())
+        return (f" Adding {listed} would close the ~{deficit:,.0f} damage "
+                f"gap with room to spare.")
+
     def preflight(self, board, extra, n=200):
         """(feasible, note) -- can anything win this board?
 
@@ -456,11 +509,7 @@ class TrainWorker(QThread):
         # the answer and suggesting them sends you round in circles.
         ceiling = self.damage_ceiling()
         if ceiling < health:
-            missing = [n for n in ("Evil Snowman", "Snow Serpent",
-                                   "Frost Beetle")
-                       if n in self.cards and n not in self.deck]
-            hint = (f" You have no {missing[0]} in the deck."
-                    if missing else "")
+            hint = self.deck_advice(health - ceiling)
             return False, (
                 head +
                 f"Your deck is the reason, not the board. Every damage "

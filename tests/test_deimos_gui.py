@@ -4644,7 +4644,7 @@ def test_a_deck_that_cannot_deliver_the_health_is_told_so(qapp):
     assert ok is False
     assert "Your deck is the reason" in note
     assert "1,404 health" in note
-    assert "no Evil Snowman" in note
+    assert "would close" in note          # concrete cards, not a shrug
     # ...and it does not send the operator round the knobs that cannot help
     assert "check that the enemy school" not in note
 
@@ -5252,3 +5252,24 @@ def test_the_tuned_trio_survives_the_wire():
         P.set_search_horizon(None)
         P.set_continuation(P.DEFAULT_CONTINUATION)
         P.set_driver("ttk")
+
+
+def test_deck_advice_names_castable_cards(qapp):
+    """The boards no policy can win are lost in the deck box; the advice
+    must name real, cheap-pip additions, not a max-level spell a level-5
+    wizard cannot cast."""
+    from data_full import load_spells_full
+    from deimos_bridge.gui.app import TrainWorker
+
+    cards = load_spells_full()
+    nine = ["Frost Beetle"] * 3 + ["Ice Trap"] * 3 + ["Snow Serpent"] * 3
+    w = TrainWorker(cards, nine, "ice", 0, player_hp=1022, boss_hp=780,
+                    n_enemies=2, player_stats={"damage": {"ice": 0.09}})
+    hint = w.deck_advice(325)
+    assert "would close" in hint
+    named = [part.split("x ", 1)[1] for part in
+             hint.split("Adding ", 1)[1].split(" would")[0].split(", ")]
+    for name in named:
+        card = cards[name]
+        assert card.pips <= 4 and card.school == "ice", (name, card.pips)
+    assert w.deck_advice(0) == "" or "would close" in w.deck_advice(0)
