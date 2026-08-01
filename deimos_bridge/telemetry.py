@@ -93,6 +93,28 @@ def predict_damage(sim, state, card, target_index=0):
 # --------------------------------------------------------------------------
 # records
 # --------------------------------------------------------------------------
+def describe_threat(e) -> str:
+    """How the rollouts modelled a mob's offence, for the Board panel.
+
+    Two models exist since `_apply_pool`: a catalog caster (spell pool
+    plus the pips read off the client) and the measured flat hit. Which
+    one priced the fight decides whether the policy shields before the
+    spike or races through the drizzle -- and neither the model nor the
+    enemy's pip rack was visible anywhere in the window.
+    """
+    norm = int(getattr(e, "norm_pips", 0) or 0)
+    pow_ = int(getattr(e, "pow_pips", 0) or 0)
+    rack = f"{norm}+{pow_}p" if pow_ else f"{norm}p"
+    pool = getattr(e, "spell_pool", None)
+    if pool:
+        head = ", ".join(pool[:3]) + ("…" if len(pool) > 3 else "")
+        return f"{rack} · casts {head}"
+    hit = float(getattr(e, "flat_hit", 0) or 0)
+    if hit:
+        return f"{rack} · ~{hit:,.0f}/round"
+    return rack
+
+
 def describe_hanging(h) -> str:
     """A hanging effect as something a human can act on.
 
@@ -181,6 +203,12 @@ class EnemyView:
     #: the wrong school -- and it was given the literal "ice" for every
     #: mob in every fight -- can resist 40% of the whole deck.
     school: str = ""
+    #: how the rollouts modelled this mob's offence, preformatted:
+    #: "4+1p · casts Banshee, Ghoul, Dark Sprite" for a catalog caster,
+    #: "2p · ~136/round" for the measured flat model. The decision the
+    #: policy makes hangs on which of the two priced the fight, and
+    #: neither was visible anywhere in the window.
+    threat: str = ""
 
 
 @dataclass
@@ -346,7 +374,8 @@ class Telemetry:
                                + [f"{o.per_tick:,.0f}/tick x{o.rounds_left} "
                                   f"{o.kind}"
                                   for o in getattr(e, "over_time", [])],
-                               getattr(e, "school", "") or "")
+                               getattr(e, "school", "") or "",
+                               describe_threat(e))
                      for e in s.enemies],
         )
 

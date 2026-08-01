@@ -5572,3 +5572,42 @@ def test_named_enemies_cast_in_the_rollouts():
                   max_hp=690, team=1)
     be._apply_pool(read_for(boss3))
     assert boss3.spell_pool is None
+
+
+def test_the_board_panel_shows_the_threat_model(qapp):
+    """Whether the policy shields before the spike or races through the
+    drizzle hangs on which offence model priced the mob -- the catalog
+    caster with its read pips, or the measured flat hit -- and neither
+    was visible anywhere in the window."""
+    from deimos_bridge.gui.panels import BoardPanel
+    from deimos_bridge.live_backend import PolicyDecision
+    from deimos_bridge.telemetry import Telemetry
+    from w101_sim import Actor, State
+
+    tel = Telemetry()
+    tel.start_fight()
+    me = Actor(name="W", school="ice", hp=800, max_hp=800, team=0)
+    caster = Actor(name="Lord Nightshade", school="death", hp=690,
+                   max_hp=690, team=1, norm_pips=4, pow_pips=1,
+                   spell_pool=["Banshee", "Ghoul", "Dark Sprite",
+                               "Death Trap"])
+    drizzle = Actor(name="minion", school="fire", hp=300, max_hp=300,
+                    team=1, norm_pips=2, flat_hit=136.0)
+
+    class _Read:
+        state = State(me, [caster, drizzle])
+        round_number = 1
+        hand_cards = {}
+        resolver = type("R", (), {"misses": set()})()
+        hidden = []
+        hand_visibility = 1.0
+
+    rec = tel.observe(PolicyDecision(passing=True, reason="x"), _Read())
+    assert rec.enemies[0].threat == "4+1p · casts Banshee, Ghoul, " \
+                                    "Dark Sprite…"
+    assert rec.enemies[1].threat == "2p · ~136/round"
+
+    panel = BoardPanel(tel)
+    panel.render(rec)
+    assert "casts Banshee" in panel.enemies.item(0, 2).text()
+    assert "~136/round" in panel.enemies.item(1, 2).text()

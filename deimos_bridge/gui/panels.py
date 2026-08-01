@@ -156,7 +156,8 @@ class BoardPanel(QWidget):
 
         foes = QGroupBox("enemies")
         fl = QVBoxLayout(foes)
-        self.enemies = _table(["enemy", "health", "charms", "wards"])
+        self.enemies = _table(["enemy", "health", "threat",
+                               "charms", "wards"])
         fl.addWidget(self.enemies)
         self.unres = _label("", PALETTE["bad"])
         self.unres.setWordWrap(True)
@@ -188,8 +189,14 @@ class BoardPanel(QWidget):
         for i, e in enumerate(rec.enemies):
             self.enemies.setItem(i, 0, _cell(e.name))
             self.enemies.setItem(i, 1, _cell(f"{e.hp:,.0f} / {e.max_hp:,.0f}"))
-            self.enemies.setItem(i, 2, _cell(", ".join(e.charms) or "—"))
-            self.enemies.setItem(i, 3, _cell(", ".join(e.wards) or "—"))
+            # Which offence model priced this mob -- "4+1p · casts
+            # Banshee, Ghoul…" or "2p · ~136/round" -- because whether
+            # the policy shields before the spike or races through the
+            # drizzle hangs on exactly this, and it was invisible.
+            self.enemies.setItem(i, 2, _cell(getattr(e, "threat", "")
+                                             or "—"))
+            self.enemies.setItem(i, 3, _cell(", ".join(e.charms) or "—"))
+            self.enemies.setItem(i, 4, _cell(", ".join(e.wards) or "—"))
 
         if rec.unresolved:
             self.unres.setText(
