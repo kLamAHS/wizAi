@@ -34,10 +34,11 @@ import asyncio
 import json
 
 
-def _log_decision(log):
+def _log_decision(log, seat=0):
     def on_decision(decision, read):
         s = read.state
         log.append({
+            "wizard": seat + 1,
             "round": read.round_number,
             "decision": repr(decision),
             "card": decision.card_name,
@@ -134,76 +135,120 @@ async def run(args):
     policy = build_policy(args.policy, cards, args.school, deck)
 
     log = []
-    backend = None
+    backends = []
     handler = ClientHandler()
+    wizards = max(1, int(getattr(args, "wizards", 1) or 1))
+    # Above one wizard the run becomes a hivemind: every seat submits its
+    # board each round and waits for the others, then chooses against a
+    # board that already carries what the rest of the party committed to.
+    # See deimos_bridge/hivemind.py.
+    hive = None
+    if wizards > 1:
+        from .hivemind import Hivemind
+        hive = Hivemind(passes=args.passes, on_status=lambda m: print(f"  {m}"))
     try:
         clients = handler.get_new_clients()
         if not clients:
             raise SystemExit("no Wizard101 client found -- is the game running?")
-        client = clients[0]
-        try:
-            await client.activate_hooks()
-        except Exception as exc:
-            # PatternFailed here has two causes with one message, and the
-            # message's advice ("restart the client") only fixes one of
-            # them. Rather than reprint it, hand over to the diagnostic
-            # that can actually tell them apart.
-            if "PatternFailed" in type(exc).__name__ or "Pattern" in str(exc):
-                raise SystemExit(
-                    "wizwalker could not install its hooks: the autobot "
-                    "signature was not found in the running client.\n\n"
-                    "That has two causes and the built-in advice only "
-                    "covers one. Run this to find out which:\n\n"
-                    "    .venv\\Scripts\\python.exe -m "
-                    "deimos_bridge.diagnose_hooks\n"
-                ) from exc
-            raise
+        if len(clients) < wizards:
+            raise SystemExit(
+                f"--wizards {wizards} needs {wizards} running, logged-in "
+                f"clients; wizwalker found {len(clients)}.")
+        clients = clients[:wizards]
+        for i, client in enumerate(clients):
+            try:
+                await client.activate_hooks()
+            except Exception as exc:
+                # PatternFailed here has two causes with one message, and
+                # the message's advice ("restart the client") only fixes
+                # one of them. Rather than reprint it, hand over to the
+                # diagnostic that can actually tell them apart.
+                if "PatternFailed" in type(exc).__name__ \
+                        or "Pattern" in str(exc):
+                    raise SystemExit(
+                        "wizwalker could not install its hooks: the autobot "
+                        "signature was not found in the running client.\n\n"
+                        "That has two causes and the built-in advice only "
+                        "covers one. Run this to find out which:\n\n"
+                        "    .venv\\Scripts\\python.exe -m "
+                        "deimos_bridge.diagnose_hooks\n"
+                    ) from exc
+                raise
+            backend = WizAiBackend(
+                policy=policy, cards=cards, school=args.school,
+                decklist=deck, on_decision=_log_decision(log, i),
+                catalog=catalog, policy_name=args.policy, seat=i,
+                coordinator=hive, party_size=wizards)
+            if hive is not None:
+                hive.join(i, f"wizard {i + 1}")
+            backends.append(backend)
 
-        backend = WizAiBackend(policy=policy, cards=cards, school=args.school,
-                               decklist=deck, on_decision=_log_decision(log),
-                               catalog=catalog, policy_name=args.policy)
         # WizAiCombatHandler, not SprintyCombat: one decision must be one
         # cast, or the fight is played by a different policy than the one
         # being measured. See live_backend.WizAiCombatHandler.
-        combat = make_combat_handler(client, backend)
+        combats = [make_combat_handler(c, b)
+                   for c, b in zip(clients, backends)]
 
         print(f"wizAi policy {args.policy!r} taking over combat "
-              f"({args.school} wizard)")
+              f"({args.school} wizard"
+              + (f" x{wizards}, agreeing each round" if wizards > 1 else "")
+              + ")")
         print("walk into a fight — waiting for combat…")
-        for fight in range(args.fights):
-            print(f"\nfight {fight + 1}/{args.fights}")
-            try:
-                # `wait_for_combat` blocks until a duel starts and then
-                # runs `handle_combat` itself (handler.py:64-73). Calling
-                # handle_combat again here would be a second, empty pass.
-                await combat.wait_for_combat()
-                print("  fight over")
-            except KeyboardInterrupt:
-                raise
-            except Exception as exc:
-                # A duel ending is a normal event that wizwalker often
-                # signals by a read failing -- the participant list is
-                # freed under it. Reporting that as a traceback makes a
-                # finished fight look like a crash.
-                name = type(exc).__name__
-                if any(k in name for k in ("Memory", "ClientClosed",
-                                           "ReadingEnum", "Invalidated")):
-                    print(f"  fight ended ({name})")
-                else:
-                    print(f"  fight aborted: {name}: {exc}")
-                    if fight == 0:
-                        raise
+
+        async def fight_loop(seat, combat):
+            for fight in range(args.fights):
+                who = "" if wizards == 1 else f"[wizard {seat + 1}] "
+                print(f"\n{who}fight {fight + 1}/{args.fights}")
+                try:
+                    # `wait_for_combat` blocks until a duel starts and
+                    # then runs `handle_combat` itself (handler.py:64-73).
+                    # Calling handle_combat again here would be a second,
+                    # empty pass.
+                    await combat.wait_for_combat()
+                    print(f"  {who}fight over")
+                except KeyboardInterrupt:
+                    raise
+                except Exception as exc:
+                    # A duel ending is a normal event that wizwalker often
+                    # signals by a read failing -- the participant list is
+                    # freed under it. Reporting that as a traceback makes
+                    # a finished fight look like a crash.
+                    name = type(exc).__name__
+                    if any(k in name for k in ("Memory", "ClientClosed",
+                                               "ReadingEnum", "Invalidated")):
+                        print(f"  {who}fight ended ({name})")
+                    else:
+                        print(f"  {who}fight aborted: {name}: {exc}")
+                        if fight == 0:
+                            raise
+                finally:
+                    if hive is not None:
+                        # Out of the circle: the rest of the party must
+                        # stop waiting for this seat at the barrier, or
+                        # every one of their rounds pays the full timeout.
+                        hive.leave_combat(seat)
+
+        # Concurrently. Four sequential loops would mean wizard 2 never
+        # reaching its planning phase until wizard 1's duel was over,
+        # which is a queue rather than a party.
+        await asyncio.gather(*[fight_loop(i, c)
+                               for i, c in enumerate(combats)])
     finally:
         await handler.close()
         if args.out:
             with open(args.out, "w") as f:
                 json.dump({"policy": args.policy, "school": args.school,
-                           "decisions": log}, f, indent=2)
+                           "wizards": wizards, "decisions": log}, f, indent=2)
             print(f"\nwrote {args.out} ({len(log)} decisions)")
-        if backend is not None:
+        if hive is not None:
+            print(f"party: {hive.rounds} coordinated round(s), "
+                  f"{hive.retargets} move(s) changed by the party, "
+                  f"{hive.saved} card(s) held back from an already-dead "
+                  f"board")
+        if backends:
             # The single most useful line after a live run: a card the
             # resolver could not place is a card the policy never saw.
-            print(backend.resolver.report())
+            print(backends[0].resolver.report())
 
 
 def main():
@@ -222,6 +267,22 @@ def main():
                     help="comma-separated card names, for the scarcity "
                          "feature and for training the 'trained' policy")
     ap.add_argument("--fights", type=int, default=1)
+    ap.add_argument("--wizards", type=int, default=1,
+                    help="how many running clients to drive, up to the four "
+                         "a battle circle seats. Above one they play as a "
+                         "hivemind: each round every wizard waits for the "
+                         "others and then chooses against a board carrying "
+                         "what the rest of the party committed to, so a trap "
+                         "one lays is cashed by the next and nobody fires "
+                         "into a mob that is already dead.\n\n"
+                         "This entry point does not move anyone: every "
+                         "client has to be walked into the same duel "
+                         "yourself. The window's 'Followers chase wizard 1' "
+                         "does the gathering")
+    ap.add_argument("--passes", type=int, default=2,
+                    help="coordination passes per round (0 = every wizard "
+                         "decides alone, which is the uncoordinated "
+                         "baseline)")
     ap.add_argument("--out", default="results_live_run.json")
     asyncio.run(run(ap.parse_args()))
 

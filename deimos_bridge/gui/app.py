@@ -1,12 +1,26 @@
 """The window.
 
-Holds a `Telemetry`, one tab per panel, and the controls for configuring
-and starting a run. Training happens on a worker thread so the window
-stays responsive -- a Q-learning run is minutes of solid CPU and freezing
-the UI for it would make the progress readout pointless.
+Holds one `Telemetry` per wizard, one tab per panel, and the controls for
+configuring and starting a run. Training happens on a worker thread so
+the window stays responsive -- a Q-learning run is minutes of solid CPU
+and freezing the UI for it would make the progress readout pointless.
 
     python -m deimos_bridge.gui              # live (needs Windows + game)
     python -m deimos_bridge.gui --demo       # canned fight, runs anywhere
+
+**Up to four wizards.** The `wizards` box says how many Wizard101 clients
+to drive, and the `wizard` selector beside it says which one the
+controls, the tabs and the Train button are talking about. Every wizard
+gets its own school, deck, policy, gear, trained table and telemetry,
+because all six of those genuinely differ -- a Q table is keyed on its
+own decklist, and a party of four identical wizards is the one party
+worth nothing.
+
+With more than one, the run also becomes a *hivemind*: the wizards agree
+each round before any of them clicks a card, so a trap laid by one is
+cashed by the next and nobody fires into a mob that is already dead. The
+Party tab shows what that agreement changed. See
+`deimos_bridge/hivemind.py`.
 """
 import argparse
 import sys
@@ -20,10 +34,15 @@ from PyQt6.QtWidgets import (QApplication, QComboBox, QFileDialog, QGroupBox,
 from ..hotkeys import DEFAULTS as HOTKEY_DEFAULTS, KEY_CHOICES as HOTKEY_CHOICES
 from ..telemetry import Telemetry
 from .deckpicker import pick_deck
-from .live import LiveWorker
+from .live import LiveWorker, SeatConfig
 from .panels import (BoardPanel, DecisionsPanel, LearningPanel, ModelPanel,
-                     NamingPanel, RunPanel, _label, scrollable)
+                     NamingPanel, PartyPanel, RunPanel, _label, scrollable)
 from .theme import PALETTE, stylesheet
+
+#: How many game clients one window will drive. Four is the game's own
+#: limit -- a battle circle seats four wizards -- so it is the ceiling
+#: rather than a chosen one.
+MAX_WIZARDS = 4
 
 SCHOOLS = ["fire", "ice", "storm", "myth", "life", "death", "balance"]
 #: `ttk-lookahead` first, so it is what the window starts on. It keys on
@@ -82,7 +101,7 @@ class TrainWorker(QThread):
     def __init__(self, cards, deck, school, episodes, player_hp=800,
                  boss_hp=1200, player_stats=None, n_enemies=1,
                  mob_hps=None, generalize=True, mob_schools=None,
-                 mob_damage=0):
+                 mob_damage=0, party_size=1):
         super().__init__()
         self.cards, self.deck = cards, deck
         self.school, self.episodes = school, episodes
@@ -110,6 +129,11 @@ class TrainWorker(QThread):
         #: fight. 0 means "never measured", and only then is the wizard's
         #: own health used as a stand-in.
         self.mob_damage = int(mob_damage or 0)
+        #: wizards in the circle. It only reaches the *unmeasured*
+        #: incoming prior and the deck-ceiling refusal, because those are
+        #: the two places a solo assumption is quietly wrong for a party
+        #: member -- see `enemy_damage` and `preflight`.
+        self.party_size = max(1, int(party_size or 1))
         #: Resample the board every episode instead of training one.
         #: On by default, because the alternative is retraining before
         #: every fight -- which needs you to know the board before you
@@ -439,10 +463,21 @@ class TrainWorker(QThread):
         round. Then the wizard's health, which is at least in the right
         order of magnitude for the level ranges where the two grow
         together, and is what this used to always do.
+
+        Both are "damage to *this* wizard, per enemy, per round", and in
+        a party that is not the board's output -- an enemy picking one
+        of four wizards to hit lands on this one a quarter of the time.
+        The measured number already knows that, because it is read off
+        this wizard's own health bar. The stand-in did not, so a party
+        member with no fight measured yet trained against a board
+        hitting four times as hard as the one it plays: the death clock
+        sits four times too early, and every line that needs a setup
+        turn is scored as though it dies before the payoff. Divided for
+        the same reason `WizAiBackend._apportion_incoming` divides.
         """
         if self.mob_damage and self.mob_damage > 0:
             return int(self.mob_damage)
-        return max(30, self.player_hp // 12)
+        return max(30, self.player_hp // (12 * self.party_size))
 
     def deck_advice(self, deficit):
         """Name cards that would close a damage deficit, from the pool.
@@ -577,19 +612,38 @@ class TrainWorker(QThread):
         # simply cannot deliver the board's health, none of the knobs is
         # the answer and suggesting them sends you round in circles.
         ceiling = self.damage_ceiling()
-        if ceiling < health:
-            hint = self.deck_advice(health - ceiling)
+        # In a party this wizard is not asked to deliver the whole
+        # board. Three other wizards are hitting it, and refusing to
+        # train a deck for a board its share of which it clears
+        # comfortably is a refusal to the wrong question -- the one the
+        # simulator can ask, rather than the one being played.
+        owed = health / self.party_size
+        if ceiling < owed:
+            hint = self.deck_advice(owed - ceiling)
+            share = ("" if self.party_size == 1 else
+                     f" Your share of it, across {self.party_size} "
+                     f"wizards, is about {owed:,.0f}.")
             return False, (
                 head +
                 f"Your deck is the reason, not the board. Every damage "
                 f"card in it, landing, with your gear, and with every "
                 f"buff spent on the biggest hits, comes to about "
                 f"{ceiling:,.0f} damage — and this board has {health:,} "
-                f"health. No play order wins that, and no mob HP, mob "
-                f"count or enemy school setting changes it.{hint}"
+                f"health.{share} No play order wins that, and no mob HP, "
+                f"mob count or enemy school setting changes it.{hint}"
                 f"{matchup}\n\n"
                 f"Add damage cards, or train against a smaller board.")
 
+        alone = ("" if self.party_size == 1 else
+                 f"\n\nThis is a SOLO verdict: the simulator has one "
+                 f"wizard in it, and you are training one of "
+                 f"{self.party_size}. The incoming damage is already "
+                 f"priced as this wizard's share, but the other "
+                 f"{self.party_size - 1} wizards' damage is not — so a "
+                 f"board your party clears together can still be refused "
+                 f"here. Train against a smaller board and the table will "
+                 f"still key the real one, because the trained band is "
+                 f"stretched to cover the boards you say you will meet.")
         return False, (
             head +
             f"Neither the scripted policy ({n} fights) nor the search "
@@ -599,7 +653,7 @@ class TrainWorker(QThread):
             f"mob HP or the mob count, raise your health, or check the "
             f"incoming damage: at {board.dmg}/round each you last "
             f"{self.player_hp / max(1, board.dmg * (1 + len(extra))):.0f} "
-            f"rounds.{matchup}")
+            f"rounds.{matchup}{alone}")
 
     def run(self):
         try:
@@ -926,22 +980,60 @@ class MainWindow(QMainWindow):
     #: has run. Deck-scoped: the choice that is +5.2 points on one deck
     #: is -7.6 on another, so there is no global answer to store.
     continuation = ""
-    #: which deck the installed quartet was measured for, so the
-    #: auto-tuner knows an untuned deck when it sees one and never
-    #: re-tunes a deck a train already tuned
-    _tuned_deck = None
-    _tuning_deck = None
+    #: which deck each wizard's installed quartet was measured for, so
+    #: the auto-tuner knows an untuned deck when it sees one and never
+    #: re-tunes a deck a train already tuned. Per wizard, because the
+    #: quartet is deck-scoped and four wizards hold four decks -- one
+    #: shared entry would tune wizard 1 and then declare wizard 3 done.
+    _tuned_decks = None
+    _tuning_decks = None
+    _autotunes = None
+    #: which wizard the running train belongs to, so the others still
+    #: auto-tune while it works
+    _training_seat = None
     #: cheat warnings already shown, so a farmed boss is announced once
     #: per session rather than once per fight
     _cheats_warned = None
+    #: which wizard the school/deck/policy boxes and the tabs are showing.
+    #: Not read off the combo: the combo's index moves *during* a party
+    #: resize, and the whole point of this attribute is to know which
+    #: wizard the widgets still hold so its values can be stored before
+    #: the new one is loaded over them.
+    _seat_showing = 0
+    #: set while the widgets are being written to from stored config, so
+    #: the change signals do not read that back as the user editing --
+    #: which would save wizard 1's deck over wizard 2's on every switch,
+    #: and swap a running fight's policy for good measure
+    _loading = False
 
     def __init__(self, telemetry=None):
         super().__init__()
         self._cheats_warned = set()
         self.setWindowTitle("wizAi — live combat lab")
         self.resize(1180, 800)
-        self.tel = telemetry or Telemetry()
-        self.agent = None
+        #: one record per wizard. Built up front rather than on demand so
+        #: the selector, the panels and the export all have something to
+        #: point at before a run has ever started. `self.tel` stays
+        #: wizard 1's, which is what every caller that predates parties
+        #: means by "the telemetry".
+        self.tels = [telemetry or Telemetry()] + [
+            Telemetry() for _ in range(MAX_WIZARDS - 1)]
+        self.tel = self.tels[0]
+        #: each wizard's own trained table and gear. A Q table is keyed
+        #: on its deck, and gear is read per client, so neither can be
+        #: shared even between two wizards of the same school.
+        self.agents = [None] * MAX_WIZARDS
+        self.stats = [{} for _ in range(MAX_WIZARDS)]
+        #: each wizard's school/deck/policy/boss, so moving the selector
+        #: does not lose what was typed for the other three. Filled in
+        #: once the controls exist, at the bottom of `__init__`.
+        self.seat_configs = [None] * MAX_WIZARDS
+        #: the rollout continuation tuned per wizard (it is deck-scoped,
+        #: and the decks differ)
+        self.continuations = [""] * MAX_WIZARDS
+        self._tuned_decks = [None] * MAX_WIZARDS
+        self._tuning_decks = [None] * MAX_WIZARDS
+        self._autotunes = {}
         self.worker = None      # training
         self.live = None        # the live fight
         #: each mob's health from the last real fight, so training does
@@ -957,10 +1049,6 @@ class MainWindow(QMainWindow):
         self.observed_incoming = 0.0
         #: whether the incoming number came off a real fight
         self.mob_damage_measured = False
-        #: the wizard's gear, filled in from the client on connect.
-        #: Training uses it, which is the whole point: a Q table learned
-        #: for a naked wizard is solving a fight nobody will play.
-        self.player_stats = {}
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -974,6 +1062,7 @@ class MainWindow(QMainWindow):
         self.learning = LearningPanel(self.tel)
         self.naming = NamingPanel(self.tel)
         self.runs = RunPanel(self.tel)
+        self.party = PartyPanel()
         # Every tab scrolls. The Decisions and Learning panels stack a
         # chart, a second chart and a table, which is taller than a laptop
         # window -- and Qt's answer to "does not fit" is to squeeze all
@@ -983,15 +1072,23 @@ class MainWindow(QMainWindow):
                             (self.model, "Damage model"),
                             (self.learning, "Learning"),
                             (self.naming, "Naming"),
-                            (self.runs, "Runs")):
+                            (self.runs, "Runs"),
+                            (self.party, "Party")):
             tabs.addTab(scrollable(panel), name)
         self.tabs = tabs
+        #: the Party tab only means something with a party in it
+        self.party_tab = tabs.count() - 1
+        tabs.setTabVisible(self.party_tab, False)
         root.addWidget(tabs)
 
         self.status = _label("idle — press Play live, or start with --demo",
                              PALETTE["muted"])
         root.addWidget(self.status)
         self.setStyleSheet(stylesheet())
+        # Every wizard starts as a copy of what the boxes say, so a party
+        # that is never configured per wizard still runs four wizards
+        # rather than three empty ones.
+        self.seat_configs = [self._snapshot() for _ in range(MAX_WIZARDS)]
         self.refresh_all()
         self._update_policy_state()
 
@@ -1005,7 +1102,7 @@ class MainWindow(QMainWindow):
         called on the GUI thread via `LiveWorker`'s queued signals.
         """
         for panel in (self.board, self.decisions, self.model, self.learning,
-                      self.naming, self.runs):
+                      self.naming, self.runs, self.party):
             try:
                 panel.refresh()
             except Exception:
@@ -1022,9 +1119,45 @@ class MainWindow(QMainWindow):
         self.policy_state.setWordWrap(True)
 
         row = QHBoxLayout()
+
+        # How many clients, and which one everything below is about.
+        # One box would not do: "drive three wizards" and "show me the
+        # second one" are different questions, and conflating them means
+        # you cannot look at wizard 2 without changing the party size.
+        row.addWidget(QLabel("wizards"))
+        self.wizards = QSpinBox()
+        self.wizards.setRange(1, MAX_WIZARDS)
+        self.wizards.setValue(1)
+        self.wizards.setToolTip(
+            "How many Wizard101 clients to drive at once, up to the four a "
+            "battle circle seats.\n\n"
+            "Above one they play as a hivemind: each round every wizard "
+            "submits its board, waits for the others, and then chooses "
+            "against a board that already carries what the rest of the "
+            "party committed to. A trap one wizard lays is in the next "
+            "wizard's rollout and gets cashed; nobody spends a nuke on a "
+            "mob another wizard has already killed this round. The Party "
+            "tab shows what that changed.\n\n"
+            "You need one running, logged-in client per wizard — the run "
+            "says so and stops rather than quietly playing short.")
+        self.wizards.valueChanged.connect(self.on_wizard_count)
+        row.addWidget(self.wizards)
+
+        self.which = QComboBox()
+        self.which.setToolTip(
+            "Which wizard the boxes below, the tabs above and the Train "
+            "button are about. Each wizard keeps its own school, deck, "
+            "policy, gear, trained table and run record — switching this "
+            "does not lose what you set for the others.")
+        self.which.addItem("wizard 1")
+        self.which.currentIndexChanged.connect(self.on_which_wizard)
+        self.which.setVisible(False)
+        row.addWidget(self.which)
+
         row.addWidget(QLabel("school"))
         self.school = QComboBox()
         self.school.addItems(SCHOOLS)
+        self.school.currentTextChanged.connect(self._on_seat_edited)
         row.addWidget(self.school)
 
         row.addWidget(QLabel("policy"))
@@ -1184,6 +1317,7 @@ class MainWindow(QMainWindow):
             "Required for a trained policy: the Q table is keyed on this "
             "deck's own blade and nuke positions, so a table trained for "
             "one decklist means nothing for another.")
+        self.deck.textChanged.connect(self._on_seat_edited)
         deck_row.addWidget(self.deck)
         self.deck_btn = QPushButton("Choose…")
         self.deck_btn.clicked.connect(self.on_pick_deck)
@@ -1196,6 +1330,7 @@ class MainWindow(QMainWindow):
             "encounter — the real casting boss plus the creatures the "
             "catalog says fight beside it — before ever walking in. "
             "Leave empty to build for the measured board instead.")
+        self.boss_name.textChanged.connect(self._on_seat_edited)
         deck_row.addWidget(self.boss_name)
         self.build_btn = QPushButton("Build deck…")
         self.build_btn.setToolTip(
@@ -1210,6 +1345,24 @@ class MainWindow(QMainWindow):
         outer.addLayout(deck_row)
 
         quest_row = QHBoxLayout()
+        self.follow_leader = QCheckBox("Followers chase wizard 1")
+        self.follow_leader.setChecked(True)
+        self.follow_leader.setVisible(False)
+        self.follow_leader.setToolTip(
+            "Wizard 1 quests; the rest teleport onto it and step into its "
+            "fight.\n\n"
+            "This is what makes a party a party. Four clients each running "
+            "the questing independently walk to four different places, take "
+            "four different quests, and coordinate perfectly with nobody — "
+            "the round-by-round agreement can only help wizards who are in "
+            "the same duel.\n\n"
+            "Inside one zone the follow is a plain position teleport. Across "
+            "zones it goes through the friends list and needs the leader's "
+            "wizard name, which is read off the first duel — so the party "
+            "has to fight once together, or already be friends and in the "
+            "same zone, before a door can be followed through.")
+        quest_row.addWidget(self.follow_leader)
+
         self.auto_quest = QCheckBox("Auto-quest between fights")
         self.auto_quest.setToolTip(
             "Between fights, teleport to the quest marker and click through "
@@ -1386,7 +1539,8 @@ class MainWindow(QMainWindow):
             player_hp=self.player_hp.value(), boss_hp=self.boss_hp.value(),
             n_enemies=self.n_enemies.value(), mob_hps=self.observed_hps,
             mob_schools=self.observed_schools,
-            mob_damage=int(self.observed_incoming))
+            mob_damage=int(self.observed_incoming),
+            party_size=self.party_size())
         hps = worker.board_hps()
         schools = worker.board_schools()
         board = " + ".join(f"{hp:,} {sc}" for hp, sc in zip(hps, schools))
@@ -1396,8 +1550,22 @@ class MainWindow(QMainWindow):
         dmg = worker.enemy_damage()
         how = ("measured live" if self.mob_damage_measured
                else "estimated — no fight measured yet")
-        return (f"training board: {board}, {dmg}/round each "
+        line = (f"training board: {board}, {dmg}/round each "
                 f"({how}) — {source}")
+        if self.party_size() > 1:
+            # Said rather than left to be discovered. The incoming
+            # damage is this wizard's share and the simulator knows it;
+            # the other wizards' *damage* is not modelled, because the
+            # simulator has one wizard in it. So the trained table is
+            # pessimistic about the fight, which is the safe direction
+            # but not a free one -- it will not learn to leave a mob to
+            # somebody else.
+            line += (f"\ntraining models ONE wizard: incoming is your "
+                     f"share of a {self.party_size()}-wizard circle, but "
+                     f"the other {self.party_size() - 1} wizards' damage "
+                     f"is not in it — the table is trained for a harder "
+                     f"fight than the party plays")
+        return line
 
     def _gear_line(self):
         """What the simulator thinks the wizard is wearing.
@@ -1447,7 +1615,7 @@ class MainWindow(QMainWindow):
         # First: did training learn anything at all? A table whose kill
         # rate never left zero has nothing to apply, and every other
         # explanation below is a distraction from that.
-        curve = self.tel.training_curve()
+        curve = self.current_tel().training_curve()
         if curve and max(k for _ep, k in curve) <= 0.0:
             return ("cause: training never won a fight — kill rate stayed "
                     "at 0% for every checkpoint, so the table learned "
@@ -1470,7 +1638,7 @@ class MainWindow(QMainWindow):
                     "fraction of the maximum — a wrong maximum shares no "
                     "states with the live board. Fix the health box and "
                     "retrain.")
-        seen = self.tel.observed_board()
+        seen = self.current_tel().observed_board()
         if not self.generalize.isChecked():
             return ("cause: trained on one fixed board. Tick 'any board' "
                     "and retrain — a fixed-board model covered 0% of five "
@@ -1513,7 +1681,7 @@ class MainWindow(QMainWindow):
 
     def _update_policy_state(self):
         """Say which policy is driving, and how often it really decided."""
-        mix = self.tel.policy_mix()
+        mix = self.current_tel().policy_mix()
         if not mix:
             self.policy_state.setText(
                 "policy selected: " + self.policy.currentText() +
@@ -1532,7 +1700,7 @@ class MainWindow(QMainWindow):
         # different answers to one question on screen at once, because
         # those counters reset on every `set_policy` and the records do
         # not.
-        decided, missed, reasons = self.tel.trained_coverage()
+        decided, missed, reasons = self.current_tel().trained_coverage()
         if decided + missed:
             cover = decided * 100.0 / (decided + missed)
             colour = (PALETTE["good"] if cover > 66 else
@@ -1551,6 +1719,152 @@ class MainWindow(QMainWindow):
                 colour = PALETTE["bad"]
         self.policy_state.setText(text)
         self.policy_state.setStyleSheet(f"color: {colour}")
+
+    # -- which wizard the window is talking about --------------------------
+    #
+    # One selector governs the config boxes AND the tabs, deliberately.
+    # Two would let the window show wizard 2's decisions beside wizard
+    # 1's deck, which is exactly the confusion a party invites.
+    @property
+    def agent(self):
+        """The selected wizard's trained table. A Q table is keyed on its
+        own decklist, so there is no such thing as the party's agent."""
+        return self.agents[self._seat_showing]
+
+    @agent.setter
+    def agent(self, value):
+        self.agents[self._seat_showing] = value
+
+    @property
+    def player_stats(self):
+        """The selected wizard's gear, read off its own client."""
+        return self.stats[self._seat_showing]
+
+    @player_stats.setter
+    def player_stats(self, value):
+        self.stats[self._seat_showing] = dict(value or {})
+
+    @property
+    def continuation(self):
+        return self.continuations[self._seat_showing]
+
+    @continuation.setter
+    def continuation(self, value):
+        self.continuations[self._seat_showing] = value or ""
+
+    def current_tel(self):
+        """The record the tabs are showing."""
+        return self.tels[self._seat_showing]
+
+    @property
+    def _tuned_deck(self):
+        return self._tuned_decks[self._seat_showing]
+
+    @_tuned_deck.setter
+    def _tuned_deck(self, value):
+        self._tuned_decks[self._seat_showing] = value
+
+    @property
+    def _tuning_deck(self):
+        return self._tuning_decks[self._seat_showing]
+
+    @_tuning_deck.setter
+    def _tuning_deck(self, value):
+        self._tuning_decks[self._seat_showing] = value
+
+    @property
+    def _autotune(self):
+        return self._autotunes.get(self._seat_showing)
+
+    @_autotune.setter
+    def _autotune(self, value):
+        if value is None:
+            self._autotunes.pop(self._seat_showing, None)
+        else:
+            self._autotunes[self._seat_showing] = value
+
+    def _snapshot(self):
+        return {"school": self.school.currentText(),
+                "policy": self.policy.currentText(),
+                "deck": self.deck.text(),
+                "boss": self.boss_name.text()}
+
+    def _on_seat_edited(self, *_):
+        """The boxes are the truth for whichever wizard they are showing."""
+        if self._loading or self.seat_configs is None:
+            return
+        self.seat_configs[self._seat_showing] = self._snapshot()
+
+    def on_which_wizard(self, index):
+        """Point the boxes and the tabs at a different wizard."""
+        if self._loading:
+            return
+        index = max(0, min(int(index), MAX_WIZARDS - 1))
+        if index == self._seat_showing:
+            return
+        # Store before loading, or the wizard being left behind keeps
+        # whatever the wizard being switched to has.
+        self.seat_configs[self._seat_showing] = self._snapshot()
+        self._seat_showing = index
+        cfg = self.seat_configs[index] or {}
+        self._loading = True
+        try:
+            self.school.setCurrentText(cfg.get("school") or SCHOOLS[0])
+            self.policy.setCurrentText(cfg.get("policy") or POLICIES[0])
+            self.deck.setText(cfg.get("deck") or "")
+            self.boss_name.setText(cfg.get("boss") or "")
+        finally:
+            self._loading = False
+        for panel in (self.board, self.decisions, self.model, self.learning,
+                      self.naming, self.runs):
+            try:
+                panel.set_telemetry(self.tels[index])
+            except Exception:
+                pass          # a panel must never take down a live fight
+        self.status.setText(
+            f"showing wizard {index + 1} — its own school, deck, policy, "
+            f"gear and run record")
+        self._update_policy_state()
+
+    def on_wizard_count(self, n):
+        """Resize the party. The selector and the Party tab follow."""
+        n = max(1, min(int(n), MAX_WIZARDS))
+        self._loading = True
+        try:
+            while self.which.count() > n:
+                self.which.removeItem(self.which.count() - 1)
+            while self.which.count() < n:
+                self.which.addItem(f"wizard {self.which.count() + 1}")
+        finally:
+            self._loading = False
+        self.which.setVisible(n > 1)
+        self.follow_leader.setVisible(n > 1)
+        self.tabs.setTabVisible(self.party_tab, n > 1)
+        if self._seat_showing >= n:
+            # The wizard the boxes were showing is no longer in the
+            # party; Qt has already moved the combo, so this only has to
+            # make the window agree with it.
+            self.on_which_wizard(self.which.currentIndex())
+        if n > 1:
+            self.status.setText(
+                f"{n} wizards — they will agree each round before any of "
+                f"them casts. You need {n} running, logged-in clients.")
+        else:
+            self.status.setText("one wizard — deciding for itself")
+
+    def party_size(self):
+        return max(1, min(self.wizards.value(), MAX_WIZARDS))
+
+    def seat_configs_now(self):
+        """Every wizard in the party, with the visible one refreshed."""
+        self._on_seat_edited()
+        out = []
+        for i in range(self.party_size()):
+            cfg = dict(self.seat_configs[i] or self._snapshot())
+            cfg["deck"] = [d.strip() for d in (cfg.get("deck") or "").split(",")
+                           if d.strip()]
+            out.append(cfg)
+        return out
 
     # -- actions ----------------------------------------------------------
     def decklist(self):
@@ -1578,6 +1892,7 @@ class MainWindow(QMainWindow):
             return
 
         self._tuning_deck = list(deck)
+        self._training_seat = self._seat_showing
         self.train_btn.setEnabled(False)
         self.train_progress.setVisible(True)
         # Indeterminate only until the first tick. The warm-start solve
@@ -1604,8 +1919,9 @@ class MainWindow(QMainWindow):
                                   # schools especially: every training
                                   # mob used to be the literal "ice".
                                   mob_schools=self.observed_schools,
-                                  mob_damage=self.observed_incoming)
-        self.tel.clear_curve()
+                                  mob_damage=self.observed_incoming,
+                                  party_size=self.party_size())
+        self.current_tel().clear_curve()
         self.worker.snapshot.connect(self.on_snapshot)
         self.worker.progress.connect(self.on_progress)
         self.worker.tick.connect(self.on_tick)
@@ -1625,7 +1941,7 @@ class MainWindow(QMainWindow):
     def on_snapshot(self, episode, kill, ttk):
         """One training checkpoint. Queued from the training thread, so
         this runs on the GUI thread and may touch widgets."""
-        self.tel.record_snapshot(episode, kill, ttk)
+        self.current_tel().record_snapshot(episode, kill, ttk)
         # Kept for the bar to append. A checkpoint is the only thing in a
         # training run that says whether it is going anywhere, and it
         # used to be visible only as a new point on a chart on another
@@ -1659,19 +1975,24 @@ class MainWindow(QMainWindow):
             text += f" — {self._last_checkpoint}"
         self.train_progress.setFormat(text)
 
-    def on_continuation(self, name, scores):
-        """The rollout continuation picked for this deck.
+    def on_continuation(self, name, scores, seat=None):
+        """The rollout continuation picked for one wizard's deck.
 
         Kept on the window rather than in a module global so a live run
-        can be handed it, and so changing decks changes it.
+        can be handed it, and so changing decks changes it. Per wizard
+        for the same reason it is per deck: the choice that is +5.2
+        points on one deck is -7.6 on another, and a party holds four.
         """
-        self.continuation = name
-        self._tuned_deck = tuple(sorted(self._tuning_deck
-                                        or self.decklist()))
+        seat = self._seat_showing if seat is None else seat
+        self.continuations[seat] = name
+        self._tuned_decks[seat] = tuple(sorted(
+            self._tuning_decks[seat] or self.decklist()))
         ranked = sorted((scores or {}).items(), key=lambda kv: -kv[1])
         spread = ((ranked[0][1] - ranked[-1][1]) * 100) if len(ranked) > 1 else 0
+        who = ("this deck" if self.party_size() == 1
+               else f"wizard {seat + 1}'s deck")
         self.status.setText(
-            f"rollout continuation for this deck: {name} "
+            f"rollout continuation for {who}: {name} "
             f"({spread:.0f} points better than the worst of "
             f"{len(ranked)} tried)")
 
@@ -1788,7 +2109,8 @@ class MainWindow(QMainWindow):
         # deck as template ids and wizAi's table carries none, so a real
         # deck read cannot be turned into names -- but a card in combat
         # can, because CombatCard.name() returns one.
-        seen = sorted({name for rec in self.tel.rounds for name in rec.hand})
+        seen = sorted({name for rec in self.current_tel().rounds
+                       for name in rec.hand})
         chosen = pick_deck(self, cards, self.school.currentText(),
                            self.decklist(), seen,
                            canonical=catalog.get("canonical"))
@@ -1881,19 +2203,38 @@ class MainWindow(QMainWindow):
         deck picker's card list and the health the table was trained for
         both come from what a connected run observed, so disconnecting to
         change models throws away the inputs to the next decision.
+
+        It swaps the *selected* wizard's policy, not the party's. Four
+        wizards in a circle are meant to play differently -- that is most
+        of what makes a party worth more than one wizard four times.
         """
+        if self._loading:
+            return          # loading another wizard's config, not a choice
+        self._on_seat_edited()
         if self.live is not None and self.live.isRunning():
-            self.live.set_policy(name, agent=self.agent)
+            seat = {} if self._seat_showing == 0 \
+                else {"seat": self._seat_showing}
+            self.live.set_policy(name, agent=self.agent, **seat)
         self._update_policy_state()
 
-    def on_gear_read(self, stats):
-        """The wizard's real damage/accuracy/pierce, off the client."""
-        self.player_stats = dict(stats or {})
+    def on_gear_read(self, stats, seat=0):
+        """A wizard's real damage/accuracy/pierce, off its own client."""
+        self.stats[max(0, min(int(seat), MAX_WIZARDS - 1))] = dict(stats or {})
         self._update_policy_state()
 
-    def on_hp_read(self, hp):
-        """The wizard's real max health, straight off the client."""
-        if hp <= 0 or hp == self.player_hp.value():
+    def on_hp_read(self, hp, seat=0):
+        """A wizard's real max health, straight off its own client.
+
+        Only written into the box when it is that wizard's box on screen.
+        The box drives training, and training is for the selected wizard
+        -- wizard 3's 2,100 landing in it while wizard 1 is shown would
+        silently train wizard 1's deck against wizard 3's health, which
+        is the exact mismatch reading the health off the client exists to
+        prevent.
+        """
+        if hp <= 0 or seat != self._seat_showing:
+            return
+        if hp == self.player_hp.value():
             return
         self.player_hp.setMaximum(max(self.player_hp.maximum(), hp))
         self.player_hp.setValue(hp)
@@ -1904,21 +2245,34 @@ class MainWindow(QMainWindow):
     def on_start_live(self):
         if self.live is not None and self.live.isRunning():
             return
-        deck = self.decklist()
-        policy = self.policy.currentText()
-        if policy.startswith("trained") and self.agent is None:
-            QMessageBox.warning(
-                self, "wizAi",
-                "No trained policy yet. Press Train first, or pick another "
-                "policy from the list — you can switch to it mid-fight once "
-                "it has trained, without reconnecting.")
-            return
-        if policy.startswith("trained") and not deck:
-            QMessageBox.warning(self, "wizAi", "A trained policy needs its deck.")
-            return
+        configs = self.seat_configs_now()
+        for i, cfg in enumerate(configs):
+            policy, deck = cfg["policy"], cfg["deck"]
+            who = "" if len(configs) == 1 else f"Wizard {i + 1}: "
+            if policy.startswith("trained") and self.agents[i] is None:
+                QMessageBox.warning(
+                    self, "wizAi",
+                    f"{who}no trained policy yet. Press Train first, or pick "
+                    "another policy from the list — you can switch to it "
+                    "mid-fight once it has trained, without reconnecting."
+                    + ("" if not who else "\n\nEach wizard has its own "
+                       "trained table: a Q table is keyed on its own "
+                       "decklist, so wizard 1's does not drive wizard 3."))
+                return
+            if policy.startswith("trained") and not deck:
+                QMessageBox.warning(self, "wizAi",
+                                    f"{who}a trained policy needs its deck.")
+                return
 
-        self.live = LiveWorker(self.tel, self.school.currentText(), deck,
-                               policy, self.fights.value(), agent=self.agent,
+        first = configs[0]
+        rest = [SeatConfig(school=cfg["school"], deck=cfg["deck"],
+                           policy_name=cfg["policy"], agent=self.agents[i],
+                           continuation=self.continuations[i],
+                           telemetry=self.tels[i], name=f"wizard {i + 1}")
+                for i, cfg in enumerate(configs) if i > 0]
+        self.live = LiveWorker(self.tels[0], first["school"], first["deck"],
+                               first["policy"], self.fights.value(),
+                               agent=self.agents[0],
                                auto_quest=self.auto_quest.isChecked(),
                                auto_dialogue=self.auto_dialogue.isChecked(),
                                collect_wisps=self.collect_wisps.isChecked(),
@@ -1926,15 +2280,21 @@ class MainWindow(QMainWindow):
                                script=(self.script_source
                                        if self.use_script.isChecked() else ""),
                                hotkeys=self.hotkey_bindings(),
-                               continuation=self.continuation)
+                               continuation=self.continuations[0],
+                               seats=rest,
+                               follow_leader=self.follow_leader.isChecked())
         self.live.status.connect(self.on_live_status)
-        self.live.round_done.connect(self.on_round)
-        self.live.fight_done.connect(self.on_fight_done)
+        # Seat-aware throughout: four wizards fill four records, and a
+        # round routed to the wrong one settles its damage against
+        # another wizard's board.
+        self.live.seat_round_done.connect(self.on_seat_round)
+        self.live.seat_fight_done.connect(self.on_seat_fight_done)
         self.live.failed.connect(self.on_live_failed)
         self.live.finished_ok.connect(self.on_live_finished)
-        self.live.hp_read.connect(self.on_hp_read)
-        self.live.gear_read.connect(self.on_gear_read)
-        self.live.policy_changed.connect(self.on_policy_installed)
+        self.live.seat_hp_read.connect(self.on_seat_hp_read)
+        self.live.seat_gear_read.connect(self.on_seat_gear_read)
+        self.live.seat_policy_changed.connect(self.on_seat_policy_installed)
+        self.live.party_plan.connect(self.on_party_plan)
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         # Train stays live. Every input to a useful training run -- the
@@ -1961,7 +2321,8 @@ class MainWindow(QMainWindow):
         down, because a model that already covers three mobs should not
         forget them because the last fight had one.
         """
-        seen = self.tel.observed_board()
+        tel = self.current_tel()
+        seen = tel.observed_board()
         if not seen:
             return False
         n, hp = seen
@@ -1970,15 +2331,25 @@ class MainWindow(QMainWindow):
         n = max(n, self.n_enemies.value())
         # The individual healths, not just the biggest: mobs that all
         # start equal never produce the opening state a real board has.
-        self.observed_hps = self.tel.observed_mob_hps()
-        self.observed_schools = self.tel.observed_mob_schools()
-        self.observed_names = self.tel.observed_mob_names()
-        self.observed_incoming = self.tel.observed_incoming()
+        self.observed_hps = tel.observed_mob_hps()
+        self.observed_schools = tel.observed_mob_schools()
+        self.observed_names = tel.observed_mob_names()
+        self.observed_incoming = tel.observed_incoming()
         self.mob_damage_measured = self.observed_incoming > 0
         self.n_enemies.setValue(min(max(int(n), 1), self.n_enemies.maximum()))
         self.boss_hp.setValue(min(max(int(hp), self.boss_hp.minimum()),
                                   self.boss_hp.maximum()))
         return changed
+
+    def on_seat_hp_read(self, seat, hp):
+        self.on_hp_read(hp, seat)
+
+    def on_seat_gear_read(self, seat, stats):
+        self.on_gear_read(stats, seat)
+
+    def on_party_plan(self, plan):
+        """One round the whole party agreed. Queued onto the GUI thread."""
+        self.party.show_plan(plan, getattr(self.live, "hive", None))
 
     def on_round(self, rec):
         # Queued from the worker thread, so this runs on the GUI thread.
@@ -1986,6 +2357,24 @@ class MainWindow(QMainWindow):
             self._warn_cheats(rec)
         self.refresh_all()
         self._update_policy_state()
+
+    def on_seat_round(self, seat, rec):
+        """A round from one wizard.
+
+        Only the wizard on screen redraws. Four wizards each finishing a
+        planning phase would otherwise repaint every panel four times a
+        round, three of those with data the panels are not showing.
+        """
+        if getattr(rec, "round", 0) == 1:
+            self._warn_cheats(rec)
+        if seat == self._seat_showing:
+            self.refresh_all()
+            self._update_policy_state()
+        else:
+            try:
+                self.party.refresh()
+            except Exception:
+                pass
 
     def _warn_cheats(self, rec):
         """Say so when the catalog knows this enemy cheats.
@@ -2017,48 +2406,108 @@ class MainWindow(QMainWindow):
         self.refresh_all()
         self._update_policy_state()
 
+    def on_seat_fight_done(self, seat, n):
+        """One wizard's duel ended.
+
+        The board it just fought is the same board every wizard in the
+        circle fought, so the training range is adopted from whichever
+        wizard is on screen and not from all four -- four adoptions of
+        one fight would say the same thing four times and race each
+        other into the spinboxes.
+        """
+        if seat == self._seat_showing:
+            self.on_fight_done(n)
+        else:
+            self.refresh_all()
+
     def _maybe_autotune(self):
-        """Tune the quartet for the observed fight when nothing has.
+        """Tune each wizard's quartet for the observed fight.
 
         A train tunes as part of its run; this covers the wizard who
         connects and just fights. It fires once per deck, off the first
         finished fight's measured board, at low priority under the live
         run -- which the sweep is safe for now that it never installs
         the candidate it is measuring.
+
+        Once per **wizard**, not once per window. The quartet is
+        deck-scoped and worth ~14 points of kill rate, and a party holds
+        four decks: tuning only the wizard that happens to be selected
+        leaves the other three playing the untuned defaults for the
+        whole run, on the exact boards the run is measuring for them.
         """
-        deck = self.decklist()
-        if not deck or not self.observed_hps:
-            return
         if self.live is None or not self.live.isRunning():
             return
-        if self.worker is not None and self.worker.isRunning():
-            return                    # the train will tune on its own
-        if tuple(sorted(deck)) == self._tuned_deck:
+        if not self.observed_hps:
             return
-        if getattr(self, "_autotune", None) is not None \
-                and self._autotune.isRunning():
-            return
+        seats = getattr(self.live, "seats", None)
+        configs = self.seat_configs_now()
+        if seats is not None:
+            configs = configs[:len(seats)]
+        started = []
+        for seat, cfg in enumerate(configs):
+            if self._start_autotune(seat, cfg):
+                started.append(seat)
+        if started:
+            who = ("the search" if len(configs) == 1 else
+                   "wizard " + ", ".join(str(i + 1) for i in started) +
+                   "'s search")
+            self.status.setText(
+                f"tuning {who} for the observed fight (in the "
+                f"background — the fight keeps playing)…")
+
+    def _start_autotune(self, seat, cfg):
+        """One wizard's tuner, if it wants one. Returns whether it started."""
+        deck = cfg["deck"]
+        if not deck:
+            return False
+        if seat == self._training_seat and self.worker is not None \
+                and self.worker.isRunning():
+            return False              # its train will tune on its own
+        if tuple(sorted(deck)) == self._tuned_decks[seat]:
+            return False
+        running = self._autotunes.get(seat)
+        if running is not None and running.isRunning():
+            return False
         dmg = int(self.observed_incoming) or max(
             30, self.player_hp.value() // 12)
-        self._autotune = TuneWorker(self.school.currentText(), deck,
-                                    self.observed_hps,
-                                    self.observed_schools, dmg)
-        self._autotune.tuned.connect(self.on_autotuned)
-        self._autotune.failed.connect(lambda _m: None)   # a nicety;
-        self._autotune.start(QThread.Priority.LowPriority)  # stay quiet
-        self.status.setText(
-            "tuning the search for the observed fight (in the "
-            "background — the fight keeps playing)…")
+        worker = TuneWorker(cfg["school"], deck, self.observed_hps,
+                            self.observed_schools, dmg)
+        self._autotunes[seat] = worker
+        # Bound to the seat, not to whichever wizard happens to be
+        # selected when the sweep finishes a minute later.
+        worker.tuned.connect(
+            lambda wire, scores, s=seat: self.on_autotuned(wire, scores, s))
+        worker.failed.connect(lambda _m: None)          # a nicety;
+        worker.start(QThread.Priority.LowPriority)      # stay quiet
+        return True
 
-    def on_autotuned(self, wire, scores):
-        self._tuning_deck = self.decklist()
+    def on_autotuned(self, wire, scores, seat=None):
+        seat = self._seat_showing if seat is None else seat
+        cfg = self.seat_configs[seat] or {}
+        self._tuning_decks[seat] = [d.strip() for d
+                                    in (cfg.get("deck") or "").split(",")
+                                    if d.strip()]
+        # The pick is this wizard's, and so is the reinstall. Storing it
+        # first: `set_policy` rebuilds the closure, and the closure is
+        # where the quartet gets bound for a party -- reinstalling before
+        # the pick is recorded would rebuild with the old one.
+        self.continuations[seat] = wire
         # A driver change only takes effect through a rebuilt policy
         # closure; reinstalling the current name does exactly that
         # without dropping the connection. Before on_continuation, so
         # the status line the operator is left with is the tuned pick.
         if self.live is not None and self.live.isRunning():
-            self.live.set_policy(self.live.policy_name)
-        self.on_continuation(wire, scores)
+            seats = getattr(self.live, "seats", None)
+            if seats is not None and seat < len(seats):
+                seats[seat].continuation = wire
+                name = seats[seat].policy_name
+            else:
+                name = self.live.policy_name
+            if seat == 0:
+                self.live.set_policy(name)
+            else:
+                self.live.set_policy(name, seat=seat)
+        self.on_continuation(wire, scores, seat)
 
     def on_policy_installed(self, name):
         """The worker says which policy it actually ended up with.
@@ -2072,7 +2521,22 @@ class MainWindow(QMainWindow):
             self.policy.blockSignals(True)      # not a fresh user choice
             self.policy.setCurrentText(name)
             self.policy.blockSignals(False)
+            self._on_seat_edited()
         self._update_policy_state()
+
+    def on_seat_policy_installed(self, seat, name):
+        """Only the wizard on screen puts its box back in step.
+
+        Seat 3's policy landing in the box while wizard 1 is shown would
+        misreport wizard 1 and, worse, be saved as wizard 1's choice the
+        next time anything touched the config.
+        """
+        if not name:
+            return
+        self.seat_configs[seat] = dict(self.seat_configs[seat] or {},
+                                       policy=name)
+        if seat == self._seat_showing:
+            self.on_policy_installed(name)
 
     def on_live_failed(self, message):
         self._live_over()
@@ -2097,11 +2561,34 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def on_export(self):
+        """Write the run out. In a party, one file per wizard.
+
+        Not one merged file: the records are per wizard because a round
+        settles its damage against the board *that* wizard was shown, and
+        interleaving four wizards' rounds into one file would make every
+        residual in it meaningless. The names are suffixed rather than
+        overwritten, which is the alternative that silently exports one
+        wizard four times.
+        """
         path, _ = QFileDialog.getSaveFileName(
             self, "Export run", "results_live_run.json", "JSON (*.json)")
-        if path:
-            self.tel.to_json(path)
+        if not path:
+            return
+        n = self.party_size()
+        if n == 1:
+            self.tels[0].to_json(path)
             self.status.setText(f"wrote {path}")
+            return
+        import os
+
+        stem, ext = os.path.splitext(path)
+        written = []
+        for i in range(n):
+            out = f"{stem}-wizard{i + 1}{ext or '.json'}"
+            self.tels[i].to_json(out)
+            written.append(os.path.basename(out))
+        self.status.setText(f"wrote {len(written)} files: "
+                            + ", ".join(written))
 
 
 def demo_telemetry():

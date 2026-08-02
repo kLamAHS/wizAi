@@ -679,7 +679,7 @@ def choose_search(cards, deck, school, boards, n=60, on_probe=None,
 _DRIVER = "ttk"
 
 
-def tuned_driver():
+def tuned_driver(continuation=None, horizon=None, driver=None):
     """The measured-best driver for the tuned deck.
 
     The search drives with the TUNED continuation as its rollout policy,
@@ -687,12 +687,28 @@ def tuned_driver():
     continuation choice is worth ~14 points inside a rollout, and a
     driver that ignored it would play a different game from the one the
     probes measured.
+
+    Called with no arguments it reads the deck-scoped globals, and keeps
+    reading them: `_rollout` looks up `_CONTINUATION` and `_HORIZON` at
+    DECISION time, not here, so a later `set_continuation` reaches a
+    policy already built. That is what makes "tune, then keep playing"
+    work.
+
+    It is also exactly wrong for a party. Four wizards hold four decks
+    and the quartet is deck-scoped, so four `set_continuation` calls
+    leave all four playing whichever was written last. Passing the pick
+    in explicitly binds it into the closure instead, which is why these
+    arguments exist -- see `gui/live.LiveWorker._seat_search`.
     """
-    m = re.match(r"search\(k=(\d+)\)$", _DRIVER or "")
+    name = _DRIVER if driver is None else driver
+    m = re.match(r"search\(k=(\d+)\)$", str(name or ""))
     if m:
         from search_policy import make_search_policy
-        return make_search_policy(base=_continuation(), k=int(m.group(1)))
-    return greedy_ttk()
+        base = _continuation() if continuation is None else continuation
+        return make_search_policy(base=base, k=int(m.group(1)))
+    if continuation is None and horizon is None:
+        return greedy_ttk()
+    return greedy_ttk(max_turns=horizon, continuation=continuation)
 
 
 def driver_name():

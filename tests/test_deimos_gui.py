@@ -3038,7 +3038,8 @@ def test_every_tab_scrolls(qapp):
     from deimos_bridge.gui.app import MainWindow
 
     win = MainWindow(Telemetry())
-    assert win.tabs.count() == 6
+    # Board, Decisions, Damage model, Learning, Naming, Runs, Party.
+    assert win.tabs.count() == 7
     for i in range(win.tabs.count()):
         assert isinstance(win.tabs.widget(i), QScrollArea), i
         assert win.tabs.widget(i).widgetResizable()
@@ -6271,3 +6272,514 @@ def test_the_sweep_never_installs_what_it_is_measuring():
         P.set_continuation(P.DEFAULT_CONTINUATION)
         P.set_search_horizon(None)
         P.set_driver("ttk")
+
+
+# --------------------------------------------------------------- four wizards
+def test_the_window_offers_up_to_four_wizards(qapp):
+    """Four is the game's own limit — a battle circle seats four — so it
+    is the ceiling rather than a chosen one."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    assert win.wizards.minimum() == 1 and win.wizards.maximum() == 4
+    assert win.wizards.value() == 1
+
+
+def test_the_party_controls_stay_out_of_the_way_of_one_wizard(qapp):
+    """A window driving one client must look exactly like the window that
+    always drove one client — no selector, no Party tab."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    assert win.which.isHidden()
+    assert not win.tabs.isTabVisible(win.party_tab)
+
+    win.wizards.setValue(3)
+    assert win.which.count() == 3
+    assert not win.which.isHidden()
+    assert win.tabs.isTabVisible(win.party_tab)
+
+    win.wizards.setValue(1)
+    assert win.which.count() == 1
+    assert win.which.isHidden()
+    assert not win.tabs.isTabVisible(win.party_tab)
+
+
+def test_each_wizard_keeps_its_own_school_deck_and_policy(qapp):
+    """Four identical wizards is the one party worth nothing. Switching
+    the selector must not carry wizard 1's deck onto wizard 2."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.wizards.setValue(2)
+    win.school.setCurrentText("death")
+    win.deck.setText("Dark Sprite,Dark Sprite")
+
+    win.which.setCurrentIndex(1)
+    assert win.deck.text() == ""             # a fresh wizard, not a copy
+    win.school.setCurrentText("storm")
+    win.deck.setText("Thunder Snake")
+
+    win.which.setCurrentIndex(0)
+    assert win.school.currentText() == "death"
+    assert win.deck.text() == "Dark Sprite,Dark Sprite"
+
+    seats = win.seat_configs_now()
+    assert [s["school"] for s in seats] == ["death", "storm"]
+    assert seats[1]["deck"] == ["Thunder Snake"]
+
+
+def test_the_tabs_follow_the_selected_wizard(qapp):
+    """One selector governs the boxes AND the tabs. Two would let the
+    window show wizard 2's decisions beside wizard 1's deck."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.wizards.setValue(2)
+    assert win.decisions.tel is win.tels[0]
+    win.which.setCurrentIndex(1)
+    assert win.decisions.tel is win.tels[1]
+    assert win.board.tel is win.tels[1]
+    assert win.runs.tel is win.tels[1]
+    assert win.current_tel() is win.tels[1]
+    # ...and wizard 1's record is untouched, not retargeted away.
+    assert win.tel is win.tels[0]
+
+
+def test_each_wizard_has_its_own_trained_table_and_gear(qapp):
+    """A Q table is keyed on its own decklist and gear is read per
+    client, so neither can be shared even between two ice wizards."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.wizards.setValue(2)
+    sentinel = object()
+    win.agent = sentinel
+    win.on_gear_read({"damage": {"ice": 0.09}}, seat=0)
+    win.on_gear_read({"damage": {"storm": 0.31}}, seat=1)
+
+    assert win.agent is sentinel
+    assert win.player_stats == {"damage": {"ice": 0.09}}
+    win.which.setCurrentIndex(1)
+    assert win.agent is None
+    assert win.player_stats == {"damage": {"storm": 0.31}}
+
+
+def test_a_health_read_lands_only_in_its_own_wizards_box(qapp):
+    """The box drives training. Wizard 3's 2,100 arriving while wizard 1
+    is shown would train wizard 1's deck against wizard 3's health --
+    the exact mismatch reading it off the client exists to prevent."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.wizards.setValue(3)
+    win.on_hp_read(1337, seat=0)
+    assert win.player_hp.value() == 1337
+    win.on_hp_read(2100, seat=2)
+    assert win.player_hp.value() == 1337
+    win.which.setCurrentIndex(2)
+    win.on_hp_read(2100, seat=2)
+    assert win.player_hp.value() == 2100
+
+
+def test_starting_a_party_hands_every_wizard_its_own_seat(qapp, monkeypatch):
+    from deimos_bridge.gui import app as app_mod
+    from deimos_bridge.gui.app import MainWindow
+
+    monkeypatch.setattr(app_mod.LiveWorker, "start", lambda self, *a: None)
+    win = MainWindow(Telemetry())
+    win.wizards.setValue(3)
+    win.school.setCurrentText("fire")
+    win.deck.setText("Fire Cat")
+    win.which.setCurrentIndex(1)
+    win.school.setCurrentText("ice")
+    win.deck.setText("Frost Beetle")
+    win.which.setCurrentIndex(2)
+    win.school.setCurrentText("storm")
+    win.deck.setText("Thunder Snake")
+    win.which.setCurrentIndex(0)
+
+    win.on_start_live()
+    seats = win.live.seats
+    assert [s.school for s in seats] == ["fire", "ice", "storm"]
+    assert [s.deck for s in seats] == [["Fire Cat"], ["Frost Beetle"],
+                                       ["Thunder Snake"]]
+    # Each wizard fills its own record, or a round settles its damage
+    # against another wizard's board.
+    assert [s.tel for s in seats] == [win.tels[0], win.tels[1], win.tels[2]]
+    assert len({id(s.tel) for s in seats}) == 3
+
+
+def test_a_party_refuses_to_start_for_the_wizard_that_has_no_table(
+        qapp, monkeypatch):
+    from deimos_bridge.gui import app as app_mod
+    from deimos_bridge.gui.app import MainWindow
+
+    said = {}
+    monkeypatch.setattr(app_mod.QMessageBox, "warning",
+                        lambda *a, **k: said.setdefault("text", a[2]))
+    monkeypatch.setattr(app_mod.LiveWorker, "start", lambda self, *a: None)
+    win = MainWindow(Telemetry())
+    win.wizards.setValue(2)
+    win.which.setCurrentIndex(1)
+    win.policy.setCurrentText("trained (Q)")
+    win.which.setCurrentIndex(0)
+
+    win.on_start_live()
+    assert win.live is None
+    assert "Wizard 2" in said["text"], said
+
+
+def test_the_worker_builds_a_hivemind_only_for_a_party(qapp):
+    """A hive of one costs a barrier, a plan and a copy of the board
+    every round and buys nothing a single wizard could not decide."""
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    alone = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1)
+    assert alone._make_hive() is None
+
+    pair = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1,
+                      seats=[SeatConfig(school="storm", deck=[],
+                                        policy_name="ttk-lookahead")])
+    hive = pair._make_hive()
+    assert hive is not None and hive.size == 2
+
+
+def test_seat_zero_is_still_reachable_straight_off_the_worker(qapp):
+    """Everything written against the single-wizard worker keeps working:
+    the seat-0 fields are the worker's own, not a second copy that can
+    drift out of step."""
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    tel = Telemetry()
+    w = LiveWorker(tel, "ice", ["Frost Beetle"], "school-aware", 1,
+                   seats=[SeatConfig(school="fire", deck=["Fire Cat"])])
+    assert w.tel is tel and w.school == "ice" and w.deck == ["Frost Beetle"]
+    w.school = "myth"
+    assert w.seats[0].school == "myth"
+    assert w.seats[1].school == "fire"
+    assert w.party == 2
+
+
+def test_a_button_press_reaches_every_wizard(qapp):
+    """One 'collect wisps' is meant to sweep the whole party's wisps, not
+    one quarter of them."""
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1,
+                   seats=[SeatConfig(school="fire")])
+    assert w.request("wisps") is True
+    assert [s.requests for s in w.seats] == [["wisps"], ["wisps"]]
+    assert w.request("wisps") is False          # still deduped, per seat
+
+
+def test_a_seat_swaps_only_its_own_policy(qapp):
+    """Four wizards in a circle are meant to play differently; that is
+    most of what makes a party worth more than one wizard four times."""
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    w = LiveWorker(Telemetry(), "ice", ["Frost Beetle"] * 4, "school-aware", 1,
+                   seats=[SeatConfig(school="fire", deck=["Fire Cat"] * 4,
+                                     policy_name="school-aware")])
+    assert w.set_policy("ttk-lookahead", seat=1) is True
+    assert w.seats[1].policy_name == "ttk-lookahead"
+    assert w.seats[0].policy_name == "school-aware"
+
+
+def test_a_party_exports_one_file_per_wizard(qapp, monkeypatch, tmp_path):
+    """Interleaving four wizards' rounds into one file makes every
+    residual in it meaningless: a round settles its damage against the
+    board that wizard was shown."""
+    from deimos_bridge.gui import app as app_mod
+    from deimos_bridge.gui.app import MainWindow
+
+    target = tmp_path / "run.json"
+    monkeypatch.setattr(app_mod.QFileDialog, "getSaveFileName",
+                        lambda *a, **k: (str(target), ""))
+    win = MainWindow(Telemetry())
+    win.wizards.setValue(2)
+    win.on_export()
+    assert (tmp_path / "run-wizard1.json").exists()
+    assert (tmp_path / "run-wizard2.json").exists()
+    assert not target.exists()
+
+
+def test_the_party_panel_reads_a_plan(qapp):
+    from deimos_bridge.gui.app import MainWindow
+    from deimos_bridge.hivemind import PartyPlan, SeatMove
+
+    win = MainWindow(Telemetry())
+    win.wizards.setValue(2)
+    win.on_party_plan(PartyPlan(
+        round_number=3,
+        board=[("Lost Soul", 40.0, 450.0)],
+        moves=[SeatMove(seat=0, name="wizard 1", card="Fire Cat", target=0,
+                        target_name="Lost Soul", solo_card="Fire Cat",
+                        solo_target=0, damage=51.0),
+               SeatMove(seat=1, name="wizard 2", note="held",
+                        solo_card="Fire Cat", solo_target=0)],
+        saved=1, passes=2, seconds=0.12))
+    assert win.party.table.rowCount() == 2
+    assert "round 3" in win.party.headline.text()
+    assert "held" in win.party.headline.text()
+    assert "Lost Soul" in win.party.board_lab.text()
+
+
+def test_two_wizards_tuned_differently_do_not_overwrite_each_other(qapp):
+    """The quartet is deck-scoped and lives in module globals that
+    `_rollout` reads at DECISION time. Four wizards holding four decks
+    would therefore all play whichever pick was installed last — so a
+    seat's quartet is bound into its own closure instead, and nothing is
+    installed globally at all."""
+    from data_full import load_spells_full
+    from deimos_bridge import policies as P
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+    from w101_sim import Actor, Boss, Rules, Sim, State
+
+    cards = load_spells_full()
+    worker = LiveWorker(
+        Telemetry(), "fire", ["Fire Cat"], "ttk-lookahead", 1,
+        continuation="nuke-asap @ horizon 6 @ driver ttk",
+        seats=[SeatConfig(school="fire", deck=["Fire Cat"],
+                          policy_name="ttk-lookahead",
+                          continuation="school-aware(3) @ horizon 12 "
+                                       "@ driver ttk")])
+    before = (P.continuation_name(), P.search_horizon(), P.driver_name())
+    policies = [worker._build_policy(seat) for seat in worker.seats]
+
+    def horizon_seen(policy):
+        player = Actor(name="W", school="fire", hp=900, max_hp=900, team=0,
+                       norm_pips=6)
+        player.hand = [cards["Fire Cat"]]
+        foe = Actor(name="Mob", school="ice", hp=400, max_hp=400, team=1)
+        sim = Sim(cards=cards, decklist=["Fire Cat"], school="fire",
+                  boss=Boss(name="Mob", hp=400, school="ice", dmg=40),
+                  rules=Rules(), player_hp=900)
+        policy(sim, State(player, [foe]))
+        return {c.horizon for c in policy.last_candidates}
+
+    assert horizon_seen(policies[0]) == {6}
+    assert horizon_seen(policies[1]) == {12}
+    # ...and neither seat reached for the globals to get there.
+    assert (P.continuation_name(), P.search_horizon(),
+            P.driver_name()) == before
+
+
+def test_only_the_followers_chase_the_leader(qapp):
+    """The leader quests; a leader that also chased itself would stand
+    still forever, and one wizard has nobody to follow."""
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    w = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1,
+                   seats=[SeatConfig(school="fire"),
+                          SeatConfig(school="storm")])
+    assert [w._follows(s) for s in w.seats] == [False, True, True]
+
+    w.follow_leader = False
+    assert not any(w._follows(s) for s in w.seats)
+
+    alone = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1)
+    assert alone._follows(alone.seats[0]) is False
+
+
+def test_the_follow_checkbox_only_appears_with_a_party(qapp):
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    assert win.follow_leader.isHidden()
+    win.wizards.setValue(2)
+    assert not win.follow_leader.isHidden()
+    assert win.follow_leader.isChecked()
+
+
+def test_the_follow_choice_reaches_the_worker(qapp, monkeypatch):
+    from deimos_bridge.gui import app as app_mod
+    from deimos_bridge.gui.app import MainWindow
+
+    monkeypatch.setattr(app_mod.LiveWorker, "start", lambda self, *a: None)
+    win = MainWindow(Telemetry())
+    win.wizards.setValue(2)
+    win.follow_leader.setChecked(False)
+    win.on_start_live()
+    assert win.live.follow_leader is False
+
+
+def test_the_leaders_name_is_learned_from_its_first_duel(qapp):
+    """The client only offers it on the character-select screen, which a
+    running wizard is not on — but every combat read already carries it,
+    and the cross-zone follow cannot pick a leader out of the friends
+    list without it."""
+    from deimos_bridge.gui.live import LiveWorker
+
+    w = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1)
+    seat = w.seats[0]
+    assert seat.wizard_name is None
+
+    class _Player:
+        name = "Wolf Deathblade"
+
+    class _State:
+        player = _Player()
+
+    class _Read:
+        state = _State()
+
+    w._learn_name(seat, _Read())
+    assert seat.wizard_name == "Wolf Deathblade"
+
+
+def test_every_wizard_in_the_party_tunes_its_own_search(qapp, monkeypatch):
+    """The quartet is deck-scoped and worth ~14 points of kill rate.
+    Tuning only whichever wizard happens to be selected leaves the other
+    three playing the untuned defaults for the whole run, on the exact
+    boards the run is measuring for them."""
+    from deimos_bridge.gui import app as app_mod
+    from deimos_bridge.gui.app import MainWindow
+
+    started = []
+    monkeypatch.setattr(app_mod.TuneWorker, "start",
+                        lambda self, *a, **k: started.append(self))
+
+    win = MainWindow(Telemetry())
+    win.wizards.setValue(3)
+    win.school.setCurrentText("fire")
+    win.deck.setText("Fire Cat")
+    win.which.setCurrentIndex(1)
+    win.school.setCurrentText("ice")
+    win.deck.setText("Frost Beetle")
+    win.which.setCurrentIndex(2)
+    win.school.setCurrentText("storm")
+    win.deck.setText("Thunder Snake")
+    win.which.setCurrentIndex(0)
+
+    win.observed_hps = [690]
+    win.observed_schools = ["death"]
+    win.observed_incoming = 136
+
+    class _Live:
+        seats = [object(), object(), object()]
+
+        def isRunning(self):
+            return True
+
+    win.live = _Live()
+    win._maybe_autotune()
+    assert len(started) == 3
+    assert [w.school for w in started] == ["fire", "ice", "storm"]
+    assert [w.deck for w in started] == [["Fire Cat"], ["Frost Beetle"],
+                                         ["Thunder Snake"]]
+
+
+def test_a_tuned_result_lands_on_the_wizard_that_asked_for_it(qapp):
+    """The sweep takes about a minute. Landing its answer on whichever
+    wizard is selected when it finishes would hand wizard 3's pick to
+    wizard 1 -- and the pick is deck-scoped, so that is worse than not
+    tuning at all."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.wizards.setValue(2)
+    win.on_autotuned("nuke-asap @ horizon 6 @ driver ttk", {}, 1)
+    assert win.continuations[1] == "nuke-asap @ horizon 6 @ driver ttk"
+    assert win.continuations[0] == ""
+    assert win.continuation == ""            # wizard 1 is still showing
+
+
+def test_a_party_member_is_not_trained_against_four_times_the_damage(qapp):
+    """An enemy picking one of four wizards to hit lands on this one a
+    quarter of the time. The measured number knows that -- it is read off
+    this wizard's own health bar -- but the stand-in did not, so a party
+    member with no fight measured yet trained against a board hitting
+    four times as hard as the one it plays."""
+    from deimos_bridge.gui.app import TrainWorker
+
+    solo = TrainWorker({}, [], "ice", 500, player_hp=2000)
+    party = TrainWorker({}, [], "ice", 500, player_hp=2000, party_size=4)
+    assert party.enemy_damage() < solo.enemy_damage()
+    assert party.enemy_damage() == max(30, 2000 // 48)
+
+    # ...but a measured number is already this wizard's share, so it is
+    # taken as it is rather than divided twice.
+    measured = TrainWorker({}, [], "ice", 500, player_hp=2000,
+                           mob_damage=77, party_size=4)
+    assert measured.enemy_damage() == 77
+
+
+def test_the_deck_ceiling_refusal_asks_for_this_wizards_share(qapp):
+    """Three other wizards are hitting the same board. Refusing to train
+    a deck because it cannot deliver all of a board's health alone is a
+    refusal to the question the simulator can ask rather than the one
+    being played."""
+    from deimos_bridge.gui.app import TrainWorker
+    from data_full import load_spells_full
+    from w101_sim import Boss
+
+    cards = load_spells_full()
+    deck = ["Fire Cat"] * 4          # about 400 damage, all told
+
+    def refusal(hp, party_size):
+        worker = TrainWorker(cards, deck, "fire", 500, player_hp=900,
+                             party_size=party_size)
+        return worker.preflight(
+            Boss(name="Wall", hp=hp, school="ice", dmg=40), [], n=20)[1]
+
+    # Too big for the party's share as well: still the deck's fault, but
+    # the number it is measured against — and the advice sized off it —
+    # is this wizard's share rather than the whole board.
+    assert "Your deck is the reason" in refusal(2400, 1)
+    party = refusal(2400, 4)
+    assert "Your deck is the reason" in party
+    assert "share of it, across 4 wizards, is about 600" in party
+
+    # Inside the share: no longer the deck's fault at all, where solo it
+    # squarely was.
+    assert "Your deck is the reason" in refusal(1200, 1)
+    assert "Your deck is the reason" not in refusal(1200, 4)
+
+
+def test_a_party_is_told_the_training_board_models_one_wizard(qapp):
+    """The trained table is pessimistic about the fight -- the safe
+    direction, but not a free one: it will not learn to leave a mob to
+    somebody else, and nothing on screen said so."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    assert "models ONE wizard" not in win._board_line()
+    win.wizards.setValue(4)
+    line = win._board_line()
+    assert "models ONE wizard" in line
+    assert "other 3 wizards" in line
+
+
+def test_a_follower_does_not_chase_twice_a_second(qapp):
+    """The service tick runs at 2Hz and a follow is not a cheap read: it
+    teleports, and against a leader mid-duel it also reaches for the
+    nearest mob. A follower that cannot get in — the circle already
+    seats four — would retry that for the length of the fight."""
+    import asyncio
+
+    from deimos_bridge import party as party_mod
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    w = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1,
+                   seats=[SeatConfig(school="fire")])
+    w.seats[0].client = object()
+    follower = w.seats[1]
+    follower.client = object()
+
+    tried = []
+
+    async def _follow(f, leader, leader_name=None, radius=0.0):
+        tried.append(f)
+        return False, ""
+
+    real, party_mod.follow = party_mod.follow, _follow
+    try:
+        async def drive():
+            for _ in range(6):
+                await w._follow_step(follower.client, follower)
+        asyncio.run(drive())
+    finally:
+        party_mod.follow = real
+
+    assert len(tried) == 1, "six ticks must not be six teleports"

@@ -1,9 +1,9 @@
-"""Driving a real fight from the window.
+"""Driving real fights from the window — one wizard, or a party of four.
 
-Two problems to keep apart.
+Three problems to keep apart.
 
 **asyncio inside Qt.** wizwalker is async top to bottom and Qt has its
-own loop, so the fight runs on a `QThread` with its own event loop. The
+own loop, so the run happens on a `QThread` with its own event loop. The
 window stays responsive and a hung memory read cannot freeze the UI.
 
 **Thread affinity.** Qt widgets may only be touched from the GUI thread,
@@ -12,6 +12,29 @@ phase. So nothing here updates a widget: the worker emits signals, and
 `MainWindow` does the drawing. `LiveWorker.round_done` is what the panels
 ultimately refresh on, and because the signal crosses threads Qt queues
 it onto the GUI thread automatically.
+
+**One worker, several clients.** A party of up to four wizards runs on
+*one* thread and *one* event loop, not four. That is not a saving, it is
+a requirement: a wizwalker `Client` binds its hooks to the loop that
+activated them, and the hivemind's barrier has to be able to wake a
+sleeping seat from whichever seat closed the round. Each wizard gets its
+own `_Seat` — client, backend, combat handler, telemetry, questing,
+upkeep — and the fight loops run concurrently under `asyncio.gather`.
+
+One wizard leads and the rest follow it around: the leader quests, the
+followers teleport onto it and step into its duel (`deimos_bridge/
+party.py`). That is not a convenience -- the round-by-round agreement
+only reaches wizards who are in the same fight, and four clients each
+running the questing independently walk to four different places and
+coordinate perfectly with nobody.
+
+A run of one is exactly the run that shipped before parties existed: no
+coordinator is built, no barrier is entered, nothing follows anything,
+and no status line is prefixed.
+
+Seat 0's configuration is also reachable straight off the worker
+(`worker.school`, `worker.deck`, `worker._backend`, ...), so every caller
+written against the single-wizard worker keeps working.
 """
 import asyncio
 import threading as _threading
@@ -19,15 +42,140 @@ import threading as _threading
 from PyQt6.QtCore import QThread, pyqtSignal
 
 
+class SeatConfig:
+    """One wizard's half of a run: what it plays and what it plays with.
+
+    A party is not four copies of one wizard. Schools differ (that is
+    most of the point — a death wizard's Feint is worth casting because
+    a storm wizard is going to cash it), decks differ, and a trained Q
+    table is keyed on its own deck, so the policy has to be per seat
+    too.
+    """
+
+    def __init__(self, school="ice", deck=(), policy_name="ttk-lookahead",
+                 agent=None, continuation="", telemetry=None, name=""):
+        self.school = school
+        self.deck = list(deck or [])
+        self.policy_name = policy_name
+        self.agent = agent
+        self.continuation = continuation or ""
+        #: each wizard records its own run. One shared telemetry would
+        #: interleave four wizards' rounds into one Decisions table and
+        #: settle each round's damage against another wizard's board.
+        self.telemetry = telemetry
+        self.name = name
+
+    def label(self, index):
+        return self.name or f"wizard {index + 1}"
+
+
+class _Seat:
+    """One wizard's live state, for the duration of a run."""
+
+    def __init__(self, index, config, telemetry):
+        self.index = index
+        self.name = config.label(index)
+        self.school = config.school
+        self.deck = list(config.deck)
+        self.policy_name = config.policy_name
+        self.agent = config.agent
+        self.continuation = config.continuation
+        self.tel = telemetry
+        #: set when a trained policy is in play, so its coverage can be
+        #: reported -- "the agent had never seen 94% of these boards" is
+        #: the most useful thing to know about a learned live run.
+        self.trained = None
+        self.backend = None
+        self.client = None
+        self.combat = None
+        self.quester = None
+        self.runner = None
+        #: the wizard's gear, read off the client on connect
+        self.player_stats = {}
+        #: whether the wizard's real max health was ever read
+        self.hp_known = False
+        self.fought = 0
+        #: one-shot questing requests from the GUI thread. A plain list
+        #: under a lock: individual list ops are atomic, but "is it
+        #: already queued" followed by "queue it" is a check-then-act,
+        #: and the two callers are on different threads -- buttons on the
+        #: GUI thread, hotkeys on the worker's loop.
+        self.requests = []
+        self.lock = _threading.Lock()
+        #: the action currently being performed, if any. The queue
+        #: dedupe only covers the window in which an action sits
+        #: *waiting*; a wisp sweep runs for seconds, and a held hotkey
+        #: would otherwise queue a fresh sweep the moment the last one
+        #: started.
+        self.busy = None
+        #: serialises upkeep against itself, per client. The fight loop
+        #: awaits `after_fight` while the service task is live, and after
+        #: a fight `in_battle` is False -- so a queued wisps request was
+        #: serviced *during* the automatic sweep, running two of them
+        #: against one client. Per seat and not per run: two wizards are
+        #: two clients, and there is nothing to serialise between them.
+        self.upkeep_lock = None
+        #: set while the fight loop is doing the between-fights chores.
+        #: The lock keeps two upkeep runs apart; this keeps *questing*
+        #: apart from upkeep, which is a different collision -- a wisp
+        #: sweep yields the loop every 0.15s, and a quest-marker teleport
+        #: landing between two wisp teleports moves the wizard off the
+        #: field while the sweep keeps counting.
+        self.in_upkeep = False
+        #: said once, not every half-second, when the quest arrow is off
+        self.warned_quest_arrow = False
+        #: this wizard's in-game name, learned from its first duel. The
+        #: client will not say it outside the character-select screen,
+        #: but a combat read names the client's own member -- and the
+        #: cross-zone follow needs it to pick the leader out of the
+        #: friends list.
+        self.wizard_name = None
+        #: when this wizard last tried to catch up with the leader. See
+        #: `LiveWorker.FOLLOW_EVERY`.
+        self.followed_at = 0.0
+        #: stage name -> how many times it has failed, so a broken stage
+        #: is reported rather than retried silently twice a second
+        self.stage_errors = {}
+
+    def enqueue(self, action):
+        with self.lock:
+            if action in self.requests or action == self.busy:
+                return False
+            self.requests.append(action)
+        return True
+
+
+def _seat_property(name):
+    """Expose seat 0's field on the worker itself.
+
+    The window, the hotkeys and every test written before parties talk
+    to `worker.school` / `worker._backend` / `worker.trained`. Those are
+    seat 0's, and saying so once here is better than a second copy of
+    the state that can drift out of step with the seat's.
+    """
+
+    def get(self):
+        return getattr(self.seats[0], name)
+
+    def set(self, value):
+        setattr(self.seats[0], name, value)
+
+    return property(get, set)
+
+
 class LiveWorker(QThread):
-    """Connects to the client and plays fights until told to stop."""
+    """Connects to the client(s) and plays fights until told to stop."""
 
     #: human-readable progress, straight to the status bar
     status = pyqtSignal(str)
+    #: the same line, tagged with the seat it came from
+    seat_status = pyqtSignal(int, str)
     #: one planning phase completed; payload is the RoundRecord
     round_done = pyqtSignal(object)
+    seat_round_done = pyqtSignal(int, object)
     #: a fight ended
     fight_done = pyqtSignal(int)
+    seat_fight_done = pyqtSignal(int, int)
     #: fatal, with a message already worth reading
     failed = pyqtSignal(str)
     #: the run stopped cleanly
@@ -36,23 +184,39 @@ class LiveWorker(QThread):
     #: to use it or the learned states share no health bucket with a live
     #: board, and typing it in by hand is a guess the game can answer.
     hp_read = pyqtSignal(int)
+    seat_hp_read = pyqtSignal(int, int)
     #: the wizard's gear stats, so training prices hits the way the game
     #: does rather than assuming a naked wizard
     gear_read = pyqtSignal(object)
+    seat_gear_read = pyqtSignal(int, object)
     #: the policy actually installed on the backend, after a swap
     policy_changed = pyqtSignal(str)
+    seat_policy_changed = pyqtSignal(int, str)
+    #: one round agreed by the whole party; payload is a `PartyPlan`
+    party_plan = pyqtSignal(object)
 
     def __init__(self, telemetry, school, deck, policy_name, fights,
                  agent=None, auto_quest=False, auto_dialogue=True,
                  collect_wisps=True, use_potions=True, script="",
-                 hotkeys=None, continuation=""):
+                 hotkeys=None, continuation="", seats=None,
+                 coordinate=True, passes=2, barrier=None,
+                 follow_leader=True, leader=0):
         super().__init__()
-        self.tel = telemetry
-        self.school = school
-        self.deck = list(deck or [])
-        self.policy_name = policy_name
+        # Seat 0 is always the arguments this was called with, so the
+        # single-wizard signature is untouched; `seats` adds the rest.
+        first = SeatConfig(school=school, deck=deck, policy_name=policy_name,
+                           agent=agent, continuation=continuation,
+                           telemetry=telemetry)
+        configs = [first] + list(seats or [])
+        self.seats = [
+            _Seat(i, cfg, cfg.telemetry if cfg.telemetry is not None
+                  else (telemetry if i == 0 else None))
+            for i, cfg in enumerate(configs)]
+        for seat in self.seats:
+            if seat.tel is None:
+                from ..telemetry import Telemetry
+                seat.tel = Telemetry()
         self.fights = fights
-        self.agent = agent
         self.auto_quest = auto_quest
         self.auto_dialogue = auto_dialogue
         #: between-fights upkeep. An unattended run dies by attrition
@@ -60,100 +224,92 @@ class LiveWorker(QThread):
         #: 12% health has told you nothing about the policy.
         self.collect_wisps = collect_wisps
         self.use_potions = use_potions
-        #: Deimos's own questing, if its requirements are installed. It
-        #: has the navigation ours lacks -- navmap teleports, spiral
-        #: doors, dungeon entry, NPC talking -- and composes cleanly
-        #: because auto_quest_solo no-ops during combat.
-        self.quester = None
-        #: set when a trained policy is in play, so its coverage can be
-        #: reported -- "the agent had never seen 94% of these boards" is
-        #: the most useful thing to know about a learned live run.
-        self.trained = None
         #: a deimoslang program, stepped between fights like the quester
         self.script = script or ""
-        self.runner = None
         #: {action: key name}. Global hotkeys, so the same actions the
         #: buttons perform are reachable without alt-tabbing out of a
         #: full-screen game -- which is the difference between using them
-        #: and not.
+        #: and not. Registered once for the whole run: they are
+        #: system-wide keys, so a second registration of the same key
+        #: fails, and one press should reach every wizard anyway.
         self.hotkeys = dict(hotkeys or {})
         self._hotkeys = None
-        #: the rollout continuation picked for this deck, if training has
-        #: chosen one. Every lookahead decision in the run plays it out,
-        #: so it is worth more than it looks -- measured at ~14 points of
-        #: kill rate between the best and worst choice.
-        self.continuation = continuation or ""
-        #: the wizard's gear, read off the client on connect
-        self.player_stats = {}
-        #: said once, not every half-second, when the quest arrow is off
-        self._warned_quest_arrow = False
+        #: the hivemind, built in `_go` when there is more than one
+        #: wizard. See `deimos_bridge/hivemind.py`; with one wizard it
+        #: stays None and the decision path is the one that shipped.
+        self.coordinate = bool(coordinate)
+        self.passes = int(passes)
+        self.barrier = barrier
+        self.hive = None
+        #: which wizard sets the pace, and whether the rest chase it.
+        #: Without this a party is four wizards questing independently to
+        #: four different places, coordinating perfectly with nobody --
+        #: see `deimos_bridge/party.py`.
+        self.leader = max(0, min(int(leader), len(self.seats) - 1))
+        self.follow_leader = bool(follow_leader)
         self._stop = False
-        #: one-shot questing requests from the GUI thread. A plain list
-        #: under a lock: individual list ops are atomic, but "is it
-        #: already queued" followed by "queue it" is a check-then-act,
-        #: and the two callers are on different threads -- buttons on the
-        #: GUI thread, hotkeys on the worker's loop.
-        self._requests = []
-        self._requests_lock = _threading.Lock()
-        #: the action currently being performed, if any. The queue
-        #: dedupe only covers the window in which an action sits
-        #: *waiting*; a wisp sweep runs for seconds, and a held hotkey
-        #: would otherwise queue a fresh sweep the moment the last one
-        #: started.
-        self._busy = None
-        #: serialises upkeep against itself. The fight loop awaits
-        #: `after_fight` while the service task is live, and after a
-        #: fight `in_battle` is False -- so a queued wisps request was
-        #: serviced *during* the automatic sweep, running two of them
-        #: against one client. Created in `_go`, on the worker's loop.
-        self._upkeep_lock = None
-        #: set while the fight loop is doing the between-fights chores.
-        #: The lock keeps two upkeep runs apart; this keeps *questing*
-        #: apart from upkeep, which is a different collision -- a wisp
-        #: sweep yields the loop every 0.15s, and a quest-marker teleport
-        #: landing between two wisp teleports moves the wizard off the
-        #: field while the sweep keeps counting.
-        self._in_upkeep = False
-        #: stage name -> how many times it has failed, so a broken stage
-        #: is reported rather than retried silently twice a second
-        self._stage_errors = {}
-        #: whether the wizard's real max health was ever read
-        self.hp_known = False
-        self._client = None
+
+    # -- seat 0, reachable where it always was -----------------------------
+    tel = _seat_property("tel")
+    school = _seat_property("school")
+    deck = _seat_property("deck")
+    policy_name = _seat_property("policy_name")
+    agent = _seat_property("agent")
+    trained = _seat_property("trained")
+    continuation = _seat_property("continuation")
+    player_stats = _seat_property("player_stats")
+    hp_known = _seat_property("hp_known")
+    quester = _seat_property("quester")
+    runner = _seat_property("runner")
+    _backend = _seat_property("backend")
+    _client = _seat_property("client")
+    _requests = _seat_property("requests")
+    _busy = _seat_property("busy")
+    _upkeep_lock = _seat_property("upkeep_lock")
+    _in_upkeep = _seat_property("in_upkeep")
+    _warned_quest_arrow = _seat_property("warned_quest_arrow")
+    _stage_errors = _seat_property("stage_errors")
+
+    @property
+    def party(self):
+        return len(self.seats)
 
     def stop(self):
-        """Ask the loop to finish after the current fight."""
+        """Ask every seat's loop to finish after the current fight."""
         self._stop = True
 
     #: what `request` accepts. Every one of these drives the mouse, so
     #: every one is serviced from the one task that owns it.
     ACTIONS = ("teleport", "dialogue", "wisps", "potion")
 
-    def request(self, action):
+    def request(self, action, seat=None):
         """Queue an action ('teleport' | 'dialogue' | 'wisps' | 'potion').
 
-        Called from the GUI thread. The loop performs it out of combat,
-        because the client cannot be driven from two places at once --
-        the combat handler is clicking cards during a duel and a second
-        coroutine reaching for the mouse produces misclicks.
+        Called from the GUI thread, and by default it reaches **every**
+        wizard: one button is meant to sweep the whole party's wisps, not
+        one quarter of them. `seat` narrows it to one.
+
+        The loop performs it out of combat, because the client cannot be
+        driven from two places at once -- the combat handler is clicking
+        cards during a duel and a second coroutine reaching for the mouse
+        produces misclicks.
 
         Duplicates are dropped rather than queued -- including one that
         is *running* rather than waiting. Holding a hotkey down sends a
         burst of repeats, and a queue of eight wisp sweeps would take a
         minute to work through with the fight waiting. Returns whether
-        the action was accepted, so the caller can stop claiming an
-        action is happening when it was dropped.
+        the action was accepted by any seat, so the caller can stop
+        claiming an action is happening when it was dropped.
         """
         if action not in self.ACTIONS:
             return False
-        with self._requests_lock:
-            if action in self._requests or action == self._busy:
-                return False
-            self._requests.append(action)
-        return True
+        targets = (self.seats if seat is None
+                   else [self.seats[seat]] if 0 <= seat < len(self.seats)
+                   else [])
+        return any([s.enqueue(action) for s in targets])
 
     # -- swapping the policy without dropping the connection --------------
-    def set_policy(self, name, agent=None):
+    def set_policy(self, name, agent=None, seat=None):
         """Install a different policy on a running fight. Returns ok.
 
         Called from the GUI thread, and unlike `request` it does *not* go
@@ -170,37 +326,72 @@ class LiveWorker(QThread):
         observed, so dropping the connection throws away the inputs to
         the next decision.
         """
+        which = self.seats[seat] if seat is not None else self.seats[0]
         if agent is not None:
-            self.agent = agent
-        previous = self.policy_name
-        self.policy_name = name
+            which.agent = agent
+        previous = which.policy_name
+        which.policy_name = name
         try:
-            policy = self._build_policy()
+            policy = self._build_policy(which)
         except Exception as exc:
             # Selecting "trained" with nothing trained yet lands here.
             # Keeping the old policy beats installing nothing: the fight
             # is still running, and a backend with no policy cannot play.
-            self.policy_name = previous
-            self.status.emit(f"kept {previous} — {exc}")
-            self.policy_changed.emit(previous)
+            which.policy_name = previous
+            self._say(which, f"kept {previous} — {exc}")
+            self._policy_installed(which, previous)
             return False
 
-        self.tel.policy_name = name
-        backend = self._backend
+        which.tel.policy_name = name
+        backend = which.backend
         if backend is None:
             # Not connected yet. `_go` builds from `policy_name`, so the
             # selection is already recorded and will be honoured.
-            self.policy_changed.emit(name)
+            self._policy_installed(which, name)
             return True
         # One call, not two attribute writes: the backend keeps the
         # policy and its label in a single tuple precisely so a decision
         # in flight cannot read the new name against the old callable.
         backend.set_policy(policy, name)
-        self.status.emit(f"policy is now {name} — takes effect next round")
-        self.policy_changed.emit(name)
+        self._say(which, f"policy is now {name} — takes effect next round")
+        self._policy_installed(which, name)
         return True
 
-    async def _service_loop(self, client):
+    def _policy_installed(self, seat, name):
+        self.seat_policy_changed.emit(seat.index, name)
+        if seat.index == 0:
+            self.policy_changed.emit(name)
+
+    def _seat_for(self, client):
+        """Whose wizard is this client? Seat 0 when nobody claims it.
+
+        The per-client helpers below take the client and derive the seat
+        from it rather than being handed both. That is not tidiness: a
+        client is what every one of them actually operates on, a seat is
+        bookkeeping, and keeping the signature at "the thing it drives"
+        is what lets `_service_loop` be driven with a stand-in client in
+        a test without the seat having to exist.
+        """
+        for seat in self.seats:
+            if seat.client is client:
+                return seat
+        return self.seats[0]
+
+    # -- talking to the window --------------------------------------------
+    def _say(self, seat, message):
+        """One status line, tagged with the wizard it is about.
+
+        Only tagged in a party. With one wizard the tag would be noise on
+        every line, and every message the single-wizard run ever printed
+        would change shape for no reason.
+        """
+        index = 0 if seat is None else seat.index
+        self.seat_status.emit(index, message)
+        if len(self.seats) > 1 and seat is not None:
+            message = f"[{seat.name}] {message}"
+        self.status.emit(message)
+
+    async def _service_loop(self, client, seat=None):
         """Handle requests and auto-dialogue *while* the fight loop runs.
 
         This is the fix for "Teleport to quest says it is teleporting and
@@ -216,25 +407,34 @@ class LiveWorker(QThread):
         """
         from .. import questing
 
+        seat = self._seat_for(client) if seat is None else seat
         while not self._stop:
             try:
-                if await questing.in_battle(client) or self._in_upkeep:
+                if await questing.in_battle(client) or seat.in_upkeep:
                     await asyncio.sleep(0.5)
                     continue
 
                 await self._drain_requests(client)
 
-                if self.auto_dialogue and self.quester is None:
+                if self.auto_dialogue and seat.quester is None:
                     # Deimos's questing does its own dialogue handling, so
                     # a second clicker would race it for the same button.
-                    await self._stage("auto-dialogue",
+                    await self._stage(seat, "auto-dialogue",
                                       self._auto_dialogue(client))
 
-                if self.runner is not None:
-                    await self._stage("script step", self._script_step())
+                if seat.runner is not None:
+                    await self._stage(seat, "script step",
+                                      self._script_step(seat))
 
-                if self.auto_quest:
-                    await self._stage("quest step", self._quest_step(client))
+                if self._follows(seat):
+                    # A follower does not quest. Two wizards taking their
+                    # own quests walk to two places, and then the party
+                    # coordinates beautifully with nobody.
+                    await self._stage(seat, "following the leader",
+                                      self._follow_step(client))
+                elif self.auto_quest:
+                    await self._stage(seat, "quest step",
+                                      self._quest_step(client))
 
                 await asyncio.sleep(0.5)
             except asyncio.CancelledError:
@@ -246,10 +446,10 @@ class LiveWorker(QThread):
                 # every stage below the one that raised, so a broken
                 # mouse hook killed auto-dialogue, the script runner and
                 # auto-quest simultaneously and forever, without a word.
-                self._stage_failed("the service loop", exc)
+                self._stage_failed(seat, "the service loop", exc)
                 await asyncio.sleep(1.0)
 
-    async def _stage(self, name, coro):
+    async def _stage(self, seat, name, coro):
         """Run one stage of the service tick, reporting its own failure.
 
         Per stage rather than per tick: a stage that raises must not take
@@ -261,12 +461,13 @@ class LiveWorker(QThread):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            self._stage_failed(name, exc)
+            self._stage_failed(seat, name, exc)
 
-    def _stage_failed(self, name, exc):
-        self._say_once(name, f"{name} failed — {type(exc).__name__}: {exc}")
+    def _stage_failed(self, seat, name, exc):
+        self._say_once(seat, name,
+                       f"{name} failed — {type(exc).__name__}: {exc}")
 
-    def _say_once(self, key, message):
+    def _say_once(self, seat, key, message):
         """Say it the first time, then every 20th -- twice a second is spam.
 
         The service tick runs twice a second, so a stage that is broken
@@ -274,14 +475,14 @@ class LiveWorker(QThread):
         nothing else. Reporting the first and then thinning out keeps
         the failure visible without burying everything around it.
         """
-        n = self._stage_errors.get(key, 0) + 1
-        self._stage_errors[key] = n
+        seat = self.seats[0] if seat is None else seat
+        n = seat.stage_errors.get(key, 0) + 1
+        seat.stage_errors[key] = n
         if n == 1 or n % 20 == 0:
-            self.status.emit(
-                message + (f" (still failing after {n} tries)"
-                           if n > 1 else ""))
+            self._say(seat, message + (f" (still failing after {n} tries)"
+                                       if n > 1 else ""))
 
-    async def _drain_requests(self, client):
+    async def _drain_requests(self, client, seat=None):
         """Perform the queued button/hotkey actions, one at a time.
 
         `in_battle` is re-checked before each one, not once per tick: a
@@ -291,42 +492,45 @@ class LiveWorker(QThread):
         """
         from .. import questing
 
-        while self._requests and not self._stop:
+        seat = self._seat_for(client) if seat is None else seat
+        while seat.requests and not self._stop:
             if await questing.in_battle(client):
                 return
-            with self._requests_lock:
-                if not self._requests:
+            with seat.lock:
+                if not seat.requests:
                     return
-                action = self._requests.pop(0)
-                self._busy = action
+                action = seat.requests.pop(0)
+                seat.busy = action
             try:
-                await self._stage(f"the {action} request",
-                                  self._do_request(client, action))
+                await self._stage(seat, f"the {action} request",
+                                  self._do_request(client, action, seat))
             finally:
-                self._busy = None
+                seat.busy = None
 
-    async def _do_request(self, client, action):
+    async def _do_request(self, client, action, seat=None):
         from .. import questing
 
+        seat = self.seats[0] if seat is None else seat
         if action == "teleport":
             ok, reason = await questing.teleport_to_quest(client)
-            self.status.emit("teleported to the quest marker"
-                             if ok else reason)
+            self._say(seat, "teleported to the quest marker"
+                      if ok else reason)
         elif action == "dialogue":
             n, why = await questing.advance_dialogue(client)
-            self.status.emit(f"advanced {n} dialogue window(s)" if n
-                             else (why or "no dialogue open"))
+            self._say(seat, f"advanced {n} dialogue window(s)" if n
+                      else (why or "no dialogue open"))
         elif action in ("wisps", "potion"):
             await self._upkeep_now(client, action)
 
-    async def _script_step(self):
-        if not await self.runner.step() and self.runner.finished:
-            self.status.emit("script finished")
-            self.runner = None
-        elif self.runner is not None and self.runner.failures in (1, 10):
-            self.status.emit(f"script error: {self.runner.last_error}")
+    async def _script_step(self, seat=None):
+        seat = self.seats[0] if seat is None else seat
+        if not await seat.runner.step() and seat.runner.finished:
+            self._say(seat, "script finished")
+            seat.runner = None
+        elif seat.runner is not None and seat.runner.failures in (1, 10):
+            self._say(seat, f"script error: {seat.runner.last_error}")
 
-    async def _auto_dialogue(self, client):
+    async def _auto_dialogue(self, client, seat=None):
         """Open and clear dialogue, but only the quest's.
 
         The game's press-X prompt appears for every interactable in
@@ -342,20 +546,22 @@ class LiveWorker(QThread):
         """
         from .. import questing
 
+        seat = self._seat_for(client) if seat is None else seat
         if not await questing.in_dialogue(client):
             if await questing.near_interactable(client):
                 near, why = await questing.at_quest_marker(client)
                 if near:
                     ok, pressed_why = await questing.press_x(client)
                     if ok:
-                        self.status.emit("opened the quest dialogue")
+                        self._say(seat, "opened the quest dialogue")
                         await asyncio.sleep(0.6)
                     elif pressed_why:
-                        self._say_once("press-x", pressed_why)
+                        self._say_once(seat, "press-x", pressed_why)
                 elif (why and "quest marker" not in why
-                        and not self._warned_quest_arrow):
-                    self._warned_quest_arrow = True
-                    self.status.emit(
+                        and not seat.warned_quest_arrow):
+                    seat.warned_quest_arrow = True
+                    self._say(
+                        seat,
                         "auto-dialogue only talks to quest NPCs, and " + why)
 
         if await questing.in_dialogue(client):
@@ -363,14 +569,14 @@ class LiveWorker(QThread):
             # dialogue blocks movement, so leaving one up strands the run.
             n, click_why = await questing.advance_dialogue(client)
             if n:
-                self.status.emit(f"auto-dialogue: {n} window(s)")
+                self._say(seat, f"auto-dialogue: {n} window(s)")
             elif click_why:
                 # Reported, not spun on: this used to loop twice a second
                 # forever against an open dialogue it could not click,
                 # with movement blocked and nothing on screen.
-                self._say_once("auto-dialogue-click", click_why)
+                self._say_once(seat, "auto-dialogue-click", click_why)
 
-    async def _upkeep_now(self, client, action):
+    async def _upkeep_now(self, client, action, seat=None):
         """Collect wisps, or drink a potion, on demand.
 
         The failure is *reported* -- and reported as the helper diagnosed
@@ -382,39 +588,39 @@ class LiveWorker(QThread):
         """
         from .. import upkeep
 
+        seat = self._seat_for(client) if seat is None else seat
         ok, why = await upkeep.available()
         if not ok:
-            self.status.emit(f"upkeep unavailable — {why}")
+            self._say(seat, f"upkeep unavailable — {why}")
             return
 
         # The same lock the automatic sweep holds. Pressing the hotkey as
         # a fight ends would otherwise run two wisp sweeps, or two potion
         # calls, against one client on one loop.
-        async with self._upkeep():
+        async with self._upkeep(seat):
             try:
                 if action == "wisps":
                     said = []
 
                     def relay(message):
                         said.append(message)
-                        self.status.emit(message)
+                        self._say(seat, message)
 
                     await upkeep.collect_wisps(client, on_status=relay)
                     if not said:
-                        self.status.emit("no wisps in range")
+                        self._say(seat, "no wisps in range")
                 else:
                     if await upkeep.drink_potion(client):
-                        self.status.emit("drank a potion")
+                        self._say(seat, "drank a potion")
                     else:
                         why = getattr(upkeep.drink_potion, "last_error", "")
-                        self.status.emit(
-                            "no potion drunk"
-                            + (f" — {why}" if why else ""))
+                        self._say(seat, "no potion drunk"
+                                  + (f" — {why}" if why else ""))
             except Exception as exc:
-                self.status.emit(
-                    f"{action} failed — {type(exc).__name__}: {exc}")
+                self._say(seat,
+                          f"{action} failed — {type(exc).__name__}: {exc}")
 
-    def _upkeep(self):
+    def _upkeep(self, seat=None):
         """The upkeep lock, or a no-op when there is no loop yet.
 
         `_upkeep_now` is reachable before `_go` has built the lock (and
@@ -423,18 +629,19 @@ class LiveWorker(QThread):
         """
         import contextlib
 
-        if self._upkeep_lock is None:
+        seat = self.seats[0] if seat is None else seat
+        if seat.upkeep_lock is None:
             return contextlib.nullcontext()
-        return self._upkeep_lock
+        return seat.upkeep_lock
 
     async def _setup_hotkeys(self):
         """Bind the global hotkeys, if any were configured.
 
-        A keypress does exactly what the button does: it lands in
-        `_requests`, and the service task performs it between clicks. It
-        deliberately does not touch the client directly -- a hotkey can
-        arrive mid-cast, and two things driving the mouse at once
-        misclick.
+        A keypress does exactly what the button does: it lands in every
+        seat's request queue, and each seat's service task performs it
+        between clicks. It deliberately does not touch a client directly
+        -- a hotkey can arrive mid-cast, and two things driving the mouse
+        at once misclick.
         """
         if not self.hotkeys:
             return
@@ -448,7 +655,7 @@ class LiveWorker(QThread):
             self._hotkeys = None
             self.status.emit(f"hotkeys not installed ({type(exc).__name__})")
 
-    async def _read_max_hp(self, client):
+    async def _read_max_hp(self, client, seat=None):
         """Report the wizard's real max health, once, on connect.
 
         Training needs it: `Featurizer.key` buckets health as a fraction
@@ -466,20 +673,24 @@ class LiveWorker(QThread):
         help. Naming the unread stat is the difference between a
         two-second fix and an hour of retraining.
         """
+        seat = self._seat_for(client) if seat is None else seat
         try:
             hp = int(await client.stats.max_hitpoints())
         except Exception as exc:
-            self.status.emit(
+            self._say(
+                seat,
                 f"could not read your max health ({type(exc).__name__}) — "
                 f"training will use whatever is in the box, and a wrong "
                 f"value makes the Q table share no states with the live "
                 f"board")
             return          # a nicety; never worth failing the connect
         if hp > 0:
-            self.hp_known = True
-            self.hp_read.emit(hp)
+            seat.hp_known = True
+            self.seat_hp_read.emit(seat.index, hp)
+            if seat.index == 0:
+                self.hp_read.emit(hp)
 
-    async def _fight_outcome(self, client):
+    async def _fight_outcome(self, client, seat=None):
         """True/False/None: did the fight that just ended get won?
 
         Twelve fights exported as "wins: 0" with `won: null` on every
@@ -491,15 +702,16 @@ class LiveWorker(QThread):
         a defeat into a win. A fight that recorded no rounds (a
         spurious boundary) stays unknown rather than guessed.
         """
+        seat = self._seat_for(client) if seat is None else seat
         try:
-            if not self.tel.fights or self.tel.fights[-1].rounds == 0:
+            if not seat.tel.fights or seat.tel.fights[-1].rounds == 0:
                 return None
             hp = await client.stats.current_hitpoints()
             return bool(hp and int(hp) > 0)
         except Exception:
             return None
 
-    async def _read_gear(self, client):
+    async def _read_gear(self, client, seat=None):
         """The wizard's damage, accuracy, pierce and resist, on connect.
 
         Without it the simulator prices every hit as though the wizard
@@ -510,23 +722,27 @@ class LiveWorker(QThread):
         """
         from .. import live_state
 
+        seat = self._seat_for(client) if seat is None else seat
         try:
-            stats = await live_state.read_player_stats(client, self.school)
+            stats = await live_state.read_player_stats(client, seat.school)
         except Exception:
             return
         if not stats:
-            self.status.emit(
+            self._say(
+                seat,
                 "could not read your gear stats — the simulator will price "
                 "hits as if you were wearing none")
             return
-        self.player_stats = stats
-        if self._backend is not None:
-            self._backend.player_stats = stats
+        seat.player_stats = stats
+        if seat.backend is not None:
+            seat.backend.player_stats = stats
             if stats.get("power_pip_chance"):
-                self._backend.power_pip_chance = stats["power_pip_chance"]
-        self.gear_read.emit(dict(stats))
-        dmg = (stats.get("damage") or {}).get(self.school, 0.0)
-        line = (f"read your gear: {dmg * 100:.0f}% {self.school} damage, "
+                seat.backend.power_pip_chance = stats["power_pip_chance"]
+        self.seat_gear_read.emit(seat.index, dict(stats))
+        if seat.index == 0:
+            self.gear_read.emit(dict(stats))
+        dmg = (stats.get("damage") or {}).get(seat.school, 0.0)
+        line = (f"read your gear: {dmg * 100:.0f}% {seat.school} damage, "
                 f"{stats.get('pierce', 0.0) * 100:.0f}% pierce, "
                 f"{stats.get('accuracy', 0.0) * 100:.0f}% accuracy")
         unread = stats.get("unread") or []
@@ -536,34 +752,79 @@ class LiveWorker(QThread):
             # then priced every hit in training below what it lands for.
             line += (f" — but {', '.join(unread)} could not be read and "
                      f"are being treated as 0")
-        self.status.emit(line)
+        self._say(seat, line)
 
-    async def _setup_questing(self, client):
+    async def _setup_questing(self, client, seat=None):
         """Prefer Deimos's questing; fall back to ours if it will not import."""
         from .. import deimos_questing
 
+        seat = self._seat_for(client) if seat is None else seat
         ok, reason = deimos_questing.available()
         if not ok:
-            self.status.emit("using the light questing — " + reason.splitlines()[0])
+            self._say(seat,
+                      "using the light questing — " + reason.splitlines()[0])
             return
         try:
-            self.quester = await deimos_questing.make_quester(client)
-            self.status.emit("questing: using Deimos's navigator")
+            seat.quester = await deimos_questing.make_quester(client)
+            self._say(seat, "questing: using Deimos's navigator")
         except Exception as exc:
-            self.quester = None
-            self.status.emit(f"using the light questing ({type(exc).__name__})")
+            seat.quester = None
+            self._say(seat, f"using the light questing ({type(exc).__name__})")
 
-    async def _setup_script(self, client):
+    async def _setup_script(self, client, seat=None):
         from .. import scripts
 
+        seat = self._seat_for(client) if seat is None else seat
         try:
-            self.runner = scripts.make_runner(client, self.script)
-            self.status.emit("script loaded")
+            seat.runner = scripts.make_runner(client, self.script)
+            self._say(seat, "script loaded")
         except Exception as exc:
-            self.runner = None
-            self.status.emit(f"script not loaded: {exc}")
+            seat.runner = None
+            self._say(seat, f"script not loaded: {exc}")
 
-    async def _quest_step(self, client):
+    def _follows(self, seat):
+        """Is this seat a follower rather than the one setting the pace?"""
+        return (self.follow_leader and len(self.seats) > 1
+                and seat.index != self.leader)
+
+    #: seconds between follow attempts. The service tick runs twice a
+    #: second, and a follow is not a cheap read -- it teleports, and when
+    #: the leader is mid-duel it also reaches for the nearest mob. A
+    #: follower that cannot get in (the circle already seats four) would
+    #: otherwise retry that twice a second for the length of the fight.
+    FOLLOW_EVERY = 2.5
+
+    async def _follow_step(self, client, seat=None):
+        """One tick of keeping this wizard on the leader.
+
+        Reported only when something actually happened. The tick runs
+        twice a second and a party standing together correctly is the
+        normal case, so a line per tick would bury everything else in
+        the status bar.
+        """
+        import time
+
+        from .. import party
+
+        seat = self._seat_for(client) if seat is None else seat
+        boss = self.seats[self.leader]
+        if boss is seat or boss.client is None:
+            return
+        now = time.monotonic()
+        if now - seat.followed_at < self.FOLLOW_EVERY:
+            return
+        seat.followed_at = now
+        moved, why = await party.follow(client, boss.client,
+                                        leader_name=boss.wizard_name)
+        if moved and why:
+            self._say(seat, why)
+        elif why:
+            # A follower that cannot reach its leader is the failure that
+            # makes the whole party pointless, so it is said -- but
+            # thinned, because the cause is usually standing.
+            self._say_once(seat, "follow", why)
+
+    async def _quest_step(self, client, seat=None):
         """One tick of whichever questing is in play.
 
         Deimos's is a *step*, not a loop: its own driver is
@@ -572,18 +833,20 @@ class LiveWorker(QThread):
         """
         from .. import questing
 
-        if self.quester is not None:
-            ok = await self.quester.step()
-            if not ok and self.quester.failures in (1, 10, 50):
-                self.status.emit(
-                    f"questing step failed ({self.quester.failures}x): "
-                    f"{self.quester.last_error}")
+        seat = self._seat_for(client) if seat is None else seat
+        if seat.quester is not None:
+            ok = await seat.quester.step()
+            if not ok and seat.quester.failures in (1, 10, 50):
+                self._say(seat,
+                          f"questing step failed ({seat.quester.failures}x): "
+                          f"{seat.quester.last_error}")
             return
         # One hop per tick. The blocking hunt cannot run here -- it would
         # stall the request queue -- and running it from the fight loop
         # was the bug: that loop parks in wait_for_combat, so a hunt
         # placed before it fired once per fight and then never again.
-        await questing.hop_once(client, on_status=self.status.emit)
+        await questing.hop_once(
+            client, on_status=lambda m: self._say(seat, m))
 
     # -- worker thread ----------------------------------------------------
     def run(self):
@@ -599,13 +862,15 @@ class LiveWorker(QThread):
             except Exception:
                 pass
 
-    def _build_policy(self):
-        # Cleared first: `self.trained` drives the coverage readout, and
+    def _build_policy(self, seat=None):
+        seat = self.seats[0] if seat is None else seat
+        # Cleared first: `seat.trained` drives the coverage readout, and
         # a stale one left over from a previous selection would report a
         # learned policy's numbers for a heuristic that replaced it.
-        self.trained = None
-        if self.policy_name.startswith("trained"):
-            if self.agent is None:
+        seat.trained = None
+        name = seat.policy_name
+        if name.startswith("trained"):
+            if seat.agent is None:
                 raise RuntimeError(
                     "No trained policy yet — press Train first, or pick "
                     "another policy.")
@@ -613,27 +878,85 @@ class LiveWorker(QThread):
             # Wrapped, not raw: a tabular agent has no opinion about a
             # state it never visited, and QAgent.greedy turns "no
             # opinion" into PASS. See policies.TrainedPolicy.
-            self.trained = trained_policy(self.agent)
-            return self.trained
-        if self.policy_name.startswith("ttk"):
+            seat.trained = trained_policy(seat.agent)
+            return seat.trained
+        if name.startswith("ttk"):
             # The tuned driver: plain lookahead, or determinized search
-            # where the per-deck probes measured it ahead.
+            # where the per-deck probes measured it ahead. The seat's own
+            # quartet is passed in rather than installed globally -- see
+            # `_seat_search`.
             from ..policies import tuned_driver
-            return tuned_driver()
-        if self.policy_name.startswith("school-aware"):
+            base, horizon, driver = self._seat_search(seat)
+            return tuned_driver(continuation=base, horizon=horizon,
+                                driver=driver)
+        if name.startswith("school-aware"):
             from ..policies import school_aware_blade_stack
             return school_aware_blade_stack(3)
-        if self.policy_name.startswith("nuke"):
+        if name.startswith("nuke"):
             from w101_sim import strat_nuke_asap
             return strat_nuke_asap
         from w101_sim import make_blade_stack
         n = 3
-        if "(" in self.policy_name:
+        if "(" in name:
             try:
-                n = int(self.policy_name.split("(")[1].split(")")[0])
+                n = int(name.split("(")[1].split(")")[0])
             except (IndexError, ValueError):
                 pass
         return make_blade_stack(n)
+
+    def _seat_search(self, seat):
+        """This seat's tuned quartet, parsed but deliberately NOT installed.
+
+        The quartet -- continuation, horizon, driver -- is deck-scoped
+        and worth ~14 points of kill rate, and `policies` keeps it in
+        module globals that `_rollout` reads at *decision* time. For one
+        wizard that is exactly right: tune mid-run and the running fight
+        picks it up. For four it is exactly wrong, because four wizards
+        hold four decks and four `set_continuation` calls would leave all
+        four playing whichever was written last.
+
+        So it is parsed here and handed to `tuned_driver` explicitly,
+        which binds it into that seat's closure. Returns
+        `(None, None, None)` for an untuned seat, which is the signal to
+        `tuned_driver` to keep reading the globals as it always has.
+        """
+        wire = seat.continuation
+        if not wire:
+            return None, None, None
+        from ..policies import DEFAULT_HORIZON, build_continuation
+
+        name, horizon, driver = wire, DEFAULT_HORIZON, None
+        if " @ driver " in name:
+            name, driver = name.rsplit(" @ driver ", 1)
+        if " @ horizon " in name:
+            name, raw = name.rsplit(" @ horizon ", 1)
+            try:
+                horizon = int(raw)
+            except ValueError:
+                pass
+        self._say(seat, f"search: {name} continuation, horizon {horizon}, "
+                        f"driver {driver or 'ttk'}")
+        return build_continuation(name), horizon, driver
+
+    def _make_hive(self):
+        """The coordinator, when there is a party to coordinate.
+
+        Deliberately not built for one wizard: a hive of one still costs
+        a barrier, a plan and a copy of the board every round, and buys
+        nothing that a single wizard could not decide on its own.
+        """
+        if len(self.seats) < 2 or not self.coordinate:
+            return None
+        from ..hivemind import Hivemind
+
+        hive = Hivemind(passes=self.passes,
+                        on_status=self.status.emit,
+                        on_plan=self.party_plan.emit)
+        if self.barrier is not None:
+            hive.timeout = float(self.barrier)
+        for seat in self.seats:
+            hive.join(seat.index, seat.name)
+        return hive
 
     async def _go(self):
         try:
@@ -647,30 +970,22 @@ class LiveWorker(QThread):
         from ..live_backend import WizAiBackend, make_combat_handler
         from ..live_state import build_catalog
 
-        if self.continuation:
-            from ..policies import (driver_name, search_horizon,
-                                    set_continuation, set_driver,
-                                    set_search_horizon)
-            name = self.continuation
-            if " @ driver " in name:
-                name, drv = name.rsplit(" @ driver ", 1)
-                set_driver(drv)
-            if " @ horizon " in name:
-                name, h = name.rsplit(" @ horizon ", 1)
-                set_search_horizon(int(h))
-            self.status.emit(
-                f"search: {set_continuation(name)} continuation, "
-                f"horizon {search_horizon()}, driver {driver_name()}")
         self.status.emit("loading the card table…")
         catalog = build_catalog()
         cards = catalog["cards"]
-        built_as = self.policy_name
-        policy = self._build_policy()
 
-        self.status.emit("looking for the game…")
+        # Before touching the game. Picking "trained" for a wizard with
+        # nothing trained is a configuration mistake, and finding it out
+        # after four clients have had their hooks installed means tearing
+        # all four back down again.
+        for seat in self.seats:
+            self._build_policy(seat)
+
+        self.status.emit("looking for the game…" if len(self.seats) == 1
+                         else f"looking for {len(self.seats)} game clients…")
         handler = ClientHandler()
-        backend = None
-        servicer = None
+        servicers = []
+        self.hive = hive = self._make_hive()
         try:
             clients = handler.get_new_clients()
             if not clients:
@@ -678,112 +993,92 @@ class LiveWorker(QThread):
                     "No Wizard101 client found. wizwalker matches the window "
                     "class 'Wizard Graphical Client' — the game has to be "
                     "fully launched, not just the launcher.")
-            client = clients[0]
+            if len(clients) < len(self.seats):
+                # Named rather than silently played short: a party of
+                # four that quietly runs as a party of two coordinates
+                # perfectly and farms half as fast, which is the kind of
+                # failure that goes unnoticed for an evening.
+                raise RuntimeError(
+                    f"{len(self.seats)} wizards are configured but only "
+                    f"{len(clients)} Wizard101 client(s) are running. Launch "
+                    f"one client per wizard and log each one in, or set "
+                    f"'wizards' back to {len(clients)}.")
 
-            self.status.emit("activating hooks…")
-            try:
-                await client.activate_hooks()
-            except Exception as exc:
-                if "Pattern" in type(exc).__name__ or "Pattern" in str(exc):
-                    raise RuntimeError(
-                        "wizwalker could not install its hooks: the autobot "
-                        "signature was not found in the running client.\n\n"
-                        "Run  python -m deimos_bridge.diagnose_hooks  — it "
-                        "tells you whether this is stale state in the process "
-                        "(close the game completely) or a game patch that "
-                        "outdates wizwalker."
-                    ) from exc
-                raise
-
-            await self._read_max_hp(client)
-            await self._read_gear(client)
-
-            self.tel.policy_name = self.policy_name
-            self.tel.school = self.school
-            self.tel.deck = self.deck
-            backend = WizAiBackend(
-                policy=policy, cards=cards, school=self.school,
-                decklist=self.deck, catalog=catalog,
-                policy_name=built_as, on_decision=self._on_decision,
-                player_stats=self.player_stats,
-                on_lost_round=self._on_lost_round)
-            backend.on_failed_cast = self._on_failed_cast
-            self.tel.resolver = backend.resolver
-            self._backend = backend
-            if self.policy_name != built_as:
-                # The dropdown moved while the hooks were installing.
-                # `set_policy` short-circuits until `_backend` exists, so
-                # that selection is sitting in `policy_name` unapplied.
-                self.set_policy(self.policy_name)
-            combat = make_combat_handler(client, backend)
-
-            if self.auto_quest:
-                await self._setup_questing(client)
-            if self.script:
-                await self._setup_script(client)
-            await self._setup_hotkeys()
-
-            self._client = client
-            self.status.emit(
-                "connected — hunting for fights" if self.auto_quest
-                else "connected — walk into a fight")
-            # Built here, not in __init__: an asyncio.Lock binds to the
-            # loop it is created on, and __init__ runs on the GUI thread.
-            self._upkeep_lock = asyncio.Lock()
-            servicer = asyncio.ensure_future(self._service_loop(client))
-            fought = 0
-            while not self._stop and (self.fights <= 0 or fought < self.fights):
-                # Questing of either kind runs on the service task, which
-                # keeps ticking while this loop is parked in
-                # wait_for_combat below.
-                self.tel.start_fight()
+            for seat, client in zip(self.seats, clients):
+                seat.client = client
+                self._say(seat, "activating hooks…")
                 try:
-                    # blocks until a duel starts, then plays it out
-                    await combat.wait_for_combat()
+                    await client.activate_hooks()
                 except Exception as exc:
-                    name = type(exc).__name__
-                    if not any(k in name for k in ("Memory", "ClientClosed",
-                                                   "ReadingEnum", "Invalidated")):
-                        raise
-                fought += 1
-                self.tel.end_fight(await self._fight_outcome(client))
-                self.fight_done.emit(fought)
+                    if "Pattern" in type(exc).__name__ \
+                            or "Pattern" in str(exc):
+                        raise RuntimeError(
+                            "wizwalker could not install its hooks: the "
+                            "autobot signature was not found in the running "
+                            "client.\n\n"
+                            "Run  python -m deimos_bridge.diagnose_hooks  — "
+                            "it tells you whether this is stale state in the "
+                            "process (close the game completely) or a game "
+                            "patch that outdates wizwalker."
+                        ) from exc
+                    raise
 
-                if self.trained is not None:
-                    t = self.trained
-                    self.status.emit(
-                        f"trained policy: knew {t.coverage * 100:.0f}% of "
-                        f"{t.seen + t.missed} boards "
-                        f"({t.missed} fell back)")
+                await self._read_max_hp(client, seat)
+                await self._read_gear(client, seat)
 
-                if not self._stop and (self.collect_wisps or self.use_potions):
-                    from .. import upkeep
-                    try:
-                        # Under the lock, and under a flag the service
-                        # task honours: a wisp sweep yields the loop
-                        # every 0.15s, and the service task used to wake
-                        # up inside it, decide the wizard was out of
-                        # combat and free, and teleport it to the quest
-                        # marker halfway through the sweep.
-                        self._in_upkeep = True
-                        async with self._upkeep():
-                            await upkeep.after_fight(
-                                client, wisps=self.collect_wisps,
-                                potions=self.use_potions,
-                                on_status=self.status.emit)
-                    except Exception as exc:
-                        # Still never a blocker -- but the reason is said
-                        # out loud. Swallowing it silently is what made
-                        # "collect wisps is not working" impossible to
-                        # act on: no message, no log, no difference
-                        # between broken and nothing-to-do.
-                        self.status.emit(
-                            f"upkeep failed — {type(exc).__name__}: {exc}")
-                    finally:
-                        self._in_upkeep = False
+                built_as = seat.policy_name
+                policy = self._build_policy(seat)
+                seat.tel.policy_name = seat.policy_name
+                seat.tel.school = seat.school
+                seat.tel.deck = seat.deck
+                backend = WizAiBackend(
+                    policy=policy, cards=cards, school=seat.school,
+                    decklist=seat.deck, catalog=catalog,
+                    policy_name=built_as,
+                    on_decision=self._decision_hook(seat),
+                    player_stats=seat.player_stats,
+                    on_lost_round=self._lost_round_hook(seat),
+                    seat=seat.index, coordinator=hive,
+                    party_size=len(self.seats))
+                backend.on_failed_cast = self._failed_cast_hook(seat)
+                seat.tel.resolver = backend.resolver
+                seat.backend = backend
+                if seat.policy_name != built_as:
+                    # The dropdown moved while the hooks were installing.
+                    # `set_policy` short-circuits until the backend
+                    # exists, so that selection is sitting in
+                    # `policy_name` unapplied.
+                    self.set_policy(seat.policy_name, seat=seat.index)
+                seat.combat = make_combat_handler(client, backend)
+
+                if self.auto_quest:
+                    await self._setup_questing(client, seat)
+                if self.script:
+                    await self._setup_script(client, seat)
+                # Built here, not in __init__: an asyncio.Lock binds to
+                # the loop it is created on, and __init__ runs on the GUI
+                # thread.
+                seat.upkeep_lock = asyncio.Lock()
+
+            await self._setup_hotkeys()
+            if hive is not None:
                 self.status.emit(
-                    f"fight {fought} over — waiting for the next"
-                    if not self._stop else "stopping…")
+                    f"connected {len(self.seats)} wizards — they will agree "
+                    f"each round before anyone casts")
+            else:
+                self.status.emit(
+                    "connected — hunting for fights" if self.auto_quest
+                    else "connected — walk into a fight")
+
+            for seat in self.seats:
+                servicers.append(asyncio.ensure_future(
+                    self._service_loop(seat.client, seat)))
+            # Concurrently, on one loop. Four sequential fight loops
+            # would mean wizard 2 never reaching its planning phase until
+            # wizard 1's duel was over, which is not a party -- it is a
+            # queue, and the barrier would time out on every round.
+            await asyncio.gather(*[self._fight_loop(seat)
+                                   for seat in self.seats])
             self.finished_ok.emit()
         finally:
             if self._hotkeys is not None:
@@ -792,9 +1087,12 @@ class LiveWorker(QThread):
                 # must not survive a failed run.
                 await self._hotkeys.stop()
                 self._hotkeys = None
-            if self.runner is not None:
-                self.runner.stop()
-            if servicer is not None:
+            for seat in self.seats:
+                if seat.runner is not None:
+                    seat.runner.stop()
+                if hive is not None:
+                    hive.leave(seat.index)
+            for servicer in servicers:
                 servicer.cancel()
                 try:
                     await servicer
@@ -806,31 +1104,133 @@ class LiveWorker(QThread):
                 pass
             self.status.emit("disconnected")
 
-    #: the live backend, set once it exists. `_on_decision` needs it to
-    #: build the throwaway `Sim` that produces a damage prediction.
-    _backend = None
+    async def _fight_loop(self, seat):
+        """One wizard's duels, start to finish.
 
-    def _on_decision(self, decision, read):
-        """Runs on the worker thread: record, then signal. No widgets."""
-        sim = None
-        if self._backend is not None:
+        Every seat runs one of these, concurrently. The only thing they
+        share is `_stop` and the hivemind -- upkeep, questing and the
+        fight count are per client, because they are per *wizard*.
+        """
+        hive = self.hive
+        while not self._stop and (self.fights <= 0
+                                  or seat.fought < self.fights):
+            # Questing of either kind runs on the service task, which
+            # keeps ticking while this loop is parked in
+            # wait_for_combat below.
+            seat.tel.start_fight()
             try:
-                sim = self._backend._sim_for(read)
+                # blocks until a duel starts, then plays it out
+                await seat.combat.wait_for_combat()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                name = type(exc).__name__
+                if not any(k in name for k in ("Memory", "ClientClosed",
+                                               "ReadingEnum", "Invalidated")):
+                    raise
+            finally:
+                if hive is not None:
+                    # Out of the circle: the rest of the party must stop
+                    # waiting for this seat at the barrier, or every one
+                    # of their rounds pays the full timeout.
+                    hive.leave_combat(seat.index)
+            seat.fought += 1
+            seat.tel.end_fight(await self._fight_outcome(seat.client, seat))
+            self.seat_fight_done.emit(seat.index, seat.fought)
+            if seat.index == 0:
+                self.fight_done.emit(seat.fought)
+
+            if seat.trained is not None:
+                t = seat.trained
+                self._say(seat,
+                          f"trained policy: knew {t.coverage * 100:.0f}% of "
+                          f"{t.seen + t.missed} boards "
+                          f"({t.missed} fell back)")
+
+            if not self._stop and (self.collect_wisps or self.use_potions):
+                from .. import upkeep
+                try:
+                    # Under the lock, and under a flag the service
+                    # task honours: a wisp sweep yields the loop
+                    # every 0.15s, and the service task used to wake
+                    # up inside it, decide the wizard was out of
+                    # combat and free, and teleport it to the quest
+                    # marker halfway through the sweep.
+                    seat.in_upkeep = True
+                    async with self._upkeep(seat):
+                        await upkeep.after_fight(
+                            seat.client, wisps=self.collect_wisps,
+                            potions=self.use_potions,
+                            on_status=lambda m: self._say(seat, m))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # Still never a blocker -- but the reason is said
+                    # out loud. Swallowing it silently is what made
+                    # "collect wisps is not working" impossible to
+                    # act on: no message, no log, no difference
+                    # between broken and nothing-to-do.
+                    self._say(seat,
+                              f"upkeep failed — {type(exc).__name__}: {exc}")
+                finally:
+                    seat.in_upkeep = False
+            self._say(seat,
+                      f"fight {seat.fought} over — waiting for the next"
+                      if not self._stop else "stopping…")
+
+    # -- per-seat callbacks the backend fires ------------------------------
+    def _decision_hook(self, seat):
+        return lambda decision, read: self._on_decision(decision, read, seat)
+
+    def _lost_round_hook(self, seat):
+        return lambda number, reason: self._on_lost_round(number, reason, seat)
+
+    def _failed_cast_hook(self, seat):
+        return lambda reason: self._on_failed_cast(reason, seat)
+
+    def _on_decision(self, decision, read, seat=None):
+        """Runs on the worker thread: record, then signal. No widgets."""
+        seat = self.seats[0] if seat is None else seat
+        sim = None
+        backend = seat.backend
+        if backend is not None:
+            try:
+                sim = backend._sim_for(read)
             except Exception:
-                sim = None          # a prediction is optional, the round is not
-        rec = self.tel.observe(
+                sim = None      # a prediction is optional, the round is not
+        rec = seat.tel.observe(
             decision, read, sim=sim,
-            cards=self._backend.cards if self._backend else None)
+            cards=backend.cards if backend else None)
         # The backend measures this every round; it used to go nowhere,
         # while the trainer guessed the same quantity off the wizard's
         # own health.
+        if seat.wizard_name is None:
+            self._learn_name(seat, read)
         rec.incoming = float(
-            getattr(self._backend, "_measured_incoming", 0.0) or 0.0)
-        if self.tel.fights:
-            self.tel.fights[-1].damage_taken += rec.incoming
-        self.round_done.emit(rec)
+            getattr(backend, "_measured_incoming", 0.0) or 0.0)
+        if seat.tel.fights:
+            seat.tel.fights[-1].damage_taken += rec.incoming
+        self.seat_round_done.emit(seat.index, rec)
+        if seat.index == 0:
+            self.round_done.emit(rec)
 
-    def _on_lost_round(self, round_number, reason):
+    def _learn_name(self, seat, read):
+        """Take the wizard's own name off the duel it is standing in.
+
+        The client only offers it on the character-select screen, which
+        a running wizard is not on. But `read_state` already builds the
+        player actor from `combat.get_client_member().name()`, so every
+        round of every duel carries it for free -- and the cross-zone
+        follow needs exactly that string to pick the leader out of a
+        friends list. One duel is enough; until then a follower that
+        needs it says so rather than failing silently.
+        """
+        name = getattr(getattr(read, "state", None), "player", None)
+        name = getattr(name, "name", None)
+        if isinstance(name, str) and name.strip():
+            seat.wizard_name = name.strip()
+
+    def _on_lost_round(self, round_number, reason, seat=None):
         """A round whose board could not be read. Recorded as that.
 
         It used to vanish: no row in the Decisions table, no pass
@@ -838,14 +1238,20 @@ class LiveWorker(QThread):
         before -- so the missing round's damage was folded into its
         predecessor's residual and scored against the damage model.
         """
-        self.status.emit(reason)
-        rec = self.tel.observe_lost_round(round_number, reason)
+        seat = self.seats[0] if seat is None else seat
+        self._say(seat, reason)
+        rec = seat.tel.observe_lost_round(round_number, reason)
         if rec is not None:
-            self.round_done.emit(rec)
+            self.seat_round_done.emit(seat.index, rec)
+            if seat.index == 0:
+                self.round_done.emit(rec)
 
-    def _on_failed_cast(self, reason):
-        """The card never went out, after the round said it had."""
-        self.status.emit(reason)
-        rec = self.tel.note_failed_cast(reason)
+    def _on_failed_cast(self, reason, seat=None):
+        """The chosen card never went out, after the round said it had."""
+        seat = self.seats[0] if seat is None else seat
+        self._say(seat, reason)
+        rec = seat.tel.note_failed_cast(reason)
         if rec is not None:
-            self.round_done.emit(rec)
+            self.seat_round_done.emit(seat.index, rec)
+            if seat.index == 0:
+                self.round_done.emit(rec)
