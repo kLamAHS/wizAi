@@ -129,6 +129,15 @@ BOARD_SETS = {
     # out; the bars are the leaders there: school-aware(3) 30.4 on
     # L30 death, nuke-asap 60.8 on L50 death, school-aware(0) 58.8 on
     # L30 myth, school-aware(3) 72.8 on L30 life.
+    #
+    # CAMPAIGN 5 VERDICT -- SHIPPED as the third seat (neural-c). Run
+    # A climbed 49.9 -> 55.0 on fitness; held out, it beat the L30
+    # death leader on both fresh streams (34.9/38.1 vs school-aware(3)
+    # 28.5/31.8), tied the L30 life leader exactly (69.0 vs 69.1),
+    # and stayed behind the leaders on L50 death (56.0 vs nuke-asap
+    # 62.9) and L30 myth (54.4 vs school-aware(0) 57.2) -- those
+    # boards remain hand-coded ground, and the per-deck sweep keeps
+    # them there.
     "sustain": (
         (["Poison"] * 4 + ["Vampire"] * 4 + ["Banshee"] * 4
          + ["Balanceblade"] * 2 + ["Hex"] * 2 + ["Death Shield"] * 2,
