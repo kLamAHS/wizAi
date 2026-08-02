@@ -603,6 +603,16 @@ def load_bosses_full(path="bosses_clean.json", report=None, rules=None,
             b.pool = list(spec["pool"])
             b.archetype = spec["archetype"]
             b.dmg = 0            # the pool replaces the flat estimate
+            # Pip economy scaled by RANK, calibrated against a live
+            # measurement. The 0.40 default is the PLAYER's base cap,
+            # and handing it to a rank-3 street boss overstated him
+            # badly: Alicane Swiftarrow measured 78/round in a real
+            # fight; the casting model dealt 129/round at 0.40 and 94
+            # at 0.0. Low ranks get ~no power pips, the endgame keeps
+            # the cap (high-tier bosses genuinely chain them).
+            # Confidence: modeled, low end calibrated on one measured
+            # fight -- the same status as the rest of this layer.
+            b.pip_chance = min(0.40, 0.05 * max(0, rank - 3))
         bosses[name] = b
         registry[name] = dict(r, dmg_estimate=dmg,
                               dmg_confidence="inferred")
