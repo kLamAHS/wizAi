@@ -5454,6 +5454,28 @@ def test_the_catalog_corrects_a_misread_school():
     assert boss.boost == {"ice": 0.2}
 
 
+def test_maxed_episodes_get_honest_advice_not_a_dead_end(qapp):
+    """The window told an operator at the episode box's MAXIMUM to
+    "raise episodes and retrain" — advice its own spinbox made
+    impossible to follow, about a scaling law (coverage ~episodes^0.43)
+    its own measurements say would barely help. At high episode counts
+    the message now says what is true: the table cannot key this range
+    and the ttk policy is the stronger driver. And the box itself goes
+    to 2,000,000 now, so the low-count advice stays followable."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    assert win.episodes.maximum() >= 2_000_000
+
+    win.generalize.setChecked(True)
+    win.episodes.setValue(200_000)
+    why = win._why_coverage_is_low()
+    assert "ttk" in why and "raise episodes and retrain" not in why
+
+    win.episodes.setValue(20_000)
+    assert "raise episodes and retrain" in win._why_coverage_is_low()
+
+
 def test_the_incoming_mean_counts_the_quiet_rounds():
     """A round where every mob fizzled or passed is a real round of
     the damage distribution. Dropping zero-loss rounds biased the
