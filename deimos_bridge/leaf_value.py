@@ -29,6 +29,18 @@ Training is self-play in the simulator: play randomized boards with a
 fast scripted policy, record each planning phase's features, label every
 state in a fight with its outcome, fit a logistic regression. Minutes,
 once, for a function that never needs a health band.
+
+STATUS: default OFF, twice measured. At horizon 12 it was a null --
+only ~17% of decisions reach the stalled branch it ranks. The obvious
+revisit once the tuner started installing horizon 6 (where far more
+rollouts stall) was measured 2026-08: paired n=400 on the contested
+set, +0.0/+0.2/+0.0 on three boards and **-15.8 on the buff-heavy
+board**. A stalled H6 rollout with blades stacked is a nearly-won
+position; nothing in these twelve features sees hanging charms, so the
+leaf prices it like an ordinary attrition board and the search stops
+building the very lines that win buff-heavy decks. Harmful, not null
+-- do not enable at short horizons without a charm-aware feature set,
+and measure in the seat before believing any refit.
 """
 import json
 import math
