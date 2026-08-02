@@ -391,7 +391,7 @@ class WizAiBackend:
             player.power_pip_chance = self.power_pip_chance
 
     def _apply_bestiary(self, read):
-        """Exact per-boss resist and boost, off the scraped catalog.
+        """Exact per-boss facts, off the scraped catalog.
 
         The read infers a mob's school and nothing else about its
         defences; the catalog KNOWS them for named creatures -- "50% to
@@ -400,16 +400,31 @@ class WizAiBackend:
         sim's `_resist_mult` consumes exactly these two dicts. Observed
         facts are never overwritten: only empty fields are filled, so a
         live-read shield or boost stays authoritative.
+
+        SCHOOL is the exception, and the catalog wins it outright for
+        an exact name match: `read_school`'s failure mode is a silent
+        "balance" guess, and that guess poisons everything downstream
+        -- a fire wizard's fight against the fire boss Alicane
+        Swiftarrow was read as "480 balance + 235 balance", so training
+        boards, the envelope and the trained table all priced fire
+        damage landing at full when the real fight halves it. A
+        catalog's school for a named creature is scraped fact; a read
+        school disagreeing with it is far more likely the fallback
+        than a genuine tier variant of a different school.
         """
         try:
-            from .bestiary import stat_overrides
+            from .bestiary import lookup, stat_overrides
         except Exception:
             return
         for enemy in read.state.enemies:
             try:
                 found = stat_overrides(enemy.name, enemy.max_hp)
+                rec = lookup(enemy.name, enemy.max_hp)
             except Exception:
                 continue
+            if rec and rec.get("school") and \
+                    enemy.school != rec["school"]:
+                enemy.school = rec["school"]
             if not found:
                 continue
             resist, boost, _stunable = found
