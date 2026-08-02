@@ -479,6 +479,26 @@ class LiveWorker(QThread):
             self.hp_known = True
             self.hp_read.emit(hp)
 
+    async def _fight_outcome(self, client):
+        """True/False/None: did the fight that just ended get won?
+
+        Twelve fights exported as "wins: 0" with `won: null` on every
+        one -- including a fight that took Alicane Swiftarrow from 480
+        to 40 with the killing Fire Elf going in. The combat handler
+        does not report outcomes, but the client answers: a defeated
+        wizard leaves the duel at zero health, a winner does not. Read
+        BEFORE the between-fight upkeep runs -- a potion would launder
+        a defeat into a win. A fight that recorded no rounds (a
+        spurious boundary) stays unknown rather than guessed.
+        """
+        try:
+            if not self.tel.fights or self.tel.fights[-1].rounds == 0:
+                return None
+            hp = await client.stats.current_hitpoints()
+            return bool(hp and int(hp) > 0)
+        except Exception:
+            return None
+
     async def _read_gear(self, client):
         """The wizard's damage, accuracy, pierce and resist, on connect.
 
@@ -726,7 +746,7 @@ class LiveWorker(QThread):
                                                    "ReadingEnum", "Invalidated")):
                         raise
                 fought += 1
-                self.tel.end_fight()
+                self.tel.end_fight(await self._fight_outcome(client))
                 self.fight_done.emit(fought)
 
                 if self.trained is not None:

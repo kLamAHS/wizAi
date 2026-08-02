@@ -5454,6 +5454,64 @@ def test_the_catalog_corrects_a_misread_school():
     assert boss.boost == {"ice": 0.2}
 
 
+def test_the_fight_outcome_is_read_off_the_client(qapp):
+    """Twelve live fights exported as "wins: 0" with won=null on every
+    one, including a clear win. The combat handler does not report
+    outcomes; the client does -- a defeated wizard leaves the duel at
+    zero health. Zero-round fights (spurious boundaries) stay
+    unknown."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    tel = Telemetry()
+    w = LiveWorker(tel, "fire", ["Fire Cat"] * 4, "ttk-lookahead", 1)
+
+    class _Stats:
+        hp = 223
+
+        async def current_hitpoints(self):
+            return self.hp
+
+    class _Client:
+        stats = _Stats()
+
+    run = asyncio.new_event_loop().run_until_complete
+    tel.start_fight()
+    tel.fights[-1].rounds = 13
+    assert run(w._fight_outcome(_Client())) is True     # alive: won
+
+    _Stats.hp = 0
+    assert run(w._fight_outcome(_Client())) is False    # defeated
+
+    tel.start_fight()                                   # 0 rounds
+    _Stats.hp = 500
+    assert run(w._fight_outcome(_Client())) is None     # unknown
+
+
+def test_an_early_pass_does_not_wear_last_rounds_candidates():
+    """Round 10 of a live export said "policy chose to pass" beside a
+    candidate table claiming Pixie was chosen -- the previous round's
+    comparison, left on the attribute when the decision ended early
+    because nothing was castable."""
+    from data_full import load_spells_full
+    from deimos_bridge.policies import greedy_ttk
+    from w101_sim import Boss, Sim
+
+    cards = load_spells_full()
+    sim = Sim(cards, ["Fire Cat"] * 3 + ["Fire Elf"] * 3, "fire",
+              Boss(name="b", hp=480, school="fire", dmg=0),
+              player_hp=589)
+    pol = greedy_ttk(6)
+    s = sim.new_state()
+    pol(sim, s)
+    assert pol.last_candidates            # a real comparison happened
+
+    s.player.hand[:] = []                 # nothing castable this round
+    assert pol(sim, s) is None
+    assert pol.last_candidates == []      # and the record says so
+
+
 def test_maxed_episodes_get_honest_advice_not_a_dead_end(qapp):
     """The window told an operator at the episode box's MAXIMUM to
     "raise episodes and retrain" — advice its own spinbox made

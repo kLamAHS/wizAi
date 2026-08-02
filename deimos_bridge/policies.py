@@ -1076,6 +1076,12 @@ def greedy_ttk(max_turns: int = None, continuation=None):
     fixed_continuation = continuation
 
     def strat(sim, s):
+        # Cleared FIRST: a decision that ends early (nothing castable
+        # this round) used to leave the PREVIOUS round's comparison on
+        # the attribute, and the round record then showed a phantom --
+        # "policy chose to pass" beside a candidate table claiming a
+        # Pixie was chosen, copied verbatim from the round before.
+        strat.last_candidates = []
         max_turns = fixed if fixed is not None else search_horizon()
         from w101_sim import castable
 
