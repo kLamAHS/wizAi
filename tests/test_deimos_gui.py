@@ -5592,7 +5592,11 @@ def test_named_enemies_cast_in_the_rollouts():
     be._apply_pool(read_for(boss))
     assert boss.spell_pool                # it casts in rollouts now
     assert boss.archetype == "debuffer"
-    assert boss.power_pip_chance > 0
+    # rank-scaled pip economy: the 690 HP Nightshade is rank 3, and
+    # rank 3 measured ~no power pips (the Alicane calibration)
+    from deimos_bridge.bestiary import full_boss
+    assert boss.power_pip_chance == full_boss("Lord Nightshade",
+                                              690).pip_chance
     assert boss.flat_hit == 136.0         # the fallback stays measured
 
     # An unknown mob keeps the flat model untouched.

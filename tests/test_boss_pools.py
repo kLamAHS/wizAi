@@ -108,6 +108,22 @@ def test_every_pool_has_something_to_cast():
         assert spec["archetype"] in set(SCHOOL_ARCHETYPE.values())
 
 
+def test_enemy_pip_economy_scales_with_rank():
+    """The 0.40 default is the PLAYER's base power-pip cap, and handing
+    it to a rank-3 street boss overstated him badly: Alicane Swiftarrow
+    measured 78/round live; the casting model dealt 129/round at 0.40
+    and 94 at zero. Low ranks get ~no power pips; the endgame keeps
+    the cap."""
+    bosses, _ = load_bosses_full(str(ROOT / "bosses_clean.json"),
+                                 spell_pools=True, cards=CARDS)
+    alicane = bosses["Alicane Swiftarrow"]
+    assert alicane.rank == 3 and alicane.pip_chance == 0.0
+    high = [b for b in bosses.values() if b.pool and (b.rank or 0) >= 11]
+    assert high and all(b.pip_chance == 0.40 for b in high)
+    mid = [b for b in bosses.values() if b.pool and b.rank == 6]
+    assert mid and all(abs(b.pip_chance - 0.15) < 1e-9 for b in mid)
+
+
 def test_a_casting_boss_actually_casts():
     """End to end: boss damage must route through the cast path, so it
     meets the player's shields and the fizzle roll like any other spell."""
