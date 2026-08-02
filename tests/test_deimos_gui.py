@@ -4935,16 +4935,22 @@ def test_search_does_not_stand_still_on_a_board_it_cannot_win():
 def test_the_losing_board_ranking_is_pluggable_and_defaults_to_shipped():
     """This branch fires on 17% of candidates on a level-5 board and on
     37-100% of them on a hard one, so it is worth keeping testable. The
-    default must stay bit-identical to what shipped — the alternatives
-    measured as a null (+0.75 pts, inside a 2.4-point noise floor)."""
+    default is "kills" since the live trace that posed the choice the
+    first measurement's boards never did: threat removal beat six
+    points of banked damage +2.4/+2.4/+1.2 across three paired
+    streams, and on boards without a kill on offer the credit is
+    provably decision-identical."""
     import deimos_bridge.policies as P
 
-    assert P.LOST_RANKING == "damage"
-    # Shipped: rank untouched, second element is real banked damage.
-    assert P._lost_score(14, 250.0, 2, 5) == (14, -250.0)
+    assert P.LOST_RANKING == "kills"
 
     original = P.LOST_RANKING
     try:
+        P.LOST_RANKING = "damage"
+        # the previous shipped form: rank untouched, second element
+        # real banked damage
+        assert P._lost_score(14, 250.0, 2, 5) == (14, -250.0)
+
         P.LOST_RANKING = "kills"
         rank, dealt = P._lost_score(14, 250.0, 2, 5)
         assert dealt == -250.0, "damage must stay real for the panel"
@@ -5446,6 +5452,95 @@ def test_the_catalog_corrects_a_misread_school():
     assert boss.school == "fire"                  # the catalog's fact
     assert boss.resist == {"fire": 0.4}           # and his real wall
     assert boss.boost == {"ice": 0.2}
+
+
+def test_the_incoming_mean_counts_the_quiet_rounds():
+    """A round where every mob fizzled or passed is a real round of
+    the damage distribution. Dropping zero-loss rounds biased the
+    estimate high: a live fight read 117/round per enemy on a board
+    dealing ~78, because the two rounds that hurt were averaged and
+    the round that didn't was thrown away."""
+    from deimos_bridge.live_backend import WizAiBackend
+    from w101_sim import Actor, State
+
+    be = WizAiBackend(policy=lambda sim, s: None, cards={}, school="fire")
+    me = Actor(name="W", school="fire", hp=589, max_hp=589, team=0)
+    foes = [Actor(name="a", school="fire", hp=480, max_hp=480, team=1),
+            Actor(name="b", school="fire", hp=235, max_hp=235, team=1)]
+
+    def read_at(hp, rnd):
+        class _R:
+            state = State(me, foes)
+            round_number = rnd
+        me.hp = hp
+        return _R()
+
+    be._estimate_incoming(read_at(589, 1))     # baseline
+    be._estimate_incoming(read_at(589, 2))     # quiet round: 0 lost
+    be._estimate_incoming(read_at(475, 3))     # 114 lost
+    per = be._estimate_incoming(read_at(121, 4))   # 354 lost
+    assert abs(per - (0 + 57 + 177) / 3) < 1e-6    # the zero counts
+
+    # A healing round (hp went UP) stays out: that is the heal's
+    # number, not the board's.
+    be._estimate_incoming(read_at(500, 5))
+    assert len(be._incoming) == 3
+
+
+def test_a_casters_damage_is_not_billed_to_the_minion():
+    """`_estimate_incoming` splits the health lost evenly across the
+    living enemies, which hands half the boss's Sunbird to the minion
+    beside him -- and then the boss's casting model deals his own
+    damage ON TOP. On a live fight that double-count read Magma Man at
+    117/round (real: ~50), every rollout died inside the horizon, and
+    the decisions collapsed to the sentinel ranking."""
+    from data_full import load_spells_full
+    from deimos_bridge.live_backend import WizAiBackend
+    from w101_sim import Actor, State
+
+    cards = load_spells_full()
+    be = WizAiBackend(policy=lambda sim, s: None, cards=cards,
+                      school="fire")
+    me = Actor(name="W", school="fire", hp=589, max_hp=589, team=0)
+    boss = Actor(name="Alicane Swiftarrow", school="fire", hp=480,
+                 max_hp=480, team=1, flat_hit=117.0,
+                 spell_pool=["Sunbird", "Fire Elf", "Fire Cat"],
+                 power_pip_chance=0.0)
+    magma = Actor(name="Magma Man", school="balance", hp=235,
+                  max_hp=235, team=1, flat_hit=117.0)
+
+    class _Read:
+        state = State(me, [boss, magma])
+
+    # At the (biased-high) 117 mean the remainder still exceeds the
+    # plain split, and the cap holds: apportionment only ever LOWERS
+    # a stamp, so a noisy total cannot inflate the minion further.
+    be._measured_incoming = 117.0
+    be._apportion_incoming(_Read())
+    assert magma.flat_hit == 117.0
+    assert boss.flat_hit == 117.0          # casters keep theirs (unused)
+
+    # The fixes compose: zero-counting brings the mean to 78, and then
+    # the caster's ~92/round comes out of the flat mob's bill -- total
+    # 156 minus ~92 modeled lands the minion at ~64, near his true ~50.
+    magma.flat_hit = 78.0
+    be._measured_incoming = 78.0
+    be._apportion_incoming(_Read())
+    assert 40.0 <= magma.flat_hit <= 70.0
+
+
+def test_a_kill_outranks_slightly_more_banked_damage():
+    """The live trace that flipped LOST_RANKING: a dying board where
+    "bank the most damage" hit the full-health boss for 81 banked
+    instead of removing a 75 HP attacker dealing ~50/round. The kill
+    credit prices threat removal; on boards without a kill on offer it
+    provably changes nothing."""
+    from deimos_bridge.policies import LOST_RANKING, _lost_score
+
+    assert LOST_RANKING == "kills"
+    kill_line = _lost_score(8, 75.0, 1, 4)      # kills the minion
+    bank_line = _lost_score(8, 81.0, 0, 4)      # 6 more banked, no kill
+    assert min(kill_line, bank_line) == kill_line
 
 
 def test_the_preflight_asks_the_search_before_refusing(qapp):
