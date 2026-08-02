@@ -57,6 +57,25 @@ doing its job: a cast believed at 75% still leaves a sliver, and three
 wizards can each add a legitimate share to a mob that then dies to the
 first of them.
 
+**What it deliberately does not do.** This coordinates the first move of
+each round. It does not tell a wizard's *rollout* that its party keeps
+hitting for the rest of the horizon -- and the pieces for that are all
+present, which is exactly why the omission needs writing down.
+`read_state` already puts the other party members into `State.allies`,
+and `Sim.end_round` already acts them out through `_minion_turn`; their
+`minion_power` is simply 0.0, so they stand there doing nothing.
+
+Filling that field in was measured and rejected. Over 18 cells (3 decks
+x {2,4} wizards x 3 party-scaled boards, n=60 paired seeds, both arms a
+real party fight and differing only in what the policy is *shown*): kill
+rate +0.74 points for a party of two with a range of -11.7 to +20.0, and
++0.00 for a party of four because every cell saturates at 100%; turns
+saved +0.147 and +0.294 per fight, on fights averaging seven turns, with
+3 of the 9 four-wizard cells going the wrong way. Inside the noise, with
+two contested storm cells losing 6.7 and 11.7 points. So the zero stays,
+and `party_pressure_probe.py` is the reason -- it is a measured decision
+rather than an oversight waiting to be tidied up.
+
 Everything here is plain Python: no Qt, no wizwalker, no game. The
 coordinator is driven by `WizAiBackend.coordinator`, and the policies it
 calls are the ordinary `policy(sim, state)` callables, so a party plan is

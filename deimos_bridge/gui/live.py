@@ -130,6 +130,9 @@ class _Seat:
         #: cross-zone follow needs it to pick the leader out of the
         #: friends list.
         self.wizard_name = None
+        #: when this wizard last tried to catch up with the leader. See
+        #: `LiveWorker.FOLLOW_EVERY`.
+        self.followed_at = 0.0
         #: stage name -> how many times it has failed, so a broken stage
         #: is reported rather than retried silently twice a second
         self.stage_errors = {}
@@ -784,6 +787,13 @@ class LiveWorker(QThread):
         return (self.follow_leader and len(self.seats) > 1
                 and seat.index != self.leader)
 
+    #: seconds between follow attempts. The service tick runs twice a
+    #: second, and a follow is not a cheap read -- it teleports, and when
+    #: the leader is mid-duel it also reaches for the nearest mob. A
+    #: follower that cannot get in (the circle already seats four) would
+    #: otherwise retry that twice a second for the length of the fight.
+    FOLLOW_EVERY = 2.5
+
     async def _follow_step(self, client, seat=None):
         """One tick of keeping this wizard on the leader.
 
@@ -792,12 +802,18 @@ class LiveWorker(QThread):
         normal case, so a line per tick would bury everything else in
         the status bar.
         """
+        import time
+
         from .. import party
 
         seat = self._seat_for(client) if seat is None else seat
         boss = self.seats[self.leader]
         if boss is seat or boss.client is None:
             return
+        now = time.monotonic()
+        if now - seat.followed_at < self.FOLLOW_EVERY:
+            return
+        seat.followed_at = now
         moved, why = await party.follow(client, boss.client,
                                         leader_name=boss.wizard_name)
         if moved and why:

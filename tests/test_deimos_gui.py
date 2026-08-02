@@ -6749,3 +6749,37 @@ def test_a_party_is_told_the_training_board_models_one_wizard(qapp):
     line = win._board_line()
     assert "models ONE wizard" in line
     assert "other 3 wizards" in line
+
+
+def test_a_follower_does_not_chase_twice_a_second(qapp):
+    """The service tick runs at 2Hz and a follow is not a cheap read: it
+    teleports, and against a leader mid-duel it also reaches for the
+    nearest mob. A follower that cannot get in — the circle already
+    seats four — would retry that for the length of the fight."""
+    import asyncio
+
+    from deimos_bridge import party as party_mod
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    w = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1,
+                   seats=[SeatConfig(school="fire")])
+    w.seats[0].client = object()
+    follower = w.seats[1]
+    follower.client = object()
+
+    tried = []
+
+    async def _follow(f, leader, leader_name=None, radius=0.0):
+        tried.append(f)
+        return False, ""
+
+    real, party_mod.follow = party_mod.follow, _follow
+    try:
+        async def drive():
+            for _ in range(6):
+                await w._follow_step(follower.client, follower)
+        asyncio.run(drive())
+    finally:
+        party_mod.follow = real
+
+    assert len(tried) == 1, "six ticks must not be six teleports"
