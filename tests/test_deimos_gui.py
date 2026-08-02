@@ -6626,3 +6626,126 @@ def test_the_leaders_name_is_learned_from_its_first_duel(qapp):
 
     w._learn_name(seat, _Read())
     assert seat.wizard_name == "Wolf Deathblade"
+
+
+def test_every_wizard_in_the_party_tunes_its_own_search(qapp, monkeypatch):
+    """The quartet is deck-scoped and worth ~14 points of kill rate.
+    Tuning only whichever wizard happens to be selected leaves the other
+    three playing the untuned defaults for the whole run, on the exact
+    boards the run is measuring for them."""
+    from deimos_bridge.gui import app as app_mod
+    from deimos_bridge.gui.app import MainWindow
+
+    started = []
+    monkeypatch.setattr(app_mod.TuneWorker, "start",
+                        lambda self, *a, **k: started.append(self))
+
+    win = MainWindow(Telemetry())
+    win.wizards.setValue(3)
+    win.school.setCurrentText("fire")
+    win.deck.setText("Fire Cat")
+    win.which.setCurrentIndex(1)
+    win.school.setCurrentText("ice")
+    win.deck.setText("Frost Beetle")
+    win.which.setCurrentIndex(2)
+    win.school.setCurrentText("storm")
+    win.deck.setText("Thunder Snake")
+    win.which.setCurrentIndex(0)
+
+    win.observed_hps = [690]
+    win.observed_schools = ["death"]
+    win.observed_incoming = 136
+
+    class _Live:
+        seats = [object(), object(), object()]
+
+        def isRunning(self):
+            return True
+
+    win.live = _Live()
+    win._maybe_autotune()
+    assert len(started) == 3
+    assert [w.school for w in started] == ["fire", "ice", "storm"]
+    assert [w.deck for w in started] == [["Fire Cat"], ["Frost Beetle"],
+                                         ["Thunder Snake"]]
+
+
+def test_a_tuned_result_lands_on_the_wizard_that_asked_for_it(qapp):
+    """The sweep takes about a minute. Landing its answer on whichever
+    wizard is selected when it finishes would hand wizard 3's pick to
+    wizard 1 -- and the pick is deck-scoped, so that is worse than not
+    tuning at all."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.wizards.setValue(2)
+    win.on_autotuned("nuke-asap @ horizon 6 @ driver ttk", {}, 1)
+    assert win.continuations[1] == "nuke-asap @ horizon 6 @ driver ttk"
+    assert win.continuations[0] == ""
+    assert win.continuation == ""            # wizard 1 is still showing
+
+
+def test_a_party_member_is_not_trained_against_four_times_the_damage(qapp):
+    """An enemy picking one of four wizards to hit lands on this one a
+    quarter of the time. The measured number knows that -- it is read off
+    this wizard's own health bar -- but the stand-in did not, so a party
+    member with no fight measured yet trained against a board hitting
+    four times as hard as the one it plays."""
+    from deimos_bridge.gui.app import TrainWorker
+
+    solo = TrainWorker({}, [], "ice", 500, player_hp=2000)
+    party = TrainWorker({}, [], "ice", 500, player_hp=2000, party_size=4)
+    assert party.enemy_damage() < solo.enemy_damage()
+    assert party.enemy_damage() == max(30, 2000 // 48)
+
+    # ...but a measured number is already this wizard's share, so it is
+    # taken as it is rather than divided twice.
+    measured = TrainWorker({}, [], "ice", 500, player_hp=2000,
+                           mob_damage=77, party_size=4)
+    assert measured.enemy_damage() == 77
+
+
+def test_the_deck_ceiling_refusal_asks_for_this_wizards_share(qapp):
+    """Three other wizards are hitting the same board. Refusing to train
+    a deck because it cannot deliver all of a board's health alone is a
+    refusal to the question the simulator can ask rather than the one
+    being played."""
+    from deimos_bridge.gui.app import TrainWorker
+    from data_full import load_spells_full
+    from w101_sim import Boss
+
+    cards = load_spells_full()
+    deck = ["Fire Cat"] * 4          # about 400 damage, all told
+
+    def refusal(hp, party_size):
+        worker = TrainWorker(cards, deck, "fire", 500, player_hp=900,
+                             party_size=party_size)
+        return worker.preflight(
+            Boss(name="Wall", hp=hp, school="ice", dmg=40), [], n=20)[1]
+
+    # Too big for the party's share as well: still the deck's fault, but
+    # the number it is measured against — and the advice sized off it —
+    # is this wizard's share rather than the whole board.
+    assert "Your deck is the reason" in refusal(2400, 1)
+    party = refusal(2400, 4)
+    assert "Your deck is the reason" in party
+    assert "share of it, across 4 wizards, is about 600" in party
+
+    # Inside the share: no longer the deck's fault at all, where solo it
+    # squarely was.
+    assert "Your deck is the reason" in refusal(1200, 1)
+    assert "Your deck is the reason" not in refusal(1200, 4)
+
+
+def test_a_party_is_told_the_training_board_models_one_wizard(qapp):
+    """The trained table is pessimistic about the fight -- the safe
+    direction, but not a free one: it will not learn to leave a mob to
+    somebody else, and nothing on screen said so."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    assert "models ONE wizard" not in win._board_line()
+    win.wizards.setValue(4)
+    line = win._board_line()
+    assert "models ONE wizard" in line
+    assert "other 3 wizards" in line

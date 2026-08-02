@@ -101,7 +101,7 @@ class TrainWorker(QThread):
     def __init__(self, cards, deck, school, episodes, player_hp=800,
                  boss_hp=1200, player_stats=None, n_enemies=1,
                  mob_hps=None, generalize=True, mob_schools=None,
-                 mob_damage=0):
+                 mob_damage=0, party_size=1):
         super().__init__()
         self.cards, self.deck = cards, deck
         self.school, self.episodes = school, episodes
@@ -129,6 +129,11 @@ class TrainWorker(QThread):
         #: fight. 0 means "never measured", and only then is the wizard's
         #: own health used as a stand-in.
         self.mob_damage = int(mob_damage or 0)
+        #: wizards in the circle. It only reaches the *unmeasured*
+        #: incoming prior and the deck-ceiling refusal, because those are
+        #: the two places a solo assumption is quietly wrong for a party
+        #: member -- see `enemy_damage` and `preflight`.
+        self.party_size = max(1, int(party_size or 1))
         #: Resample the board every episode instead of training one.
         #: On by default, because the alternative is retraining before
         #: every fight -- which needs you to know the board before you
@@ -458,10 +463,21 @@ class TrainWorker(QThread):
         round. Then the wizard's health, which is at least in the right
         order of magnitude for the level ranges where the two grow
         together, and is what this used to always do.
+
+        Both are "damage to *this* wizard, per enemy, per round", and in
+        a party that is not the board's output -- an enemy picking one
+        of four wizards to hit lands on this one a quarter of the time.
+        The measured number already knows that, because it is read off
+        this wizard's own health bar. The stand-in did not, so a party
+        member with no fight measured yet trained against a board
+        hitting four times as hard as the one it plays: the death clock
+        sits four times too early, and every line that needs a setup
+        turn is scored as though it dies before the payoff. Divided for
+        the same reason `WizAiBackend._apportion_incoming` divides.
         """
         if self.mob_damage and self.mob_damage > 0:
             return int(self.mob_damage)
-        return max(30, self.player_hp // 12)
+        return max(30, self.player_hp // (12 * self.party_size))
 
     def deck_advice(self, deficit):
         """Name cards that would close a damage deficit, from the pool.
@@ -596,19 +612,38 @@ class TrainWorker(QThread):
         # simply cannot deliver the board's health, none of the knobs is
         # the answer and suggesting them sends you round in circles.
         ceiling = self.damage_ceiling()
-        if ceiling < health:
-            hint = self.deck_advice(health - ceiling)
+        # In a party this wizard is not asked to deliver the whole
+        # board. Three other wizards are hitting it, and refusing to
+        # train a deck for a board its share of which it clears
+        # comfortably is a refusal to the wrong question -- the one the
+        # simulator can ask, rather than the one being played.
+        owed = health / self.party_size
+        if ceiling < owed:
+            hint = self.deck_advice(owed - ceiling)
+            share = ("" if self.party_size == 1 else
+                     f" Your share of it, across {self.party_size} "
+                     f"wizards, is about {owed:,.0f}.")
             return False, (
                 head +
                 f"Your deck is the reason, not the board. Every damage "
                 f"card in it, landing, with your gear, and with every "
                 f"buff spent on the biggest hits, comes to about "
                 f"{ceiling:,.0f} damage — and this board has {health:,} "
-                f"health. No play order wins that, and no mob HP, mob "
-                f"count or enemy school setting changes it.{hint}"
+                f"health.{share} No play order wins that, and no mob HP, "
+                f"mob count or enemy school setting changes it.{hint}"
                 f"{matchup}\n\n"
                 f"Add damage cards, or train against a smaller board.")
 
+        alone = ("" if self.party_size == 1 else
+                 f"\n\nThis is a SOLO verdict: the simulator has one "
+                 f"wizard in it, and you are training one of "
+                 f"{self.party_size}. The incoming damage is already "
+                 f"priced as this wizard's share, but the other "
+                 f"{self.party_size - 1} wizards' damage is not — so a "
+                 f"board your party clears together can still be refused "
+                 f"here. Train against a smaller board and the table will "
+                 f"still key the real one, because the trained band is "
+                 f"stretched to cover the boards you say you will meet.")
         return False, (
             head +
             f"Neither the scripted policy ({n} fights) nor the search "
@@ -618,7 +653,7 @@ class TrainWorker(QThread):
             f"mob HP or the mob count, raise your health, or check the "
             f"incoming damage: at {board.dmg}/round each you last "
             f"{self.player_hp / max(1, board.dmg * (1 + len(extra))):.0f} "
-            f"rounds.{matchup}")
+            f"rounds.{matchup}{alone}")
 
     def run(self):
         try:
@@ -945,11 +980,17 @@ class MainWindow(QMainWindow):
     #: has run. Deck-scoped: the choice that is +5.2 points on one deck
     #: is -7.6 on another, so there is no global answer to store.
     continuation = ""
-    #: which deck the installed quartet was measured for, so the
-    #: auto-tuner knows an untuned deck when it sees one and never
-    #: re-tunes a deck a train already tuned
-    _tuned_deck = None
-    _tuning_deck = None
+    #: which deck each wizard's installed quartet was measured for, so
+    #: the auto-tuner knows an untuned deck when it sees one and never
+    #: re-tunes a deck a train already tuned. Per wizard, because the
+    #: quartet is deck-scoped and four wizards hold four decks -- one
+    #: shared entry would tune wizard 1 and then declare wizard 3 done.
+    _tuned_decks = None
+    _tuning_decks = None
+    _autotunes = None
+    #: which wizard the running train belongs to, so the others still
+    #: auto-tune while it works
+    _training_seat = None
     #: cheat warnings already shown, so a farmed boss is announced once
     #: per session rather than once per fight
     _cheats_warned = None
@@ -990,6 +1031,9 @@ class MainWindow(QMainWindow):
         #: the rollout continuation tuned per wizard (it is deck-scoped,
         #: and the decks differ)
         self.continuations = [""] * MAX_WIZARDS
+        self._tuned_decks = [None] * MAX_WIZARDS
+        self._tuning_decks = [None] * MAX_WIZARDS
+        self._autotunes = {}
         self.worker = None      # training
         self.live = None        # the live fight
         #: each mob's health from the last real fight, so training does
@@ -1495,7 +1539,8 @@ class MainWindow(QMainWindow):
             player_hp=self.player_hp.value(), boss_hp=self.boss_hp.value(),
             n_enemies=self.n_enemies.value(), mob_hps=self.observed_hps,
             mob_schools=self.observed_schools,
-            mob_damage=int(self.observed_incoming))
+            mob_damage=int(self.observed_incoming),
+            party_size=self.party_size())
         hps = worker.board_hps()
         schools = worker.board_schools()
         board = " + ".join(f"{hp:,} {sc}" for hp, sc in zip(hps, schools))
@@ -1505,8 +1550,22 @@ class MainWindow(QMainWindow):
         dmg = worker.enemy_damage()
         how = ("measured live" if self.mob_damage_measured
                else "estimated — no fight measured yet")
-        return (f"training board: {board}, {dmg}/round each "
+        line = (f"training board: {board}, {dmg}/round each "
                 f"({how}) — {source}")
+        if self.party_size() > 1:
+            # Said rather than left to be discovered. The incoming
+            # damage is this wizard's share and the simulator knows it;
+            # the other wizards' *damage* is not modelled, because the
+            # simulator has one wizard in it. So the trained table is
+            # pessimistic about the fight, which is the safe direction
+            # but not a free one -- it will not learn to leave a mob to
+            # somebody else.
+            line += (f"\ntraining models ONE wizard: incoming is your "
+                     f"share of a {self.party_size()}-wizard circle, but "
+                     f"the other {self.party_size() - 1} wizards' damage "
+                     f"is not in it — the table is trained for a harder "
+                     f"fight than the party plays")
+        return line
 
     def _gear_line(self):
         """What the simulator thinks the wizard is wearing.
@@ -1697,6 +1756,33 @@ class MainWindow(QMainWindow):
         """The record the tabs are showing."""
         return self.tels[self._seat_showing]
 
+    @property
+    def _tuned_deck(self):
+        return self._tuned_decks[self._seat_showing]
+
+    @_tuned_deck.setter
+    def _tuned_deck(self, value):
+        self._tuned_decks[self._seat_showing] = value
+
+    @property
+    def _tuning_deck(self):
+        return self._tuning_decks[self._seat_showing]
+
+    @_tuning_deck.setter
+    def _tuning_deck(self, value):
+        self._tuning_decks[self._seat_showing] = value
+
+    @property
+    def _autotune(self):
+        return self._autotunes.get(self._seat_showing)
+
+    @_autotune.setter
+    def _autotune(self, value):
+        if value is None:
+            self._autotunes.pop(self._seat_showing, None)
+        else:
+            self._autotunes[self._seat_showing] = value
+
     def _snapshot(self):
         return {"school": self.school.currentText(),
                 "policy": self.policy.currentText(),
@@ -1806,6 +1892,7 @@ class MainWindow(QMainWindow):
             return
 
         self._tuning_deck = list(deck)
+        self._training_seat = self._seat_showing
         self.train_btn.setEnabled(False)
         self.train_progress.setVisible(True)
         # Indeterminate only until the first tick. The warm-start solve
@@ -1832,7 +1919,8 @@ class MainWindow(QMainWindow):
                                   # schools especially: every training
                                   # mob used to be the literal "ice".
                                   mob_schools=self.observed_schools,
-                                  mob_damage=self.observed_incoming)
+                                  mob_damage=self.observed_incoming,
+                                  party_size=self.party_size())
         self.current_tel().clear_curve()
         self.worker.snapshot.connect(self.on_snapshot)
         self.worker.progress.connect(self.on_progress)
@@ -1887,19 +1975,24 @@ class MainWindow(QMainWindow):
             text += f" — {self._last_checkpoint}"
         self.train_progress.setFormat(text)
 
-    def on_continuation(self, name, scores):
-        """The rollout continuation picked for this deck.
+    def on_continuation(self, name, scores, seat=None):
+        """The rollout continuation picked for one wizard's deck.
 
         Kept on the window rather than in a module global so a live run
-        can be handed it, and so changing decks changes it.
+        can be handed it, and so changing decks changes it. Per wizard
+        for the same reason it is per deck: the choice that is +5.2
+        points on one deck is -7.6 on another, and a party holds four.
         """
-        self.continuation = name
-        self._tuned_deck = tuple(sorted(self._tuning_deck
-                                        or self.decklist()))
+        seat = self._seat_showing if seat is None else seat
+        self.continuations[seat] = name
+        self._tuned_decks[seat] = tuple(sorted(
+            self._tuning_decks[seat] or self.decklist()))
         ranked = sorted((scores or {}).items(), key=lambda kv: -kv[1])
         spread = ((ranked[0][1] - ranked[-1][1]) * 100) if len(ranked) > 1 else 0
+        who = ("this deck" if self.party_size() == 1
+               else f"wizard {seat + 1}'s deck")
         self.status.setText(
-            f"rollout continuation for this deck: {name} "
+            f"rollout continuation for {who}: {name} "
             f"({spread:.0f} points better than the worst of "
             f"{len(ranked)} tried)")
 
@@ -2328,46 +2421,77 @@ class MainWindow(QMainWindow):
             self.refresh_all()
 
     def _maybe_autotune(self):
-        """Tune the quartet for the observed fight when nothing has.
+        """Tune each wizard's quartet for the observed fight.
 
         A train tunes as part of its run; this covers the wizard who
         connects and just fights. It fires once per deck, off the first
         finished fight's measured board, at low priority under the live
         run -- which the sweep is safe for now that it never installs
         the candidate it is measuring.
+
+        Once per **wizard**, not once per window. The quartet is
+        deck-scoped and worth ~14 points of kill rate, and a party holds
+        four decks: tuning only the wizard that happens to be selected
+        leaves the other three playing the untuned defaults for the
+        whole run, on the exact boards the run is measuring for them.
         """
-        deck = self.decklist()
-        if not deck or not self.observed_hps:
-            return
         if self.live is None or not self.live.isRunning():
             return
-        if self.worker is not None and self.worker.isRunning():
-            return                    # the train will tune on its own
-        if tuple(sorted(deck)) == self._tuned_deck:
+        if not self.observed_hps:
             return
-        if getattr(self, "_autotune", None) is not None \
-                and self._autotune.isRunning():
-            return
+        seats = getattr(self.live, "seats", None)
+        configs = self.seat_configs_now()
+        if seats is not None:
+            configs = configs[:len(seats)]
+        started = []
+        for seat, cfg in enumerate(configs):
+            if self._start_autotune(seat, cfg):
+                started.append(seat)
+        if started:
+            who = ("the search" if len(configs) == 1 else
+                   "wizard " + ", ".join(str(i + 1) for i in started) +
+                   "'s search")
+            self.status.setText(
+                f"tuning {who} for the observed fight (in the "
+                f"background — the fight keeps playing)…")
+
+    def _start_autotune(self, seat, cfg):
+        """One wizard's tuner, if it wants one. Returns whether it started."""
+        deck = cfg["deck"]
+        if not deck:
+            return False
+        if seat == self._training_seat and self.worker is not None \
+                and self.worker.isRunning():
+            return False              # its train will tune on its own
+        if tuple(sorted(deck)) == self._tuned_decks[seat]:
+            return False
+        running = self._autotunes.get(seat)
+        if running is not None and running.isRunning():
+            return False
         dmg = int(self.observed_incoming) or max(
             30, self.player_hp.value() // 12)
-        self._autotune = TuneWorker(self.school.currentText(), deck,
-                                    self.observed_hps,
-                                    self.observed_schools, dmg)
-        self._autotune.tuned.connect(self.on_autotuned)
-        self._autotune.failed.connect(lambda _m: None)   # a nicety;
-        self._autotune.start(QThread.Priority.LowPriority)  # stay quiet
-        self.status.setText(
-            "tuning the search for the observed fight (in the "
-            "background — the fight keeps playing)…")
+        worker = TuneWorker(cfg["school"], deck, self.observed_hps,
+                            self.observed_schools, dmg)
+        self._autotunes[seat] = worker
+        # Bound to the seat, not to whichever wizard happens to be
+        # selected when the sweep finishes a minute later.
+        worker.tuned.connect(
+            lambda wire, scores, s=seat: self.on_autotuned(wire, scores, s))
+        worker.failed.connect(lambda _m: None)          # a nicety;
+        worker.start(QThread.Priority.LowPriority)      # stay quiet
+        return True
 
-    def on_autotuned(self, wire, scores):
-        self._tuning_deck = self.decklist()
+    def on_autotuned(self, wire, scores, seat=None):
+        seat = self._seat_showing if seat is None else seat
+        cfg = self.seat_configs[seat] or {}
+        self._tuning_decks[seat] = [d.strip() for d
+                                    in (cfg.get("deck") or "").split(",")
+                                    if d.strip()]
         # The pick is this wizard's, and so is the reinstall. Storing it
         # first: `set_policy` rebuilds the closure, and the closure is
         # where the quartet gets bound for a party -- reinstalling before
         # the pick is recorded would rebuild with the old one.
-        self.continuation = wire
-        seat = self._seat_showing
+        self.continuations[seat] = wire
         # A driver change only takes effect through a rebuilt policy
         # closure; reinstalling the current name does exactly that
         # without dropping the connection. Before on_continuation, so
@@ -2383,7 +2507,7 @@ class MainWindow(QMainWindow):
                 self.live.set_policy(name)
             else:
                 self.live.set_policy(name, seat=seat)
-        self.on_continuation(wire, scores)
+        self.on_continuation(wire, scores, seat)
 
     def on_policy_installed(self, name):
         """The worker says which policy it actually ended up with.
