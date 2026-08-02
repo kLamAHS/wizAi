@@ -73,6 +73,11 @@ class TrainWorker(QThread):
     verdict = pyqtSignal(float, float)
     finished_ok = pyqtSignal(object)
     failed = pyqtSignal(str)
+    #: the preflight's verdict, distinct from a crash: "this board is
+    #: not winnable at these settings" is a finding about the fight,
+    #: and a status bar that renders it as "training failed" reads as
+    #: a bug in the tool rather than a fact about the board
+    refused = pyqtSignal(str)
 
     def __init__(self, cards, deck, school, episodes, player_hp=800,
                  boss_hp=1200, player_stats=None, n_enemies=1,
@@ -515,6 +520,22 @@ class TrainWorker(QThread):
             return True, ""       # never block a run over the check itself
         if kill > 0.0:
             return True, ""
+        # The scripted canary is the WEAKEST policy in the repo, and
+        # refusing on its word alone overclaims badly: measured on a
+        # live operator's board (480 + 235 at 77/round, a heal-less
+        # fire deck), the canary won 0.0% of 500 while greedy_ttk --
+        # the policy that actually drives live fights -- won 60.4%.
+        # "This board cannot be won" must be checked against the
+        # strongest cheap policy before it is said. The escalation
+        # only runs when the canary reads zero, so healthy boards
+        # never pay for it.
+        try:
+            from ..policies import greedy_ttk
+            kill2, _ = evaluate(sim, greedy_ttk(6), n=max(60, n // 3))
+            if kill2 > 0.0:
+                return True, ""
+        except Exception:
+            return True, ""
         mobs = " + ".join(f"{b.hp:,} HP {b.school}" for b in [board] + extra)
         health = sum(b.hp for b in [board] + extra)
         head = (f"this board cannot be won at these settings, so training "
@@ -571,12 +592,13 @@ class TrainWorker(QThread):
 
         return False, (
             head +
-            f"A scripted policy wins 0 of {n} fights on it, and your deck "
-            f"could deliver about {ceiling:,.0f} damage against its "
-            f"{health:,} health — so this is a race it loses on time, not "
-            f"on damage. Lower the mob HP or the mob count, raise your "
-            f"health, or check the incoming damage: at {board.dmg}/round "
-            f"each you last {self.player_hp / max(1, board.dmg * (1 + len(extra))):.0f} "
+            f"Neither the scripted policy ({n} fights) nor the search "
+            f"policy could win one, and your deck could deliver about "
+            f"{ceiling:,.0f} damage against its {health:,} health — so "
+            f"this is a race it loses on time, not on damage. Lower the "
+            f"mob HP or the mob count, raise your health, or check the "
+            f"incoming damage: at {board.dmg}/round each you last "
+            f"{self.player_hp / max(1, board.dmg * (1 + len(extra))):.0f} "
             f"rounds.{matchup}")
 
     def run(self):
@@ -620,7 +642,7 @@ class TrainWorker(QThread):
             feasible, note = self.preflight(board, extra)
             if not feasible:
                 self.stage.emit(note)
-                self.failed.emit(note)
+                self.refused.emit(note)
                 return
 
             # The rollout's continuation, picked for this deck. It is one
@@ -1566,6 +1588,7 @@ class MainWindow(QMainWindow):
         self.worker.continuation.connect(self.on_continuation)
         self.worker.finished_ok.connect(self.on_trained)
         self.worker.failed.connect(self.on_train_failed)
+        self.worker.refused.connect(self.on_train_refused)
         # Below the live worker, deliberately. Training is minutes of
         # solid CPU with no I/O to yield on; at equal priority it starves
         # the fight's event loop, and a planning phase that arrives late
@@ -1678,6 +1701,17 @@ class MainWindow(QMainWindow):
         self.train_progress.setVisible(False)
         self.status.setText("training failed")
         QMessageBox.critical(self, "wizAi", message)
+
+    def on_train_refused(self, message):
+        """The preflight said no. A verdict about the BOARD, not a
+        crash -- the old path rendered it as "training failed", which
+        a live operator reasonably read as the tool breaking."""
+        self.train_btn.setEnabled(True)
+        self.train_progress.setVisible(False)
+        self.status.setText(
+            "training refused — the board is not winnable at these "
+            "settings (see message)")
+        QMessageBox.warning(self, "wizAi", message)
 
     # -- deck ------------------------------------------------------------
     def on_build_deck(self):
