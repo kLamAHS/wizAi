@@ -94,6 +94,20 @@ BOARD_SETS = {
     # shield or a heal inside a rollout) and the shipped specialist
     # was never trained on. Verdict boards use different healths
     # (Ketil 1300, Jack of Knaves 1100) and stay held out.
+    #
+    # CAMPAIGN 3 VERDICT -- rejected, recorded: the hypothesis was
+    # wrong. The best checkpoint climbed +5.6 on validation and won
+    # NOTHING held out (4th/5th/7th of seven candidates), because on
+    # caster boards the continuation seat is nearly FLAT: all seven
+    # candidates landed within 2.7 points on Ketil@1300 and within ~5
+    # with stream-unstable ordering on Jack@1100. Those fights are
+    # decided by the outer search and the spike arithmetic, not by
+    # rollout continuation style -- there was no uncovered ground to
+    # specialise into, and the validation gain was fitness-local.
+    # Lesson for any campaign 4: hunt seats where the CANDIDATE SPREAD
+    # is measured large first; absolute win rates that look improvable
+    # say nothing about whether this seat is the lever that improves
+    # them.
     "defense": (
         (_MID, "ice", 1800, 0.25, 1000, 1, 0, "Ketil Blackheart"),
         (_MID, "ice", 1800, 0.25, 1450, 1, 0, "Ketil Blackheart"),
