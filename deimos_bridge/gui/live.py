@@ -194,13 +194,15 @@ class LiveWorker(QThread):
     seat_policy_changed = pyqtSignal(int, str)
     #: one round agreed by the whole party; payload is a `PartyPlan`
     party_plan = pyqtSignal(object)
+    #: (seat, the wizard's in-game name), once a duel has revealed it
+    seat_named = pyqtSignal(int, str)
 
     def __init__(self, telemetry, school, deck, policy_name, fights,
                  agent=None, auto_quest=False, auto_dialogue=True,
                  collect_wisps=True, use_potions=True, script="",
                  hotkeys=None, continuation="", seats=None,
                  coordinate=True, passes=2, barrier=None,
-                 follow_leader=True, leader=0):
+                 follow_leader=True, leader=0, label_windows=True):
         super().__init__()
         # Seat 0 is always the arguments this was called with, so the
         # single-wizard signature is untouched; `seats` adds the rest.
@@ -247,6 +249,10 @@ class LiveWorker(QThread):
         #: see `deimos_bridge/party.py`.
         self.leader = max(0, min(int(leader), len(self.seats) - 1))
         self.follow_leader = bool(follow_leader)
+        #: write which seat a client is onto its own title bar. Four
+        #: identical "Wizard101" windows cannot be told apart, and the
+        #: seat numbering only exists inside this program.
+        self.label_windows = bool(label_windows)
         self._stop = False
 
     # -- seat 0, reachable where it always was -----------------------------
@@ -1031,6 +1037,12 @@ class LiveWorker(QThread):
                 seat.tel.policy_name = seat.policy_name
                 seat.tel.school = seat.school
                 seat.tel.deck = seat.deck
+                seat.tel.seat = seat.index
+                # Before a single fight: the seat number is knowable now,
+                # the wizard's name is not until a duel names it. Half an
+                # answer on the title bar beats none while the operator
+                # is still working out which window is which.
+                self._stamp_title(seat)
                 backend = WizAiBackend(
                     policy=policy, cards=cards, school=seat.school,
                     decklist=seat.deck, catalog=catalog,
@@ -1197,11 +1209,15 @@ class LiveWorker(QThread):
 
         `get_new_clients()` returns windows in whatever order it finds
         them, so a party's seats and clients can be crossed -- and the
-        first live party run's were. The client is the authority, so the
-        seat is corrected to match it rather than the other way round,
-        and the gear is re-read: it was fetched for the wrong school, and
-        `player.damage_bonus` keyed on a school this wizard never casts
-        misses on every card, pricing the whole fight at no gear at all.
+        first live party run's were. The client is the authority: it is
+        the one with a wizard logged into it. So the seat is corrected to
+        match it rather than the other way round, and the gear is
+        re-read, because it was fetched for the wrong school. On a
+        low-level wizard that re-read changes nothing -- there is no
+        damage or accuracy stat yet to be keyed wrongly -- but the school
+        is an input to the nuke choice, to what a power pip is worth, and
+        to the board a train evaluates on, and the gear starts mattering
+        the moment there is any.
 
         The decklist is left alone. It is the operator's to fix, it only
         feeds the scarcity feature and a trained table's keying, and the
@@ -1219,6 +1235,7 @@ class LiveWorker(QThread):
             f"game was launched in, so the seats were crossed. Switched to "
             f"{actual} and re-reading the gear; until now every hit was "
             f"priced with {was}'s gear bonus, which is none of it.")
+        self._stamp_title(seat)
         if seat.client is not None:
             asyncio.ensure_future(self._reread_gear(seat))
 
@@ -1266,15 +1283,46 @@ class LiveWorker(QThread):
         The client only offers it on the character-select screen, which
         a running wizard is not on. But `read_state` already builds the
         player actor from `combat.get_client_member().name()`, so every
-        round of every duel carries it for free -- and the cross-zone
-        follow needs exactly that string to pick the leader out of a
-        friends list. One duel is enough; until then a follower that
-        needs it says so rather than failing silently.
+        round of every duel carries it for free.
+
+        Two things need it. The cross-zone follow, to pick the leader out
+        of a friends list. And the operator: "wizard 1" and "wizard 2"
+        are the window's own numbering and they mean nothing once three
+        exports are sitting in a folder or four clients are on the
+        taskbar. So the moment the name is known it goes onto the seat,
+        into the record, onto the game window's title bar, and out to the
+        window as a signal.
         """
         name = getattr(getattr(read, "state", None), "player", None)
         name = getattr(name, "name", None)
-        if isinstance(name, str) and name.strip():
-            seat.wizard_name = name.strip()
+        if not (isinstance(name, str) and name.strip()):
+            return
+        seat.wizard_name = seat.name = name.strip()
+        seat.tel.wizard = seat.wizard_name
+        if self.hive is not None:
+            self.hive.join(seat.index, seat.name)
+        self._stamp_title(seat)
+        self.seat_named.emit(seat.index, seat.wizard_name)
+        self._say(seat, f"this client is {seat.wizard_name}, the "
+                        f"{seat.school} wizard")
+
+    def _stamp_title(self, seat):
+        """Write who this is onto the game window itself.
+
+        The one place the operator is already looking. Four identical
+        "Wizard101" windows on a taskbar cannot be told apart, and the
+        seat numbering only exists inside this program -- so it is put
+        where the mapping is needed, which is on the window. Deimos does
+        the same thing for the same reason.
+        """
+        if not self.label_windows or seat.client is None:
+            return
+        who = seat.wizard_name or f"wizard {seat.index + 1}"
+        try:
+            seat.client.title = (f"wizAi {seat.index + 1} · {who} · "
+                                 f"{seat.school}")
+        except Exception:
+            pass          # a window title is a nicety, never a blocker
 
     def _on_lost_round(self, round_number, reason, seat=None):
         """A round whose board could not be read. Recorded as that.

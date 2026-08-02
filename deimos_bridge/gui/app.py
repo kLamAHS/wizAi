@@ -1834,7 +1834,11 @@ class MainWindow(QMainWindow):
             while self.which.count() > n:
                 self.which.removeItem(self.which.count() - 1)
             while self.which.count() < n:
-                self.which.addItem(f"wizard {self.which.count() + 1}")
+                i = self.which.count()
+                named = (self.tels[i].wizard
+                         if i < len(self.tels) else "")
+                self.which.addItem(f"wizard {i + 1} — {named}" if named
+                                   else f"wizard {i + 1}")
         finally:
             self._loading = False
         self.which.setVisible(n > 1)
@@ -2295,6 +2299,7 @@ class MainWindow(QMainWindow):
         self.live.seat_gear_read.connect(self.on_seat_gear_read)
         self.live.seat_policy_changed.connect(self.on_seat_policy_installed)
         self.live.party_plan.connect(self.on_party_plan)
+        self.live.seat_named.connect(self.on_seat_named)
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         # Train stays live. Every input to a useful training run -- the
@@ -2350,6 +2355,23 @@ class MainWindow(QMainWindow):
     def on_party_plan(self, plan):
         """One round the whole party agreed. Queued onto the GUI thread."""
         self.party.show_plan(plan, getattr(self.live, "hive", None))
+
+    def on_seat_named(self, seat, name):
+        """A duel told us which wizard this client is actually driving.
+
+        "wizard 1" and "wizard 2" are this window's own numbering and
+        mean nothing to anyone looking at four game clients. Once the
+        game has named one, the selector says so too -- the game window's
+        own title bar is stamped by the worker at the same moment, so the
+        two agree.
+        """
+        if not name or not (0 <= seat < self.which.count()):
+            return
+        self._loading = True
+        try:
+            self.which.setItemText(seat, f"wizard {seat + 1} — {name}")
+        finally:
+            self._loading = False
 
     def on_round(self, rec):
         # Queued from the worker thread, so this runs on the GUI thread.
@@ -2584,7 +2606,14 @@ class MainWindow(QMainWindow):
         stem, ext = os.path.splitext(path)
         written = []
         for i in range(n):
-            out = f"{stem}-wizard{i + 1}{ext or '.json'}"
+            # The name when the game has given one. Three files called
+            # "-wizard1/2/3" have to be identified by reading the hands
+            # and guessing, which is what happened to the first party
+            # run's exports.
+            who = "".join(ch for ch in (self.tels[i].wizard or "")
+                          if ch.isalnum())
+            out = f"{stem}-wizard{i + 1}{'-' + who if who else ''}" \
+                  f"{ext or '.json'}"
             self.tels[i].to_json(out)
             written.append(os.path.basename(out))
         self.status.setText(f"wrote {len(written)} files: "

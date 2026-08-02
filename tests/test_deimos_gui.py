@@ -6870,3 +6870,108 @@ def _cards_once():
         from data_full import load_spells_full
         _CARDS_ONCE = load_spells_full()
     return _CARDS_ONCE
+
+
+def test_the_export_says_which_wizard_it_is(qapp):
+    """Three files called -wizard1/2/3 have to be identified by reading
+    the hands and guessing, which is what the first party run's exports
+    needed. The game names the wizard; the record should carry it."""
+    tel = Telemetry(policy_name="ttk-lookahead", school="ice",
+                    wizard="Wolf Deathblade", seat=1)
+    s = tel.summary()
+    assert s["wizard"] == "Wolf Deathblade"
+    assert s["seat"] == 2
+
+    # ...and falls back to the seat rather than to nothing.
+    assert Telemetry(seat=2).summary()["wizard"] == "wizard 3"
+
+
+def test_a_named_party_exports_named_files(qapp, monkeypatch, tmp_path):
+    from deimos_bridge.gui import app as app_mod
+    from deimos_bridge.gui.app import MainWindow
+
+    target = tmp_path / "run.json"
+    monkeypatch.setattr(app_mod.QFileDialog, "getSaveFileName",
+                        lambda *a, **k: (str(target), ""))
+    win = MainWindow(Telemetry())
+    win.wizards.setValue(2)
+    win.tels[0].wizard = "Wolf Deathblade"
+    win.on_export()
+    assert (tmp_path / "run-wizard1-WolfDeathblade.json").exists()
+    # The unnamed one keeps the seat, so nothing is lost when a wizard
+    # has not fought yet.
+    assert (tmp_path / "run-wizard2.json").exists()
+
+
+def test_learning_the_name_relabels_everything_that_shows_it(qapp):
+    """The window's selector, the record, the hive's plan and the game
+    window's own title bar all name the same wizard, or the operator has
+    to hold the mapping in their head."""
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    w = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1,
+                   seats=[SeatConfig(school="fire")])
+    w.status = type("S", (), {"emit": staticmethod(lambda *_: None)})()
+    w.hive = w._make_hive()
+    seat = w.seats[1]
+
+    class _Client:
+        title = "Wizard101"
+
+    seat.client = _Client()
+
+    class _Player:
+        name = "Wolf Deathblade"
+
+    class _Read:
+        state = type("S", (), {"player": _Player()})()
+
+    named = []
+    w.seat_named.connect(lambda i, n: named.append((i, n)))
+    w._learn_name(seat, _Read())
+
+    assert seat.wizard_name == "Wolf Deathblade"
+    assert seat.name == "Wolf Deathblade"
+    assert seat.tel.wizard == "Wolf Deathblade"
+    assert named == [(1, "Wolf Deathblade")]
+    assert "Wolf Deathblade" in seat.client.title
+    assert "wizAi 2" in seat.client.title
+    # The plan the Party tab renders names it too.
+    assert w.hive._seats[1] == "Wolf Deathblade"
+
+
+def test_the_window_title_is_stamped_before_any_fight(qapp):
+    """Half an answer now beats a whole one after the first duel: the
+    operator is working out which window is which before it starts."""
+    from deimos_bridge.gui.live import LiveWorker
+
+    w = LiveWorker(Telemetry(), "storm", [], "ttk-lookahead", 1)
+    seat = w.seats[0]
+
+    class _Client:
+        title = "Wizard101"
+
+    seat.client = _Client()
+    w._stamp_title(seat)
+    assert seat.client.title == "wizAi 1 · wizard 1 · storm"
+
+    w.label_windows = False
+    seat.client.title = "Wizard101"
+    w._stamp_title(seat)
+    assert seat.client.title == "Wizard101"
+
+
+def test_the_selector_carries_a_name_it_already_learned(qapp):
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.wizards.setValue(2)
+    win.on_seat_named(1, "Wolf Deathblade")
+    assert win.which.itemText(1) == "wizard 2 — Wolf Deathblade"
+    # Naming a seat is not the user picking a different wizard.
+    assert win._seat_showing == 0
+
+    # Resizing the party rebuilds the list; a learned name survives it.
+    win.tels[2].wizard = "Autumn Frost"
+    win.wizards.setValue(3)
+    assert win.which.itemText(2) == "wizard 3 — Autumn Frost"

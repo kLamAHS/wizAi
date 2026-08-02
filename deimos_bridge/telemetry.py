@@ -302,8 +302,17 @@ class FightRecord:
 class Telemetry:
     """Everything a live run produced. The GUI is a view over this."""
 
-    def __init__(self, policy_name="", school="", deck=None, resolver=None):
+    def __init__(self, policy_name="", school="", deck=None, resolver=None,
+                 wizard="", seat=0):
         self.policy_name = policy_name
+        #: which wizard this record belongs to, and what it is called
+        #: in the game. "wizard 1" and "wizard 2" are the window's own
+        #: numbering, and they mean nothing once three exports are
+        #: sitting in a folder -- the first live party run had to be
+        #: identified by reading the hands and guessing. The name is
+        #: learned from the first duel; the seat is always known.
+        self.wizard = wizard
+        self.seat = int(seat or 0)
         self.school = school
         self.deck = list(deck or [])
         #: the run's NameResolver, if there is one. Only used so the GUI
@@ -867,6 +876,8 @@ class Telemetry:
     def summary(self):
         st = self.error_stats()
         return {
+            "wizard": self.wizard or f"wizard {self.seat + 1}",
+            "seat": self.seat + 1,
             "policy": self.policy_name,
             "school": self.school,
             "fights": len(self.fights),

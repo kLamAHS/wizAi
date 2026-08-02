@@ -452,14 +452,23 @@ class WizAiBackend:
         `ClientHandler.get_new_clients()` returns windows in whatever
         order it finds them, and nothing else can tell which one is
         "wizard 1" -- so a party's seats and clients can be crossed, and
-        the first live party run was. It is silent and expensive: the
-        gear read asks for the WRONG school's damage stat, so
-        `player.damage_bonus` comes back keyed on a school this wizard
-        never casts, `_damage_bonus` misses on every card, and every hit
-        is priced as though the wizard wore no gear at all. Measured on
-        that run: an ice wizard configured as fire, and a fire wizard
-        configured as ice, both playing their whole fight at zero gear
-        damage.
+        the first live party run's were: an ice wizard configured fire
+        and a fire wizard configured ice.
+
+        What it costs depends on the wizard, and it is worth being exact
+        because the obvious answer is wrong. The gear read asks for the
+        configured school's damage stat, so `player.damage_bonus` comes
+        back keyed on a school this wizard never casts and
+        `_damage_bonus` misses on every card -- but a low-level wizard
+        has no damage or accuracy stat to lose, so on that run the
+        crossing cost nothing there. It bites where the school itself is
+        the input: `choose_nuke` prefers the caster's own school and
+        finds none of it, `effective_pips` values a power pip at two in
+        the wizard's school and one elsewhere, `TrainWorker.board_schools`
+        excludes the wizard's own school from an evaluation board and
+        excludes the wrong one, and the exported run names a school its
+        own hand contradicts. It gets expensive the moment the wizard has
+        gear worth reading.
 
         Checked once, from the read the fight already does -- the client
         member is a `CombatParticipant` and knows its own school. Only
