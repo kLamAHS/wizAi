@@ -522,6 +522,36 @@ class TrainWorker(QThread):
                 f"Board: {mobs}, each hitting for {board.dmg}/round, "
                 f"against {self.player_hp:,} HP.\n\n")
 
+        # The matchup, named. A fire wizard's all-fire deck against a
+        # fire board loses ~40% of every hit to own-school resist, and
+        # no amount of same-school deck advice fixes a school wall --
+        # `deck_advice` draws from this school's own pool, so without
+        # this line the refusal recommends more of the resisted school.
+        # Measured on the fight that earned the message (Alicane
+        # Swiftarrow + Magma Man vs a level-7 fire wizard): 0.2% for
+        # every policy in the repo; the deck is the reason, and the
+        # only real fixes are off-school.
+        pool = [b for b in [board] + extra if b.hp > 0]
+        wall = sum(b.incoming_mult(self.school) * b.hp for b in pool) \
+            / max(1, sum(b.hp for b in pool))
+        matchup = ""
+        if wall <= 0.75:
+            own = [self.cards[n] for n in self.deck
+                   if n in self.cards
+                   and self.cards[n].kind in ("damage", "drain")]
+            share = (sum(1 for c in own if c.school == self.school)
+                     / len(own)) if own else 0.0
+            if share >= 0.7:
+                matchup = (
+                    f"\n\nThe matchup is most of it: this board takes "
+                    f"only ~{wall * 100:.0f}% from {self.school} damage, "
+                    f"and this deck's damage is "
+                    f"{'all' if share == 1.0 else 'mostly'} "
+                    f"{self.school}. Nothing from the {self.school} "
+                    f"pool fixes a school wall — off-school damage "
+                    f"does: treasure cards from the bazaar, or a wand "
+                    f"that hits in another school.")
+
         # Name the cause rather than listing the knobs. When the deck
         # simply cannot deliver the board's health, none of the knobs is
         # the answer and suggesting them sends you round in circles.
@@ -535,7 +565,8 @@ class TrainWorker(QThread):
                 f"buff spent on the biggest hits, comes to about "
                 f"{ceiling:,.0f} damage — and this board has {health:,} "
                 f"health. No play order wins that, and no mob HP, mob "
-                f"count or enemy school setting changes it.{hint}\n\n"
+                f"count or enemy school setting changes it.{hint}"
+                f"{matchup}\n\n"
                 f"Add damage cards, or train against a smaller board.")
 
         return False, (
@@ -546,7 +577,7 @@ class TrainWorker(QThread):
             f"on damage. Lower the mob HP or the mob count, raise your "
             f"health, or check the incoming damage: at {board.dmg}/round "
             f"each you last {self.player_hp / max(1, board.dmg * (1 + len(extra))):.0f} "
-            f"rounds.")
+            f"rounds.{matchup}")
 
     def run(self):
         try:

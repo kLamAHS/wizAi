@@ -5424,6 +5424,55 @@ def test_the_deck_search_prices_the_named_boss(qapp, monkeypatch):
     assert seen["boost"] == {"life": 0.2}
 
 
+def test_the_catalog_corrects_a_misread_school():
+    """`read_school`'s failure mode is a silent "balance" guess, and
+    the guess poisons everything downstream: a fire wizard's fight
+    against the FIRE boss Alicane Swiftarrow was read as "480 balance
+    + 235 balance", so training, the envelope and the trained table
+    all priced fire damage landing at full when the real fight halves
+    it. For an exact catalog name, the scraped school wins."""
+    from deimos_bridge.live_backend import WizAiBackend
+    from w101_sim import Actor, State
+
+    be = WizAiBackend(policy=lambda sim, s: None, cards={}, school="fire")
+    me = Actor(name="W", school="fire", hp=589, max_hp=589, team=0)
+    boss = Actor(name="Alicane Swiftarrow", school="balance", hp=480,
+                 max_hp=480, team=1)
+
+    class _Read:
+        state = State(me, [boss])
+
+    be._apply_bestiary(_Read())
+    assert boss.school == "fire"                  # the catalog's fact
+    assert boss.resist == {"fire": 0.4}           # and his real wall
+    assert boss.boost == {"ice": 0.2}
+
+
+def test_the_refusal_names_a_school_wall(qapp):
+    """A fire wizard's all-fire deck against a fire board loses ~40%
+    of every hit to own-school resist, and same-school deck advice
+    cannot fix that -- the refusal must say so and point off-school.
+    Measured on the fight that earned this: Alicane Swiftarrow + Magma
+    Man vs a level-7 fire wizard, 0.2% for every policy in the repo."""
+    from data_full import load_spells_full
+    from deimos_bridge.gui.app import TrainWorker
+    from w101_sim import Boss
+
+    cards = load_spells_full()
+    deck = (["Fire Cat"] * 3 + ["Fire Elf"] * 3 + ["Fireblade"] * 3
+            + ["Pixie"] * 2)
+    w = TrainWorker(cards, deck, "fire", 100, player_hp=589,
+                    boss_hp=480, player_stats={"accuracy": 0.05},
+                    n_enemies=2, mob_hps=[480, 235],
+                    mob_schools=["fire", "fire"], mob_damage=150)
+    board = Boss(name="b", hp=480, school="fire", dmg=150)
+    extra = [Boss(name="m", hp=235, school="fire", dmg=150)]
+    ok, note = w.preflight(board, extra, n=60)
+    assert not ok
+    assert "school wall" in note and "treasure cards" in note
+    assert "fire damage" in note
+
+
 def test_the_bestiary_reads_universal_resist():
     """The scrape stores universal resist in two shapes stat_overrides
     used to drop entirely: a bare number with no note (44 creatures,
