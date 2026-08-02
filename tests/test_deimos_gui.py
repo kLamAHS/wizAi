@@ -6783,3 +6783,90 @@ def test_a_follower_does_not_chase_twice_a_second(qapp):
         party_mod.follow = real
 
     assert len(tried) == 1, "six ticks must not be six teleports"
+
+
+def test_a_crossed_seat_is_caught_from_the_first_round(qapp):
+    """From the first live party run: wizard 1 was configured `fire` and
+    held a pure ice hand laying +40% ice traps, while wizard 2 was
+    configured `ice` and held Fireblade. `get_new_clients()` returns
+    windows in whatever order it finds them and nothing else can tell
+    which is which, so the seats and the clients were crossed.
+
+    It is expensive and silent: the gear read asks for the wrong
+    school's damage stat, so `player.damage_bonus` comes back keyed on a
+    school this wizard never casts and every hit is priced at no gear at
+    all."""
+    import asyncio
+
+    from deimos_bridge.live_backend import WizAiBackend
+    from deimos_bridge.mock_client import MockCard, MockCombat, MockMember
+
+    seen = []
+    backend = WizAiBackend.from_trained(
+        school="fire", deck=["Frost Beetle"], cards=_cards_once(),
+        policy=lambda sim, s: None, policy_name="ttk-lookahead")
+    backend.on_school_mismatch = seen.append
+    backend.attach_combat(MockCombat(
+        # the game's own id for Ice, out of `deimos_damage.SCHOOL_TO_STR`
+        [MockMember("Wizard", 1022, client=True, team_id=0, normal_pips=1,
+                    school_id=72777),
+         MockMember("Lord Nightshade", 690, monster=True, team_id=1)],
+        [MockCard("Frost Beetle")]))
+
+    asyncio.run(backend.decide())
+    assert seen == ["ice"], seen
+    # Once, not once a round.
+    asyncio.run(backend.decide())
+    assert seen == ["ice"]
+
+
+def test_an_unreadable_school_is_not_reported_as_a_mismatch(qapp):
+    """A school that will not read is not evidence of anything, and a
+    false 'you configured the wrong wizard' would send the operator
+    chasing a setup problem that does not exist."""
+    import asyncio
+
+    from deimos_bridge.live_backend import WizAiBackend
+    from deimos_bridge.mock_client import MockCard, MockCombat, MockMember
+
+    seen = []
+    backend = WizAiBackend.from_trained(
+        school="fire", deck=["Fire Cat"], cards=_cards_once(),
+        policy=lambda sim, s: None)
+    backend.on_school_mismatch = seen.append
+    backend.attach_combat(MockCombat(
+        [MockMember("Wizard", 691, client=True, team_id=0, normal_pips=1),
+         MockMember("Lost Soul", 450, monster=True, team_id=1)],
+        [MockCard("Fire Cat")]))
+    asyncio.run(backend.decide())
+    assert seen == []
+
+
+def test_the_worker_switches_the_seat_to_what_the_client_says(qapp):
+    """The client is the authority: it is the one that knows which wizard
+    is logged into it."""
+    from deimos_bridge.gui.live import LiveWorker
+
+    w = LiveWorker(Telemetry(), "fire", ["Fire Cat"], "ttk-lookahead", 1)
+    seat = w.seats[0]
+    seat.backend = type("B", (), {"school": "fire"})()
+    said = []
+    w.status = type("S", (), {"emit": staticmethod(said.append)})()
+
+    w._on_school_mismatch("ice", seat)
+    assert seat.school == "ice"
+    assert seat.tel.school == "ice"
+    assert seat.backend.school == "ice"
+    assert any("is a ice wizard, not the fire" in m for m in said), said
+    assert any("seats were crossed" in m for m in said), said
+
+
+_CARDS_ONCE = None
+
+
+def _cards_once():
+    global _CARDS_ONCE
+    if _CARDS_ONCE is None:
+        from data_full import load_spells_full
+        _CARDS_ONCE = load_spells_full()
+    return _CARDS_ONCE

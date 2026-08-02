@@ -1041,6 +1041,7 @@ class LiveWorker(QThread):
                     seat=seat.index, coordinator=hive,
                     party_size=len(self.seats))
                 backend.on_failed_cast = self._failed_cast_hook(seat)
+                backend.on_school_mismatch = self._school_hook(seat)
                 seat.tel.resolver = backend.resolver
                 seat.backend = backend
                 if seat.policy_name != built_as:
@@ -1188,6 +1189,46 @@ class LiveWorker(QThread):
     def _failed_cast_hook(self, seat):
         return lambda reason: self._on_failed_cast(reason, seat)
 
+    def _school_hook(self, seat):
+        return lambda actual: self._on_school_mismatch(actual, seat)
+
+    def _on_school_mismatch(self, actual, seat):
+        """This client is not the wizard this seat was configured as.
+
+        `get_new_clients()` returns windows in whatever order it finds
+        them, so a party's seats and clients can be crossed -- and the
+        first live party run's were. The client is the authority, so the
+        seat is corrected to match it rather than the other way round,
+        and the gear is re-read: it was fetched for the wrong school, and
+        `player.damage_bonus` keyed on a school this wizard never casts
+        misses on every card, pricing the whole fight at no gear at all.
+
+        The decklist is left alone. It is the operator's to fix, it only
+        feeds the scarcity feature and a trained table's keying, and the
+        hand the policy actually plays is read off the game either way.
+        """
+        was, seat.school = seat.school, actual
+        seat.tel.school = actual
+        if seat.backend is not None:
+            seat.backend.school = actual
+        named = f" ({seat.wizard_name})" if seat.wizard_name else ""
+        self._say(
+            seat,
+            f"this client{named} is a {actual} wizard, not the {was} it was "
+            f"configured as — the clients come back in whatever order the "
+            f"game was launched in, so the seats were crossed. Switched to "
+            f"{actual} and re-reading the gear; until now every hit was "
+            f"priced with {was}'s gear bonus, which is none of it.")
+        if seat.client is not None:
+            asyncio.ensure_future(self._reread_gear(seat))
+
+    async def _reread_gear(self, seat):
+        try:
+            await self._read_gear(seat.client, seat)
+        except Exception as exc:
+            self._say(seat, f"could not re-read the gear for {seat.school} "
+                            f"({type(exc).__name__}: {exc})")
+
     def _on_decision(self, decision, read, seat=None):
         """Runs on the worker thread: record, then signal. No widgets."""
         seat = self.seats[0] if seat is None else seat
@@ -1198,9 +1239,14 @@ class LiveWorker(QThread):
                 sim = backend._sim_for(read)
             except Exception:
                 sim = None      # a prediction is optional, the round is not
+        # The party's plan for this round goes with it: the damage model
+        # settles by differencing the board, and that delta carries every
+        # wizard's damage, not just this one's.
+        plan = getattr(self.hive, "last_plan", None) if self.hive else None
         rec = seat.tel.observe(
             decision, read, sim=sim,
-            cards=backend.cards if backend else None)
+            cards=backend.cards if backend else None,
+            party=plan, seat=seat.index)
         # The backend measures this every round; it used to go nowhere,
         # while the trainer guessed the same quantity off the wizard's
         # own health.

@@ -1161,11 +1161,20 @@ def greedy_ttk(max_turns: int = None, continuation=None):
         # policy played a trap" and "the trap and the nuke were half a
         # turn apart". Everything here was already computed; only the
         # discarding was deliberate.
-        strat.last_candidates = [
-            Candidate(card=c.name, target=t, turns=score[0],
-                      damage=-score[1], pips=c.pips,
-                      chosen=(c, t) == best_action, horizon=max_turns)
-            for score, (c, t) in scored]
+        # Marked chosen only if passing does not beat them, which is
+        # decided below. A live export showed round 4 with Frost Beetle
+        # @0 AND "pass" both flagged chosen, because this list was
+        # written before the pass was scored -- so the decision matrix
+        # rendered two winners for one round.
+        def mark(scored, passing):
+            return [
+                Candidate(card=c.name, target=t, turns=score[0],
+                          damage=-score[1], pips=c.pips,
+                          chosen=(not passing) and (c, t) == best_action,
+                          horizon=max_turns)
+                for score, (c, t) in scored]
+
+        strat.last_candidates = mark(scored, False)
 
         # Passing is a real move -- banking a pip for a bigger hit next
         # turn is exactly the call the heuristic could not make -- but it
@@ -1177,6 +1186,7 @@ def greedy_ttk(max_turns: int = None, continuation=None):
         pass_turns, pass_damage = _rollout(sim, s, None, max_turns,
                                            continuation=fixed_continuation)
         passing = pass_turns < best_score[0]
+        strat.last_candidates = mark(scored, passing)
         strat.last_candidates.append(
             Candidate(card="pass", target=None, turns=pass_turns,
                       damage=-pass_damage, pips=0, chosen=passing,
