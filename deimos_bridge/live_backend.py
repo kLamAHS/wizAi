@@ -206,6 +206,7 @@ class WizAiBackend:
         self._apply_player_stats(read)
         self._apply_bestiary(read)
         self._apply_pool(read)
+        self._apportion_incoming(read)
         self.last_read = read
 
         sim = self._sim_for(read)
@@ -335,7 +336,15 @@ class WizAiBackend:
         living = [e for e in read.state.enemies if e.alive]
         if self._hp_seen is not None and self._round_seen != read.round_number:
             lost = self._hp_seen - player.hp
-            if lost > 0:
+            # Zero counts. A round where every mob fizzled or passed is
+            # a real round of the damage distribution, and dropping it
+            # biased the mean high -- measured on a live fight, the
+            # per-enemy estimate read 117/round on a board dealing ~78,
+            # because the two rounds that hurt were averaged and the
+            # round that didn't was thrown away. Negative rounds (the
+            # wizard healed more than was dealt) still stay out: that
+            # is the heal's number, not the board's.
+            if lost >= 0:
                 self._incoming.append(lost / max(1, self._enemies_seen))
         self._hp_seen = player.hp
         self._round_seen = read.round_number
@@ -490,6 +499,50 @@ class WizAiBackend:
                 enemy.damage_bonus = {"*": b.outgoing_bonus}
             if b.pierce and not enemy.pierce:
                 enemy.pierce = b.pierce
+
+    def _modeled_pool_output(self, enemy):
+        """A casting enemy's expected damage per round, roughly.
+
+        Mean damage-per-pip over the pool's hits, times pip income
+        (one plus the power-pip chance), times a typical enemy
+        accuracy. Sanity: the calibrated casting Alicane Swiftarrow
+        measures 94/round in the sim; this estimate prices him at ~92.
+        """
+        hits = [self.cards[n] for n in (enemy.spell_pool or [])
+                if n in self.cards
+                and self.cards[n].kind in ("damage", "drain")]
+        if not hits:
+            return 0.0
+        per_pip = sum(h.damage / max(1, h.pips) for h in hits) / len(hits)
+        income = 1.0 + float(getattr(enemy, "power_pip_chance", 0.0) or 0)
+        return per_pip * income * 0.75
+
+    def _apportion_incoming(self, read):
+        """Split the measured incoming between casters and flat mobs.
+
+        `_estimate_incoming` divides the health lost each round evenly
+        across the living enemies -- which hands half of a casting
+        boss's Sunbird to the minion standing next to him, and then
+        `_apply_pool` makes the boss cast his own damage ON TOP. On a
+        live fight that double-count read Magma Man at 117/round (his
+        real output is ~50), the rollouts saw ~230/round incoming on a
+        ~150/round board, every line died inside the horizon, and the
+        decision collapsed to the sentinel ranking. The flat mobs'
+        share is the measured total minus what the casters are already
+        modeled to deal -- only ever LOWERED, never raised, and
+        floored so no living mob reads as harmless.
+        """
+        living = [e for e in read.state.enemies if e.alive]
+        pooled = [e for e in living
+                  if getattr(e, "spell_pool", None) is not None]
+        flat = [e for e in living if e not in pooled]
+        if not pooled or not flat:
+            return
+        total = self._measured_incoming * len(living)
+        modeled = sum(self._modeled_pool_output(e) for e in pooled)
+        share = max(10.0, (total - modeled) / len(flat))
+        for e in flat:
+            e.flat_hit = min(e.flat_hit, share)
 
     def _record(self, decision, read):
         self.history.append(decision)

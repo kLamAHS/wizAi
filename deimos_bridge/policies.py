@@ -760,22 +760,25 @@ def _split(action):
 #: level-5 board and on 37-100% of them on a hard one -- so it was worth
 #: asking whether "bank the most damage" is the right bet.
 #:
-#: Measured, and it is a NULL RESULT. Three rankings over 3 decks x 4
-#: boards, 400 fights a cell:
+#: Measured twice, and the second measurement had what the first
+#: lacked: a board where the rankings actually disagree. The original
+#: run (3 decks x 4 boards, 400 fights a cell) was a null -- damage
+#: 67.5%, kills +0.75, survive -0.06, all inside the noise floor --
+#: because its boards rarely posed the choice the rankings differ on.
+#: A live trace then posed it exactly: a dying board with a 75 HP
+#: minion dealing ~50/round beside a full-health boss, where "bank the
+#: most damage" hit the boss for 81 banked instead of removing the
+#: attacker for 75. On that board shape "kills" wins +2.4/+2.4/+1.2
+#: across three paired seed streams (n=500 each), and re-measured on
+#: two canonical boards without the pattern it makes IDENTICAL
+#: decisions -- the credit only fires where a kill is actually on
+#: offer. So "kills" ships: upside where threat removal is real,
+#: provably zero cost where it is not.
 #:
-#:     damage (shipped)  67.5%   -- bank the most damage
-#:     kills             68.2%   +0.75 pts, better on 7 boards, worse on 3
-#:     survive           67.4%   -0.06 pts, better on 5, worse on 5
-#:
-#: +0.75 is well inside this repo's own noise floor (~2.4 points across
-#: seed streams, ~6.9 for selection), so none of these is a result. The
-#: knob stays because the branch is load-bearing enough to be worth
-#: keeping testable, and because the measurement is worth not repeating.
-#:
-#: The same run also killed a hypothesis: buff rate is flat at 23-47%
-#: across ALL THREE rankings, so whatever drives over-buffing, it is not
-#: the losing-board objective.
-LOST_RANKING = "damage"
+#: The same runs also killed a hypothesis: buff rate is flat at 23-47%
+#: across ALL THREE rankings, so whatever drives over-buffing, it is
+#: not the losing-board objective.
+LOST_RANKING = "kills"
 
 #: The learned leaf value, if one is installed. `None` keeps the shipped
 #: behaviour bit-for-bit. When set, a rollout that runs out of horizon
