@@ -443,8 +443,17 @@ class _Fixed:
 #: board -- and LAST on the buff-heavy deck's hard board (9.1 against
 #: 24.1). Deck-specific like every other candidate, which is why the
 #: per-deck paired probes decide where it actually drives.
+#: "neural-b" is the SECOND seat -- the campaign-4 charm specialist,
+#: trained where the spread survey measured the biggest unclaimed
+#: lever. Held out on the survey points: first on the buff-heavy
+#: deck's board on both fresh streams (38.2/37.8 against 32.9/31.9
+#: for school-aware(0), the previous leader there), and second-close
+#: on the myth board (40.0 vs school-aware(3)'s 41.1), which stays
+#: the hand-coded candidate's ground. Separate weights file; the
+#: sweep prices both nets like any other candidate.
 CONTINUATIONS = ("nuke-asap", "school-aware(3)", "school-aware(0)",
-                 "blade-stack(2)", "blade-stack(3)", "neural")
+                 "blade-stack(2)", "blade-stack(3)", "neural",
+                 "neural-b")
 
 #: The shipped default, kept because the right answer is deck-specific
 #: and the alternative is right only on some decks: the same swap that
@@ -467,13 +476,14 @@ def build_continuation(name):
         return make_blade_stack(2)
     if name == "blade-stack(3)":
         return make_blade_stack(3)
-    if name == "neural":
+    if name in ("neural", "neural-b"):
         # Falls back to the default heuristic if the weights cannot
         # load: a missing or stale file must never break a sweep or a
         # live fight -- it just costs this candidate its chance.
         try:
-            from .neural_net import net_policy
-            return net_policy()
+            from .neural_net import DEFAULT_WEIGHTS_B, net_policy
+            return net_policy(DEFAULT_WEIGHTS_B if name == "neural-b"
+                              else None)
         except Exception:
             return school_aware_blade_stack(3)
     return school_aware_blade_stack(3)

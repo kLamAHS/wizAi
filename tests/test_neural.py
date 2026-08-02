@@ -101,19 +101,28 @@ def test_missing_weights_raise_rather_than_guess(tmp_path):
 
 
 def test_neural_holds_a_sweep_seat():
-    """The sixth continuation candidate: in the sweep, buildable, and
-    installable -- so choose_search prices it per deck like the five
-    hand-coded ones."""
-    from deimos_bridge import policies as P
+    """Both net seats: in the sweep, buildable, installable -- so
+    choose_search prices them per deck like the hand-coded five. And
+    genuinely DIFFERENT nets: two seats with one behaviour would be
+    the redundancy campaign 2 rejected."""
+    import numpy as np
 
-    assert "neural" in P.CONTINUATIONS
-    pol = P.build_continuation("neural")
-    sim = _sim()
-    s = sim.new_state()
-    move = pol(sim, s)
-    assert move is None or sim.can_cast(s, move[0], move[1])
-    assert P.set_continuation("neural") == "neural"
+    from deimos_bridge import neural_net, policies as P
+
+    for name in ("neural", "neural-b"):
+        assert name in P.CONTINUATIONS
+        pol = P.build_continuation(name)
+        sim = _sim()
+        s = sim.new_state()
+        move = pol(sim, s)
+        assert move is None or sim.can_cast(s, move[0], move[1])
+        assert P.set_continuation(name) == name
     P.set_continuation(P.DEFAULT_CONTINUATION)
+
+    a = neural_net.Net.load(neural_net.DEFAULT_WEIGHTS)
+    b = neural_net.Net.load(neural_net.DEFAULT_WEIGHTS_B)
+    assert not all(np.allclose(x[0], y[0])
+                   for x, y in zip(a.layers, b.layers))
 
 
 def test_unloadable_weights_cost_the_candidate_not_the_sweep(monkeypatch):
