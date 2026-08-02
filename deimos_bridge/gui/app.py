@@ -1101,9 +1101,20 @@ class MainWindow(QMainWindow):
         train_row = QHBoxLayout()
         train_row.addWidget(QLabel("episodes"))
         self.episodes = QSpinBox()
-        self.episodes.setRange(500, 200_000)
+        # The old 200k ceiling contradicted the window's own advice: a
+        # coverage miss said "raise episodes and retrain" to an
+        # operator whose box was already at its maximum.
+        self.episodes.setRange(500, 2_000_000)
         self.episodes.setSingleStep(1000)
         self.episodes.setValue(20000)
+        self.episodes.setToolTip(
+            "How many simulated fights to learn from. Diminishing "
+            "returns are measured, not a warning label: coverage grows "
+            "as roughly episodes^0.43, so ten times the episodes buys "
+            "about 2.7x the coverage. If misses keep coming at high "
+            "episode counts, the table cannot key this board range — "
+            "the ttk policy needs no training and usually plays it "
+            "better.")
         train_row.addWidget(self.episodes)
 
         train_row.addWidget(QLabel("my HP"))
@@ -1482,6 +1493,21 @@ class MainWindow(QMainWindow):
                         f"{lo:,}–{hi:,}. The key buckets health as HP//250, "
                         f"so outside that band nothing matches. Set mob HP "
                         f"nearer {hp:,.0f} and retrain.")
+        # The dead-end version of this advice told an operator at the
+        # episode box's MAXIMUM to "raise episodes and retrain". The
+        # scaling is measured: coverage grows as ~episodes^0.43, so at
+        # high counts the honest reading is that the table cannot key
+        # this range — and the window already measures who plays those
+        # rounds better (the fallback IS the ttk lookahead).
+        if self.episodes.value() >= 100_000:
+            return ("the states are mostly unvisited even at "
+                    f"{self.episodes.value():,} episodes. Coverage grows "
+                    "as ~episodes^0.43 (measured), so more training buys "
+                    "little here — this board range is wider than a "
+                    "tabular key can fill. The rounds that miss are "
+                    "played by the ttk lookahead, which needs no "
+                    "training; picking the ttk policy outright is "
+                    "usually the stronger driver on boards like these.")
         return ("the states are mostly unvisited — a wider board range "
                 "needs more episodes to fill; raise episodes and retrain")
 

@@ -5454,6 +5454,192 @@ def test_the_catalog_corrects_a_misread_school():
     assert boss.boost == {"ice": 0.2}
 
 
+def test_duplicate_live_blades_share_a_stacking_identity():
+    """A live trace priced a Fire Cat at 100 x 1.35 x 1.35 = 182: two
+    copies of the same Fireblade had been given DIFFERENT stack keys
+    (the old fallback used the effect's list position), so the rollout
+    consumed both on a single hit -- every extra blade looked
+    multiplicative, and three rounds of blade-spam followed on a fight
+    the wizard nearly lost. Same shape now means same key, whether or
+    not the template id reads; the sim then applies one per hit, which
+    is the game's rule."""
+    import asyncio
+
+    from deimos_bridge.live_state import read_hangings
+    from w101_sim import Boss, Sim
+
+    class _Enum:
+        name = "modify_outgoing_damage"
+
+    class _NoTid:
+        async def effect_type(self):
+            return _Enum()
+
+        async def effect_param(self):
+            return 35.0
+
+        async def damage_type(self):
+            return 2343174                      # fire
+
+        async def spell_template_id(self):
+            raise RuntimeError("old wizwalker")
+
+    class _Participant:
+        async def hanging_effects(self):
+            return [_NoTid(), _NoTid()]
+
+        async def aura_effects(self):
+            return []
+
+    class _Member:
+        async def get_participant(self):
+            return _Participant()
+
+    charms = asyncio.new_event_loop().run_until_complete(
+        read_hangings(_Member(), "charm"))
+    assert len(charms) == 2
+    assert charms[0].stack_key == charms[1].stack_key
+
+    from data_full import load_spells_full
+    cards = load_spells_full()
+    sim = Sim(cards, ["Fire Cat"], "fire",
+              Boss(name="b", hp=500, school="balance", dmg=0),
+              player_hp=600)
+    s = sim.new_state()
+    s.player.charms[:] = charms
+    mult = sim._consume_damage_charms(s, s.player, "fire")
+    assert abs(mult - 1.35) < 1e-9          # ONE applies, not both
+    assert len(s.player.charms) == 1        # the duplicate stays banked
+
+
+def test_the_rollout_banks_the_burn():
+    """`dealt` used to sum cast damage only; DoT ticks land in
+    end_round and were invisible, so a Fire Elf line that killed with
+    its burn banked just the initial hit and lost every damage
+    tiebreak to a blade line -- an anti-DoT bias, on the school built
+    around DoTs. Damage is the board delta now: a kill banks the whole
+    board no matter who delivered the last point."""
+    import random
+
+    from data_full import LIVE_RULES, load_spells_full
+    from deimos_bridge.policies import greedy_ttk
+    from w101_sim import Boss, Hanging, Sim
+
+    cards = load_spells_full()
+    deck = ["Fire Cat"]*3 + ["Fire Elf"]*3 + ["Fireblade"]*3 + ["Pixie"]*2
+    sim = Sim(cards, deck, "fire",
+              Boss(name="Warhorn", hp=285, school="balance", dmg=54),
+              player_hp=666,
+              player_stats={"damage": {"*": 0.0}, "accuracy": 0.05},
+              rules=LIVE_RULES,
+              # seeded: new_state shuffles the deck, and the rollout's
+              # continuation draws from it -- near-tie picks must not
+              # swing with the shuffle inside a test
+              rng=random.Random(11))
+    s = sim.new_state()
+    s.player.hand[:] = [cards["Fire Cat"], cards["Fire Elf"],
+                        cards["Fireblade"], cards["Pixie"]]
+    s.player.norm_pips = 2
+    pol = greedy_ttk(6)
+    pol(sim, s)
+    elf = next(c for c in pol.last_candidates if c.card == "Fire Elf")
+    assert elf.turns <= 6                   # the line kills in-horizon
+    assert elf.damage == 285.0              # and banks the WHOLE board
+
+    # The behavioural regression from the live export: one blade
+    # already up, the same hand -- the pick must not be a second blade.
+    s2 = sim.new_state()
+    s2.player.charms[:] = [Hanging(name="live:b", slot="charm",
+                                   kind="damage", percent=0.35,
+                                   schools={"fire"}, source="live",
+                                   sub="b")]
+    s2.player.hand[:] = [cards["Fire Cat"], cards["Fire Elf"],
+                        cards["Fireblade"], cards["Pixie"]]
+    s2.player.norm_pips = 2
+    move = pol(sim, s2)
+    assert move is not None and move[0].name != "Fireblade"
+
+
+def test_the_fight_outcome_is_read_off_the_client(qapp):
+    """Twelve live fights exported as "wins: 0" with won=null on every
+    one, including a clear win. The combat handler does not report
+    outcomes; the client does -- a defeated wizard leaves the duel at
+    zero health. Zero-round fights (spurious boundaries) stay
+    unknown."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    tel = Telemetry()
+    w = LiveWorker(tel, "fire", ["Fire Cat"] * 4, "ttk-lookahead", 1)
+
+    class _Stats:
+        hp = 223
+
+        async def current_hitpoints(self):
+            return self.hp
+
+    class _Client:
+        stats = _Stats()
+
+    run = asyncio.new_event_loop().run_until_complete
+    tel.start_fight()
+    tel.fights[-1].rounds = 13
+    assert run(w._fight_outcome(_Client())) is True     # alive: won
+
+    _Stats.hp = 0
+    assert run(w._fight_outcome(_Client())) is False    # defeated
+
+    tel.start_fight()                                   # 0 rounds
+    _Stats.hp = 500
+    assert run(w._fight_outcome(_Client())) is None     # unknown
+
+
+def test_an_early_pass_does_not_wear_last_rounds_candidates():
+    """Round 10 of a live export said "policy chose to pass" beside a
+    candidate table claiming Pixie was chosen -- the previous round's
+    comparison, left on the attribute when the decision ended early
+    because nothing was castable."""
+    from data_full import load_spells_full
+    from deimos_bridge.policies import greedy_ttk
+    from w101_sim import Boss, Sim
+
+    cards = load_spells_full()
+    sim = Sim(cards, ["Fire Cat"] * 3 + ["Fire Elf"] * 3, "fire",
+              Boss(name="b", hp=480, school="fire", dmg=0),
+              player_hp=589)
+    pol = greedy_ttk(6)
+    s = sim.new_state()
+    pol(sim, s)
+    assert pol.last_candidates            # a real comparison happened
+
+    s.player.hand[:] = []                 # nothing castable this round
+    assert pol(sim, s) is None
+    assert pol.last_candidates == []      # and the record says so
+
+
+def test_maxed_episodes_get_honest_advice_not_a_dead_end(qapp):
+    """The window told an operator at the episode box's MAXIMUM to
+    "raise episodes and retrain" — advice its own spinbox made
+    impossible to follow, about a scaling law (coverage ~episodes^0.43)
+    its own measurements say would barely help. At high episode counts
+    the message now says what is true: the table cannot key this range
+    and the ttk policy is the stronger driver. And the box itself goes
+    to 2,000,000 now, so the low-count advice stays followable."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    assert win.episodes.maximum() >= 2_000_000
+
+    win.generalize.setChecked(True)
+    win.episodes.setValue(200_000)
+    why = win._why_coverage_is_low()
+    assert "ttk" in why and "raise episodes and retrain" not in why
+
+    win.episodes.setValue(20_000)
+    assert "raise episodes and retrain" in win._why_coverage_is_low()
+
+
 def test_the_incoming_mean_counts_the_quiet_rounds():
     """A round where every mob fizzled or passed is a real round of
     the damage distribution. Dropping zero-loss rounds biased the

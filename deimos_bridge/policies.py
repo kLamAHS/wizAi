@@ -922,8 +922,22 @@ def _rollout(sim, state, first_action, max_turns=12, target=0,
         """
         return sum(max(e.hp, 0.0) for e in s.enemies)
 
-    dealt = 0.0
     start_board = board_hp() or 1.0
+
+    def dealt_now():
+        """Everything the board has lost since the rollout began.
+
+        The board DELTA, not a sum over casts -- the old per-cast
+        accounting silently excluded DoT ticks (they land in
+        `end_round`, not in a cast), so a Fire Elf line that killed
+        with its burn banked only its initial hit. On a live fire
+        wizard that bias decided ties the wrong way every time: a
+        blade line and a DoT line both killing on the same turn
+        compared 182 banked against 135, and the blade won three
+        rounds running while the burn was doing the actual work.
+        """
+        return start_board - board_hp()
+
     #: Ranks worse than any line that clears the board, and worse than
     #: one that merely runs out of horizon while alive. `unplayable` is
     #: for a move that cannot be made at all.
@@ -949,7 +963,7 @@ def _rollout(sim, state, first_action, max_turns=12, target=0,
         one, so it is not an edge case -- it is a large fraction of every
         decision the lookahead makes.
         """
-        return _lost_score(max_turns + 2, dealt, kills(), turn)
+        return _lost_score(max_turns + 2, dealt_now(), kills(), turn)
 
     def stalled(turn=0):
         if _LEAF is not None:
@@ -963,8 +977,8 @@ def _rollout(sim, state, first_action, max_turns=12, target=0,
                 worth = _LEAF(probe, s)
             except Exception:
                 worth = 0.0
-            return (max_turns + 1, -(dealt + worth * start_board))
-        return _lost_score(max_turns + 1, dealt, kills(), turn)
+            return (max_turns + 1, -(dealt_now() + worth * start_board))
+        return _lost_score(max_turns + 1, dealt_now(), kills(), turn)
 
     # find the copied card matching the chosen one
     action = None
@@ -985,19 +999,17 @@ def _rollout(sim, state, first_action, max_turns=12, target=0,
                 # mob and hits another scores a buff that never fires.
                 if not probe.can_cast(s, action, target):
                     return unplayable
-                before = board_hp()
                 probe.cast(s, action, target)
-                dealt += before - board_hp()
             except Exception:
                 return unplayable
         if not enemy_alive():
-            return turn, -dealt
+            return turn, -dealt_now()
         try:
             probe.end_round(s)
         except Exception:
             return stalled(turn)
         if not enemy_alive():
-            return turn, -dealt
+            return turn, -dealt_now()
         if not s.player.alive:
             return died(turn)
 
@@ -1076,6 +1088,12 @@ def greedy_ttk(max_turns: int = None, continuation=None):
     fixed_continuation = continuation
 
     def strat(sim, s):
+        # Cleared FIRST: a decision that ends early (nothing castable
+        # this round) used to leave the PREVIOUS round's comparison on
+        # the attribute, and the round record then showed a phantom --
+        # "policy chose to pass" beside a candidate table claiming a
+        # Pixie was chosen, copied verbatim from the round before.
+        strat.last_candidates = []
         max_turns = fixed if fixed is not None else search_horizon()
         from w101_sim import castable
 
