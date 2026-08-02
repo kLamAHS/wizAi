@@ -5454,6 +5454,112 @@ def test_the_catalog_corrects_a_misread_school():
     assert boss.boost == {"ice": 0.2}
 
 
+def test_duplicate_live_blades_share_a_stacking_identity():
+    """A live trace priced a Fire Cat at 100 x 1.35 x 1.35 = 182: two
+    copies of the same Fireblade had been given DIFFERENT stack keys
+    (the old fallback used the effect's list position), so the rollout
+    consumed both on a single hit -- every extra blade looked
+    multiplicative, and three rounds of blade-spam followed on a fight
+    the wizard nearly lost. Same shape now means same key, whether or
+    not the template id reads; the sim then applies one per hit, which
+    is the game's rule."""
+    import asyncio
+
+    from deimos_bridge.live_state import read_hangings
+    from w101_sim import Boss, Sim
+
+    class _Enum:
+        name = "modify_outgoing_damage"
+
+    class _NoTid:
+        async def effect_type(self):
+            return _Enum()
+
+        async def effect_param(self):
+            return 35.0
+
+        async def damage_type(self):
+            return 2343174                      # fire
+
+        async def spell_template_id(self):
+            raise RuntimeError("old wizwalker")
+
+    class _Participant:
+        async def hanging_effects(self):
+            return [_NoTid(), _NoTid()]
+
+        async def aura_effects(self):
+            return []
+
+    class _Member:
+        async def get_participant(self):
+            return _Participant()
+
+    charms = asyncio.new_event_loop().run_until_complete(
+        read_hangings(_Member(), "charm"))
+    assert len(charms) == 2
+    assert charms[0].stack_key == charms[1].stack_key
+
+    from data_full import load_spells_full
+    cards = load_spells_full()
+    sim = Sim(cards, ["Fire Cat"], "fire",
+              Boss(name="b", hp=500, school="balance", dmg=0),
+              player_hp=600)
+    s = sim.new_state()
+    s.player.charms[:] = charms
+    mult = sim._consume_damage_charms(s, s.player, "fire")
+    assert abs(mult - 1.35) < 1e-9          # ONE applies, not both
+    assert len(s.player.charms) == 1        # the duplicate stays banked
+
+
+def test_the_rollout_banks_the_burn():
+    """`dealt` used to sum cast damage only; DoT ticks land in
+    end_round and were invisible, so a Fire Elf line that killed with
+    its burn banked just the initial hit and lost every damage
+    tiebreak to a blade line -- an anti-DoT bias, on the school built
+    around DoTs. Damage is the board delta now: a kill banks the whole
+    board no matter who delivered the last point."""
+    import random
+
+    from data_full import LIVE_RULES, load_spells_full
+    from deimos_bridge.policies import greedy_ttk
+    from w101_sim import Boss, Hanging, Sim
+
+    cards = load_spells_full()
+    deck = ["Fire Cat"]*3 + ["Fire Elf"]*3 + ["Fireblade"]*3 + ["Pixie"]*2
+    sim = Sim(cards, deck, "fire",
+              Boss(name="Warhorn", hp=285, school="balance", dmg=54),
+              player_hp=666,
+              player_stats={"damage": {"*": 0.0}, "accuracy": 0.05},
+              rules=LIVE_RULES,
+              # seeded: new_state shuffles the deck, and the rollout's
+              # continuation draws from it -- near-tie picks must not
+              # swing with the shuffle inside a test
+              rng=random.Random(11))
+    s = sim.new_state()
+    s.player.hand[:] = [cards["Fire Cat"], cards["Fire Elf"],
+                        cards["Fireblade"], cards["Pixie"]]
+    s.player.norm_pips = 2
+    pol = greedy_ttk(6)
+    pol(sim, s)
+    elf = next(c for c in pol.last_candidates if c.card == "Fire Elf")
+    assert elf.turns <= 6                   # the line kills in-horizon
+    assert elf.damage == 285.0              # and banks the WHOLE board
+
+    # The behavioural regression from the live export: one blade
+    # already up, the same hand -- the pick must not be a second blade.
+    s2 = sim.new_state()
+    s2.player.charms[:] = [Hanging(name="live:b", slot="charm",
+                                   kind="damage", percent=0.35,
+                                   schools={"fire"}, source="live",
+                                   sub="b")]
+    s2.player.hand[:] = [cards["Fire Cat"], cards["Fire Elf"],
+                        cards["Fireblade"], cards["Pixie"]]
+    s2.player.norm_pips = 2
+    move = pol(sim, s2)
+    assert move is not None and move[0].name != "Fireblade"
+
+
 def test_the_fight_outcome_is_read_off_the_client(qapp):
     """Twelve live fights exported as "wins: 0" with won=null on every
     one, including a clear win. The combat handler does not report

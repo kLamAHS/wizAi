@@ -329,28 +329,45 @@ async def read_hangings(member, slot: str) -> list:
         try:
             tid = int(await e.spell_template_id())
         except Exception:
-            tid = i
+            tid = None
+
+        # The STACKING identity is the effect's shape, not its list
+        # position. The old fallback (`sub=i`, the loop index) gave two
+        # copies of the same Fireblade DIFFERENT stack keys, so the
+        # rollout consumed both on a single hit -- a live trace priced
+        # a Fire Cat at 100 x 1.35 x 1.35 = 182, and three rounds of
+        # blade-spam followed, because every extra blade looked
+        # multiplicative when the game applies one per hit
+        # (`_consume_damage_charms`, one per stack_key -- Deimos's own
+        # dedupe rule). Same-shaped charms now share a key whether or
+        # not the template id reads; two genuinely different blades
+        # (different percent or school) still stack.
+        ident = f"{kind_name}:{dtype}:{param:g}"
+        shown = tid if tid is not None else ident
 
         if slot == "charm" and kind_name in OUTGOING_DAMAGE:
-            out.append(Hanging(name=f"live:{tid}", slot="charm", kind="damage",
-                               percent=param / 100.0, schools=schools,
-                               source="live", sub=tid))
+            out.append(Hanging(name=f"live:{shown}", slot="charm",
+                               kind="damage", percent=param / 100.0,
+                               schools=schools, source="live", sub=ident))
         elif slot == "ward" and kind_name in INCOMING_DAMAGE:
-            out.append(Hanging(name=f"live:{tid}", slot="ward", kind="damage",
-                               percent=param / 100.0, schools=schools,
-                               source="live", sub=tid))
+            out.append(Hanging(name=f"live:{shown}", slot="ward",
+                               kind="damage", percent=param / 100.0,
+                               schools=schools, source="live", sub=ident))
         elif slot == "ward" and kind_name in INCOMING_PRISM:
-            out.append(Hanging(name=f"live:{tid}", slot="ward", kind="prism",
-                               schools=schools,
+            out.append(Hanging(name=f"live:{shown}", slot="ward",
+                               kind="prism", schools=schools,
                                convert_to=_SCHOOL_BY_ID.get(int(param), None),
-                               source="live", sub=tid))
+                               source="live", sub=ident))
         elif slot == "ward" and kind_name in INCOMING_ABSORB:
-            out.append(Hanging(name=f"live:{tid}", slot="ward", kind="absorb",
-                               amount=param, source="live", sub=tid))
+            # absorbs are separate POOLS -- two absorbs both soak, so
+            # they keep per-instance identity
+            out.append(Hanging(name=f"live:{shown}", slot="ward",
+                               kind="absorb", amount=param, source="live",
+                               sub=tid if tid is not None else i))
         elif slot == "charm" and kind_name in OUTGOING_ACCURACY:
-            out.append(Hanging(name=f"live:{tid}", slot="charm",
+            out.append(Hanging(name=f"live:{shown}", slot="charm",
                                kind="accuracy", percent=param / 100.0,
-                               schools=schools, source="live", sub=tid))
+                               schools=schools, source="live", sub=ident))
         elif slot == "ward" and kind_name in (OVER_TIME_DOT | OVER_TIME_HOT):
             from w101_sim import OverTime
 
@@ -360,7 +377,7 @@ async def read_hangings(member, slot: str) -> list:
                 rounds = 3
             school = _SCHOOL_BY_ID.get(dtype, "fire")
             out.append(OverTime(
-                name=f"live:{tid}",
+                name=f"live:{shown}",
                 kind="dot" if kind_name in OVER_TIME_DOT else "hot",
                 school=school, per_tick=abs(param) / rounds,
                 rounds_left=rounds, caster="live"))
