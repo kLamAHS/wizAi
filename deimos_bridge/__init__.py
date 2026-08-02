@@ -22,6 +22,11 @@ and only the second needs Windows and a running game:
   `live_backend`    the decision loop, and the CombatHandler that asks a
                     wizAi policy what to cast. The piece that fights real
                     enemies.
+  `hivemind`        one round planned for a party of up to four wizards
+                    at once, so a trap one lays is cashed by the next and
+                    nobody fires into a mob that is already dead. Plain
+                    Python, like the first three: the joint plan is
+                    testable with no game in sight.
   `mock_client`     fakes of the wizwalker objects, so `live_state` and
                     `live_backend` are testable without the game.
 
@@ -37,5 +42,6 @@ __all__ = [
     "effect_audit",
     "live_state",
     "live_backend",
+    "hivemind",
     "mock_client",
 ]

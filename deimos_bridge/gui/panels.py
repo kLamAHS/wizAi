@@ -122,7 +122,31 @@ def _cell(text, color=None):
     return it
 
 
-class BoardPanel(QWidget):
+
+class TelemetryView:
+    """A panel that can be pointed at a different wizard's run.
+
+    With a party, the window keeps one `Telemetry` per wizard -- one
+    shared record would interleave four wizards' rounds into one
+    Decisions table and settle each round's damage against another
+    wizard's board. The tabs then show whichever wizard is selected, so
+    every panel needs to be able to change which record it reads.
+
+    Deliberately a re-render and not a subscription: a live run fills the
+    telemetry from a worker thread, and a panel that redrew from there
+    would be touching Qt off the GUI thread.
+    """
+
+    def set_telemetry(self, telemetry):
+        if telemetry is None or telemetry is getattr(self, "tel", None):
+            return
+        self.tel = telemetry
+        if hasattr(self, "_row"):
+            self._row = -1          # follow the new record's latest round
+        self.refresh()
+
+
+class BoardPanel(TelemetryView, QWidget):
     """What the policy was shown.
 
     First panel for a reason: the most expensive live-run failure is not
@@ -205,7 +229,7 @@ class BoardPanel(QWidget):
             self.unres.setText("")
 
 
-class DecisionsPanel(QWidget):
+class DecisionsPanel(TelemetryView, QWidget):
     """Every decision, with what it weighed and what it passed over.
 
     The matrix is the point of this panel and the table is the backup.
@@ -307,7 +331,7 @@ class DecisionsPanel(QWidget):
         self.table.scrollToBottom()
 
 
-class ModelPanel(QWidget):
+class ModelPanel(TelemetryView, QWidget):
     """Did the simulator predict what the game actually did?
 
     The reason this project needed Deimos at all. Every other number here
@@ -390,7 +414,7 @@ class ModelPanel(QWidget):
             for r in rows])
 
 
-class LearningPanel(QWidget):
+class LearningPanel(TelemetryView, QWidget):
     """Whether the model learned anything, and whether it is being used.
 
     Two questions with two different answers, and conflating them is how
@@ -479,7 +503,7 @@ class LearningPanel(QWidget):
             "the controls for which mismatch it is.")
 
 
-class NamingPanel(QWidget):
+class NamingPanel(TelemetryView, QWidget):
     """Cards the policy could not see, and what to do about each.
 
     Its own panel because the failure is silent: wizAi's card table is
@@ -566,7 +590,7 @@ class NamingPanel(QWidget):
             self.table.setItem(i, 3, _cell(todo, PALETTE["muted"]))
 
 
-class RunPanel(QWidget):
+class RunPanel(TelemetryView, QWidget):
     """Fights, and the run summary you would paste into a results table."""
 
     def __init__(self, telemetry):
@@ -600,3 +624,122 @@ class RunPanel(QWidget):
             self.table.setItem(i, 3, _cell(f"{f.damage_dealt:,.0f}"))
             self.table.setItem(i, 4, _cell(f.passes))
             self.table.setItem(i, 5, _cell(f.unresolved))
+
+
+class PartyPanel(QWidget):
+    """What the four wizards agreed to do, and what it changed.
+
+    The one panel that is not a view over a `Telemetry`, because it is
+    not about a wizard -- it is about the round, which belongs to no
+    single one of them. It reads a `hivemind.PartyPlan`.
+
+    It exists because coordination is invisible in every other panel. A
+    Decisions row saying "Snow Serpent on the minion" reads identically
+    whether that was this wizard's own call or the consequence of
+    another wizard having already claimed the boss, and the second is
+    the entire reason to run four clients. So the plan is shown as a
+    plan: who casts what, at whom, and what each of them would have
+    played alone.
+    """
+
+    def __init__(self):
+        super().__init__()
+        root = QVBoxLayout(self)
+        root.addWidget(_label(
+            "Each round, every wizard in the circle submits its board and "
+            "waits for the others before anyone clicks a card. The move is "
+            "then chosen against a board that already carries what the rest "
+            "of the party committed to — so a trap one wizard lays is in the "
+            "next wizard's rollout and gets cashed, and nobody fires into a "
+            "mob that is already dead this round.", PALETTE["muted"]))
+
+        self.headline = _label("no party round planned yet", size=13,
+                               bold=True)
+        root.addWidget(self.headline)
+
+        self.board_lab = _label("", PALETTE["muted"])
+        root.addWidget(self.board_lab)
+
+        # "alone" gets real width: it is the only column that answers the
+        # question the tab exists for, and elided down to "Dark Spr…" it
+        # answers nothing.
+        self.table = _table(["wizard", "casts", "on", "damage", "alone",
+                             "why"],
+                            weights=(2, 4, 4, 2, 4, 5))
+        root.addWidget(self.table)
+
+        self.totals = _label("", PALETTE["muted"])
+        root.addWidget(self.totals)
+        root.addWidget(_label(
+            "'alone' is the same wizard's own answer with no party around "
+            "it — where it differs from 'casts' is exactly what coordinating "
+            "bought. A held card is one the rest of the party has already "
+            "made unnecessary this round; it stays in hand rather than being "
+            "spent on a corpse.", PALETTE["muted"]))
+        self.plan = None
+        self.hive = None
+
+    def show_plan(self, plan, hive=None):
+        self.plan = plan
+        if hive is not None:
+            self.hive = hive
+        self.refresh()
+
+    def refresh(self):
+        plan = self.plan
+        if plan is None:
+            self.headline.setText("no party round planned yet")
+            self.board_lab.setText("")
+            self.table.setRowCount(0)
+            self.totals.setText("")
+            return
+
+        self.headline.setText(
+            (f"round {plan.round_number} · " if plan.round_number else "")
+            + plan.summary())
+        self.board_lab.setText(
+            "board: " + (" · ".join(f"{name} {hp:,.0f}/{mx:,.0f}"
+                                    for name, hp, mx in plan.board)
+                         or "—"))
+
+        _apply_weights(self.table)
+        self.table.setRowCount(len(plan.moves))
+        for i, move in enumerate(plan.moves):
+            held = move.note == "held"
+            colour = (PALETTE["warn"] if held else
+                      PALETTE["good"] if move.retargeted else PALETTE["text"])
+            alone = move.solo_card or "pass"
+            if move.solo_target is not None and move.solo_card:
+                alone += f" @{move.solo_target}"
+            self.table.setItem(i, 0, _cell(move.name))
+            self.table.setItem(i, 1, _cell(move.card or "pass", colour))
+            self.table.setItem(i, 2, _cell(move.target_name or "—"))
+            self.table.setItem(i, 3, _cell(f"{move.damage:,.0f}"
+                                           if move.damage else "—"))
+            self.table.setItem(i, 4, _cell(
+                alone, PALETTE["muted"] if not move.retargeted
+                else PALETTE["good"]))
+            self.table.setItem(i, 5, _cell(
+                "held — already dead this round" if held else
+                "re-aimed by the party" if move.retargeted else "—",
+                PALETTE["muted"]))
+
+        hive = self.hive
+        if hive is None:
+            self.totals.setText("")
+            return
+        # Lifetime, not this round: one re-aim is an anecdote, and the
+        # question worth answering is whether running four clients as a
+        # party is doing anything at all.
+        self.totals.setText(
+            f"over {hive.rounds} coordinated round(s): "
+            f"{hive.retargets} move(s) changed by the party, "
+            f"{hive.saved} card(s) held back from a board that was already "
+            f"dead"
+            + (f" · {hive.solo_rounds} round(s) planned alone (the rest of "
+               f"the party was not in the circle)" if hive.solo_rounds
+               else ""))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        _apply_weights(self.table)

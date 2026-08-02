@@ -81,7 +81,8 @@ class WizAiBackend:
 
     def __init__(self, policy, cards, school, decklist=None, cast_time=0.3,
                  on_decision=None, rules=None, catalog=None, policy_name="",
-                 player_stats=None, on_lost_round=None):
+                 player_stats=None, on_lost_round=None, seat=0,
+                 coordinator=None, party_size=1):
         """
         Args:
             policy:   `policy(sim, state) -> Card | str | None`, wizAi's
@@ -102,6 +103,17 @@ class WizAiBackend:
             player_stats: the wizard's gear, as `Sim(player_stats=...)`
                       takes it. See `live_state.read_player_stats`;
                       leaving it empty models a wizard wearing nothing.
+            seat:     which wizard of the party this backend drives.
+                      Only an identity -- the coordinator keys on it.
+            coordinator: a `hivemind.Hivemind`, or None to decide alone.
+                      With one installed the policy is still the same
+                      callable and still gets `(sim, state)`; what
+                      changes is that the state it is handed already
+                      carries what the rest of the party committed to
+                      this round. See `deimos_bridge/hivemind.py`.
+            party_size: how many wizards are in the circle. Used to
+                      apportion a casting boss's modelled output, which
+                      a party splits between them.
         """
         #: The policy and its display name, held as one tuple so that
         #: swapping is a single atomic rebind. Two attributes would let a
@@ -129,6 +141,15 @@ class WizAiBackend:
         #: than being given a made-up number.
         self.power_pip_chance = None
         self.rules = rules
+        #: which wizard of the party this is. An identity and nothing
+        #: else -- the coordinator keys its plan on it.
+        self.seat = int(seat or 0)
+        #: who agrees the round with the other seats. `None` is a wizard
+        #: deciding alone, which is bit-for-bit the path that shipped
+        #: before parties existed.
+        self.coordinator = coordinator
+        #: wizards in the circle, for splitting a boss's output
+        self.party_size = max(1, int(party_size or 1))
         self.resolver = NameResolver(cards, catalog)
         self.history = []          # PolicyDecision, in order
         self._seen = []            # card names observed in hand so far
@@ -216,7 +237,17 @@ class WizAiBackend:
         # replaced it midway.
         policy, label = self._policy
         try:
-            choice = policy(sim, read.state)
+            if self.coordinator is not None:
+                # The party decides the round together. The policy is
+                # still this callable and still sees `(sim, state)` --
+                # what the coordinator changes is the board it is shown,
+                # which already carries the other wizards' commitments.
+                # It also blocks until they have all arrived, which is
+                # why `decide` is async and this branch is awaited.
+                choice = await self.coordinator.decide(
+                    self.seat, sim, read.state, policy, read)
+            else:
+                choice = policy(sim, read.state)
         except Exception as exc:                      # a policy must never
             decision = PolicyDecision(                # break a live fight
                 passing=True, policy=label or "policy",
@@ -230,8 +261,43 @@ class WizAiBackend:
         # what it weighed.
         decision.policy = self._why(policy, label)
         decision.candidates = list(getattr(policy, "last_candidates", ()) or ())
+        self._note_party(decision)
         self._record(decision, read)
         return decision
+
+    def _note_party(self, decision):
+        """Record when the party is what changed this wizard's mind.
+
+        Without it a coordinated run is unreadable: the decision row
+        says "ttk-lookahead played Snow Serpent on the minion" whether
+        that was this wizard's own call or the consequence of another
+        wizard having already claimed the boss, and those are different
+        events. The whole reason to run four instances is the second
+        one, so it has to be visible.
+        """
+        hive = self.coordinator
+        if hive is None:
+            return
+        # The label goes on whether or not the plan is still readable: a
+        # round decided through the coordinator was coordinated, and a
+        # log that only says so when the outcome happened to change is a
+        # log that cannot answer "was the party on?".
+        decision.policy += " · party"
+        try:
+            move = hive.last_move(self.seat)
+        except Exception:
+            return
+        if move is None:
+            return
+        if move.note == "held":
+            decision.reason = ("held this card — the rest of the party "
+                               "already has this board dead this round")
+        elif move.retargeted:
+            was = move.solo_card or "pass"
+            if move.solo_target is not None:
+                was += f" @{move.solo_target}"
+            decision.reason += (f" (alone it would have played {was}; "
+                                f"the party's plan changed it)")
 
     def _interpret(self, choice, read):
         if choice is None:
@@ -539,7 +605,15 @@ class WizAiBackend:
         if not pooled or not flat:
             return
         total = self._measured_incoming * len(living)
-        modeled = sum(self._modeled_pool_output(e) for e in pooled)
+        # Divided by the party, because the measurement it is subtracted
+        # from already is. `_estimate_incoming` reads THIS wizard's health
+        # drop, and a boss casting one Wraith a round in a circle of four
+        # spreads that round's output across four health bars -- so
+        # subtracting the caster's whole modelled output from one
+        # wizard's share drives the flat mobs to the floor and reads a
+        # dangerous board as a harmless one.
+        modeled = sum(self._modeled_pool_output(e)
+                      for e in pooled) / self.party_size
         share = max(10.0, (total - modeled) / len(flat))
         for e in flat:
             e.flat_hit = min(e.flat_hit, share)
@@ -704,6 +778,14 @@ class WizAiCombatHandler:
     # valid `combat` for the backend.
 
     async def handle_round(self):
+        # Announced before anything is read: the coordinator only waits
+        # for seats it knows are in a duel, so a wizard still walking to
+        # the circle never stalls the ones already swinging -- and one
+        # that has just walked in has to be counted before the others
+        # plan without it.
+        hive = getattr(self.backend, "coordinator", None)
+        if hive is not None:
+            hive.enter_combat(self.backend.seat)
         # Every action here is a mouse click -- wizwalker has no memory
         # API for casting -- and `MouseHandler.__aenter__` is what
         # activates the mouseless cursor hook that makes those clicks land
