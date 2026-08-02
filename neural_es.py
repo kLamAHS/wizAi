@@ -99,6 +99,16 @@ BOARD_SETS = {
     # healths sit off the survey points (650/950), which stay held
     # out; the bar to ship is beating the LEADER there, not the
     # shipped net.
+    #
+    # CAMPAIGN 4 VERDICT -- SHIPPED as the second seat (neural-b).
+    # Run A climbed 31.8 -> 40.8 on fitness; held out on the survey
+    # points it beat the buff-heavy board's leader on both fresh
+    # streams (38.2/37.8 vs school-aware(0)'s 32.9/31.9) and closed
+    # most of the myth gap without taking it (40.0 vs
+    # school-aware(3)'s 41.1 -- that board stays hand-coded ground).
+    # The survey-first design is what campaigns 2 and 3 bought: aim
+    # at measured levers, ship on beating the leader, let the
+    # per-deck sweep route everything else.
     "charm": (
         (["Iceblade"] * 4 + ["Ice Trap"] * 4 + ["Evil Snowman"] * 4
          + ["Frost Beetle"] * 4, "ice", 1022, 0.09, 620, 2, 92),

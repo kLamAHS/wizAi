@@ -283,6 +283,12 @@ class Net:
 
 DEFAULT_WEIGHTS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                "neural_continuation.json")
+#: the second seat: the campaign-4 charm specialist ("neural-b" in
+#: CONTINUATIONS). Separate weights, same architecture, priced by the
+#: same per-deck sweep -- more coverage means more seats, not a wider
+#: objective on one net.
+DEFAULT_WEIGHTS_B = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "neural_continuation_b.json")
 
 
 def net_policy(path=None):
