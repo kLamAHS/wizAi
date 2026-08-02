@@ -5454,6 +5454,59 @@ def test_the_catalog_corrects_a_misread_school():
     assert boss.boost == {"ice": 0.2}
 
 
+def test_overkill_burns_die_with_their_target():
+    """A live trace showed the lookahead spending a 2-pip Fire Elf on
+    a 14 HP minion instead of the 1-pip Cat -- because the sim
+    re-resolved the dot op after the killing hit, transferring the
+    whole burn to the boss. The real game binds the spell to its
+    target (live-confirmed: the burn never appeared on the boss). A
+    target that dies mid-cast stays the target; the ops that follow
+    no-op."""
+    import random
+
+    from data_full import LIVE_RULES, load_spells_full
+    from deimos_bridge.policies import greedy_ttk
+    from w101_sim import Boss, Sim
+
+    cards = load_spells_full()
+    sim = Sim(cards, ["Fire Elf"] * 4, "fire",
+              Boss(name="boss", hp=550, school="death", dmg=0),
+              enemies=[Boss(name="minion", hp=14, school="balance",
+                            dmg=0)],
+              player_hp=684, rules=LIVE_RULES, rng=random.Random(5),
+              player_stats={"accuracy": 0.5})     # never fizzles
+    s = sim.new_state()
+    s.player.norm_pips = 2
+    elf = next(c for c in s.hand if c.name == "Fire Elf")
+    sim.cast(s, elf, target=1)
+    assert not s.enemies[1].alive                 # the minion died
+    assert s.enemies[1].hp <= 0
+    assert s.enemies[0].over_time == []           # no transferred burn
+    hp0 = s.enemies[0].hp
+    sim.end_round(s)
+    assert s.enemies[0].hp == hp0                 # and nothing ticks
+
+    # The decision that exposed it: minion at 14, cat and elf both
+    # kill it -- with no free transfer, the 1-pip Cat is not beaten
+    # by the 2-pip Elf.
+    deck = ["Fire Cat"]*3 + ["Fire Elf"]*3 + ["Fireblade"]*3 + ["Pixie"]*2
+    sim2 = Sim(cards, deck, "fire",
+               Boss(name="boss", hp=440, school="death", dmg=60),
+               enemies=[Boss(name="minion", hp=14, school="balance",
+                             dmg=79)],
+               player_hp=684, rules=LIVE_RULES, rng=random.Random(5))
+    s2 = sim2.new_state()
+    s2.player.hand[:] = [cards["Fire Cat"], cards["Fire Elf"],
+                         cards["Fireblade"], cards["Pixie"]]
+    s2.player.norm_pips = 2
+    pol = greedy_ttk(6)
+    pol(sim2, s2)
+    by = {(c.card, c.target): c for c in pol.last_candidates}
+    cat = by[("Fire Cat", 1)]
+    elf2 = by[("Fire Elf", 1)]
+    assert (cat.turns, -cat.damage, 1) <= (elf2.turns, -elf2.damage, 2)
+
+
 def test_duplicate_live_blades_share_a_stacking_identity():
     """A live trace priced a Fire Cat at 100 x 1.35 x 1.35 = 182: two
     copies of the same Fireblade had been given DIFFERENT stack keys

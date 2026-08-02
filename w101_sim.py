@@ -1375,6 +1375,18 @@ class Sim:
                                                 _aura_pierce(caster))
             return ward_state[k]
 
+        # The aimed enemy is resolved ONCE per cast. Resolving per-op
+        # let a dot op RE-resolve after the killing hit of the same
+        # cast, so a Fire Elf that overkilled a 14 HP minion left its
+        # whole burn on the boss -- a transfer the real game does not
+        # make (live-confirmed: the burn never appeared on the boss),
+        # and the lookahead had learned to exploit it, spending 2-pip
+        # elves on dying mobs for a free 283 next door. A target that
+        # dies mid-cast stays the target; the ops that follow no-op,
+        # which is overkill working the way overkill works.
+        pinned_foe = self._resolve_targets(s, caster, "enemy",
+                                           target_idx, ally_idx)
+
         for op in ops:
             o = dict(op)
             kind = o["op"]
@@ -1382,8 +1394,11 @@ class Sim:
             tgt_spec = o.get("tgt", "enemy" if kind in
                              ("hit", "dot", "drain", "stun", "dispel")
                              else "self")
-            targets = self._resolve_targets(s, caster, tgt_spec, target_idx,
-                                            ally_idx)
+            if tgt_spec == "enemy":
+                targets = [t for t in pinned_foe if t.alive]
+            else:
+                targets = self._resolve_targets(s, caster, tgt_spec,
+                                                target_idx, ally_idx)
 
             if kind in ("hit", "dot", "drain"):
                 g = o.get("group", 0)
