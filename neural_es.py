@@ -89,6 +89,28 @@ BOARD_SETS = {
         (_STORM, "storm", 800, 0.05, 1250, 1, 105),
         (_FIRE, "fire", 900, 0.07, 620, 2, 82),
     ),
+    # campaign 4: the two boards the spread survey measured as real
+    # levers where a hand-coded candidate leads the neural one by ~10
+    # -- both CHARM-HEAVY decks. buffy(ice): spread 34.4, leader
+    # school-aware(0) 36.8 vs neural 26.8. L30 myth: spread 15.2,
+    # leader school-aware(3) 43.6 vs neural 33.2. Near-ceiling boards
+    # (L30 death, leader 96.8) are deliberately absent: matching a
+    # covered leader is redundancy, the campaign-2 lesson. Fitness
+    # healths sit off the survey points (650/950), which stay held
+    # out; the bar to ship is beating the LEADER there, not the
+    # shipped net.
+    "charm": (
+        (["Iceblade"] * 4 + ["Ice Trap"] * 4 + ["Evil Snowman"] * 4
+         + ["Frost Beetle"] * 4, "ice", 1022, 0.09, 620, 2, 92),
+        (["Iceblade"] * 4 + ["Ice Trap"] * 4 + ["Evil Snowman"] * 4
+         + ["Frost Beetle"] * 4, "ice", 1022, 0.09, 690, 2, 92),
+        (["Cyclops"] * 4 + ["Humongofrog"] * 4 + ["Troll"] * 4
+         + ["Balanceblade"] * 2 + ["Hex"] * 2 + ["Tower Shield"] * 2,
+         "myth", 1270, 0.15, 900, 2, 115),
+        (["Cyclops"] * 4 + ["Humongofrog"] * 4 + ["Troll"] * 4
+         + ["Balanceblade"] * 2 + ["Hex"] * 2 + ["Tower Shield"] * 2,
+         "myth", 1270, 0.15, 1010, 2, 115),
+    ),
     # campaign 3: survival play against CASTING bosses -- the ground
     # no hand-coded continuation covers (none of the five ever casts a
     # shield or a heal inside a rollout) and the shipped specialist
