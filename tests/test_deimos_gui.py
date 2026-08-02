@@ -5448,6 +5448,47 @@ def test_the_catalog_corrects_a_misread_school():
     assert boss.boost == {"ice": 0.2}
 
 
+def test_the_preflight_asks_the_search_before_refusing(qapp):
+    """The scripted canary is the weakest policy in the repo, and
+    refusing on its word alone overclaims badly: on a live operator's
+    board (480 + 235 balance at 77/round, a heal-less fire deck) the
+    canary won 0.0% of 500 while greedy_ttk -- the policy that
+    actually drives live fights -- won 60.4%. The GUI told the
+    operator "this board cannot be won" about a fight the AI wins
+    three times in five."""
+    from data_full import load_spells_full
+    from deimos_bridge.gui.app import TrainWorker
+    from w101_sim import Boss
+
+    cards = load_spells_full()
+    deck = ["Fire Cat"] * 3 + ["Fire Elf"] * 3 + ["Fireblade"] * 3
+    w = TrainWorker(cards, deck, "fire", 100, player_hp=589,
+                    boss_hp=480, player_stats={"accuracy": 0.05},
+                    n_enemies=2, mob_hps=[480, 235],
+                    mob_schools=["balance", "balance"], mob_damage=77)
+    board = Boss(name="b", hp=480, school="balance", dmg=77)
+    extra = [Boss(name="m", hp=235, school="balance", dmg=77)]
+    ok, note = w.preflight(board, extra, n=200)
+    assert ok, f"refused a board the search wins: {note}"
+
+
+def test_a_refusal_is_not_a_failure(qapp, monkeypatch):
+    """The preflight's verdict is a finding about the BOARD; rendering
+    it as "training failed" reads as the tool breaking, which is
+    exactly how a live operator read it."""
+    from deimos_bridge.gui import app as app_mod
+    from deimos_bridge.gui.app import MainWindow
+
+    warned = []
+    monkeypatch.setattr(app_mod.QMessageBox, "warning",
+                        lambda *a, **k: warned.append(a))
+    win = MainWindow(Telemetry())
+    win.on_train_refused("this board cannot be won at these settings")
+    assert "refused" in win.status.text()
+    assert "failed" not in win.status.text()
+    assert warned
+
+
 def test_the_refusal_names_a_school_wall(qapp):
     """A fire wizard's all-fire deck against a fire board loses ~40%
     of every hit to own-school resist, and same-school deck advice
