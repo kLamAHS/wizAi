@@ -21,8 +21,17 @@ sleeping seat from whichever seat closed the round. Each wizard gets its
 own `_Seat` — client, backend, combat handler, telemetry, questing,
 upkeep — and the fight loops run concurrently under `asyncio.gather`.
 
+One wizard leads and the rest follow it around: the leader quests, the
+followers teleport onto it and step into its duel (`deimos_bridge/
+party.py`). That is not a convenience -- the round-by-round agreement
+only reaches wizards who are in the same fight, and four clients each
+running the questing independently walk to four different places and
+coordinate perfectly with nobody.
+
 A run of one is exactly the run that shipped before parties existed: no
-coordinator is built, no barrier is entered, no status line is prefixed.
+coordinator is built, no barrier is entered, nothing follows anything,
+and no status line is prefixed.
+
 Seat 0's configuration is also reachable straight off the worker
 (`worker.school`, `worker.deck`, `worker._backend`, ...), so every caller
 written against the single-wizard worker keeps working.
@@ -115,6 +124,12 @@ class _Seat:
         self.in_upkeep = False
         #: said once, not every half-second, when the quest arrow is off
         self.warned_quest_arrow = False
+        #: this wizard's in-game name, learned from its first duel. The
+        #: client will not say it outside the character-select screen,
+        #: but a combat read names the client's own member -- and the
+        #: cross-zone follow needs it to pick the leader out of the
+        #: friends list.
+        self.wizard_name = None
         #: stage name -> how many times it has failed, so a broken stage
         #: is reported rather than retried silently twice a second
         self.stage_errors = {}
@@ -181,7 +196,8 @@ class LiveWorker(QThread):
                  agent=None, auto_quest=False, auto_dialogue=True,
                  collect_wisps=True, use_potions=True, script="",
                  hotkeys=None, continuation="", seats=None,
-                 coordinate=True, passes=2, barrier=None):
+                 coordinate=True, passes=2, barrier=None,
+                 follow_leader=True, leader=0):
         super().__init__()
         # Seat 0 is always the arguments this was called with, so the
         # single-wizard signature is untouched; `seats` adds the rest.
@@ -222,6 +238,12 @@ class LiveWorker(QThread):
         self.passes = int(passes)
         self.barrier = barrier
         self.hive = None
+        #: which wizard sets the pace, and whether the rest chase it.
+        #: Without this a party is four wizards questing independently to
+        #: four different places, coordinating perfectly with nobody --
+        #: see `deimos_bridge/party.py`.
+        self.leader = max(0, min(int(leader), len(self.seats) - 1))
+        self.follow_leader = bool(follow_leader)
         self._stop = False
 
     # -- seat 0, reachable where it always was -----------------------------
@@ -401,7 +423,13 @@ class LiveWorker(QThread):
                     await self._stage(seat, "script step",
                                       self._script_step(seat))
 
-                if self.auto_quest:
+                if self._follows(seat):
+                    # A follower does not quest. Two wizards taking their
+                    # own quests walk to two places, and then the party
+                    # coordinates beautifully with nobody.
+                    await self._stage(seat, "following the leader",
+                                      self._follow_step(client))
+                elif self.auto_quest:
                     await self._stage(seat, "quest step",
                                       self._quest_step(client))
 
@@ -750,6 +778,35 @@ class LiveWorker(QThread):
         except Exception as exc:
             seat.runner = None
             self._say(seat, f"script not loaded: {exc}")
+
+    def _follows(self, seat):
+        """Is this seat a follower rather than the one setting the pace?"""
+        return (self.follow_leader and len(self.seats) > 1
+                and seat.index != self.leader)
+
+    async def _follow_step(self, client, seat=None):
+        """One tick of keeping this wizard on the leader.
+
+        Reported only when something actually happened. The tick runs
+        twice a second and a party standing together correctly is the
+        normal case, so a line per tick would bury everything else in
+        the status bar.
+        """
+        from .. import party
+
+        seat = self._seat_for(client) if seat is None else seat
+        boss = self.seats[self.leader]
+        if boss is seat or boss.client is None:
+            return
+        moved, why = await party.follow(client, boss.client,
+                                        leader_name=boss.wizard_name)
+        if moved and why:
+            self._say(seat, why)
+        elif why:
+            # A follower that cannot reach its leader is the failure that
+            # makes the whole party pointless, so it is said -- but
+            # thinned, because the cause is usually standing.
+            self._say_once(seat, "follow", why)
 
     async def _quest_step(self, client, seat=None):
         """One tick of whichever questing is in play.
@@ -1131,6 +1188,8 @@ class LiveWorker(QThread):
         # The backend measures this every round; it used to go nowhere,
         # while the trainer guessed the same quantity off the wizard's
         # own health.
+        if seat.wizard_name is None:
+            self._learn_name(seat, read)
         rec.incoming = float(
             getattr(backend, "_measured_incoming", 0.0) or 0.0)
         if seat.tel.fights:
@@ -1138,6 +1197,22 @@ class LiveWorker(QThread):
         self.seat_round_done.emit(seat.index, rec)
         if seat.index == 0:
             self.round_done.emit(rec)
+
+    def _learn_name(self, seat, read):
+        """Take the wizard's own name off the duel it is standing in.
+
+        The client only offers it on the character-select screen, which
+        a running wizard is not on. But `read_state` already builds the
+        player actor from `combat.get_client_member().name()`, so every
+        round of every duel carries it for free -- and the cross-zone
+        follow needs exactly that string to pick the leader out of a
+        friends list. One duel is enough; until then a follower that
+        needs it says so rather than failing silently.
+        """
+        name = getattr(getattr(read, "state", None), "player", None)
+        name = getattr(name, "name", None)
+        if isinstance(name, str) and name.strip():
+            seat.wizard_name = name.strip()
 
     def _on_lost_round(self, round_number, reason, seat=None):
         """A round whose board could not be read. Recorded as that.

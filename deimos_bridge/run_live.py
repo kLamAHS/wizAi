@@ -274,7 +274,11 @@ def main():
                          "others and then chooses against a board carrying "
                          "what the rest of the party committed to, so a trap "
                          "one lays is cashed by the next and nobody fires "
-                         "into a mob that is already dead")
+                         "into a mob that is already dead.\n\n"
+                         "This entry point does not move anyone: every "
+                         "client has to be walked into the same duel "
+                         "yourself. The window's 'Followers chase wizard 1' "
+                         "does the gathering")
     ap.add_argument("--passes", type=int, default=2,
                     help="coordination passes per round (0 = every wizard "
                          "decides alone, which is the uncoordinated "

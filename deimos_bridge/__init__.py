@@ -27,12 +27,15 @@ and only the second needs Windows and a running game:
                     nobody fires into a mob that is already dead. Plain
                     Python, like the first three: the joint plan is
                     testable with no game in sight.
+  `party`           the movement that gets those four wizards into the
+                    same duel in the first place -- one leads, the rest
+                    teleport onto it and step into its fight.
   `mock_client`     fakes of the wizwalker objects, so `live_state` and
                     `live_backend` are testable without the game.
 
-Import policy: nothing at this level imports wizwalker. The two live
-modules import it lazily inside functions, so `import deimos_bridge` is
-safe on Linux.
+Import policy: nothing at this level imports wizwalker. The modules that
+need it -- `live_state`, `live_backend`, `party` -- import it lazily
+inside functions, so `import deimos_bridge` is safe on Linux.
 """
 
 __all__ = [
@@ -43,5 +46,6 @@ __all__ = [
     "live_state",
     "live_backend",
     "hivemind",
+    "party",
     "mock_client",
 ]

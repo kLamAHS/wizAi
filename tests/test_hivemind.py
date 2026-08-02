@@ -471,3 +471,168 @@ def test_every_party_size_produces_a_move_for_every_seat(seats):
     assert len(out.moves) == seats
     assert out.seconds >= 0.0
     assert KILL_CONFIDENCE > 0.5
+
+
+# ------------------------------------------------- keeping the party together
+class _Pos:
+    def __init__(self, x=0.0, y=0.0, z=0.0):
+        self.x, self.y, self.z = float(x), float(y), float(z)
+
+
+class _Body:
+    def __init__(self, pos):
+        self._pos = pos
+
+    async def position(self):
+        return self._pos
+
+
+class _Mouse:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakeClient:
+    """The three things `party.follow` reads, and the one it calls."""
+
+    def __init__(self, zone="Unicorn Way", pos=(0, 0, 0), fighting=False):
+        self._zone = zone
+        self.body = _Body(_Pos(*pos))
+        self._fighting = fighting
+        self.teleports = []
+        self.mouse_handler = _Mouse()
+
+    async def zone_name(self):
+        return self._zone
+
+    async def in_battle(self):
+        return self._fighting
+
+    async def teleport(self, target):
+        self.teleports.append(target)
+        self.body = _Body(target)
+
+
+def test_a_follower_already_beside_its_leader_stays_put():
+    """The tick runs twice a second; a follower that re-teleported every
+    time would spend the fight teleporting instead of fighting."""
+    from deimos_bridge import party
+
+    leader = _FakeClient(pos=(100, 100, 0))
+    follower = _FakeClient(pos=(140, 120, 0))
+    moved, why = asyncio.run(party.follow(follower, leader))
+    assert moved is False and why == ""
+    assert follower.teleports == []
+
+
+def test_a_follower_left_behind_teleports_onto_the_leader():
+    from deimos_bridge import party
+
+    leader = _FakeClient(pos=(5000, 0, 0))
+    follower = _FakeClient(pos=(0, 0, 0))
+    moved, why = asyncio.run(party.follow(follower, leader))
+    assert moved is True and "regrouped" in why
+    assert len(follower.teleports) == 1
+    assert follower.teleports[0].x == 5000
+
+
+def test_a_follower_in_its_own_duel_is_left_alone():
+    """It may be in the leader's duel, and the game does not let you
+    teleport out of a fight anyway."""
+    from deimos_bridge import party
+
+    leader = _FakeClient(pos=(5000, 0, 0))
+    follower = _FakeClient(pos=(0, 0, 0), fighting=True)
+    moved, _why = asyncio.run(party.follow(follower, leader))
+    assert moved is False and follower.teleports == []
+
+
+def test_a_different_zone_is_not_chased_with_a_position_teleport():
+    """An XYZ teleport cannot change zone -- it silently does nothing,
+    which is the worst of both answers."""
+    from deimos_bridge import party
+
+    leader = _FakeClient(zone="Triton Avenue", pos=(5000, 0, 0))
+    follower = _FakeClient(zone="Unicorn Way", pos=(0, 0, 0))
+    moved, why = asyncio.run(party.follow(follower, leader))
+    assert moved is False
+    assert "wizard name is not known" in why
+    assert follower.teleports == []
+
+
+def test_a_cross_zone_follow_uses_the_friends_list_when_it_has_a_name(
+        monkeypatch):
+    from deimos_bridge import party
+
+    asked = {}
+
+    async def _friends_list(follower, leader_name):
+        asked["name"] = leader_name
+        return True, ""
+
+    monkeypatch.setattr(party, "teleport_to_leader_across_zones",
+                        _friends_list)
+    moved, why = asyncio.run(party.follow(
+        _FakeClient(zone="Unicorn Way"),
+        _FakeClient(zone="Triton Avenue"), leader_name="Wolf Deathblade"))
+    assert moved is True and "Triton Avenue" in why
+    assert asked["name"] == "Wolf Deathblade"
+
+
+def test_arriving_beside_a_fighting_leader_is_not_joining_it(monkeypatch):
+    """Wizard101 puts you in the circle only when you touch a sigil or a
+    mob. A follower standing next to the circle looks exactly like a
+    working party right up until the plan says 'one wizard'."""
+    from deimos_bridge import party
+
+    stepped = []
+
+    async def _join(follower):
+        stepped.append(follower)
+        return True, ""
+
+    monkeypatch.setattr(party, "join_the_fight", _join)
+    leader = _FakeClient(pos=(5000, 0, 0), fighting=True)
+    follower = _FakeClient(pos=(0, 0, 0))
+    moved, why = asyncio.run(party.follow(follower, leader))
+    assert moved is True and "joined" in why
+    assert stepped == [follower]
+
+
+def test_a_fighting_leader_is_joined_even_from_right_beside_it(monkeypatch):
+    """Standing in range is not being in the duel, so the distance check
+    must not short-circuit the sigil step."""
+    from deimos_bridge import party
+
+    stepped = []
+
+    async def _join(follower):
+        stepped.append(follower)
+        return True, ""
+
+    monkeypatch.setattr(party, "join_the_fight", _join)
+    leader = _FakeClient(pos=(100, 100, 0), fighting=True)
+    follower = _FakeClient(pos=(110, 100, 0))
+    moved, _why = asyncio.run(party.follow(follower, leader))
+    assert moved is True and stepped == [follower]
+    assert follower.teleports == []          # it was already there
+
+
+def test_an_unreadable_leader_is_reported_rather_than_chased_to_zero():
+    """A position that will not read used to be a teleport to (0,0,0),
+    which walks the follower off the map."""
+    from deimos_bridge import party
+
+    class _Blind(_FakeClient):
+        async def zone_name(self):
+            return "Unicorn Way"
+
+    leader = _Blind()
+    leader.body = None
+    follower = _FakeClient()
+    moved, why = asyncio.run(party.follow(follower, leader))
+    assert moved is False and "leader's position" in why
+    assert follower.teleports == []

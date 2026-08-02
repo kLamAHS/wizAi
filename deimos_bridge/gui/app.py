@@ -1301,6 +1301,24 @@ class MainWindow(QMainWindow):
         outer.addLayout(deck_row)
 
         quest_row = QHBoxLayout()
+        self.follow_leader = QCheckBox("Followers chase wizard 1")
+        self.follow_leader.setChecked(True)
+        self.follow_leader.setVisible(False)
+        self.follow_leader.setToolTip(
+            "Wizard 1 quests; the rest teleport onto it and step into its "
+            "fight.\n\n"
+            "This is what makes a party a party. Four clients each running "
+            "the questing independently walk to four different places, take "
+            "four different quests, and coordinate perfectly with nobody — "
+            "the round-by-round agreement can only help wizards who are in "
+            "the same duel.\n\n"
+            "Inside one zone the follow is a plain position teleport. Across "
+            "zones it goes through the friends list and needs the leader's "
+            "wizard name, which is read off the first duel — so the party "
+            "has to fight once together, or already be friends and in the "
+            "same zone, before a door can be followed through.")
+        quest_row.addWidget(self.follow_leader)
+
         self.auto_quest = QCheckBox("Auto-quest between fights")
         self.auto_quest.setToolTip(
             "Between fights, teleport to the quest marker and click through "
@@ -1734,6 +1752,7 @@ class MainWindow(QMainWindow):
         finally:
             self._loading = False
         self.which.setVisible(n > 1)
+        self.follow_leader.setVisible(n > 1)
         self.tabs.setTabVisible(self.party_tab, n > 1)
         if self._seat_showing >= n:
             # The wizard the boxes were showing is no longer in the
@@ -2169,7 +2188,8 @@ class MainWindow(QMainWindow):
                                        if self.use_script.isChecked() else ""),
                                hotkeys=self.hotkey_bindings(),
                                continuation=self.continuations[0],
-                               seats=rest)
+                               seats=rest,
+                               follow_leader=self.follow_leader.isChecked())
         self.live.status.connect(self.on_live_status)
         # Seat-aware throughout: four wizards fill four records, and a
         # round routed to the wrong one settles its damage against

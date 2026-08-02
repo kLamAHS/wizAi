@@ -6563,3 +6563,66 @@ def test_two_wizards_tuned_differently_do_not_overwrite_each_other(qapp):
     # ...and neither seat reached for the globals to get there.
     assert (P.continuation_name(), P.search_horizon(),
             P.driver_name()) == before
+
+
+def test_only_the_followers_chase_the_leader(qapp):
+    """The leader quests; a leader that also chased itself would stand
+    still forever, and one wizard has nobody to follow."""
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    w = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1,
+                   seats=[SeatConfig(school="fire"),
+                          SeatConfig(school="storm")])
+    assert [w._follows(s) for s in w.seats] == [False, True, True]
+
+    w.follow_leader = False
+    assert not any(w._follows(s) for s in w.seats)
+
+    alone = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1)
+    assert alone._follows(alone.seats[0]) is False
+
+
+def test_the_follow_checkbox_only_appears_with_a_party(qapp):
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    assert win.follow_leader.isHidden()
+    win.wizards.setValue(2)
+    assert not win.follow_leader.isHidden()
+    assert win.follow_leader.isChecked()
+
+
+def test_the_follow_choice_reaches_the_worker(qapp, monkeypatch):
+    from deimos_bridge.gui import app as app_mod
+    from deimos_bridge.gui.app import MainWindow
+
+    monkeypatch.setattr(app_mod.LiveWorker, "start", lambda self, *a: None)
+    win = MainWindow(Telemetry())
+    win.wizards.setValue(2)
+    win.follow_leader.setChecked(False)
+    win.on_start_live()
+    assert win.live.follow_leader is False
+
+
+def test_the_leaders_name_is_learned_from_its_first_duel(qapp):
+    """The client only offers it on the character-select screen, which a
+    running wizard is not on — but every combat read already carries it,
+    and the cross-zone follow cannot pick a leader out of the friends
+    list without it."""
+    from deimos_bridge.gui.live import LiveWorker
+
+    w = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1)
+    seat = w.seats[0]
+    assert seat.wizard_name is None
+
+    class _Player:
+        name = "Wolf Deathblade"
+
+    class _State:
+        player = _Player()
+
+    class _Read:
+        state = _State()
+
+    w._learn_name(seat, _Read())
+    assert seat.wizard_name == "Wolf Deathblade"
