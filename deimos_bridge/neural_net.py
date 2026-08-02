@@ -289,6 +289,11 @@ DEFAULT_WEIGHTS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 #: objective on one net.
 DEFAULT_WEIGHTS_B = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                  "neural_continuation_b.json")
+#: the third seat: the campaign-5 sustain specialist ("neural-c"),
+#: shipped on the replicated L30 death win (34.9/38.1 held out vs
+#: 28.5/31.8 for school-aware(3), the previous leader there)
+DEFAULT_WEIGHTS_C = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "neural_continuation_c.json")
 
 
 def net_policy(path=None):

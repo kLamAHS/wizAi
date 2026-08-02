@@ -451,9 +451,15 @@ class _Fixed:
 #: on the myth board (40.0 vs school-aware(3)'s 41.1), which stays
 #: the hand-coded candidate's ground. Separate weights file; the
 #: sweep prices both nets like any other candidate.
+#: "neural-c" is the THIRD seat -- the campaign-5 sustain specialist
+#: (death/myth/life decks: scheduled damage and lifesteal). Held out
+#: on the survey points: first on L30 death on both fresh streams
+#: (34.9/38.1 vs school-aware(3)'s 28.5/31.8), a dead tie with the
+#: leader on L30 life, and behind the leaders on L50 death and L30
+#: myth, which stay hand-coded ground.
 CONTINUATIONS = ("nuke-asap", "school-aware(3)", "school-aware(0)",
                  "blade-stack(2)", "blade-stack(3)", "neural",
-                 "neural-b")
+                 "neural-b", "neural-c")
 
 #: The shipped default, kept because the right answer is deck-specific
 #: and the alternative is right only on some decks: the same swap that
@@ -476,14 +482,16 @@ def build_continuation(name):
         return make_blade_stack(2)
     if name == "blade-stack(3)":
         return make_blade_stack(3)
-    if name in ("neural", "neural-b"):
+    if name.startswith("neural"):
         # Falls back to the default heuristic if the weights cannot
         # load: a missing or stale file must never break a sweep or a
         # live fight -- it just costs this candidate its chance.
         try:
-            from .neural_net import DEFAULT_WEIGHTS_B, net_policy
-            return net_policy(DEFAULT_WEIGHTS_B if name == "neural-b"
-                              else None)
+            from . import neural_net
+            path = {"neural": None,
+                    "neural-b": neural_net.DEFAULT_WEIGHTS_B,
+                    "neural-c": neural_net.DEFAULT_WEIGHTS_C}[name]
+            return neural_net.net_policy(path)
         except Exception:
             return school_aware_blade_stack(3)
     return school_aware_blade_stack(3)

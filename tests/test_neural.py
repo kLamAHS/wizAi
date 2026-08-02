@@ -109,7 +109,7 @@ def test_neural_holds_a_sweep_seat():
 
     from deimos_bridge import neural_net, policies as P
 
-    for name in ("neural", "neural-b"):
+    for name in ("neural", "neural-b", "neural-c"):
         assert name in P.CONTINUATIONS
         pol = P.build_continuation(name)
         sim = _sim()
@@ -119,10 +119,14 @@ def test_neural_holds_a_sweep_seat():
         assert P.set_continuation(name) == name
     P.set_continuation(P.DEFAULT_CONTINUATION)
 
-    a = neural_net.Net.load(neural_net.DEFAULT_WEIGHTS)
-    b = neural_net.Net.load(neural_net.DEFAULT_WEIGHTS_B)
-    assert not all(np.allclose(x[0], y[0])
-                   for x, y in zip(a.layers, b.layers))
+    nets = [neural_net.Net.load(p) for p in
+            (neural_net.DEFAULT_WEIGHTS, neural_net.DEFAULT_WEIGHTS_B,
+             neural_net.DEFAULT_WEIGHTS_C)]
+    for i in range(len(nets)):
+        for j in range(i + 1, len(nets)):
+            assert not all(np.allclose(x[0], y[0])
+                           for x, y in zip(nets[i].layers,
+                                           nets[j].layers))
 
 
 def test_unloadable_weights_cost_the_candidate_not_the_sweep(monkeypatch):
