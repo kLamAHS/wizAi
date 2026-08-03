@@ -130,6 +130,11 @@ class _Seat:
         #: cross-zone follow needs it to pick the leader out of the
         #: friends list.
         self.wizard_name = None
+        #: the wizard's max health, off the client on connect. Kept
+        #: because it is the only identity available BEFORE a duel: a
+        #: name needs combat, and a record that outlives a run has to be
+        #: claimed or cleared before the first round lands in it.
+        self.max_hp = 0
         #: when this wizard last tried to catch up with the leader. See
         #: `LiveWorker.FOLLOW_EVERY`.
         self.followed_at = 0.0
@@ -661,6 +666,67 @@ class LiveWorker(QThread):
             self._hotkeys = None
             self.status.emit(f"hotkeys not installed ({type(exc).__name__})")
 
+    #: reads the run cannot do without, and where each one is needed.
+    #: Probed rather than assumed, because `activate_hooks()` returning
+    #: is not the same as the hooks answering -- see `_verify_hooks`.
+    HOOK_PROBES = (
+        ("max health", lambda c: c.stats.max_hitpoints(),
+         "training buckets health as a fraction of the maximum"),
+        ("position", lambda c: c.body.position(),
+         "wisp sweeps, quest hops and following the leader all teleport"),
+        ("zone", lambda c: c.zone_name(),
+         "a follower cannot tell it is in a different zone from its "
+         "leader"),
+    )
+
+    async def _verify_hooks(self, seat, tries=3, settle=1.0):
+        """Check the reads this run depends on actually answer. Reports.
+
+        `activate_hooks()` returning is not the same as the hooks being
+        up. On a real party run one client hooked and then would not
+        answer for its own wizard's name or school -- it reported every
+        *enemy's* school on the same read -- and the run carried on
+        regardless, with a wizard it could not identify and a school it
+        had to fall back to guessing. The operator's only symptom was
+        that something was off, and the fix was to hook and unhook until
+        it took.
+
+        So the reads are tried, the ones that do not answer are named,
+        and the hooks are re-activated between attempts. It reports
+        rather than refuses: a client that answers two probes out of
+        three can still fight, and being told which one is missing is
+        the whole point.
+        """
+        for attempt in range(max(1, tries)):
+            missing = []
+            for name, probe, _why in self.HOOK_PROBES:
+                try:
+                    if await probe(seat.client) is None:
+                        missing.append(name)
+                except Exception:
+                    missing.append(name)
+            if not missing:
+                if attempt:
+                    self._say(seat, "hooks are answering now")
+                return True, ""
+            if attempt + 1 < tries:
+                self._say(seat,
+                          f"hooks are not answering yet ({', '.join(missing)})"
+                          f" — reactivating and trying again")
+                try:
+                    await seat.client.activate_hooks()
+                except Exception:
+                    pass          # the retry is the point, not the error
+                await asyncio.sleep(settle)
+
+        why = "; ".join(w for n, _p, w in self.HOOK_PROBES if n in missing)
+        self._say(seat,
+                  f"hooks installed but {', '.join(missing)} will not read. "
+                  f"Playing anyway, but: {why}. Closing this client "
+                  f"completely and relaunching is what usually fixes a "
+                  f"half-installed hook.")
+        return False, ", ".join(missing)
+
     async def _read_max_hp(self, client, seat=None):
         """Report the wizard's real max health, once, on connect.
 
@@ -692,6 +758,7 @@ class LiveWorker(QThread):
             return          # a nicety; never worth failing the connect
         if hp > 0:
             seat.hp_known = True
+            seat.max_hp = hp
             self.seat_hp_read.emit(seat.index, hp)
             if seat.index == 0:
                 self.hp_read.emit(hp)
@@ -716,6 +783,49 @@ class LiveWorker(QThread):
             return bool(hp and int(hp) > 0)
         except Exception:
             return None
+
+    #: how far a wizard's max health may move between runs and still be
+    #: the same wizard. A level-up is a few percent; the two wizards that
+    #: got merged into one record were 1,053 and 713, which is 32%.
+    SAME_WIZARD_HP = 0.15
+
+    def _claim_record(self, seat):
+        """Is the record this seat inherited actually this wizard's?
+
+        The window keeps one record per SEAT and reuses it across Play
+        live presses, so a record outlives the run that filled it. That
+        is wanted -- fights accumulate. It stops being wanted the moment
+        the seat is a different wizard, and it can be: the clients come
+        back in whatever order the game was launched in, and a run where
+        one client would not hook is a run where the seats shift.
+
+        `_learn_name` catches this once both runs have names. It cannot
+        catch the case that actually happened, where the FIRST run never
+        got a name at all -- an empty name matches everything, so two
+        rounds of a 1,053 HP ice wizard stayed in the record and were
+        exported under the 713 HP fire wizard's name.
+
+        Max health is the identity available here, before any duel. It is
+        coarse -- it cannot separate two wizards of the same size -- but
+        it separates the case that occurs, and it is checked before the
+        first round of the new run lands in the record rather than after.
+        """
+        tel = seat.tel
+        if not tel.rounds or not seat.max_hp:
+            return
+        was = tel.rounds[-1].player_max_hp
+        if not was:
+            return
+        if abs(seat.max_hp - was) <= self.SAME_WIZARD_HP * was:
+            return          # the same wizard, a level or two later
+        kept = len(tel.rounds)
+        who = tel.wizard or "an unnamed wizard"
+        tel.clear()
+        self._say(seat,
+                  f"this seat's record held {kept} round(s) of {who} at "
+                  f"{was:,.0f} health and this client has {seat.max_hp:,} — "
+                  f"a different wizard. Cleared it rather than exporting "
+                  f"two wizards as one.")
 
     async def _read_gear(self, client, seat=None):
         """The wizard's damage, accuracy, pierce and resist, on connect.
@@ -1029,7 +1139,9 @@ class LiveWorker(QThread):
                         ) from exc
                     raise
 
+                await self._verify_hooks(seat)
                 await self._read_max_hp(client, seat)
+                self._claim_record(seat)
                 await self._read_gear(client, seat)
 
                 built_as = seat.policy_name
@@ -1148,6 +1260,20 @@ class LiveWorker(QThread):
                     # of their rounds pays the full timeout.
                     hive.leave_combat(seat.index)
             seat.fought += 1
+            if seat.wizard_name is None:
+                # A whole duel and the client still would not name its
+                # own wizard. That is the read that failed on the live
+                # party runs, and its symptoms turn up far from here:
+                # an export with no name in it, and a follower that
+                # cannot pick its leader out of a friends list.
+                self._say_once(
+                    seat, "no-name",
+                    "this client played a whole fight without naming its "
+                    "wizard, so the export will say 'wizard "
+                    f"{seat.index + 1}' and a cross-zone follow has "
+                    "nothing to search the friends list for. The hooks "
+                    "are usually the cause — close this client "
+                    "completely and relaunch it.")
             seat.tel.end_fight(await self._fight_outcome(seat.client, seat))
             self.seat_fight_done.emit(seat.index, seat.fought)
             if seat.index == 0:
