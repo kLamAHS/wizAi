@@ -35,8 +35,9 @@ from ..hotkeys import DEFAULTS as HOTKEY_DEFAULTS, KEY_CHOICES as HOTKEY_CHOICES
 from ..telemetry import Telemetry
 from .deckpicker import pick_deck
 from .live import LiveWorker, SeatConfig
-from .panels import (BoardPanel, DecisionsPanel, LearningPanel, ModelPanel,
-                     NamingPanel, PartyPanel, RunPanel, _label, scrollable)
+from .panels import (BoardPanel, DecisionsPanel, HivemindPanel,
+                     LearningPanel, ModelPanel, NamingPanel, RunPanel,
+                     _label, scrollable)
 from .theme import PALETTE, stylesheet
 
 #: How many game clients one window will drive. Four is the game's own
@@ -1062,7 +1063,11 @@ class MainWindow(QMainWindow):
         self.learning = LearningPanel(self.tel)
         self.naming = NamingPanel(self.tel)
         self.runs = RunPanel(self.tel)
-        self.party = PartyPanel()
+        self.party = self.hivemind = HivemindPanel()
+        #: per-wizard live state for the Hivemind roster, filled from the
+        #: worker's seat signals. Kept here rather than read off
+        #: `live.seats` because those live on the worker's thread.
+        self.seat_live = [{} for _ in range(MAX_WIZARDS)]
         # Every tab scrolls. The Decisions and Learning panels stack a
         # chart, a second chart and a table, which is taller than a laptop
         # window -- and Qt's answer to "does not fit" is to squeeze all
@@ -1073,11 +1078,11 @@ class MainWindow(QMainWindow):
                             (self.learning, "Learning"),
                             (self.naming, "Naming"),
                             (self.runs, "Runs"),
-                            (self.party, "Party")):
+                            (self.party, "Hivemind")):
             tabs.addTab(scrollable(panel), name)
         self.tabs = tabs
-        #: the Party tab only means something with a party in it
-        self.party_tab = tabs.count() - 1
+        #: the Hivemind tab only means something with a party in it
+        self.party_tab = self.hivemind_tab = tabs.count() - 1
         tabs.setTabVisible(self.party_tab, False)
         root.addWidget(tabs)
 
@@ -1507,6 +1512,14 @@ class MainWindow(QMainWindow):
         self.use_script.toggled.connect(lambda _on: self._push_script())
 
     def _on_live_toggle(self, attr, box_name, on):
+        # Not while a seat's saved configuration is being restored into
+        # the boxes. `setChecked` fires `toggled` exactly like a click
+        # does, so switching the wizard dropdown mid-run would push
+        # whatever that seat's snapshot happened to hold onto the live
+        # worker -- turning auto-quest off for the whole party because
+        # wizard 3 was configured without it.
+        if self._loading:
+            return
         if self.live is None or not self.live.isRunning():
             return
         setattr(self.live, attr, bool(on))
@@ -1520,6 +1533,8 @@ class MainWindow(QMainWindow):
         The worker rebuilds or tears down each seat's runner on its own
         loop when this changes; see `LiveWorker._sync_script`.
         """
+        if self._loading:
+            return                    # a restore, not a person: see above
         if self.live is None or not self.live.isRunning():
             return
         want = self.script_source if self.use_script.isChecked() else ""
@@ -1884,6 +1899,11 @@ class MainWindow(QMainWindow):
         self.which.setVisible(n > 1)
         self.follow_leader.setVisible(n > 1)
         self.tabs.setTabVisible(self.party_tab, n > 1)
+        if n > 1:
+            # The roster is the party's size, so it redraws when the
+            # party changes size -- including before a run, where it is
+            # the only confirmation that four wizards were configured.
+            self.refresh_hivemind()
         if self._seat_showing >= n:
             # The wizard the boxes were showing is no longer in the
             # party; Qt has already moved the combo, so this only has to
@@ -2329,6 +2349,11 @@ class MainWindow(QMainWindow):
                                seats=rest,
                                follow_leader=self.follow_leader.isChecked())
         self.live.status.connect(self.on_live_status)
+        # Per wizard as well as into the one-line status bar: with four
+        # of them talking the bar holds whichever spoke last, and a
+        # follower stuck repeating itself is invisible the moment anyone
+        # else says anything.
+        self.live.seat_status.connect(self.on_seat_status)
         # Seat-aware throughout: four wizards fill four records, and a
         # round routed to the wrong one settles its damage against
         # another wizard's board.
@@ -2388,6 +2413,8 @@ class MainWindow(QMainWindow):
         return changed
 
     def on_seat_hp_read(self, seat, hp):
+        if 0 <= seat < len(self.seat_live):
+            self.seat_live[seat]["max_hp"] = hp
         self.on_hp_read(hp, seat)
 
     def on_seat_gear_read(self, seat, stats):
@@ -2396,6 +2423,75 @@ class MainWindow(QMainWindow):
     def on_party_plan(self, plan):
         """One round the whole party agreed. Queued onto the GUI thread."""
         self.party.show_plan(plan, getattr(self.live, "hive", None))
+        self.refresh_hivemind()
+
+    # -- the Hivemind roster ----------------------------------------------
+    def on_seat_status(self, seat, message):
+        """The last thing one wizard said, kept per wizard.
+
+        The status bar holds one line for the whole window, so with four
+        wizards talking it holds whichever of them spoke last -- and a
+        follower repeating "could not read the leader's position" is
+        invisible the moment anyone else says anything. The roster keeps
+        one line each, which is the difference between noticing a stuck
+        wizard and not.
+        """
+        if not (0 <= seat < len(self.seat_live)):
+            return
+        self.seat_live[seat]["last_said"] = message
+        self.refresh_hivemind()
+
+    def _seat_state(self, seat, hive):
+        """What this wizard is doing, as one of `HivemindPanel._STATES`."""
+        row = self.seat_live[seat]
+        hp = row.get("hp")
+        if hp is not None and hp <= 0:
+            return "defeated"
+        fighting = set(hive.fighting()) if hive is not None else set()
+        if seat in fighting:
+            # Alone in the circle is a different thing from in the party's
+            # circle, and it is the one worth flagging: a wizard fighting
+            # by itself is being planned for by itself.
+            return "fighting" if len(fighting) > 1 else "alone"
+        if self.live is not None and self.live.isRunning():
+            if (self.follow_leader.isChecked() and self.party_size() > 1
+                    and seat != 0):
+                return "following"
+            if self.auto_quest.isChecked():
+                return "questing"
+        return "waiting"
+
+    def refresh_hivemind(self):
+        """Redraw the roster from what the signals have told us so far."""
+        if not self.tabs.isTabVisible(self.party_tab):
+            return
+        hive = getattr(self.live, "hive", None)
+        rows = []
+        for seat in range(self.party_size()):
+            live = self.seat_live[seat]
+            tel = self.tels[seat]
+            cfg = self.seat_configs[seat] if self.seat_configs else None
+            move = hive.last_move(seat) if hive is not None else None
+            last_move = ""
+            if move is not None and move.card:
+                last_move = move.card + (f" @{move.target_name}"
+                                         if move.target_name else "")
+            elif move is not None:
+                last_move = "pass"
+            rows.append({
+                "name": (tel.wizard or live.get("name")
+                         or f"wizard {seat + 1}"),
+                "school": tel.school or (cfg or {}).get("school", ""),
+                "policy": tel.policy_name or (cfg or {}).get("policy", ""),
+                "hp": live.get("hp"),
+                "max_hp": live.get("max_hp", 0),
+                "state": self._seat_state(seat, hive),
+                "fights": len(tel.fights),
+                "rounds": len(tel.rounds),
+                "last_move": last_move,
+                "last_said": live.get("last_said", ""),
+            })
+        self.party.show_party(rows, hive)
 
     def on_seat_named(self, seat, name):
         """A duel told us which wizard this client is actually driving.
@@ -2408,11 +2504,14 @@ class MainWindow(QMainWindow):
         """
         if not name or not (0 <= seat < self.which.count()):
             return
+        if 0 <= seat < len(self.seat_live):
+            self.seat_live[seat]["name"] = name
         self._loading = True
         try:
             self.which.setItemText(seat, f"wizard {seat + 1} — {name}")
         finally:
             self._loading = False
+        self.refresh_hivemind()
 
     def on_round(self, rec):
         # Queued from the worker thread, so this runs on the GUI thread.
@@ -2430,6 +2529,14 @@ class MainWindow(QMainWindow):
         """
         if getattr(rec, "round", 0) == 1:
             self._warn_cheats(rec)
+        # Every wizard's health, from every wizard's round: the roster is
+        # the one place all four are shown at once, so it cannot be fed
+        # only by whichever one happens to be on screen.
+        if 0 <= seat < len(self.seat_live):
+            live = self.seat_live[seat]
+            live["hp"] = getattr(rec, "player_hp", None)
+            if getattr(rec, "player_max_hp", 0):
+                live["max_hp"] = rec.player_max_hp
         if seat == self._seat_showing:
             self.refresh_all()
             self._update_policy_state()
@@ -2438,6 +2545,7 @@ class MainWindow(QMainWindow):
                 self.party.refresh()
             except Exception:
                 pass
+        self.refresh_hivemind()
 
     def _warn_cheats(self, rec):
         """Say so when the catalog knows this enemy cheats.

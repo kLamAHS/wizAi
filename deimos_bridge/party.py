@@ -42,6 +42,28 @@ one status line, not the run.
 #: every tick would spend the fight teleporting instead of fighting.
 FOLLOW_RADIUS = 900.0
 
+#: How long one friends-list teleport attempt may take.
+#:
+#: wizwalker's `teleport_to_friend_from_list` opens with
+#: `_cycle_to_online_friends`, which is
+#:
+#:     while (await text()) != "Online Friends":
+#:         click(right_button); wait(..., timeout=5)
+#:
+#: -- an unbounded loop. A wizard whose friends list never reads exactly
+#: that string (a different tab layout, a click that does not land, a
+#: label the read returns empty) sits in it clicking the page button for
+#: the rest of the run. That is not a slow follow, it is a permanent
+#: one: the follow step holds this wizard's drive lock while it runs, so
+#: every queued teleport, wisp sweep and potion waits behind it and
+#: every further keypress is refused as already queued. One unbounded
+#: loop in wizwalker took all four hotkeys away.
+#:
+#: 45s is comfortably more than a working teleport needs -- open the
+#: window, page to online friends, click the name, confirm, sit through
+#: the animation -- and finite, which is the whole point.
+TELEPORT_TIMEOUT = 45.0
+
 
 async def _safe(coro_fn, default=None):
     try:
@@ -172,11 +194,30 @@ async def teleport_to_leader_across_zones(follower, leader_name):
         return False, (f"cross-zone follow needs wizwalker's scripting "
                        f"extension ({type(exc).__name__}: {exc})")
 
+    import asyncio
+
     async def attempt(name):
         """(landed, fatal reason). A name that is simply not on the list
-        is neither -- it just means try another spelling."""
+        is neither -- it just means try another spelling.
+
+        Bounded, because the thing it calls is not: see
+        `TELEPORT_TIMEOUT`. A timeout is *fatal* rather than "try the
+        next spelling" -- whatever went wrong happened before the name
+        was ever looked at, so a second spelling would hang the same way
+        and the follower would spend three timeouts finding that out.
+        """
         try:
-            await teleport_to_friend_from_list(follower, name=name)
+            await asyncio.wait_for(
+                teleport_to_friend_from_list(follower, name=name),
+                TELEPORT_TIMEOUT)
+        except asyncio.TimeoutError:
+            return False, (
+                f"the friends-list teleport to {name} ran for "
+                f"{TELEPORT_TIMEOUT:.0f}s without finishing and was cut "
+                f"off. It gets stuck paging the list to 'Online Friends' "
+                f"when that tab will not come up — check the friends "
+                f"window is not already open on another tab, or turn "
+                f"'follow the leader' off and walk this wizard over")
         except ValueError as exc:
             if "Could not find friend" in str(exc):
                 return False, ""

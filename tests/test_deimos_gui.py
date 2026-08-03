@@ -853,8 +853,14 @@ def test_service_loop_runs_requests_while_the_fight_loop_waits(qapp):
     Requests used to drain at the top of the fight loop, which spends
     nearly all its time blocked inside wait_for_combat -- so a request
     queued while waiting sat there until a fight had started AND
-    finished. The service loop is concurrent, so it acts in about a
+    finished. The service tasks are concurrent, so it acts in about a
     second.
+
+    Both tasks are started because they are what a run starts: the queue
+    has its own task and the service tick no longer drains it. Two
+    drainers meant both could pop an action, and the second pop
+    overwrote `seat.busy` -- so the dedupe stopped covering whichever
+    action was actually running.
     """
     import asyncio
 
@@ -865,22 +871,25 @@ def test_service_loop_runs_requests_while_the_fight_loop_waits(qapp):
 
     worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
     worker.auto_dialogue = False
+    worker.seats[0].client = client
     said = []
     worker.status = type("S", (), {"emit": staticmethod(said.append)})()
 
     async def drive():
-        task = asyncio.ensure_future(worker._service_loop(client))
+        tasks = [asyncio.ensure_future(worker._service_loop(client)),
+                 asyncio.ensure_future(worker._request_loop(client))]
         worker.request("teleport")
         for _ in range(40):                 # ~2s of 50ms ticks
             await asyncio.sleep(0.05)
             if client.teleported:
                 break
         worker._stop = True
-        task.cancel()
-        try:
-            await task
-        except BaseException:
-            pass
+        for task in tasks:
+            task.cancel()
+            try:
+                await task
+            except BaseException:
+                pass
 
     asyncio.run(drive())
     assert client.teleported, "the request never ran"
@@ -7475,3 +7484,422 @@ def test_the_friends_list_holds_a_full_name_and_a_duel_gives_a_first(qapp):
     # and the resolved name is remembered, so it is one lookup per run
     assert party._FULL_NAMES["Jeffrey"] == "Jeffrey IslandBringer"
     party._FULL_NAMES.clear()
+
+
+def test_a_stage_that_never_returns_cannot_take_the_hotkeys_with_it(qapp):
+    """The regression that killed every hotkey.
+
+    wizwalker's friends-list teleport opens with `_cycle_to_online_friends`,
+    which is `while (await text()) != "Online Friends": click(); wait(5)`
+    — no bound at all. A wizard whose list never reads exactly that spins
+    in it for the rest of the run, and the follow step holds the drive
+    lock while it does. Every queued teleport, wisp sweep and potion then
+    waits behind it forever, and every further press is refused as
+    already queued: four dead keys from one unbounded loop.
+
+    So no stage may hold the wheel without a deadline.
+    """
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    class _Client:
+        async def in_battle(self):
+            return False
+
+    done, said = [], []
+    stuck = asyncio.Event()
+
+    w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1, auto_quest=True)
+    w.status = type("S", (), {"emit": staticmethod(said.append)})()
+    seat = w.seats[0]
+    seat.client = client = _Client()
+    w.STAGE_LIMITS = dict(w.STAGE_LIMITS, **{"quest step": 0.3})
+
+    async def never_returns(_c):
+        stuck.set()
+        await asyncio.Event().wait()        # the wizwalker loop, in spirit
+
+    async def drive():
+        seat.drive = asyncio.Lock()
+        w._quest_step = never_returns
+        w._do_request = lambda c, a, s=None: _record(done, a)
+
+        tasks = [asyncio.ensure_future(w._service_loop(client, seat)),
+                 asyncio.ensure_future(w._request_loop(client, seat))]
+        await asyncio.wait_for(stuck.wait(), 2)
+        w.request("teleport")
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            if done:
+                break
+        w._stop = True
+        for task in tasks:
+            task.cancel()
+            try:
+                await task
+            except BaseException:
+                pass
+
+    asyncio.run(drive())
+    assert done == ["teleport"], "the hotkey never got the wheel back"
+    assert any("was cut off" in m for m in said), said
+    assert any("hotkeys included" in m for m in said), said
+
+
+def test_a_press_that_has_to_wait_says_what_it_is_waiting_for(qapp):
+    """A press that goes quiet for thirty seconds is indistinguishable
+    from a key that is not bound, and that is what got reported."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    class _Client:
+        async def in_battle(self):
+            return False
+
+    said, started = [], asyncio.Event()
+
+    w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1, auto_quest=True)
+    w.status = type("S", (), {"emit": staticmethod(said.append)})()
+    seat = w.seats[0]
+    seat.client = client = _Client()
+
+    async def slow_quest(_c):
+        started.set()
+        await asyncio.sleep(0.6)
+
+    async def drive():
+        seat.drive = asyncio.Lock()
+        w._quest_step = slow_quest
+        w._do_request = lambda c, a, s=None: _record([], a)
+        tasks = [asyncio.ensure_future(w._service_loop(client, seat)),
+                 asyncio.ensure_future(w._request_loop(client, seat))]
+        await asyncio.wait_for(started.wait(), 2)
+        w.request("wisps")
+        await asyncio.sleep(0.8)
+        w._stop = True
+        for task in tasks:
+            task.cancel()
+            try:
+                await task
+            except BaseException:
+                pass
+
+    asyncio.run(drive())
+    # and it names the stage, not just "something": "waiting for quest
+    # step" is actionable and "waiting" is not
+    assert any("waiting for quest step to let go of the wheel" in m
+               for m in said), said
+
+
+def test_the_friends_list_teleport_is_bounded(qapp, monkeypatch):
+    """`teleport_to_friend_from_list` can genuinely never return. A
+    follower that calls it holds the party's wheel while it does not."""
+    import asyncio
+    import sys
+    import types
+
+    from deimos_bridge import party
+
+    async def _never(*_a, **_kw):
+        await asyncio.Event().wait()
+
+    class _Mouse:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_a):
+            return False
+
+    class _Follower:
+        mouse_handler = _Mouse()
+
+    for name in ("wizwalker", "wizwalker.extensions"):
+        stub = types.ModuleType(name)
+        stub.__path__ = []
+        sys.modules[name] = stub
+    mod = types.ModuleType("wizwalker.extensions.scripting")
+    mod.teleport_to_friend_from_list = _never
+    sys.modules["wizwalker.extensions.scripting"] = mod
+    monkeypatch.setattr(party, "TELEPORT_TIMEOUT", 0.2)
+    try:
+        ok, why = asyncio.run(
+            party.teleport_to_leader_across_zones(_Follower(), "Jeffrey"))
+    finally:
+        for name in ("wizwalker.extensions.scripting",
+                     "wizwalker.extensions", "wizwalker"):
+            sys.modules.pop(name, None)
+        party._FULL_NAMES.clear()
+
+    assert ok is False
+    assert "was cut off" in why, why
+    assert "Online Friends" in why, why
+
+
+def test_restoring_a_seats_boxes_does_not_retune_the_running_party(qapp,
+                                                                  monkeypatch):
+    """`setChecked` fires `toggled` exactly like a click. Switching the
+    wizard dropdown mid-run would otherwise push whatever that seat's
+    snapshot held onto the live worker — turning auto-quest off for the
+    whole party because wizard 3 was configured without it."""
+    from deimos_bridge.gui import app as app_mod
+    from deimos_bridge.gui.app import MainWindow
+
+    monkeypatch.setattr(app_mod.LiveWorker, "start", lambda self, *a: None)
+    win = MainWindow(Telemetry())
+    win.auto_quest.setChecked(True)
+    win.wizards.setValue(2)
+    win.on_start_live()
+    win.live.isRunning = lambda: True
+    assert win.live.auto_quest is True
+
+    # wizard 2's saved configuration, restored into the boxes
+    win._loading = True
+    try:
+        win.auto_quest.setChecked(False)
+    finally:
+        win._loading = False
+
+    assert win.live.auto_quest is True, "a restore reconfigured the run"
+    assert win.auto_quest.isChecked() is False, "the box still tracks the seat"
+
+    # and a person moving it still reaches the run
+    win.auto_quest.setChecked(True)
+    win.auto_quest.setChecked(False)
+    assert win.live.auto_quest is False
+
+
+def _twins(hps, name="Nirini Warrior", max_hp=395.0, round_number=1):
+    """A read of two identically-named mobs — the ordinary Wizard101 board."""
+    from w101_sim import Actor, State
+    player = Actor(name="Wizard", school="ice", hp=757, max_hp=757, team=0)
+    mobs = [Actor(name=name, school="balance", hp=hp, max_hp=max_hp, team=1)
+            for hp in hps]
+    return _Read(State(player, mobs), round_number, ("Frost Beetle",))
+
+
+def test_damage_is_measured_against_the_mob_that_was_hit(qapp):
+    """The measurement bug behind a 634% "model error" that was not one.
+
+    `_settle` looked the target up by NAME, and Wizard101 boards are
+    mostly two of the same mob. The lookup dict kept the LAST of each
+    name while the before-list scan took the FIRST, so a full-health
+    Nirini Warrior hit for 19 was differenced against its twin sitting
+    at 259 and recorded as 136.
+
+    Numbers from the live party run: wizard 2 predicted 18.53, the mob
+    went 395 -> 376, and three consecutive rounds were filed as 136,
+    117, 117.
+    """
+    tel = Telemetry()
+    tel.start_fight()
+    r = tel.observe(_Decision("Frost Beetle", target_index=0),
+                    _twins([395.0, 259.0], round_number=4))
+    r.predicted_damage = 18.53
+    tel.observe(_Decision("Frost Beetle", target_index=0),
+                _twins([376.0, 259.0], round_number=5))
+
+    assert r.actual_damage == pytest.approx(19.0), \
+        "measured against the wrong twin again"
+    assert abs(r.error) < 1.0
+    assert r.clean, r.confounds
+
+
+def test_the_twin_that_died_is_the_one_the_health_says(qapp):
+    """A board that loses one of two same-named mobs. Matching in list
+    order would pair the survivor with the corpse's slot and report the
+    living mob as dead."""
+    tel = Telemetry()
+    tel.start_fight()
+    r = tel.observe(_Decision("Frost Beetle", target_index=1),
+                    _twins([19.0, 259.0], round_number=2))
+    r.predicted_damage = 100.0
+    tel.observe(_Decision("Frost Beetle", target_index=0),
+                _twins([160.0], round_number=3))
+
+    # the target (259) survived at 160; the 19 HP twin is the one gone
+    assert r.actual_damage == pytest.approx(99.0)
+    assert r.clean, r.confounds
+    assert not any("died" in c for c in r.confounds)
+
+
+def test_a_defeated_wizard_leaves_the_circle_and_stops_recording(qapp):
+    """A knocked-out wizard is still in the duel as far as wizwalker is
+    concerned: `handle_round` keeps firing against an empty hand. The
+    live run filed four consecutive "policy chose to pass" rounds for
+    it — and, worse, the rest of the party waited for it at the barrier
+    every one of those rounds."""
+    import asyncio
+
+    from deimos_bridge.hivemind import Hivemind
+    from deimos_bridge.live_backend import WizAiBackend
+    from w101_sim import Actor, State
+
+    hive = Hivemind(timeout=0.2)
+    hive.join(0, "Konstantin")
+    hive.join(1, "Jeffrey")
+    hive.enter_combat(0)
+    hive.enter_combat(1)
+
+    said = []
+    tel = Telemetry()
+    backend = WizAiBackend(policy=lambda *_a: None, cards={}, school="fire",
+                           decklist=[], catalog={"cards": {}},
+                           seat=0, coordinator=hive, party_size=2)
+    backend.on_defeated = lambda: said.append("down")
+    backend.telemetry = tel
+
+    player = Actor(name="Konstantin", school="fire", hp=0, max_hp=757, team=0)
+    mob = Actor(name="Nirini Warrior", school="balance", hp=395,
+                max_hp=395, team=1)
+    read = _Read(State(player, [mob]), 4, ())
+    read.state.player_hp = 0.0
+
+    async def go():
+        backend.read_state_for_test = read
+        return backend._check_defeated(read)
+
+    decision = asyncio.run(go())
+    assert decision is not None and decision.passing
+    assert "defeated" in decision.reason
+    assert said == ["down"], "the operator was never told"
+    assert hive.fighting() == [1], "the party is still waiting for a corpse"
+    assert hive.size == 2, "it left the circle, not the party"
+
+    # said once per knockdown, not once per round
+    backend._check_defeated(read)
+    assert said == ["down"]
+
+
+def test_the_hivemind_tab_shows_every_wizard_at_once(qapp):
+    """The tab exists because every other one shows a wizard at a time.
+    Working out why a party has stalled by switching a dropdown four
+    times is exactly what it replaces, so the roster has to carry the
+    state that answers it: who is in the circle, on what health, and
+    what each of them last said."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.wizards.setValue(3)
+    assert win.tabs.isTabVisible(win.hivemind_tab)
+    assert win.tabs.tabText(win.hivemind_tab) == "Hivemind"
+
+    win.on_seat_named(0, "Konstantin")
+    win.on_seat_named(1, "Jeffrey")
+    win.on_seat_hp_read(0, 757)
+    win.on_seat_status(1, "following the leader — could not read the "
+                          "leader's position")
+    win.refresh_hivemind()
+
+    roster = win.hivemind.roster
+    assert roster.rowCount() == 3
+    assert roster.item(0, 0).text() == "Konstantin"
+    assert roster.item(1, 0).text() == "Jeffrey"
+    assert "wizard 3" in roster.item(2, 0).text()
+    assert "757" in roster.item(0, 3).text()
+    assert "leader's position" in roster.item(1, 8).text(), \
+        "a stuck wizard's own line is the point of the roster"
+    assert "3 wizard(s) connected" in win.hivemind.party_lab.text()
+
+
+def test_the_roster_says_who_is_actually_in_the_circle(qapp):
+    """A wizard connected but not in the duel is not being planned for —
+    the party agrees a round among the wizards actually in the circle,
+    and the rest are on their own. That is the difference between a
+    hivemind and four bots, and nothing showed it."""
+    from deimos_bridge.gui.app import MainWindow
+    from deimos_bridge.hivemind import Hivemind
+
+    win = MainWindow(Telemetry())
+    win.wizards.setValue(2)
+    hive = Hivemind(timeout=0.2)
+    hive.join(0, "Konstantin")
+    hive.join(1, "Jeffrey")
+    hive.enter_combat(0)
+    hive.enter_combat(1)
+    win.live = type("L", (), {"hive": hive, "isRunning": lambda self: True})()
+    win.refresh_hivemind()
+
+    assert win.hivemind.roster.item(0, 4).text() == "in the circle"
+    assert "2 in the circle" in win.hivemind.party_lab.text()
+
+    hive.leave_combat(1)
+    win.refresh_hivemind()
+    # one wizard left swinging is fighting ALONE, which is a different
+    # thing from fighting with the party and worth flagging
+    assert win.hivemind.roster.item(0, 4).text() == "fighting alone"
+    assert win.hivemind.roster.item(1, 4).text() != "in the circle"
+
+
+def test_the_roster_flags_a_defeated_wizard(qapp):
+    """0 health is the state that explains a party that has stopped
+    making progress, and it was visible nowhere."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.wizards.setValue(2)
+    win.on_seat_hp_read(0, 757)
+    win.seat_live[0]["hp"] = 0.0
+    win.refresh_hivemind()
+    assert win.hivemind.roster.item(0, 4).text() == "defeated"
+
+
+def test_the_wheel_is_given_back_between_stages(qapp):
+    """The drive lock stops two coroutines steering one wizard at the
+    same moment. Held for the whole tick it is held for the SUM of the
+    stages instead, so a press waits out an auto-dialogue AND a follow
+    AND a quest hop before its own turn."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    class _Client:
+        async def in_battle(self):
+            return False
+
+    order, first = [], asyncio.Event()
+
+    w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1, auto_quest=True,
+                   auto_dialogue=True)
+    w.status = type("S", (), {"emit": staticmethod(lambda *_: None)})()
+    seat = w.seats[0]
+    seat.client = client = _Client()
+
+    async def slow_dialogue(_c):
+        first.set()
+        order.append("dialogue")
+        await asyncio.sleep(0.4)
+
+    async def slow_quest(_c):
+        order.append("quest")
+        await asyncio.sleep(0.4)
+
+    async def drive():
+        seat.drive = asyncio.Lock()
+        w._auto_dialogue = slow_dialogue
+        w._quest_step = slow_quest
+        w._do_request = lambda c, a, s=None: _record(order, a)
+        tasks = [asyncio.ensure_future(w._service_loop(client, seat)),
+                 asyncio.ensure_future(w._request_loop(client, seat))]
+        await asyncio.wait_for(first.wait(), 2)
+        w.request("teleport")
+        for _ in range(30):
+            await asyncio.sleep(0.05)
+            if "teleport" in order:
+                break
+        w._stop = True
+        for task in tasks:
+            task.cancel()
+            try:
+                await task
+            except BaseException:
+                pass
+
+    asyncio.run(drive())
+    assert "teleport" in order, "the press never ran"
+    assert order.index("teleport") < len(order) - 1 or "quest" not in order, \
+        order
+    # the press got in at the gap between two stages rather than after
+    # every stage of the tick
+    assert order[:2] == ["dialogue", "teleport"], order

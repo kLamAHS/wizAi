@@ -122,6 +122,10 @@ class _Seat:
         #: QUEUE, which is the whole point: the queue is attended by its
         #: own task and only ever waits for the one action in progress.
         self.drive = None
+        #: what holds `drive` right now, by name, or None. A hung game
+        #: read under the lock is invisible from outside it -- the run
+        #: simply stops answering -- so whoever takes the wheel says so.
+        self.driver = None
         #: action -> when it was queued, so an entry that can never be
         #: serviced expires instead of wedging the hotkey forever
         self.queued_at = {}
@@ -443,38 +447,52 @@ class LiveWorker(QThread):
                     await asyncio.sleep(0.5)
                     continue
 
-                await self._drain_requests(client)
-
                 # A person pressing a key outranks any of the automatic
                 # chores below. Standing aside costs half a second of
-                # questing and buys a hotkey that answers.
+                # questing and buys a hotkey that answers. The queue
+                # itself belongs to `_request_loop` -- draining it from
+                # here too let both tasks pop an action, and the second
+                # pop overwrote `seat.busy`, so the dedupe stopped
+                # covering whichever action was actually running.
                 if seat.requests:
                     await asyncio.sleep(self.REQUEST_POLL)
                     continue
 
-                async with self._driving(seat):
-                    if self.auto_dialogue and seat.quester is None:
-                        # Deimos's questing does its own dialogue
-                        # handling, so a second clicker would race it for
-                        # the same button.
-                        await self._stage(seat, "auto-dialogue",
-                                          self._auto_dialogue(client))
+                # Building or tearing down the runner steers nothing, so
+                # it is outside the drive lock -- and outside the
+                # auto-dialogue branch it was mistakenly nested in, which
+                # meant the "Run script" tick only took effect on a
+                # wizard that also had auto-dialogue on and no Deimos
+                # quester running.
+                await self._stage(seat, "script", self._sync_script(seat))
 
-                        await self._stage(seat, "script", self._sync_script(seat))
+                # The wheel is taken per stage, not for the whole tick.
+                # It exists to stop two coroutines steering one wizard at
+                # the same moment, not to make a tick atomic -- and held
+                # across the tick it is held for the SUM of the stages,
+                # so a press could wait out an auto-dialogue and a follow
+                # before its own turn. Released between them, a queued
+                # request gets the wizard at the next gap.
+                if self.auto_dialogue and seat.quester is None:
+                    # Deimos's questing does its own dialogue handling,
+                    # so a second clicker would race it for the same
+                    # button.
+                    await self._stage(seat, "auto-dialogue",
+                                      self._auto_dialogue(client), wheel=True)
 
-                    if seat.runner is not None:
-                        await self._stage(seat, "script step",
-                                          self._script_step(seat))
+                if seat.runner is not None:
+                    await self._stage(seat, "script step",
+                                      self._script_step(seat), wheel=True)
 
-                    if self._follows(seat):
-                        # A follower does not quest. Two wizards taking
-                        # their own quests walk to two places, and then
-                        # the party coordinates beautifully with nobody.
-                        await self._stage(seat, "following the leader",
-                                          self._follow_step(client))
-                    elif self.auto_quest:
-                        await self._stage(seat, "quest step",
-                                          self._quest_step(client))
+                if self._follows(seat):
+                    # A follower does not quest. Two wizards taking their
+                    # own quests walk to two places, and then the party
+                    # coordinates beautifully with nobody.
+                    await self._stage(seat, "following the leader",
+                                      self._follow_step(client), wheel=True)
+                elif self.auto_quest:
+                    await self._stage(seat, "quest step",
+                                      self._quest_step(client), wheel=True)
 
                 await asyncio.sleep(0.5)
             except asyncio.CancelledError:
@@ -553,27 +571,108 @@ class LiveWorker(QThread):
                       f"and a stuck entry is what makes the key stop "
                       f"responding. Press it again.")
 
-    def _driving(self, seat):
-        """The lock for steering this wizard, or a no-op before `_go`."""
+    def _driving(self, seat, owner="something"):
+        """Take the wheel for this wizard, recording who has it.
+
+        The name is not decoration. Everything below the lock is a game
+        read or a mouse click, and a hung one leaves the lock held with
+        no way to tell from the outside what is holding it -- which is
+        exactly the state the run was in when every hotkey stopped
+        answering. `seat.driver` turns that into a status line: a press
+        that has to wait says what it is waiting for, by name.
+        """
         import contextlib
 
         if seat.drive is None:
             return contextlib.nullcontext()
-        return seat.drive
 
-    async def _stage(self, seat, name, coro):
+        @contextlib.asynccontextmanager
+        async def held():
+            async with seat.drive:
+                seat.driver = owner
+                try:
+                    yield
+                finally:
+                    seat.driver = None
+
+        return held()
+
+    #: seconds any one stage may hold the wheel before it is cut off.
+    #:
+    #: This is the whole reason a hotkey can go dead. Every stage below
+    #: the drive lock is a real game read or a real mouse click, and some
+    #: of the ones wizwalker ships **cannot** finish: the friends-list
+    #: teleport clicks the page button in `while (await text()) !=
+    #: "Online Friends"` with no bound at all, so a wizard whose list
+    #: never reads exactly that spins there for the rest of the run. It
+    #: holds the wheel while it spins, so every queued teleport, wisp
+    #: sweep and potion behind it waits forever and every further press
+    #: is refused as "already queued". One unbounded loop in a follow
+    #: step took all four keys away.
+    #:
+    #: Per stage rather than one number, because a legitimate quest hop
+    #: settles for over a second and a legitimate friends-list teleport
+    #: opens a window, clicks through a confirmation and waits out a
+    #: teleport animation. The limits are generous enough that nothing
+    #: which is working gets cut off, and short enough that nothing which
+    #: is stuck owns the wizard.
+    STAGE_LIMITS = {"auto-dialogue": 45.0,
+                    "script": 20.0,
+                    "script step": 30.0,
+                    "following the leader": 60.0,
+                    "quest step": 60.0}
+    #: the fallback for a stage with no entry above, including the
+    #: `the <action> request` stages, which are named after the action
+    DEFAULT_STAGE_LIMIT = 90.0
+    #: the between-fights chores, which are not a stage but hold the same
+    #: wheel. A full wisp sweep is twelve teleports with a settle after
+    #: each; two minutes is several of those and still finite.
+    AFTER_FIGHT_LIMIT = 120.0
+
+    async def _stage(self, seat, name, coro, limit=None, wheel=False):
         """Run one stage of the service tick, reporting its own failure.
 
         Per stage rather than per tick: a stage that raises must not take
         the ones below it off the air, and the message has to name which
         one it was or "nothing works" is all anybody can report.
+
+        Bounded, too. A stage that raises is visible and recoverable; a
+        stage that never returns is neither, and it takes the drive lock
+        with it. See `STAGE_LIMITS`.
+
+        `wheel` for a stage that steers -- teleports, clicks, walks. It
+        takes the drive lock for its own duration and gives it straight
+        back, so the stage after it starts from scratch and a queued
+        keypress can get in between the two.
         """
+        if limit is None:
+            limit = self.STAGE_LIMITS.get(name, self.DEFAULT_STAGE_LIMIT)
+        if wheel:
+            coro = self._at_the_wheel(seat, name, coro)
         try:
-            await coro
+            await asyncio.wait_for(coro, limit)
         except asyncio.CancelledError:
             raise
+        except asyncio.TimeoutError:
+            self._say_once(
+                seat, name,
+                f"{name} ran for {limit:.0f}s without finishing and was cut "
+                f"off. It holds the wheel while it runs, so everything else "
+                f"for this wizard — the hotkeys included — was waiting "
+                f"behind it.")
         except Exception as exc:
             self._stage_failed(seat, name, exc)
+
+    async def _at_the_wheel(self, seat, name, coro):
+        """`coro`, holding this wizard's drive lock.
+
+        Inside the stage's own deadline rather than outside it, which is
+        the whole point: the *acquisition* is bounded too, so a stage
+        that cannot get the wheel is cut off and reported instead of
+        queueing up behind a wedge and adding to it.
+        """
+        async with self._driving(seat, name):
+            await coro
 
     def _stage_failed(self, seat, name, exc):
         self._say_once(seat, name,
@@ -617,10 +716,15 @@ class LiveWorker(QThread):
             try:
                 # The lock, not the tick: the operator's press waits for
                 # whatever is steering the wizard right now and for
-                # nothing else.
-                async with self._driving(seat):
-                    await self._stage(seat, f"the {action} request",
-                                      self._do_request(client, action, seat))
+                # nothing else. And it says what that is, because a press
+                # that goes quiet for thirty seconds is indistinguishable
+                # from a key that is not bound.
+                if seat.driver is not None:
+                    self._say(seat, f"{action} is queued — waiting for "
+                                    f"{seat.driver} to let go of the wheel")
+                await self._stage(seat, f"the {action} request",
+                                  self._do_request(client, action, seat),
+                                  wheel=True)
             finally:
                 seat.busy = None
 
@@ -1402,6 +1506,7 @@ class LiveWorker(QThread):
                     party_size=len(self.seats))
                 backend.on_failed_cast = self._failed_cast_hook(seat)
                 backend.on_school_mismatch = self._school_hook(seat)
+                backend.on_defeated = self._defeated_hook(seat)
                 seat.tel.resolver = backend.resolver
                 seat.backend = backend
                 if seat.policy_name != built_as:
@@ -1537,13 +1642,22 @@ class LiveWorker(QThread):
                     # combat and free, and teleport it to the quest
                     # marker halfway through the sweep.
                     seat.in_upkeep = True
-                    async with self._driving(seat), self._upkeep(seat):
-                        await upkeep.after_fight(
+                    async with self._driving(seat, "the after-fight chores"), \
+                            self._upkeep(seat):
+                        await asyncio.wait_for(upkeep.after_fight(
                             seat.client, wisps=self.collect_wisps,
                             potions=self.use_potions,
-                            on_status=lambda m: self._say(seat, m))
+                            on_status=lambda m: self._say(seat, m)),
+                            self.AFTER_FIGHT_LIMIT)
                 except asyncio.CancelledError:
                     raise
+                except asyncio.TimeoutError:
+                    self._say(seat,
+                              f"the after-fight chores ran for "
+                              f"{self.AFTER_FIGHT_LIMIT:.0f}s without "
+                              f"finishing and were cut off — the next fight "
+                              f"matters more, and they hold the wheel while "
+                              f"they run")
                 except Exception as exc:
                     # Still never a blocker -- but the reason is said
                     # out loud. Swallowing it silently is what made
@@ -1570,6 +1684,13 @@ class LiveWorker(QThread):
 
     def _school_hook(self, seat):
         return lambda actual: self._on_school_mismatch(actual, seat)
+
+    def _defeated_hook(self, seat):
+        return lambda: self._say(
+            seat,
+            "defeated — left the party's circle so the others stop waiting "
+            "for it every round, and its rounds are no longer recorded. It "
+            "rejoins when this fight ends.")
 
     def _on_school_mismatch(self, actual, seat):
         """This client is not the wizard this seat was configured as.
