@@ -429,6 +429,15 @@ class LiveRead:
         self.members = members
         self.client_member = client_member
         self.round_number = round_number
+        #: the school the CLIENT says this wizard is, or "" if it would
+        #: not read. Deliberately not written into `state.player.school`
+        #: -- that stays whatever the run was configured with, so nothing
+        #: downstream shifts under a policy mid-fight. It exists so the
+        #: configuration can be checked against the game, because
+        #: `ClientHandler.get_new_clients()` hands back windows in
+        #: whatever order it finds them and nothing else can tell which
+        #: wizard is which. See `WizAiBackend._check_school`.
+        self.client_school = ""
         #: The live members behind `state.enemies`, **in the same order**.
         #: This is what makes a policy's "name@i" mean the same mob to the
         #: game as it did to the policy. Deriving the target from a
@@ -709,4 +718,8 @@ async def read_state(combat, resolver: NameResolver, school: str,
     read = LiveRead(state, hand_cards, resolver, members, me,
                     await combat.round_number(), enemy_members, hidden)
     read.unreadable = unreadable
+    # The client's own answer, for checking the configuration against.
+    # Empty rather than "balance" on a failed read: an unreadable school
+    # must not be reported as a mismatch with the configured one.
+    read.client_school = await read_school(me, default="")
     return read

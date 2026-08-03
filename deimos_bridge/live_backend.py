@@ -136,6 +136,11 @@ class WizAiBackend:
         self.on_decision = on_decision
         self.on_lost_round = on_lost_round
         self.on_failed_cast = None
+        #: optional callback(actual school) for a wizard whose client
+        #: disagrees with the school it was configured with. See
+        #: `_check_school`.
+        self.on_school_mismatch = None
+        self._school_checked = False
         #: the wizard's power-pip odds, off the client. None means never
         #: read, and then the actor keeps whatever default it has rather
         #: than being given a made-up number.
@@ -223,6 +228,7 @@ class WizAiBackend:
             if name not in self._seen:
                 self._seen.append(name)
         read.state.player.deck = self._deck_remaining(read.hand_cards)
+        self._check_school(read)
         self._measured_incoming = self._estimate_incoming(read)
         self._apply_player_stats(read)
         self._apply_bestiary(read)
@@ -379,6 +385,20 @@ class WizAiBackend:
     #: measure. Matches the trainer's own dummy-boss rule
     #: (`gui/app.TrainWorker`), so a live fight and the fight the Q table
     #: was learned on are not priced differently on turn one.
+    #:
+    #: Divided by the party, because the quantity is "damage to THIS
+    #: wizard", and an enemy choosing one of four wizards lands on this
+    #: one a quarter of the time. Measured on the first live party run:
+    #: the solo wizard's prior read 57/enemy against 78-84 actually
+    #: measured (right, and slightly low), while the two party wizards'
+    #: priors read 85 and 58 against 15-30 and 36-53 -- over by up to
+    #: five times. Round one is exactly where that hurts most, because
+    #: it is the only round with nothing measured yet: wizard 2's
+    #: opening had EVERY candidate scored at the horizon sentinel, all
+    #: 14.0 turns and all 235 damage, because a board dealing an
+    #: imagined 115/round killed it inside the horizon on every line.
+    #: The comparison collapses and the opening move falls through to
+    #: the pip tiebreak.
     INCOMING_PRIOR_DIVISOR = 12.0
 
     def _estimate_incoming(self, read):
@@ -420,10 +440,51 @@ class WizAiBackend:
             per_enemy = sum(self._incoming) / len(self._incoming)
         else:
             per_enemy = max(30.0,
-                            player.max_hp / self.INCOMING_PRIOR_DIVISOR)
+                            player.max_hp / (self.INCOMING_PRIOR_DIVISOR
+                                             * self.party_size))
         for enemy in read.state.enemies:
             enemy.flat_hit = per_enemy
         return per_enemy
+
+    def _check_school(self, read):
+        """Say so when this client is not the wizard it was configured as.
+
+        `ClientHandler.get_new_clients()` returns windows in whatever
+        order it finds them, and nothing else can tell which one is
+        "wizard 1" -- so a party's seats and clients can be crossed, and
+        the first live party run's were: an ice wizard configured fire
+        and a fire wizard configured ice.
+
+        What it costs depends on the wizard, and it is worth being exact
+        because the obvious answer is wrong. The gear read asks for the
+        configured school's damage stat, so `player.damage_bonus` comes
+        back keyed on a school this wizard never casts and
+        `_damage_bonus` misses on every card -- but a low-level wizard
+        has no damage or accuracy stat to lose, so on that run the
+        crossing cost nothing there. It bites where the school itself is
+        the input: `choose_nuke` prefers the caster's own school and
+        finds none of it, `effective_pips` values a power pip at two in
+        the wizard's school and one elsewhere, `TrainWorker.board_schools`
+        excludes the wizard's own school from an evaluation board and
+        excludes the wrong one, and the exported run names a school its
+        own hand contradicts. It gets expensive the moment the wizard has
+        gear worth reading.
+
+        Checked once, from the read the fight already does -- the client
+        member is a `CombatParticipant` and knows its own school. Only
+        reported here; correcting it needs the gear re-read, which is the
+        caller's business.
+        """
+        if self._school_checked:
+            return
+        actual = getattr(read, "client_school", "") or ""
+        if not actual:
+            return          # unreadable is not a mismatch
+        self._school_checked = True
+        if actual == self.school:
+            return
+        if self.on_school_mismatch:
+            self.on_school_mismatch(actual)
 
     def _apply_player_stats(self, read):
         """Put the wizard's real gear and power pips on the read player.

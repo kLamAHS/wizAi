@@ -137,6 +137,22 @@ def describe_hanging(h) -> str:
     return f"{h.name} ({h.kind})"
 
 
+def _party_hits(party, seat):
+    """{enemy name: "wizard 2", ...} for the OTHER wizards' targets.
+
+    Only enemies, and only other seats: this wizard's own cast is the
+    thing being measured, and a teammate's self-buff moves no health.
+    """
+    out = {}
+    for move in getattr(party, "moves", ()) or ():
+        if move.seat == seat or not move.card or not move.target_name:
+            continue
+        who = out.get(move.target_name)
+        out[move.target_name] = (f"{who} and {move.name}" if who
+                                 else move.name)
+    return out
+
+
 def _attr(obj, name, default=None):
     """Field off a dataclass or a dict, whichever the caller has.
 
@@ -251,6 +267,12 @@ class RoundRecord:
     #: Recorded so training can be given the real number instead of
     #: deriving one from the wizard's own health.
     incoming: float = 0.0
+    #: {enemy name: which other wizards aimed at it} for this round, when
+    #: a party planned it. The damage model settles by differencing the
+    #: board, so a mob another wizard also hit hands this wizard's cast a
+    #: residual that is the party's total -- which is not a measurement
+    #: of anything. See `Telemetry._settle`.
+    party_hits: dict = field(default_factory=dict)
 
     @property
     def error(self):
@@ -280,8 +302,17 @@ class FightRecord:
 class Telemetry:
     """Everything a live run produced. The GUI is a view over this."""
 
-    def __init__(self, policy_name="", school="", deck=None, resolver=None):
+    def __init__(self, policy_name="", school="", deck=None, resolver=None,
+                 wizard="", seat=0):
         self.policy_name = policy_name
+        #: which wizard this record belongs to, and what it is called
+        #: in the game. "wizard 1" and "wizard 2" are the window's own
+        #: numbering, and they mean nothing once three exports are
+        #: sitting in a folder -- the first live party run had to be
+        #: identified by reading the hands and guessing. The name is
+        #: learned from the first duel; the seat is always known.
+        self.wizard = wizard
+        self.seat = int(seat or 0)
         self.school = school
         self.deck = list(deck or [])
         #: the run's NameResolver, if there is one. Only used so the GUI
@@ -316,8 +347,17 @@ class Telemetry:
         return self.fights[-1]
 
     # -- the per-round hook ----------------------------------------------
-    def observe(self, decision, read, sim=None, cards=None):
-        """Record one planning phase. Call from the backend's on_decision."""
+    def observe(self, decision, read, sim=None, cards=None, party=None,
+                seat=0):
+        """Record one planning phase. Call from the backend's on_decision.
+
+        `party` is the round's `hivemind.PartyPlan`, when one was made.
+        It is not decoration: the damage model settles by differencing
+        the board between this wizard's rounds, and in a party that delta
+        carries every wizard's damage. Without knowing who else aimed
+        where, a round in which two wizards hit the same mob is recorded
+        as one cast landing for both -- silently, and with no confound.
+        """
         if not self.fights:
             self.start_fight()
         s = read.state
@@ -378,6 +418,8 @@ class Telemetry:
                                describe_threat(e))
                      for e in s.enemies],
         )
+
+        rec.party_hits = _party_hits(party, seat)
 
         unreadable = list(getattr(read, "unreadable", ()) or ())
         if unreadable:
@@ -477,12 +519,27 @@ class Telemetry:
             prev.confounds.append("target died: actual damage is a lower bound")
         else:
             prev.actual_damage = max(before.hp - after.hp, 0.0)
+            # A mob another wizard also aimed at hands this cast a
+            # residual that is the PARTY's damage, not its own. Silent
+            # before parties existed, because there was nobody else to
+            # confuse it with; in the first live party run three of
+            # wizard 1's rounds carried the collateral note below with
+            # "AoE, DoT or a minion" as the suggested cause, when the
+            # cause was wizard 2.
+            sharing = prev.party_hits.get(target)
+            if sharing:
+                prev.clean = False
+                prev.confounds.append(
+                    f"{sharing} also hit {target} this round -- the board "
+                    f"delta is the party's damage, not this cast's")
             for e in prev.enemies:
                 other = by_name.get(e.name)
                 if other is not None and e.name != target and other.hp < e.hp:
                     prev.clean = False
+                    who = prev.party_hits.get(e.name)
                     prev.confounds.append(
-                        f"{e.name} also lost HP -- AoE, DoT or a minion")
+                        f"{e.name} also lost HP -- {who} hit it" if who
+                        else f"{e.name} also lost HP -- AoE, DoT or a minion")
                     break
             if any("dot" in w.lower() or "over time" in w.lower()
                    for w in (before.wards or [])):
@@ -819,6 +876,8 @@ class Telemetry:
     def summary(self):
         st = self.error_stats()
         return {
+            "wizard": self.wizard or f"wizard {self.seat + 1}",
+            "seat": self.seat + 1,
             "policy": self.policy_name,
             "school": self.school,
             "fights": len(self.fights),

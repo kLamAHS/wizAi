@@ -636,3 +636,182 @@ def test_an_unreadable_leader_is_reported_rather_than_chased_to_zero():
     moved, why = asyncio.run(party.follow(follower, leader))
     assert moved is False and "leader's position" in why
     assert follower.teleports == []
+
+
+# ------------------------------------------ what the first live party run said
+def test_the_round_one_incoming_prior_is_split_across_the_party():
+    """From the first live party run. The solo wizard's prior read 57 per
+    enemy against 78-84 actually measured — right, and slightly low. The
+    two party wizards' priors read 85 and 58 against 15-30 and 36-53:
+    over by up to five times, on the one round that has nothing measured
+    yet to correct it."""
+    from deimos_bridge.live_backend import WizAiBackend
+    from w101_sim import Actor, State
+
+    def prior(party_size, max_hp=1022):
+        backend = WizAiBackend.from_trained(
+            school="ice", deck=[], cards={}, policy=lambda sim, s: None,
+            party_size=party_size)
+        player = Actor(name="W", school="ice", hp=max_hp, max_hp=max_hp,
+                       team=0)
+        foe = Actor(name="Mob", school="death", hp=690, max_hp=690, team=1)
+
+        class _Read:
+            state = State(player, [foe])
+            round_number = 1
+        return backend._estimate_incoming(_Read())
+
+    assert prior(1) == pytest.approx(1022 / 12)
+    assert prior(2) == pytest.approx(1022 / 24)
+    # The 30/round floor still holds, however big the party: a living mob
+    # is never harmless, and dividing past that would model one.
+    assert prior(4) == 30.0
+    assert prior(4, max_hp=300) == 30.0
+
+    # And it lands nearer the truth. Wizard 1 of that run measured 15-30
+    # per enemy once the fight had rounds to count; the solo prior said
+    # 85, and it is only round one that has to guess.
+    measured = 22.0
+    assert abs(prior(2) - measured) < abs(prior(1) - measured)
+
+
+def test_the_party_prior_buys_the_rollout_more_rounds_to_work_with():
+    """Wizard 2's round 1 in that run scored EVERY candidate at 14.0
+    turns and 235 damage — the horizon sentinel, meaning "no line
+    survives" — because a board dealing an imagined 115/round killed it
+    inside the horizon on every line, and the comparison collapsed to the
+    pip tiebreak.
+
+    The prior is what was wrong, so the prior is what this checks: how
+    many rounds the rollout thinks the wizard has. Whether that clears
+    the sentinel depends on the board — on this one, at 691 health
+    against two mobs, even the floored party prior still kills it inside
+    twelve rounds, and saying so is not wrong. It is the factor of two
+    between 6 rounds and 12 that was.
+    """
+    from deimos_bridge.live_backend import WizAiBackend
+    from w101_sim import Actor, State
+
+    def rounds_to_live(party_size):
+        backend = WizAiBackend.from_trained(
+            school="fire", deck=[], cards={}, policy=lambda sim, s: None,
+            party_size=party_size)
+        player = Actor(name="W", school="fire", hp=691, max_hp=691, team=0)
+        foes = [Actor(name="Lord Nightshade", school="death", hp=690,
+                      max_hp=690, team=1),
+                Actor(name="Field Guard", school="balance", hp=395,
+                      max_hp=395, team=1)]
+
+        class _Read:
+            state = State(player, foes)
+            round_number = 1
+        per_enemy = backend._estimate_incoming(_Read())
+        return player.max_hp / (per_enemy * len(foes))
+
+    alone = rounds_to_live(1)
+    pair = rounds_to_live(2)
+    assert alone == pytest.approx(6.0, abs=0.1)     # the run's own number
+    # 691/24 is 28.8, under the 30/round floor, so the pair lands on the
+    # floor rather than on the halving -- a living mob is never modelled
+    # as harmless. Still nearly twice the rounds to work with.
+    assert pair == pytest.approx(11.5, abs=0.1)
+    assert pair > alone
+
+
+def test_only_one_candidate_is_the_chosen_one():
+    """Wizard 1's round 4 exported Frost Beetle @0 AND 'pass' both
+    flagged chosen, so the decision matrix rendered two winners for one
+    round."""
+    from w101_sim import Actor, Boss, Rules, Sim, State
+
+    table = cards()
+    hand = ["Frost Beetle", "Snow Serpent", "Evil Snowman"]
+    player = Actor(name="W", school="ice", hp=841, max_hp=1022, team=0,
+                   norm_pips=4)
+    player.hand = [table[n] for n in hand]
+    foes = [Actor(name="Lord Nightshade", school="death", hp=690, max_hp=690,
+                  team=1, flat_hit=30),
+            Actor(name="Field Guard", school="balance", hp=395, max_hp=395,
+                  team=1, flat_hit=30)]
+    sim = Sim(table, hand, "ice",
+              Boss(name="Lord Nightshade", hp=690, school="death", dmg=30),
+              enemies=[Boss(name="Field Guard", hp=395, school="balance",
+                            dmg=30)],
+              rules=Rules(), player_hp=1022)
+    policy = greedy_ttk()
+    policy(sim, State(player, foes))
+    chosen = [c for c in policy.last_candidates if c.chosen]
+    assert len(chosen) == 1, [(c.card, c.target) for c in chosen]
+
+
+def test_a_mob_two_wizards_hit_is_not_a_damage_measurement():
+    """`_settle` differences the board, and in a party that delta is the
+    party's damage. Silent before parties existed, because there was
+    nobody else to confuse it with."""
+    from deimos_bridge.hivemind import PartyPlan, SeatMove
+    from deimos_bridge.telemetry import Telemetry
+
+    class _Decision:
+        card_name = "Frost Beetle"
+        target_index = 0
+        target_kind = "enemy"
+        passing = False
+        reason = ""
+        policy = "ttk-lookahead"
+        candidates = ()
+
+    def read(hp):
+        from w101_sim import Actor, State
+
+        class _Resolver:
+            misses = {}
+        me = Actor(name="W", school="ice", hp=841, max_hp=1022, team=0)
+        foe = Actor(name="Lord Nightshade", school="death", hp=hp,
+                    max_hp=690, team=1)
+
+        class _Read:
+            state = State(me, [foe])
+            hand_cards = {"Frost Beetle": []}
+            resolver = _Resolver()
+            round_number = 1
+            hand_visibility = 1.0
+            hidden = ()
+            unreadable = ()
+        return _Read()
+
+    plan = PartyPlan(moves=[
+        SeatMove(seat=0, name="wizard 1", card="Frost Beetle", target=0,
+                 target_name="Lord Nightshade"),
+        SeatMove(seat=1, name="wizard 2", card="Fire Cat", target=0,
+                 target_name="Lord Nightshade")])
+
+    tel = Telemetry()
+    tel.start_fight()
+    rec = tel.observe(_Decision(), read(690), party=plan, seat=0)
+    assert rec.party_hits == {"Lord Nightshade": "wizard 2"}
+    rec.predicted_damage = 85.0
+    tel.observe(_Decision(), read(529), party=plan, seat=0)
+
+    assert rec.actual_damage == 161.0        # the pair's damage, not the cast's
+    assert rec.clean is False
+    assert any("wizard 2 also hit" in c for c in rec.confounds), rec.confounds
+    # ...so it is kept out of the damage model's statistics entirely.
+    assert tel.damage_observations() == []
+
+
+def test_collateral_damage_names_the_wizard_that_caused_it():
+    """Three of wizard 1's rounds carried 'Field Guard also lost HP --
+    AoE, DoT or a minion'. The cause was wizard 2."""
+    from deimos_bridge.hivemind import PartyPlan, SeatMove
+    from deimos_bridge.telemetry import _party_hits
+
+    plan = PartyPlan(moves=[
+        SeatMove(seat=0, name="wizard 1", card="Frost Beetle", target=0,
+                 target_name="Lord Nightshade"),
+        SeatMove(seat=1, name="wizard 2", card="Fire Elf", target=1,
+                 target_name="Field Guard")])
+    assert _party_hits(plan, 0) == {"Field Guard": "wizard 2"}
+    assert _party_hits(plan, 1) == {"Lord Nightshade": "wizard 1"}
+    # A wizard that held its card moved no health and is not a cause.
+    held = PartyPlan(moves=[SeatMove(seat=1, name="wizard 2", note="held")])
+    assert _party_hits(held, 0) == {}

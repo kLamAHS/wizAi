@@ -609,7 +609,7 @@ class RunPanel(TelemetryView, QWidget):
     def refresh(self):
         s = self.tel.summary()
         self.headline.setText(
-            f"{s['policy'] or 'policy'} · {s['school']} · "
+            f"{s['wizard']} · {s['policy'] or 'policy'} · {s['school']} · "
             f"{s['fights']} fights, {s['rounds']} rounds, "
             f"{s['wins']} won, {s['passes']} passes")
         fights = self.tel.fights
