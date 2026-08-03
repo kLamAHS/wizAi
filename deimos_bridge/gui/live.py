@@ -666,6 +666,123 @@ class LiveWorker(QThread):
             self._hotkeys = None
             self.status.emit(f"hotkeys not installed ({type(exc).__name__})")
 
+    #: how long to wait for one client's hooks before saying something.
+    #: wizwalker's own default is *no* timeout, which on a background
+    #: client is a hang -- see `_activate_all_hooks`.
+    HOOK_TIMEOUT = 20.0
+    #: bring each client to the front while its hooks are being written.
+    #: Intrusive, and the alternative is the hang.
+    FOCUS_TO_HOOK = True
+
+    async def _activate_all_hooks(self):
+        """Install every client's hooks, without hanging on any of them.
+
+        This is the fix for "hooking multiple characters does not work
+        first try; I have to kill the bot and re-hook every time", and
+        the cause is worth writing down because nothing about it is
+        visible from here.
+
+        `client.activate_hooks()` defaults to `wait_for_ready=True,
+        timeout=None`, and that `None` reaches
+        `asyncio.wait_for(task, None)` -- it waits **forever** for five
+        addresses to become non-zero: `player_struct`,
+        `player_stat_struct`, `current_client`, `current_root_window`
+        and `current_render_context`. Those are written by the game's
+        own code when it next runs those paths, and the last two are the
+        UI and render paths. A Wizard101 client that is not the
+        foreground window throttles rendering, so on a background client
+        they may simply never fire.
+
+        Hooking the clients one after another then parks the whole run
+        on client 2 forever while client 1 sits there hooked, with no
+        timeout, no message and nothing to do but kill it. Alt-tabbing
+        to client 2 makes it render, which is exactly the manual
+        "messing around" that makes it take.
+
+        So: bring each client to the front for the moment its hooks are
+        being written, bound the wait, and put the operator's own window
+        back afterwards. The focus dance is intrusive and it is still
+        better than the hang; `FOCUS_TO_HOOK` turns it off.
+        """
+        was_in_front = self._foreground_window()
+        try:
+            for seat in self.seats:
+                await self._activate_hooks(seat)
+        finally:
+            self._restore_foreground(was_in_front)
+
+    def _foreground_window(self):
+        try:
+            from wizwalker import utils
+            return utils.get_foreground_window()
+        except Exception:
+            return None
+
+    def _restore_foreground(self, handle):
+        """Give the operator their own window back."""
+        if handle is None:
+            return
+        try:
+            from wizwalker import utils
+            utils.set_foreground_window(handle)
+        except Exception:
+            pass          # politeness, never a blocker
+
+    def _focus(self, seat):
+        try:
+            seat.client.is_foreground = True
+            return True
+        except Exception:
+            return False
+
+    async def _activate_hooks(self, seat, tries=2):
+        """One client's hooks, with a bounded wait and a way out."""
+        for attempt in range(max(1, tries)):
+            focused = self._focus(seat) if self.FOCUS_TO_HOOK else False
+            if focused:
+                # A frame or two for the client to notice it is visible
+                # again and start writing the values wizwalker waits on.
+                await asyncio.sleep(0.4)
+            self._say(seat, "activating hooks…" if not attempt
+                      else "activating hooks (retrying)…")
+            try:
+                await seat.client.activate_hooks(timeout=self.HOOK_TIMEOUT)
+                return True
+            except Exception as exc:
+                name = type(exc).__name__
+                if "AlreadyActivated" in name:
+                    return True          # a previous run left them up
+                if "Pattern" in name or "Pattern" in str(exc):
+                    raise RuntimeError(
+                        "wizwalker could not install its hooks: the "
+                        "autobot signature was not found in the running "
+                        "client.\n\n"
+                        "Run  python -m deimos_bridge.diagnose_hooks  — "
+                        "it tells you whether this is stale state in the "
+                        "process (close the game completely) or a game "
+                        "patch that outdates wizwalker."
+                    ) from exc
+                if not isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+                    raise
+                if attempt + 1 < tries:
+                    self._say(
+                        seat,
+                        f"this client's hooks did not finish in "
+                        f"{self.HOOK_TIMEOUT:.0f}s — the values wizwalker "
+                        f"waits for are written by the game's own render "
+                        f"loop, and a background client barely renders. "
+                        f"Bringing it to the front and trying once more.")
+        raise RuntimeError(
+            f"{seat.name}'s client hooked but never finished writing its "
+            f"hook values, twice, at {self.HOOK_TIMEOUT:.0f}s each.\n\n"
+            f"wizwalker waits for the game to write five addresses, two of "
+            f"which come from the UI and render paths — so a client that is "
+            f"minimised, on another virtual desktop, or otherwise not "
+            f"drawing will never finish. Bring that client's window up so "
+            f"it is visibly rendering, leave it at the character or world "
+            f"screen rather than a loading screen, and press Play live "
+            f"again.")
+
     #: reads the run cannot do without, and where each one is needed.
     #: Probed rather than assumed, because `activate_hooks()` returning
     #: is not the same as the hooks answering -- see `_verify_hooks`.
@@ -1122,23 +1239,14 @@ class LiveWorker(QThread):
 
             for seat, client in zip(self.seats, clients):
                 seat.client = client
-                self._say(seat, "activating hooks…")
-                try:
-                    await client.activate_hooks()
-                except Exception as exc:
-                    if "Pattern" in type(exc).__name__ \
-                            or "Pattern" in str(exc):
-                        raise RuntimeError(
-                            "wizwalker could not install its hooks: the "
-                            "autobot signature was not found in the running "
-                            "client.\n\n"
-                            "Run  python -m deimos_bridge.diagnose_hooks  — "
-                            "it tells you whether this is stale state in the "
-                            "process (close the game completely) or a game "
-                            "patch that outdates wizwalker."
-                        ) from exc
-                    raise
+            # Every client hooked before any of them is set up, so a
+            # client that will not hook is reported before a backend is
+            # built for any of them -- and so the focus dance below
+            # happens once rather than interleaved with the reads.
+            await self._activate_all_hooks()
 
+            for seat in self.seats:
+                client = seat.client
                 await self._verify_hooks(seat)
                 await self._read_max_hp(client, seat)
                 self._claim_record(seat)

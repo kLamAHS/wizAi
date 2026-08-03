@@ -7094,3 +7094,110 @@ def test_an_unnamed_record_is_still_claimed_by_health(qapp):
 
 async def _value(v):
     return v
+
+
+def _hooking_worker(clients, **kw):
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    w = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1,
+                   seats=[SeatConfig(school="fire")
+                          for _ in range(len(clients) - 1)], **kw)
+    said = []
+    w.status = type("S", (), {"emit": staticmethod(said.append)})()
+    for seat, client in zip(w.seats, clients):
+        seat.client = client
+    return w, said
+
+
+class _HookClient:
+    """A client whose hooks only finish while it is in the foreground.
+
+    Which is the real behaviour: wizwalker waits for addresses the game
+    writes from its UI and render paths, and a background Wizard101
+    client barely renders.
+    """
+
+    def __init__(self, needs_focus=True):
+        self.needs_focus = needs_focus
+        self.is_foreground = False
+        self.attempts = 0
+
+    async def activate_hooks(self, timeout=None):
+        self.attempts += 1
+        if self.needs_focus and not self.is_foreground:
+            raise TimeoutError("Hook value took too long")
+
+
+def test_hooking_the_second_client_does_not_hang_the_run(qapp):
+    """`activate_hooks()` defaults to no timeout at all, so a client that
+    never writes its render hook parks the whole run — with nothing to do
+    but kill it. This is the bug behind 'I have to kill the bot and
+    re-hook every time'."""
+    import asyncio
+
+    a, b = _HookClient(), _HookClient()
+    w, said = _hooking_worker([a, b])
+    asyncio.run(w._activate_all_hooks())
+
+    # Each client was brought to the front for its own turn.
+    assert a.attempts == 1 and b.attempts == 1
+    assert a.is_foreground and b.is_foreground
+    assert sum("activating hooks…" in m for m in said) == 2
+
+
+def test_a_client_that_will_not_hook_says_what_to_do(qapp):
+    import asyncio
+
+    import pytest
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    stuck = _HookClient()
+    stuck.is_foreground = False
+    w, said = _hooking_worker([stuck])
+    # focus does nothing for this one: it is minimised, on another
+    # desktop, or sitting on a loading screen
+    w._focus = lambda seat: False
+    with pytest.raises(RuntimeError, match="never finished writing"):
+        asyncio.run(w._activate_all_hooks())
+
+    assert stuck.attempts == 2, "it must try again before giving up"
+    assert any("render loop" in m for m in said), said
+
+
+def test_hooks_already_up_from_a_previous_run_are_not_an_error(qapp):
+    import asyncio
+
+    class _Already:
+        is_foreground = False
+
+        async def activate_hooks(self, timeout=None):
+            raise type("HookAlreadyActivated", (Exception,), {})()
+
+    w, _said = _hooking_worker([_Already()])
+    asyncio.run(w._activate_all_hooks())      # must not raise
+
+
+def test_the_operators_own_window_is_given_back(qapp):
+    """Four clients yanked to the front in turn and left that way is a
+    rude way to start a run. Off Windows there is no window handle to
+    read, and the restore has to be a no-op rather than a crash."""
+    import asyncio
+
+    w, _said = _hooking_worker([_HookClient()])
+    assert w._foreground_window() is None      # no wizwalker here
+    w._restore_foreground(None)                # must not raise
+    asyncio.run(w._activate_all_hooks())
+
+
+def test_focus_stealing_can_be_turned_off(qapp):
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    client = _HookClient(needs_focus=False)
+    w, _said = _hooking_worker([client])
+    w.FOCUS_TO_HOOK = False
+    asyncio.run(w._activate_all_hooks())
+    assert client.is_foreground is False
+    assert client.attempts == 1
