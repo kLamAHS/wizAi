@@ -141,6 +141,12 @@ class WizAiBackend:
         #: `_check_school`.
         self.on_school_mismatch = None
         self._school_checked = False
+        #: optional callback() the first time this wizard is found at 0
+        #: health in a duel it is still nominally in. See `_check_defeated`.
+        self.on_defeated = None
+        #: whether the last read found it down, so the message is said
+        #: once per knockdown rather than once per round
+        self._down = False
         #: the wizard's power-pip odds, off the client. None means never
         #: read, and then the actor keeps whatever default it has rather
         #: than being given a made-up number.
@@ -236,6 +242,10 @@ class WizAiBackend:
         self._apportion_incoming(read)
         self.last_read = read
 
+        defeated = self._check_defeated(read)
+        if defeated is not None:
+            return defeated
+
         sim = self._sim_for(read)
         # Read once, both halves together. `_policy` is rebindable from
         # the GUI thread, and a round that asked one policy for a card
@@ -270,6 +280,59 @@ class WizAiBackend:
         self._note_party(decision)
         self._record(decision, read)
         return decision
+
+    def _check_defeated(self, read):
+        """A `PolicyDecision` for a wizard at 0 health, or None.
+
+        A defeated wizard is still in the duel as far as wizwalker is
+        concerned: `handle_round` keeps firing, the read keeps coming
+        back, and the board keeps advancing. What it has is no health,
+        no pips and no hand, so every round from the moment it goes down
+        is the same round -- and the first live party run recorded four
+        consecutive ones for wizard 1, each "policy chose to pass"
+        against an empty hand, sitting in the export beside the rounds
+        it actually played.
+
+        Two things go wrong beyond the noise, and both matter more:
+
+          * **The barrier waits for it.** The party gathers every seat
+            in combat before anyone casts. A corpse submits like anyone
+            else, so the wizards still standing pay the full round-trip
+            to be told it is passing -- every round, for the rest of the
+            fight.
+          * **Its board joins the ledger.** A dead wizard's read is a
+            real read of the enemy side, and it is folded into the
+            shared enemy ledger like a live one. Nothing it contributes
+            is wrong, but nothing it contributes is a *cast* either, and
+            the coordinate descent spends a pass on a seat that cannot
+            act.
+
+        So it leaves the circle -- `leave_combat`, not `leave`: it is
+        still a member of this party and will be back as soon as the
+        fight ends -- and the round is passed without being recorded.
+        """
+        hp = getattr(read.state, "player_hp", None)
+        if hp is None:
+            hp = getattr(getattr(read.state, "player", None), "hp", None)
+        if hp is None or hp > 0:
+            self._down = False
+            return None
+
+        hive = self.coordinator
+        if hive is not None:
+            hive.leave_combat(self.seat)
+        first, self._down = not self._down, True
+        if first and self.on_defeated:
+            try:
+                self.on_defeated()
+            except Exception:
+                pass
+        # Not recorded. `_record` is what fills the export and drives
+        # every panel, and a round with no hand, no pips and no choice
+        # says nothing about the policy that was not already said by the
+        # round it died in.
+        return PolicyDecision(passing=True, policy=self._policy[1] or "policy",
+                              reason="defeated — waiting for the fight to end")
 
     def _note_party(self, decision):
         """Record when the party is what changed this wizard's mind.

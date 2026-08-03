@@ -626,20 +626,32 @@ class RunPanel(TelemetryView, QWidget):
             self.table.setItem(i, 5, _cell(f.unresolved))
 
 
-class PartyPanel(QWidget):
-    """What the four wizards agreed to do, and what it changed.
+class HivemindPanel(QWidget):
+    """The whole party on one screen: who is doing what, and what they agreed.
 
     The one panel that is not a view over a `Telemetry`, because it is
-    not about a wizard -- it is about the round, which belongs to no
-    single one of them. It reads a `hivemind.PartyPlan`.
+    not about a wizard -- it is about the party, which belongs to no
+    single one of them. Every other tab shows one wizard at a time and
+    switching between four of them to work out why the run has stopped
+    is exactly the thing this replaces.
 
-    It exists because coordination is invisible in every other panel. A
-    Decisions row saying "Snow Serpent on the minion" reads identically
-    whether that was this wizard's own call or the consequence of
-    another wizard having already claimed the boss, and the second is
-    the entire reason to run four clients. So the plan is shown as a
-    plan: who casts what, at whom, and what each of them would have
-    played alone.
+    Two halves, and they answer different questions.
+
+    **The roster** is the live state of every wizard at once: which
+    client it is, what it is doing right now, its health, how far
+    through the run it is, and the last thing it said. A party that has
+    quietly gone wrong nearly always shows it here first -- one wizard
+    out of the circle, one wizard on 0 health, one wizard repeating a
+    stage failure -- and it shows it without anyone having to guess
+    which of the four to go and look at.
+
+    **The plan** is the round the party agreed. Coordination is
+    invisible in every other panel: a Decisions row saying "Snow Serpent
+    on the minion" reads identically whether that was this wizard's own
+    call or the consequence of another wizard having already claimed the
+    boss, and the second is the entire reason to run four clients. So
+    the plan is shown as a plan: who casts what, at whom, and what each
+    of them would have played alone.
     """
 
     def __init__(self):
@@ -653,6 +665,30 @@ class PartyPanel(QWidget):
             "next wizard's rollout and gets cashed, and nobody fires into a "
             "mob that is already dead this round.", PALETTE["muted"]))
 
+        # -- the roster -------------------------------------------------
+        self.party_lab = _label("no wizards connected", size=13, bold=True)
+        root.addWidget(self.party_lab)
+
+        # "doing" and "last said" carry the diagnosis, so they get the
+        # width. The counters are two or three characters and giving them
+        # equal shares is what turned "following the leader — could not
+        # read the leader's position" into "following th…".
+        self.roster = _table(
+            ["wizard", "school", "policy", "health", "doing",
+             "fights", "rounds", "last move", "last said"],
+            weights=(3, 2, 3, 3, 4, 1, 1, 4, 7))
+        root.addWidget(self.roster)
+
+        self.roster_note = _label(
+            "'doing' is where that wizard is in the run — in the circle, "
+            "waiting for a fight, following the leader, or held up. A "
+            "wizard that is connected but not in the circle is not being "
+            "planned for: the party agrees a round among the wizards "
+            "actually in the duel, and the rest are on their own.",
+            PALETTE["muted"])
+        root.addWidget(self.roster_note)
+
+        # -- the round they agreed --------------------------------------
         self.headline = _label("no party round planned yet", size=13,
                                bold=True)
         root.addWidget(self.headline)
@@ -678,6 +714,8 @@ class PartyPanel(QWidget):
             "spent on a corpse.", PALETTE["muted"]))
         self.plan = None
         self.hive = None
+        #: one dict per wizard, assembled by the window. See `show_party`.
+        self.roster_rows = []
 
     def show_plan(self, plan, hive=None):
         self.plan = plan
@@ -685,7 +723,78 @@ class PartyPanel(QWidget):
             self.hive = hive
         self.refresh()
 
+    def show_party(self, rows, hive=None):
+        """The live state of every wizard. `rows` is a list of dicts.
+
+        Assembled by the window rather than read off the worker: the
+        worker's seats live on another thread, and a panel reaching
+        across for `seat.wizard_name` mid-write is the kind of race that
+        shows up once a week as a blank cell nobody can reproduce. Every
+        field here arrived as a signal.
+        """
+        self.roster_rows = list(rows or [])
+        if hive is not None:
+            self.hive = hive
+        self.refresh()
+
+    #: what a wizard's state is called, and what colour it reads in.
+    #: Amber is not an error -- it is "this wizard is not contributing
+    #: right now", which is the state worth spotting from across a room.
+    _STATES = {"fighting": ("in the circle", "good"),
+               "waiting": ("waiting for a fight", "muted"),
+               "following": ("following the leader", "muted"),
+               "questing": ("questing", "muted"),
+               "alone": ("fighting alone", "warn"),
+               "defeated": ("defeated", "bad"),
+               "held": ("held up", "warn")}
+
+    def _refresh_roster(self):
+        rows = self.roster_rows
+        _apply_weights(self.roster)
+        self.roster.setRowCount(len(rows))
+        for i, row in enumerate(rows):
+            state = row.get("state", "waiting")
+            text, tone = self._STATES.get(state, (state, "text"))
+            hp, mx = row.get("hp"), row.get("max_hp") or 0
+            if hp is None:
+                # Max health is read on connect, current health only in a
+                # duel. Showing "—" for both loses the half that is
+                # known, and that half is what says the hooks are up.
+                health = f"— / {mx:,.0f}" if mx else "—"
+                hp_tone = PALETTE["muted"]
+            else:
+                health = f"{hp:,.0f}" + (f" / {mx:,.0f}" if mx else "")
+                share = (hp / mx) if mx else 1.0
+                hp_tone = (PALETTE["bad"] if share <= 0.25 else
+                           PALETTE["warn"] if share <= 0.5 else
+                           PALETTE["good"])
+            cells = [
+                (row.get("name") or f"wizard {i + 1}", None),
+                (row.get("school") or "—", None),
+                (row.get("policy") or "—", None),
+                (health, hp_tone),
+                (text, PALETTE[tone]),
+                (row.get("fights", 0), None),
+                (row.get("rounds", 0), None),
+                (row.get("last_move") or "—", PALETTE["muted"]),
+                (row.get("last_said") or "—", PALETTE["muted"]),
+            ]
+            for col, (value, colour) in enumerate(cells):
+                self.roster.setItem(i, col, _cell(value, colour))
+
+        hive = self.hive
+        if not rows:
+            self.party_lab.setText("no wizards connected")
+            return
+        in_circle = sum(1 for r in rows if r.get("state") == "fighting")
+        bits = [f"{len(rows)} wizard(s) connected",
+                f"{in_circle} in the circle"]
+        if hive is not None and hive.rounds:
+            bits.append(f"{hive.rounds} coordinated round(s)")
+        self.party_lab.setText(" · ".join(bits))
+
     def refresh(self):
+        self._refresh_roster()
         plan = self.plan
         if plan is None:
             self.headline.setText("no party round planned yet")
@@ -743,3 +852,8 @@ class PartyPanel(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         _apply_weights(self.table)
+        _apply_weights(self.roster)
+
+
+#: What this panel was called when it only showed the round's plan.
+PartyPanel = HivemindPanel

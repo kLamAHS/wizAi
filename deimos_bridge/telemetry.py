@@ -30,6 +30,12 @@ HP delta measured across a round boundary also contains DoT ticks, minion
 hits, and anything the enemy healed. `DamageObservation.clean` marks the
 rounds where no such confound was detectable, and the error statistics
 are reported over clean observations by default.
+
+Also on (3): *which mob* the delta is measured on is not obvious, and
+getting it wrong is silent. See `match_enemies` -- a name lookup was
+differencing one mob's health against its identically-named twin's, and
+a prediction that was right to within half a point was being reported as
+a 634% error.
 """
 import copy
 import json
@@ -205,6 +211,100 @@ def _move_label(cand) -> str:
     card = _attr(cand, "card", "?")
     target = _attr(cand, "target")
     return card if target is None else f"{card} → {target}"
+
+
+def match_enemies(before, after):
+    """`{index in before: the same mob in after, or None}`.
+
+    Settling a round means differencing one mob's health across two
+    reads, and until now that was done by NAME. Wizard101 boards are
+    mostly *two of the same mob*: "Nirini Warrior" twice, "Lost Soul"
+    three times. A name lookup built as `{e.name: e for e in enemies}`
+    keeps the LAST of each name and `next(e for e in ... if e.name ==
+    target)` takes the FIRST, so every such fight differenced one mob's
+    before-health against a different mob's after-health.
+
+    It is not a small error. Live, wizard 2 hit a full-health Nirini
+    Warrior for a predicted 18.53 while a second Nirini sat at 259/395;
+    the mob went 395 -> 376, so the prediction was right to within half
+    a point -- and the round was recorded as 136.0 actual, a 634% model
+    error, because 395 - 259 = 136. Three consecutive rounds recorded
+    136, 117, 117 against real deltas of 19, 19, 19. Every damage-model
+    number this app has ever reported for a duel with two same-named
+    mobs was measured against the wrong mob.
+
+    Matching is per `(name, max health)` group, because that is the only
+    identity a read carries -- participants have no stable id across
+    reads that the board record keeps. Within a group:
+
+      * exact health match first. A mob nobody touched is the easiest
+        thing on the board to recognise, and pinning those down first
+        stops them absorbing the match that belonged to a mob that WAS
+        hit.
+      * then the closest health that did not go UP, smallest gap first.
+        Health falls within a fight; a candidate that gained health is
+        a worse explanation than one that lost some.
+      * anything left over died, and gets None.
+
+    Order is deliberately not used as the primary key even though the
+    participant list is stable: the whole reason indices need checking
+    is that a death compacts the list, and that is exactly when the
+    positional answer is wrong.
+    """
+    out = {i: None for i in range(len(before))}
+    if not after:
+        return out
+
+    def key(e):
+        return (getattr(e, "name", ""), float(getattr(e, "max_hp", 0) or 0))
+
+    pools = {}
+    for j, a in enumerate(after):
+        pools.setdefault(key(a), []).append(j)
+
+    taken = set()
+
+    def claim(i, group, want_exact):
+        best, gap = None, None
+        for j in group:
+            if j in taken:
+                continue
+            a = after[j]
+            delta = float(before[i].hp) - float(a.hp)
+            if want_exact:
+                if delta == 0.0:
+                    best = j
+                    break
+                continue
+            if delta < 0:
+                continue                    # health went up: a worse fit
+            if gap is None or delta < gap:
+                best, gap = j, delta
+        if best is None:
+            return False
+        taken.add(best)
+        out[i] = after[best]
+        return True
+
+    order = sorted(range(len(before)), key=lambda i: key(before[i]))
+    for want_exact in (True, False):
+        for i in order:
+            if out[i] is not None:
+                continue
+            claim(i, pools.get(key(before[i]), ()), want_exact)
+
+    # Last resort: a mob whose health only makes sense as a heal still
+    # has to be paired with something, or a healed target reads as a
+    # corpse and its round is filed as "died -- lower bound".
+    for i in order:
+        if out[i] is not None:
+            continue
+        for j in pools.get(key(before[i]), ()):
+            if j not in taken:
+                taken.add(j)
+                out[i] = after[j]
+                break
+    return out
 
 
 @dataclass
@@ -524,10 +624,14 @@ class Telemetry:
         if prev is None or prev.predicted_damage is None:
             self._pending = None
             return
-        by_name = {e.name: e for e in read.state.enemies}
+        pairs = match_enemies(prev.enemies, list(read.state.enemies))
         target = prev.target_name
-        before = next((e for e in prev.enemies if e.name == target), None)
-        after = by_name.get(target)
+        i = prev.target_index
+        if i is None or not (0 <= i < len(prev.enemies)):
+            i = next((j for j, e in enumerate(prev.enemies)
+                      if e.name == target), None)
+        before = prev.enemies[i] if i is not None else None
+        after = pairs.get(i) if i is not None else None
         if before is None:
             self._pending = None
             return
@@ -552,9 +656,9 @@ class Telemetry:
                 prev.confounds.append(
                     f"{sharing} also hit {target} this round -- the board "
                     f"delta is the party's damage, not this cast's")
-            for e in prev.enemies:
-                other = by_name.get(e.name)
-                if other is not None and e.name != target and other.hp < e.hp:
+            for j, e in enumerate(prev.enemies):
+                other = pairs.get(j)
+                if other is not None and j != i and other.hp < e.hp:
                     prev.clean = False
                     who = prev.party_hits.get(e.name)
                     prev.confounds.append(
