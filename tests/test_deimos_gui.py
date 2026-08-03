@@ -6975,3 +6975,122 @@ def test_the_selector_carries_a_name_it_already_learned(qapp):
     win.tels[2].wizard = "Autumn Frost"
     win.wizards.setValue(3)
     assert win.which.itemText(2) == "wizard 3 — Autumn Frost"
+
+
+def test_hooks_that_return_are_not_hooks_that_answer(qapp):
+    """`activate_hooks()` returning is not the same as the hooks being
+    up. On a live party run one client hooked and then would not answer
+    for its own wizard's name or school — it reported every enemy's
+    school on the same read — and the run carried on with a wizard it
+    could not identify. The operator's only recourse was to hook and
+    unhook until it took."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    class _Stats:
+        async def max_hitpoints(self):
+            return 1053
+
+    class _Body:
+        async def position(self):
+            raise RuntimeError("not hooked yet")
+
+    class _Client:
+        stats = _Stats()
+        body = _Body()
+        activations = 0
+
+        async def zone_name(self):
+            return "Unicorn Way"
+
+        async def activate_hooks(self):
+            type(self).activations += 1
+            # the retry is what fixes it, as it did for the operator
+            _Client.body = type("B", (), {
+                "position": staticmethod(lambda: _value((1, 2, 3)))})()
+
+    w = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1)
+    said = []
+    w.status = type("S", (), {"emit": staticmethod(said.append)})()
+    w.seats[0].client = _Client()
+
+    ok, missing = asyncio.run(w._verify_hooks(w.seats[0], settle=0.0))
+    assert ok is True and missing == ""
+    assert _Client.activations == 1
+    assert any("not answering yet (position)" in m for m in said), said
+    assert any("answering now" in m for m in said), said
+
+
+def test_a_hook_that_never_answers_is_named_not_hidden(qapp):
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    class _Client:
+        async def activate_hooks(self):
+            pass
+
+        async def zone_name(self):
+            raise RuntimeError("no")
+
+        class stats:
+            @staticmethod
+            async def max_hitpoints():
+                return 1053
+
+        class body:
+            @staticmethod
+            async def position():
+                return (1, 2, 3)
+
+    w = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1)
+    said = []
+    w.status = type("S", (), {"emit": staticmethod(said.append)})()
+    w.seats[0].client = _Client()
+
+    ok, missing = asyncio.run(w._verify_hooks(w.seats[0], tries=2,
+                                              settle=0.0))
+    assert ok is False and missing == "zone"
+    # Named, with what it costs, and it still plays.
+    assert any("will not read" in m and "different zone" in m
+               for m in said), said
+
+
+def test_an_unnamed_record_is_still_claimed_by_health(qapp):
+    """`_learn_name` cannot catch the case that actually happened: the
+    first run never got a name, an empty name matches everything, and two
+    rounds of a 1,053 HP ice wizard were exported under a 713 HP fire
+    wizard's name."""
+    from deimos_bridge.gui.live import LiveWorker
+    from deimos_bridge.telemetry import RoundRecord
+
+    def seeded(max_hp, wizard=""):
+        tel = Telemetry()
+        tel.wizard = wizard
+        tel.start_fight()
+        tel.rounds.append(RoundRecord(fight=1, round=1,
+                                      player_max_hp=max_hp))
+        return tel
+
+    # The Konstantin case: unnamed 1,053 record, 713 client.
+    tel = seeded(1053.0)
+    w = LiveWorker(tel, "fire", [], "ttk-lookahead", 1)
+    said = []
+    w.status = type("S", (), {"emit": staticmethod(said.append)})()
+    w.seats[0].max_hp = 713
+    w._claim_record(w.seats[0])
+    assert tel.rounds == []
+    assert any("a different wizard" in m for m in said), said
+
+    # A level or two later is the same wizard, and its fights are kept.
+    tel = seeded(1053.0, wizard="Jeffrey")
+    w = LiveWorker(tel, "ice", [], "ttk-lookahead", 1)
+    w.status = type("S", (), {"emit": staticmethod(lambda *_: None)})()
+    w.seats[0].max_hp = 1130
+    w._claim_record(w.seats[0])
+    assert len(tel.rounds) == 1
+
+
+async def _value(v):
+    return v

@@ -339,6 +339,26 @@ class Telemetry:
             except Exception:
                 pass       # a broken view must never stop a live fight
 
+    def clear(self):
+        """Throw the run away and start an empty one.
+
+        For when the record turns out to belong to somebody else. The
+        window keeps one `Telemetry` per SEAT and reuses it across Play
+        live presses, but `get_new_clients()` returns windows in whatever
+        order it finds them -- so seat 1 can be one wizard on one run and
+        a different one on the next, and the file then holds two wizards'
+        fights under one name. The first named party run's export did:
+        two rounds of a 1,053 HP ice wizard followed by six of a 713 HP
+        fire wizard, exported as one wizard called Konstantin.
+
+        Not a new object: the panels hold a reference to this one.
+        """
+        self.rounds.clear()
+        self.fights.clear()
+        self._fight = 0
+        self._pending = None
+        self.clear_curve()
+
     def start_fight(self):
         self._fight += 1
         self.fights.append(FightRecord(index=self._fight))
@@ -545,6 +565,27 @@ class Telemetry:
                    for w in (before.wards or [])):
                 prev.clean = False
                 prev.confounds.append("a DoT was ticking on the target")
+            if prev.actual_damage <= 0.0 and prev.predicted_damage > 0.0:
+                # Nothing landed at all. The prediction is computed
+                # through `_NoFizzle`, so it is the damage the cast does
+                # WHEN IT LANDS -- a real fizzle then reads as a 100%
+                # model error, and the damage model exists to check the
+                # simulator's arithmetic rather than its luck. Live
+                # example: a Snow Serpent predicted at 294 into a 249 HP
+                # mob that was still at 249 the next round, recorded
+                # clean, and it was the only observation in the run --
+                # so the whole reported model quality was one coin flip.
+                #
+                # Marked rather than dropped: a genuine zero can also be
+                # a shield or an absorb the reader missed, and that IS
+                # worth looking at. Either way it is not a measurement of
+                # the arithmetic.
+                prev.clean = False
+                prev.confounds.append(
+                    "nothing landed on a target that survived -- a fizzle, "
+                    "or a ward the read missed. The prediction assumes the "
+                    "cast lands, so this is not a measurement of the "
+                    "damage model")
         if prev.actual_damage is not None:
             self.fights[-1].damage_dealt += prev.actual_damage
         self._pending = None

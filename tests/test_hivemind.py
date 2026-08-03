@@ -815,3 +815,161 @@ def test_collateral_damage_names_the_wizard_that_caused_it():
     # A wizard that held its card moved no health and is not a cause.
     held = PartyPlan(moves=[SeatMove(seat=1, name="wizard 2", note="held")])
     assert _party_hits(held, 0) == {}
+
+
+# --------------------------------- what the first NAMED party run said
+def test_a_record_never_holds_two_wizards():
+    """The window keeps one record per SEAT and reuses it across Play
+    live presses, but the clients come back in whatever order the game
+    was launched in — so seat 1 can be one wizard on one run and another
+    on the next. The first named party run's export was two rounds of a
+    1,053 HP ice wizard followed by six of a 713 HP fire wizard, filed
+    under one name."""
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from deimos_bridge.gui.live import LiveWorker
+    from deimos_bridge.telemetry import Telemetry
+
+    tel = Telemetry()
+    tel.wizard = "Jeffrey"
+    tel.start_fight()
+    tel.rounds.append(object())
+    tel.rounds.append(object())
+
+    w = LiveWorker(tel, "ice", [], "ttk-lookahead", 1)
+    said = []
+    w.status = type("S", (), {"emit": staticmethod(said.append)})()
+
+    class _Read:
+        state = type("S", (), {
+            "player": type("P", (), {"name": "Konstantin"})()})()
+
+    w._learn_name(w.seats[0], _Read())
+    assert tel.wizard == "Konstantin"
+    assert tel.rounds == []                  # Jeffrey's rounds are gone
+    assert any("was Jeffrey last run and is Konstantin now" in m
+               for m in said), said
+
+    # The same wizard coming back is not a different one.
+    tel.rounds.append(object())
+    w.seats[0].wizard_name = None
+    w._learn_name(w.seats[0], _Read())
+    assert len(tel.rounds) == 1
+
+
+def test_the_hand_names_the_school_when_the_client_will_not():
+    """`primary_magic_school_id` reported every enemy's school correctly
+    on the live runs and gave nothing for the wizard's own member, so the
+    crossed seats went undetected twice. A wizard holding Frost Beetle,
+    Ice Trap, Snow Serpent and Evil Snowman is an ice wizard, and reading
+    that off the cards is how the crossing was spotted by eye."""
+    from deimos_bridge.live_backend import WizAiBackend
+    from w101_sim import Actor, State
+
+    table = cards()
+
+    def guess(hand, configured="fire"):
+        backend = WizAiBackend.from_trained(
+            school=configured, deck=[], cards=table,
+            policy=lambda sim, s: None)
+        player = Actor(name="W", school=configured, hp=900, max_hp=900,
+                       team=0)
+        player.hand = [table[n] for n in hand]
+
+        class _Read:
+            state = State(player, [Actor(name="Mob", school="death", hp=1,
+                                         max_hp=1, team=1)])
+        return backend._school_from_hand(_Read())
+
+    assert guess(["Frost Beetle", "Snow Serpent", "Evil Snowman"]) == "ice"
+    # Buffs do not vote: a Balanceblade is a balance card in an ice deck.
+    assert guess(["Frost Beetle", "Snow Serpent", "Evil Snowman",
+                  "Balanceblade"]) == "ice"
+    # A starter wand's off-school card does not overturn the majority...
+    assert guess(["Frost Beetle", "Snow Serpent", "Evil Snowman",
+                  "Frost Beetle", "Thunder Snake"]) == "ice"
+    # ...but a genuinely mixed hand is not evidence of anything.
+    assert guess(["Frost Beetle", "Thunder Snake", "Fire Cat"]) == ""
+    # Nor is a two-card opening hand that happens to agree with itself.
+    assert guess(["Frost Beetle", "Snow Serpent"]) == ""
+
+
+def test_a_crossed_seat_is_caught_from_the_hand_alone():
+    """End to end through the real backend: no school id anywhere, and
+    the mismatch is still found."""
+    from deimos_bridge.live_backend import WizAiBackend
+    from deimos_bridge.mock_client import MockCard, MockCombat, MockMember
+
+    seen = []
+    backend = WizAiBackend.from_trained(
+        school="fire", deck=["Frost Beetle"] * 4, cards=cards(),
+        policy=lambda sim, s: None, policy_name="ttk-lookahead")
+    backend.on_school_mismatch = seen.append
+    backend.attach_combat(MockCombat(
+        # no school_id: the accessor is simply absent, as it was live
+        [MockMember("Konstantin", 1053, client=True, team_id=0,
+                    normal_pips=4),
+         MockMember("Biti Nirini", 510, monster=True, team_id=1)],
+        [MockCard("Frost Beetle"), MockCard("Snow Serpent"),
+         MockCard("Evil Snowman")]))
+    asyncio.run(backend.decide())
+    assert seen == ["ice"], seen
+
+
+def test_a_fizzle_is_not_a_measurement_of_the_damage_model():
+    """A Snow Serpent predicted at 294 into a 249 HP mob that was still
+    at 249 the next round, recorded clean — and it was the run's ONLY
+    observation, so the whole reported model quality was one coin flip.
+    The prediction is computed through `_NoFizzle`: it is what the cast
+    does when it lands, not how often it lands."""
+    from deimos_bridge.telemetry import Telemetry
+
+    class _Decision:
+        card_name = "Snow Serpent"
+        target_index = 0
+        target_kind = "enemy"
+        passing = False
+        reason = ""
+        policy = "ttk-lookahead"
+        candidates = ()
+
+    def read(hp):
+        from w101_sim import Actor, State
+
+        class _Resolver:
+            misses = {}
+
+        class _Read:
+            state = State(Actor(name="Jeffrey", school="ice", hp=486,
+                                max_hp=1053, team=0),
+                          [Actor(name="Biti Nirini", school="fire", hp=hp,
+                                 max_hp=510, team=1)])
+            hand_cards = {"Snow Serpent": []}
+            resolver = _Resolver()
+            round_number = 5
+            hand_visibility = 1.0
+            hidden = ()
+            unreadable = ()
+        return _Read()
+
+    tel = Telemetry()
+    tel.start_fight()
+    rec = tel.observe(_Decision(), read(249))
+    rec.predicted_damage = 294.0
+    tel.observe(_Decision(), read(249))          # it did not move
+
+    assert rec.actual_damage == 0.0
+    assert rec.clean is False
+    assert any("fizzle" in c for c in rec.confounds), rec.confounds
+    assert tel.damage_observations() == []
+
+    # A cast that lands for less than predicted is still a real
+    # measurement, and must not be swept up by this.
+    tel2 = Telemetry()
+    tel2.start_fight()
+    landed = tel2.observe(_Decision(), read(249))
+    landed.predicted_damage = 294.0
+    tel2.observe(_Decision(), read(200))
+    assert landed.actual_damage == 49.0
+    assert landed.clean is True

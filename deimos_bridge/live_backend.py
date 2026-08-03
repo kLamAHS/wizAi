@@ -479,12 +479,52 @@ class WizAiBackend:
             return
         actual = getattr(read, "client_school", "") or ""
         if not actual:
-            return          # unreadable is not a mismatch
+            actual = self._school_from_hand(read)
+        if not actual:
+            return          # no evidence is not a mismatch
         self._school_checked = True
         if actual == self.school:
             return
         if self.on_school_mismatch:
             self.on_school_mismatch(actual)
+
+    #: how much of a hand's damage has to agree before the hand is taken
+    #: as evidence of the wizard's school. Not a majority: starter wands
+    #: hand out Thunder Snake, Imp, Scarab and Dark Sprite regardless of
+    #: school, and pets add trained cards of their own, so a real hand is
+    #: never pure. Four of five is well past what that noise produces and
+    #: well short of demanding purity.
+    HAND_SCHOOL_SHARE = 0.8
+    #: and enough cards to mean anything. A two-card opening hand that
+    #: happens to be one school is not evidence of anything.
+    HAND_SCHOOL_MIN = 3
+
+    def _school_from_hand(self, read):
+        """The school this wizard looks like, off what it is holding.
+
+        The fallback for when `primary_magic_school_id` will not read off
+        the client's own combat member -- which is what happened on the
+        first two live party runs, where it reported every enemy's school
+        correctly and gave nothing for the wizard. The hand is not a
+        guess in that situation: a wizard holding Frost Beetle, Ice Trap,
+        Snow Serpent and Evil Snowman under a `fire` configuration is an
+        ice wizard, and reading that off the cards is exactly how the
+        crossing was spotted by eye in the first place.
+
+        Damage cards only. Blades and traps carry a school too, but a
+        Balanceblade is a balance card in an ice deck and would vote for
+        a school nobody is playing.
+        """
+        hits = [c for c in read.state.hand
+                if getattr(c, "kind", "") in ("damage", "drain")
+                and getattr(c, "school", "")]
+        if len(hits) < self.HAND_SCHOOL_MIN:
+            return ""
+        counts = {}
+        for card in hits:
+            counts[card.school] = counts.get(card.school, 0) + 1
+        school, n = max(counts.items(), key=lambda kv: kv[1])
+        return school if n / len(hits) >= self.HAND_SCHOOL_SHARE else ""
 
     def _apply_player_stats(self, read):
         """Put the wizard's real gear and power pips on the read player.
