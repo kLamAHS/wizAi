@@ -98,6 +98,58 @@ async def wizard_name(client):
     return None
 
 
+#: resolved full friends-list names, keyed by the short name a duel
+#: gives. One lookup per leader per run rather than one per follow.
+_FULL_NAMES = {}
+
+
+async def friends_list_name(follower, short_name):
+    """The leader's FULL name as the friends list spells it, or "".
+
+    A combat read gives a wizard's first name -- "Jeffrey" -- and the
+    friends list holds "Jeffrey IslandBringer". wizwalker matches on
+    `friend_name == name`, exactly, so the teleport could never find a
+    leader it was looking at: "Could not find friend with icon None icon
+    list None and/or name Jeffrey", forever, while the friends window
+    sat open next to it showing exactly one online friend.
+
+    So the list is read and the entry whose name starts with what a duel
+    told us is taken. Prefix rather than fuzzy: first names are what the
+    duel reports and what the friends list leads with, and anything
+    looser would happily teleport to the wrong friend.
+    """
+    if short_name in _FULL_NAMES:
+        return _FULL_NAMES[short_name]
+    try:
+        from .deimos_path import ensure_path
+
+        ensure_path()
+        from wizwalker.extensions.scripting.utils import (
+            _friend_list_entry, _maybe_get_named_window)
+    except Exception:
+        return ""
+
+    try:
+        root = follower.root_window
+        try:
+            window = await _maybe_get_named_window(root, "NewFriendsListWindow")
+        except ValueError:
+            button = await _maybe_get_named_window(root, "btnFriends")
+            await follower.mouse_handler.click_window(button)
+            window = await _maybe_get_named_window(root, "NewFriendsListWindow")
+        listing = await _maybe_get_named_window(window, "listFriends")
+        text = await listing.maybe_text() or ""
+    except Exception:
+        return ""
+
+    for entry in _friend_list_entry.finditer(text):
+        found = entry.group("name")
+        if found == short_name or found.startswith(short_name + " "):
+            _FULL_NAMES[short_name] = found
+            return found
+    return ""
+
+
 async def teleport_to_leader_across_zones(follower, leader_name):
     """(ok, reason). The friends-list teleport, for a different zone.
 
@@ -119,14 +171,53 @@ async def teleport_to_leader_across_zones(follower, leader_name):
     except Exception as exc:
         return False, (f"cross-zone follow needs wizwalker's scripting "
                        f"extension ({type(exc).__name__}: {exc})")
-    try:
-        async with follower.mouse_handler:
-            await teleport_to_friend_from_list(follower, name=leader_name)
-    except Exception as exc:
-        return False, (f"could not teleport to {leader_name} through the "
-                       f"friends list ({type(exc).__name__}: {exc}) — they "
-                       f"have to be on this wizard's friends list and online")
-    return True, ""
+
+    async def attempt(name):
+        """(landed, fatal reason). A name that is simply not on the list
+        is neither -- it just means try another spelling."""
+        try:
+            await teleport_to_friend_from_list(follower, name=name)
+        except ValueError as exc:
+            if "Could not find friend" in str(exc):
+                return False, ""
+            return False, (f"could not teleport to {name} through the "
+                           f"friends list (ValueError: {exc})")
+        except Exception as exc:
+            return False, (f"could not teleport to {name} through the "
+                           f"friends list ({type(exc).__name__}: {exc})")
+        return True, ""
+
+    async with follower.mouse_handler:
+        tried = []
+        # The resolved full name first when we have one, because the
+        # exact match is the only one wizwalker does.
+        for name in (_FULL_NAMES.get(leader_name), leader_name):
+            if not name or name in tried:
+                continue
+            tried.append(name)
+            landed, fatal = await attempt(name)
+            if landed:
+                _FULL_NAMES[leader_name] = name
+                return True, ""
+            if fatal:
+                return False, fatal
+
+        # Not on the list under any spelling we knew. Read the list and
+        # find out what it actually calls them.
+        full = await friends_list_name(follower, leader_name)
+        if full and full not in tried:
+            landed, fatal = await attempt(full)
+            if landed:
+                _FULL_NAMES[leader_name] = full
+                return True, ""
+            if fatal:
+                return False, fatal
+
+    return False, (f"could not find {leader_name} on this wizard's friends "
+                   f"list — they have to be friends and online. A duel "
+                   f"reports a first name and the list holds the full one, "
+                   f"so the list was searched for a '{leader_name} ...' "
+                   f"entry too and there was none")
 
 
 async def join_the_fight(follower):

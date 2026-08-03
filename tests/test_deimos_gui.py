@@ -7094,3 +7094,384 @@ def test_an_unnamed_record_is_still_claimed_by_health(qapp):
 
 async def _value(v):
     return v
+
+
+def _hooking_worker(clients, **kw):
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    w = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1,
+                   seats=[SeatConfig(school="fire")
+                          for _ in range(len(clients) - 1)], **kw)
+    said = []
+    w.status = type("S", (), {"emit": staticmethod(said.append)})()
+    for seat, client in zip(w.seats, clients):
+        seat.client = client
+    return w, said
+
+
+class _HookClient:
+    """A client whose hooks only finish while it is in the foreground.
+
+    Which is the real behaviour: wizwalker waits for addresses the game
+    writes from its UI and render paths, and a background Wizard101
+    client barely renders.
+    """
+
+    def __init__(self, needs_focus=True):
+        self.needs_focus = needs_focus
+        self.is_foreground = False
+        self.attempts = 0
+
+    async def activate_hooks(self, timeout=None):
+        self.attempts += 1
+        if self.needs_focus and not self.is_foreground:
+            raise TimeoutError("Hook value took too long")
+
+
+def test_hooking_the_second_client_does_not_hang_the_run(qapp):
+    """`activate_hooks()` defaults to no timeout at all, so a client that
+    never writes its render hook parks the whole run — with nothing to do
+    but kill it. This is the bug behind 'I have to kill the bot and
+    re-hook every time'."""
+    import asyncio
+
+    a, b = _HookClient(), _HookClient()
+    w, said = _hooking_worker([a, b])
+    asyncio.run(w._activate_all_hooks())
+
+    # Each client was brought to the front for its own turn.
+    assert a.attempts == 1 and b.attempts == 1
+    assert a.is_foreground and b.is_foreground
+    assert sum("activating hooks…" in m for m in said) == 2
+
+
+def test_a_client_that_will_not_hook_says_what_to_do(qapp):
+    import asyncio
+
+    import pytest
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    stuck = _HookClient()
+    stuck.is_foreground = False
+    w, said = _hooking_worker([stuck])
+    # focus does nothing for this one: it is minimised, on another
+    # desktop, or sitting on a loading screen
+    w._focus = lambda seat: False
+    with pytest.raises(RuntimeError, match="never finished writing"):
+        asyncio.run(w._activate_all_hooks())
+
+    assert stuck.attempts == 2, "it must try again before giving up"
+    assert any("render loop" in m for m in said), said
+
+
+def test_hooks_already_up_from_a_previous_run_are_not_an_error(qapp):
+    import asyncio
+
+    class _Already:
+        is_foreground = False
+
+        async def activate_hooks(self, timeout=None):
+            raise type("HookAlreadyActivated", (Exception,), {})()
+
+    w, _said = _hooking_worker([_Already()])
+    asyncio.run(w._activate_all_hooks())      # must not raise
+
+
+def test_the_operators_own_window_is_given_back(qapp):
+    """Four clients yanked to the front in turn and left that way is a
+    rude way to start a run. Off Windows there is no window handle to
+    read, and the restore has to be a no-op rather than a crash."""
+    import asyncio
+
+    w, _said = _hooking_worker([_HookClient()])
+    assert w._foreground_window() is None      # no wizwalker here
+    w._restore_foreground(None)                # must not raise
+    asyncio.run(w._activate_all_hooks())
+
+
+def test_focus_stealing_can_be_turned_off(qapp):
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    client = _HookClient(needs_focus=False)
+    w, _said = _hooking_worker([client])
+    w.FOCUS_TO_HOOK = False
+    asyncio.run(w._activate_all_hooks())
+    assert client.is_foreground is False
+    assert client.attempts == 1
+
+
+def test_a_press_does_not_wait_behind_a_quest_hop(qapp):
+    """The drain shared a tick with auto-dialogue, the script runner and
+    the quest step. `advance_dialogue` clicks up to forty times at half a
+    second each and a quest hop settles for 1.2s, so a press could sit
+    unserviced for many seconds — during which `enqueue` refused every
+    further press of that key with 'already running' while nothing was
+    running. That is the dead teleport hotkey."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    class _Client:
+        async def in_battle(self):
+            return False
+
+    done = []
+    slow_started = asyncio.Event()
+
+    w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1, auto_quest=True)
+    w.status = type("S", (), {"emit": staticmethod(lambda *_: None)})()
+    seat = w.seats[0]
+    client = _Client()
+    seat.client = client
+
+    async def drive():
+        seat.drive = asyncio.Lock()
+
+        async def slow_quest(_c):
+            slow_started.set()
+            await asyncio.sleep(5)          # a hop that takes its time
+
+        w._quest_step = slow_quest
+        w._do_request = lambda c, a, s=None: _record(done, a)
+
+        service = asyncio.ensure_future(w._service_loop(client, seat))
+        requests = asyncio.ensure_future(w._request_loop(client, seat))
+        await asyncio.wait_for(slow_started.wait(), 2)
+        w.request("teleport")               # pressed mid-hop
+        for _ in range(20):
+            await asyncio.sleep(0.05)
+            if done:
+                break
+        w._stop = True
+        for task in (service, requests):
+            task.cancel()
+            try:
+                await task
+            except BaseException:
+                pass
+
+    asyncio.run(drive())
+    assert done == ["teleport"], "the press waited for the quest hop"
+
+
+async def _record(seen, action):
+    seen.append(action)
+
+
+def test_two_things_never_steer_one_wizard_at_once(qapp):
+    """The queue getting its own task is only safe because they share a
+    lock: a quest hop and a wisp sweep both teleport, and interleaving
+    them walks the wizard somewhere nobody asked for."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    class _Client:
+        async def in_battle(self):
+            return False
+
+    overlap = []
+    inside = []
+
+    w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1, auto_quest=True)
+    w.status = type("S", (), {"emit": staticmethod(lambda *_: None)})()
+    seat = w.seats[0]
+    seat.client = client = _Client()
+
+    async def steer(_c=None, *a, **kw):
+        inside.append(1)
+        overlap.append(len(inside))
+        await asyncio.sleep(0.15)
+        inside.pop()
+
+    async def drive():
+        seat.drive = asyncio.Lock()
+        w._quest_step = steer
+        w._do_request = lambda c, a, s=None: steer()
+        service = asyncio.ensure_future(w._service_loop(client, seat))
+        requests = asyncio.ensure_future(w._request_loop(client, seat))
+        for _ in range(6):
+            w.request("wisps")
+            await asyncio.sleep(0.1)
+        w._stop = True
+        for task in (service, requests):
+            task.cancel()
+            try:
+                await task
+            except BaseException:
+                pass
+
+    asyncio.run(drive())
+    assert overlap, "nothing ran at all"
+    assert max(overlap) == 1, f"two coroutines steered at once: {overlap}"
+
+
+def test_a_request_that_can_never_run_expires(qapp):
+    """A queue entry that cannot be serviced is worse than no entry: the
+    dedupe refuses every further press, so the key goes dead and the only
+    way back is a combat cycle."""
+    from deimos_bridge.gui.live import LiveWorker
+
+    w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    said = []
+    w.status = type("S", (), {"emit": staticmethod(said.append)})()
+    seat = w.seats[0]
+
+    assert w.request("teleport") is True
+    assert w.request("teleport") is False      # deduped, as it should be
+
+    seat.queued_at["teleport"] -= w.REQUEST_TTL + 1
+    w._expire_requests(seat)
+
+    assert seat.requests == []
+    assert any("dropped the queued teleport" in m for m in said), said
+    assert w.request("teleport") is True        # the key answers again
+
+
+def test_every_run_toggle_reaches_a_running_fight(qapp, monkeypatch):
+    """They were read once at Play live and never again, so auto-quest,
+    auto-dialogue, the upkeep chores and the follow could not be turned
+    on or off during a run — only by stopping and reconnecting."""
+    from deimos_bridge.gui import app as app_mod
+    from deimos_bridge.gui.app import MainWindow
+
+    monkeypatch.setattr(app_mod.LiveWorker, "start", lambda self, *a: None)
+    win = MainWindow(Telemetry())
+    win.wizards.setValue(2)
+    win.on_start_live()
+    live = win.live
+    monkeypatch.setattr(type(live), "isRunning", lambda self: True)
+
+    assert live.auto_quest is False
+    win.auto_quest.setChecked(True)
+    assert live.auto_quest is True
+    win.auto_quest.setChecked(False)
+    assert live.auto_quest is False
+
+    for box, attr in (("auto_dialogue", "auto_dialogue"),
+                      ("collect_wisps", "collect_wisps"),
+                      ("use_potions", "use_potions"),
+                      ("follow_leader", "follow_leader")):
+        getattr(win, box).setChecked(False)
+        assert getattr(live, attr) is False, attr
+        getattr(win, box).setChecked(True)
+        assert getattr(live, attr) is True, attr
+
+
+def test_the_script_can_be_started_and_stopped_mid_run(qapp, monkeypatch):
+    from deimos_bridge.gui import app as app_mod
+    from deimos_bridge.gui.app import MainWindow
+
+    monkeypatch.setattr(app_mod.LiveWorker, "start", lambda self, *a: None)
+    win = MainWindow(Telemetry())
+    win.script_source = "sendkey W 1"
+    win.on_start_live()
+    live = win.live
+    monkeypatch.setattr(type(live), "isRunning", lambda self: True)
+
+    assert live.script == ""                 # the box was unticked
+    win.use_script.setChecked(True)
+    assert live.script == "sendkey W 1"
+    win.use_script.setChecked(False)
+    assert live.script == ""
+
+
+def test_a_worker_notices_the_script_being_switched_on(qapp):
+    """The runner is built on the worker's own loop, because building one
+    takes the client and the client belongs to that loop."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    w.status = type("S", (), {"emit": staticmethod(lambda *_: None)})()
+    seat = w.seats[0]
+    seat.client = object()
+
+    built = []
+
+    async def _setup(client, s=None):
+        s = s or seat
+        s.runner = type("R", (), {"stop": lambda self: stopped.append(1)})()
+        built.append(w.script)
+
+    stopped = []
+    w._setup_script = _setup
+
+    # nothing configured: nothing built, and no churn on repeat ticks
+    asyncio.run(w._sync_script(seat))
+    asyncio.run(w._sync_script(seat))
+    assert built == [] and seat.runner is None
+
+    # switched on mid-run
+    w.script = "sendkey W 1"
+    asyncio.run(w._sync_script(seat))
+    assert built == ["sendkey W 1"] and seat.runner is not None
+    asyncio.run(w._sync_script(seat))
+    assert built == ["sendkey W 1"], "an unchanged script must not rebuild"
+
+    # ...and off again
+    w.script = ""
+    asyncio.run(w._sync_script(seat))
+    assert seat.runner is None and stopped == [1]
+
+
+def test_the_friends_list_holds_a_full_name_and_a_duel_gives_a_first(qapp):
+    """wizwalker matches `friend_name == name`, exactly. A duel reports
+    "Jeffrey"; the list holds "Jeffrey IslandBringer"; the teleport could
+    never find a leader that was sitting right there on the list."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    party._FULL_NAMES.clear()
+    tried = []
+
+    async def _tp(follower, name=None, **kw):
+        tried.append(name)
+        if name != "Jeffrey IslandBringer":
+            raise ValueError(
+                f"Could not find friend with icon None icon list None "
+                f"and/or name {name}")
+
+    async def _lookup(follower, short):
+        return "Jeffrey IslandBringer" if short == "Jeffrey" else ""
+
+    class _Mouse:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Follower:
+        mouse_handler = _Mouse()
+
+    import sys
+    import types
+    for name in ("wizwalker", "wizwalker.extensions"):
+        stub = types.ModuleType(name)
+        stub.__path__ = []            # a package, so ensure_path can extend it
+        sys.modules[name] = stub
+    mod = types.ModuleType("wizwalker.extensions.scripting")
+    mod.teleport_to_friend_from_list = _tp
+    sys.modules["wizwalker.extensions.scripting"] = mod
+    real_lookup = party.friends_list_name
+    party.friends_list_name = _lookup
+    try:
+        ok, why = asyncio.run(
+            party.teleport_to_leader_across_zones(_Follower(), "Jeffrey"))
+    finally:
+        party.friends_list_name = real_lookup
+        for name in ("wizwalker.extensions.scripting",
+                     "wizwalker.extensions", "wizwalker"):
+            sys.modules.pop(name, None)
+
+    assert ok is True, why
+    assert tried == ["Jeffrey", "Jeffrey IslandBringer"]
+    # and the resolved name is remembered, so it is one lookup per run
+    assert party._FULL_NAMES["Jeffrey"] == "Jeffrey IslandBringer"
+    party._FULL_NAMES.clear()

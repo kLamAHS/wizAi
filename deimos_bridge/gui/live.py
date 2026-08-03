@@ -115,6 +115,16 @@ class _Seat:
         #: against one client. Per seat and not per run: two wizards are
         #: two clients, and there is nothing to serialise between them.
         self.upkeep_lock = None
+        #: held by whatever is moving this wizard out of combat -- a
+        #: queued teleport, a wisp sweep, an auto-dialogue click, a quest
+        #: hop, a follow. One at a time, because two coroutines steering
+        #: one client walk it into a wall. Separate from the request
+        #: QUEUE, which is the whole point: the queue is attended by its
+        #: own task and only ever waits for the one action in progress.
+        self.drive = None
+        #: action -> when it was queued, so an entry that can never be
+        #: serviced expires instead of wedging the hotkey forever
+        self.queued_at = {}
         #: set while the fight loop is doing the between-fights chores.
         #: The lock keeps two upkeep runs apart; this keeps *questing*
         #: apart from upkeep, which is a different collision -- a wisp
@@ -124,6 +134,9 @@ class _Seat:
         self.in_upkeep = False
         #: said once, not every half-second, when the quest arrow is off
         self.warned_quest_arrow = False
+        #: what `runner` was built from, so the service tick can notice
+        #: the operator turning the script on, off, or replacing it
+        self.script_source = None
         #: this wizard's in-game name, learned from its first duel. The
         #: client will not say it outside the character-select screen,
         #: but a combat read names the client's own member -- and the
@@ -142,11 +155,13 @@ class _Seat:
         #: is reported rather than retried silently twice a second
         self.stage_errors = {}
 
-    def enqueue(self, action):
+    def enqueue(self, action, now=None):
         with self.lock:
             if action in self.requests or action == self.busy:
                 return False
             self.requests.append(action)
+            if now is not None:
+                self.queued_at[action] = now
         return True
 
 
@@ -314,10 +329,13 @@ class LiveWorker(QThread):
         """
         if action not in self.ACTIONS:
             return False
+        import time
+
         targets = (self.seats if seat is None
                    else [self.seats[seat]] if 0 <= seat < len(self.seats)
                    else [])
-        return any([s.enqueue(action) for s in targets])
+        now = time.monotonic()
+        return any([s.enqueue(action, now) for s in targets])
 
     # -- swapping the policy without dropping the connection --------------
     def set_policy(self, name, agent=None, seat=None):
@@ -427,25 +445,36 @@ class LiveWorker(QThread):
 
                 await self._drain_requests(client)
 
-                if self.auto_dialogue and seat.quester is None:
-                    # Deimos's questing does its own dialogue handling, so
-                    # a second clicker would race it for the same button.
-                    await self._stage(seat, "auto-dialogue",
-                                      self._auto_dialogue(client))
+                # A person pressing a key outranks any of the automatic
+                # chores below. Standing aside costs half a second of
+                # questing and buys a hotkey that answers.
+                if seat.requests:
+                    await asyncio.sleep(self.REQUEST_POLL)
+                    continue
 
-                if seat.runner is not None:
-                    await self._stage(seat, "script step",
-                                      self._script_step(seat))
+                async with self._driving(seat):
+                    if self.auto_dialogue and seat.quester is None:
+                        # Deimos's questing does its own dialogue
+                        # handling, so a second clicker would race it for
+                        # the same button.
+                        await self._stage(seat, "auto-dialogue",
+                                          self._auto_dialogue(client))
 
-                if self._follows(seat):
-                    # A follower does not quest. Two wizards taking their
-                    # own quests walk to two places, and then the party
-                    # coordinates beautifully with nobody.
-                    await self._stage(seat, "following the leader",
-                                      self._follow_step(client))
-                elif self.auto_quest:
-                    await self._stage(seat, "quest step",
-                                      self._quest_step(client))
+                        await self._stage(seat, "script", self._sync_script(seat))
+
+                    if seat.runner is not None:
+                        await self._stage(seat, "script step",
+                                          self._script_step(seat))
+
+                    if self._follows(seat):
+                        # A follower does not quest. Two wizards taking
+                        # their own quests walk to two places, and then
+                        # the party coordinates beautifully with nobody.
+                        await self._stage(seat, "following the leader",
+                                          self._follow_step(client))
+                    elif self.auto_quest:
+                        await self._stage(seat, "quest step",
+                                          self._quest_step(client))
 
                 await asyncio.sleep(0.5)
             except asyncio.CancelledError:
@@ -459,6 +488,78 @@ class LiveWorker(QThread):
                 # auto-quest simultaneously and forever, without a word.
                 self._stage_failed(seat, "the service loop", exc)
                 await asyncio.sleep(1.0)
+
+    #: how long a request may sit unserviced before it is dropped. A
+    #: queue entry that can never run is worse than no entry at all: the
+    #: dedupe refuses every further press of that key, so the hotkey goes
+    #: dead and the only way back is a combat cycle -- which is exactly
+    #: the "I have to walk into a fight and out again to reset the tp
+    #: hotkey" this expiry exists to end.
+    REQUEST_TTL = 45.0
+    #: how often the request task looks at the queue
+    REQUEST_POLL = 0.2
+
+    async def _request_loop(self, client, seat=None):
+        """Nothing but the button and hotkey queue, on its own task.
+
+        It used to share a tick with auto-dialogue, the script runner and
+        the quest or follow step. Every one of those can run for seconds
+        -- `advance_dialogue` clicks up to forty times at half a second
+        each, a quest hop settles for 1.2s, a wisp sweep teleports twelve
+        times -- and the drain sat at the top of that tick waiting its
+        turn. Meanwhile `enqueue` refuses a second press of an action
+        already queued, so every further press of the key was dropped
+        with "already running" while nothing was running at all. Walking
+        into a fight and out again cleared it because the tick then
+        short-circuits at the `in_battle` check and comes straight back
+        round to the drain.
+
+        So the queue gets its own task, and what the two tasks share is
+        the *drive lock* rather than the tick: a press now waits for the
+        one action actually in progress and nothing else.
+        """
+        seat = self._seat_for(client) if seat is None else seat
+        while not self._stop:
+            try:
+                if seat.requests:
+                    self._expire_requests(seat)
+                    await self._drain_requests(client, seat)
+                await asyncio.sleep(self.REQUEST_POLL)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._stage_failed(seat, "the request queue", exc)
+                await asyncio.sleep(1.0)
+
+    def _expire_requests(self, seat):
+        """Drop anything that has been queued too long to still be wanted.
+
+        A teleport pressed a minute ago is not a teleport anybody still
+        wants, and while it sits there the key is dead.
+        """
+        import time
+
+        now = time.monotonic()
+        stale = [a for a in list(seat.requests)
+                 if now - seat.queued_at.get(a, now) > self.REQUEST_TTL]
+        for action in stale:
+            with seat.lock:
+                if action in seat.requests:
+                    seat.requests.remove(action)
+            seat.queued_at.pop(action, None)
+            self._say(seat,
+                      f"dropped the queued {action} — it waited "
+                      f"{self.REQUEST_TTL:.0f}s without a chance to run, "
+                      f"and a stuck entry is what makes the key stop "
+                      f"responding. Press it again.")
+
+    def _driving(self, seat):
+        """The lock for steering this wizard, or a no-op before `_go`."""
+        import contextlib
+
+        if seat.drive is None:
+            return contextlib.nullcontext()
+        return seat.drive
 
     async def _stage(self, seat, name, coro):
         """Run one stage of the service tick, reporting its own failure.
@@ -512,9 +613,14 @@ class LiveWorker(QThread):
                     return
                 action = seat.requests.pop(0)
                 seat.busy = action
+            seat.queued_at.pop(action, None)
             try:
-                await self._stage(seat, f"the {action} request",
-                                  self._do_request(client, action, seat))
+                # The lock, not the tick: the operator's press waits for
+                # whatever is steering the wizard right now and for
+                # nothing else.
+                async with self._driving(seat):
+                    await self._stage(seat, f"the {action} request",
+                                      self._do_request(client, action, seat))
             finally:
                 seat.busy = None
 
@@ -532,6 +638,27 @@ class LiveWorker(QThread):
                       else (why or "no dialogue open"))
         elif action in ("wisps", "potion"):
             await self._upkeep_now(client, action)
+
+    async def _sync_script(self, seat):
+        """Build, replace or tear down this seat's script runner.
+
+        The script was read once at Play live and never again, so
+        ticking "Run script" mid-run did nothing and unticking it did
+        nothing either -- the runner built at connect kept stepping.
+        Done here rather than from the GUI thread because building one
+        takes the client, and the client belongs to this loop.
+        """
+        want = self.script or ""
+        if seat.script_source == want:
+            return
+        seat.script_source = want
+        if seat.runner is not None:
+            seat.runner.stop()
+            seat.runner = None
+            if not want:
+                self._say(seat, "script stopped")
+        if want:
+            await self._setup_script(seat.client, seat)
 
     async def _script_step(self, seat=None):
         seat = self.seats[0] if seat is None else seat
@@ -665,6 +792,123 @@ class LiveWorker(QThread):
         except Exception as exc:
             self._hotkeys = None
             self.status.emit(f"hotkeys not installed ({type(exc).__name__})")
+
+    #: how long to wait for one client's hooks before saying something.
+    #: wizwalker's own default is *no* timeout, which on a background
+    #: client is a hang -- see `_activate_all_hooks`.
+    HOOK_TIMEOUT = 20.0
+    #: bring each client to the front while its hooks are being written.
+    #: Intrusive, and the alternative is the hang.
+    FOCUS_TO_HOOK = True
+
+    async def _activate_all_hooks(self):
+        """Install every client's hooks, without hanging on any of them.
+
+        This is the fix for "hooking multiple characters does not work
+        first try; I have to kill the bot and re-hook every time", and
+        the cause is worth writing down because nothing about it is
+        visible from here.
+
+        `client.activate_hooks()` defaults to `wait_for_ready=True,
+        timeout=None`, and that `None` reaches
+        `asyncio.wait_for(task, None)` -- it waits **forever** for five
+        addresses to become non-zero: `player_struct`,
+        `player_stat_struct`, `current_client`, `current_root_window`
+        and `current_render_context`. Those are written by the game's
+        own code when it next runs those paths, and the last two are the
+        UI and render paths. A Wizard101 client that is not the
+        foreground window throttles rendering, so on a background client
+        they may simply never fire.
+
+        Hooking the clients one after another then parks the whole run
+        on client 2 forever while client 1 sits there hooked, with no
+        timeout, no message and nothing to do but kill it. Alt-tabbing
+        to client 2 makes it render, which is exactly the manual
+        "messing around" that makes it take.
+
+        So: bring each client to the front for the moment its hooks are
+        being written, bound the wait, and put the operator's own window
+        back afterwards. The focus dance is intrusive and it is still
+        better than the hang; `FOCUS_TO_HOOK` turns it off.
+        """
+        was_in_front = self._foreground_window()
+        try:
+            for seat in self.seats:
+                await self._activate_hooks(seat)
+        finally:
+            self._restore_foreground(was_in_front)
+
+    def _foreground_window(self):
+        try:
+            from wizwalker import utils
+            return utils.get_foreground_window()
+        except Exception:
+            return None
+
+    def _restore_foreground(self, handle):
+        """Give the operator their own window back."""
+        if handle is None:
+            return
+        try:
+            from wizwalker import utils
+            utils.set_foreground_window(handle)
+        except Exception:
+            pass          # politeness, never a blocker
+
+    def _focus(self, seat):
+        try:
+            seat.client.is_foreground = True
+            return True
+        except Exception:
+            return False
+
+    async def _activate_hooks(self, seat, tries=2):
+        """One client's hooks, with a bounded wait and a way out."""
+        for attempt in range(max(1, tries)):
+            focused = self._focus(seat) if self.FOCUS_TO_HOOK else False
+            if focused:
+                # A frame or two for the client to notice it is visible
+                # again and start writing the values wizwalker waits on.
+                await asyncio.sleep(0.4)
+            self._say(seat, "activating hooks…" if not attempt
+                      else "activating hooks (retrying)…")
+            try:
+                await seat.client.activate_hooks(timeout=self.HOOK_TIMEOUT)
+                return True
+            except Exception as exc:
+                name = type(exc).__name__
+                if "AlreadyActivated" in name:
+                    return True          # a previous run left them up
+                if "Pattern" in name or "Pattern" in str(exc):
+                    raise RuntimeError(
+                        "wizwalker could not install its hooks: the "
+                        "autobot signature was not found in the running "
+                        "client.\n\n"
+                        "Run  python -m deimos_bridge.diagnose_hooks  — "
+                        "it tells you whether this is stale state in the "
+                        "process (close the game completely) or a game "
+                        "patch that outdates wizwalker."
+                    ) from exc
+                if not isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+                    raise
+                if attempt + 1 < tries:
+                    self._say(
+                        seat,
+                        f"this client's hooks did not finish in "
+                        f"{self.HOOK_TIMEOUT:.0f}s — the values wizwalker "
+                        f"waits for are written by the game's own render "
+                        f"loop, and a background client barely renders. "
+                        f"Bringing it to the front and trying once more.")
+        raise RuntimeError(
+            f"{seat.name}'s client hooked but never finished writing its "
+            f"hook values, twice, at {self.HOOK_TIMEOUT:.0f}s each.\n\n"
+            f"wizwalker waits for the game to write five addresses, two of "
+            f"which come from the UI and render paths — so a client that is "
+            f"minimised, on another virtual desktop, or otherwise not "
+            f"drawing will never finish. Bring that client's window up so "
+            f"it is visibly rendering, leave it at the character or world "
+            f"screen rather than a loading screen, and press Play live "
+            f"again.")
 
     #: reads the run cannot do without, and where each one is needed.
     #: Probed rather than assumed, because `activate_hooks()` returning
@@ -891,6 +1135,7 @@ class LiveWorker(QThread):
         from .. import scripts
 
         seat = self._seat_for(client) if seat is None else seat
+        seat.script_source = self.script or ""
         try:
             seat.runner = scripts.make_runner(client, self.script)
             self._say(seat, "script loaded")
@@ -1122,23 +1367,14 @@ class LiveWorker(QThread):
 
             for seat, client in zip(self.seats, clients):
                 seat.client = client
-                self._say(seat, "activating hooks…")
-                try:
-                    await client.activate_hooks()
-                except Exception as exc:
-                    if "Pattern" in type(exc).__name__ \
-                            or "Pattern" in str(exc):
-                        raise RuntimeError(
-                            "wizwalker could not install its hooks: the "
-                            "autobot signature was not found in the running "
-                            "client.\n\n"
-                            "Run  python -m deimos_bridge.diagnose_hooks  — "
-                            "it tells you whether this is stale state in the "
-                            "process (close the game completely) or a game "
-                            "patch that outdates wizwalker."
-                        ) from exc
-                    raise
+            # Every client hooked before any of them is set up, so a
+            # client that will not hook is reported before a backend is
+            # built for any of them -- and so the focus dance below
+            # happens once rather than interleaved with the reads.
+            await self._activate_all_hooks()
 
+            for seat in self.seats:
+                client = seat.client
                 await self._verify_hooks(seat)
                 await self._read_max_hp(client, seat)
                 self._claim_record(seat)
@@ -1184,6 +1420,7 @@ class LiveWorker(QThread):
                 # the loop it is created on, and __init__ runs on the GUI
                 # thread.
                 seat.upkeep_lock = asyncio.Lock()
+                seat.drive = asyncio.Lock()
 
             await self._setup_hotkeys()
             if hive is not None:
@@ -1198,6 +1435,10 @@ class LiveWorker(QThread):
             for seat in self.seats:
                 servicers.append(asyncio.ensure_future(
                     self._service_loop(seat.client, seat)))
+                # Its own task, so a press never waits behind a quest hop
+                # or a dialogue click. See `_request_loop`.
+                servicers.append(asyncio.ensure_future(
+                    self._request_loop(seat.client, seat)))
             # Concurrently, on one loop. Four sequential fight loops
             # would mean wizard 2 never reaching its planning phase until
             # wizard 1's duel was over, which is not a party -- it is a
@@ -1296,7 +1537,7 @@ class LiveWorker(QThread):
                     # combat and free, and teleport it to the quest
                     # marker halfway through the sweep.
                     seat.in_upkeep = True
-                    async with self._upkeep(seat):
+                    async with self._driving(seat), self._upkeep(seat):
                         await upkeep.after_fight(
                             seat.client, wisps=self.collect_wisps,
                             potions=self.use_potions,

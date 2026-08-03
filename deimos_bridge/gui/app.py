@@ -1089,6 +1089,7 @@ class MainWindow(QMainWindow):
         # that is never configured per wizard still runs four wizards
         # rather than three empty ones.
         self.seat_configs = [self._snapshot() for _ in range(MAX_WIZARDS)]
+        self._wire_live_toggles()
         self.refresh_all()
         self._update_policy_state()
 
@@ -1485,6 +1486,45 @@ class MainWindow(QMainWindow):
         self.train_progress.setTextVisible(True)
         box.layout().addWidget(self.train_progress)
         return box
+
+    #: checkbox -> the attribute it drives on a running `LiveWorker`.
+    #: The worker reads every one of these on each service tick, so
+    #: keeping them in step is all a live toggle needs -- and without it
+    #: they were read once at Play live and never again, which is why
+    #: auto-quest, auto-dialogue, the upkeep chores and the follow could
+    #: not be turned on or off during a run.
+    LIVE_TOGGLES = {"auto_quest": "auto_quest",
+                    "auto_dialogue": "auto_dialogue",
+                    "collect_wisps": "collect_wisps",
+                    "use_potions": "use_potions",
+                    "follow_leader": "follow_leader"}
+
+    def _wire_live_toggles(self):
+        for box_name, attr in self.LIVE_TOGGLES.items():
+            box = getattr(self, box_name)
+            box.toggled.connect(
+                lambda on, a=attr, n=box_name: self._on_live_toggle(a, n, on))
+        self.use_script.toggled.connect(lambda _on: self._push_script())
+
+    def _on_live_toggle(self, attr, box_name, on):
+        if self.live is None or not self.live.isRunning():
+            return
+        setattr(self.live, attr, bool(on))
+        label = box_name.replace("_", "-")
+        self.status.setText(f"{label} is {'on' if on else 'off'} — takes "
+                            f"effect on the next tick, no reconnect")
+
+    def _push_script(self):
+        """Hand the running worker whatever the script box says now.
+
+        The worker rebuilds or tears down each seat's runner on its own
+        loop when this changes; see `LiveWorker._sync_script`.
+        """
+        if self.live is None or not self.live.isRunning():
+            return
+        want = self.script_source if self.use_script.isChecked() else ""
+        self.live.script = want
+        self.status.setText("script started" if want else "script stopped")
 
     def on_toggle_options(self, shown, by_user=True):
         self.more.setVisible(shown)
@@ -2132,6 +2172,7 @@ class MainWindow(QMainWindow):
             self.script_lab.setText(f"{lines} line(s) loaded" if lines
                                     else "no script")
             self.use_script.setChecked(bool(lines))
+            self._push_script()
 
     # -- questing --------------------------------------------------------
     def _quest_action(self, coro_name, label):
