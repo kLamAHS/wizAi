@@ -1249,6 +1249,12 @@ class LiveWorker(QThread):
     def _on_decision(self, decision, read, seat=None):
         """Runs on the worker thread: record, then signal. No widgets."""
         seat = self.seats[0] if seat is None else seat
+        if seat.wizard_name is None:
+            # Before the round is recorded, not after: if this seat is
+            # holding a different wizard than the record does, the record
+            # has to be cleared first or this round lands in it and is
+            # thrown away with the rest.
+            self._learn_name(seat, read)
         sim = None
         backend = seat.backend
         if backend is not None:
@@ -1267,8 +1273,6 @@ class LiveWorker(QThread):
         # The backend measures this every round; it used to go nowhere,
         # while the trainer guessed the same quantity off the wizard's
         # own health.
-        if seat.wizard_name is None:
-            self._learn_name(seat, read)
         rec.incoming = float(
             getattr(backend, "_measured_incoming", 0.0) or 0.0)
         if seat.tel.fights:
@@ -1297,8 +1301,25 @@ class LiveWorker(QThread):
         name = getattr(name, "name", None)
         if not (isinstance(name, str) and name.strip()):
             return
-        seat.wizard_name = seat.name = name.strip()
-        seat.tel.wizard = seat.wizard_name
+        name = name.strip()
+        if seat.tel.wizard and seat.tel.wizard != name:
+            # The seat is a different wizard than it was last run. The
+            # clients come back in whatever order the game was launched
+            # in, and the record is per SEAT and outlives a run -- so
+            # without this the file holds two wizards' fights under one
+            # name. The first named party run's did: two rounds of a
+            # 1,053 HP ice wizard, then six of a 713 HP fire one.
+            was, kept = seat.tel.wizard, len(seat.tel.rounds)
+            seat.tel.clear()
+            self._say(seat,
+                      f"this seat was {was} last run and is {name} now — "
+                      f"the clients come back in whatever order the game "
+                      f"was launched in. Cleared {kept} round(s) of {was}'s "
+                      f"run out of this record rather than exporting two "
+                      f"wizards as one.")
+            seat.tel.start_fight()
+        seat.wizard_name = seat.name = name
+        seat.tel.wizard = name
         if self.hive is not None:
             self.hive.join(seat.index, seat.name)
         self._stamp_title(seat)
