@@ -233,23 +233,31 @@ def match_enemies(before, after):
     number this app has ever reported for a duel with two same-named
     mobs was measured against the wrong mob.
 
-    Matching is per `(name, max health)` group, because that is the only
-    identity a read carries -- participants have no stable id across
-    reads that the board record keeps. Within a group:
+    **Position is the primary key**, and health is only the tie-breaker.
+    A first attempt at this matched on health instead -- exact health
+    first, on the reasoning that a mob nobody touched is the easiest
+    thing to recognise -- and that is wrong in precisely the case that
+    matters. Two Ice Weavers at 395 each, hit one for 224: the board
+    reads `[395, 395, 395]` then `[171, 395, 395]`, and matching the
+    hit mob's before-health of 395 to an *untouched twin's* 395 records
+    the cast as doing nothing. Over the second live party run that was
+    nine rounds recorded as 0 damage against predictions of 93 to 412,
+    and two more measured against the wrong twin. Re-matched by
+    position, every one of the nine lands within 1-62% of its
+    prediction and not one round gets worse.
 
-      * exact health match first. A mob nobody touched is the easiest
-        thing on the board to recognise, and pinning those down first
-        stops them absorbing the match that belonged to a mob that WAS
-        hit.
-      * then the closest health that did not go UP, smallest gap first.
-        Health falls within a fight; a candidate that gained health is
-        a worse explanation than one that lost some.
-      * anything left over died, and gets None.
+    wizwalker reads participants in a stable order, so as long as the
+    board has the same shape it had last round, the i-th mob IS the i-th
+    mob. Health then only has to sanity-check it: health falls within a
+    fight, so a positional pairing that has a mob GAINING health is not
+    a pairing, and the fallback takes over.
 
-    Order is deliberately not used as the primary key even though the
-    participant list is stable: the whole reason indices need checking
-    is that a death compacts the list, and that is exactly when the
-    positional answer is wrong.
+    When the shape changed -- something died, or something joined
+    mid-duel, which Wizard101 allows -- position means nothing and the
+    fallback runs. It matches per `(name, max health)` group, because
+    that is the only identity a read carries, taking the closest health
+    that did not go up, smallest gap first; anything left over died and
+    gets None. That is a guess, and `_settle` marks the round for it.
     """
     out = {i: None for i in range(len(before))}
     if not after:
@@ -258,24 +266,54 @@ def match_enemies(before, after):
     def key(e):
         return (getattr(e, "name", ""), float(getattr(e, "max_hp", 0) or 0))
 
+    def lines_up():
+        """Same board, same order, nobody healed -- so i is i."""
+        if len(before) != len(after):
+            return False
+        return all(key(x) == key(y) and float(y.hp) <= float(x.hp)
+                   for x, y in zip(before, after))
+
+    if lines_up():
+        return {i: after[i] for i in range(len(before))}
+
     pools = {}
     for j, a in enumerate(after):
         pools.setdefault(key(a), []).append(j)
 
+    was = {}
+    for i, b in enumerate(before):
+        was.setdefault(key(b), []).append(i)
+
+    # A mob that JOINS a duel mid-fight arrives at FULL health, and that
+    # is the one thing that makes a grown board readable at all. One
+    # Glacial Avenger at 395/395 is hit for a predicted 267; next round
+    # the board reads `[159/395, 395/395]`. Matching on health alone
+    # takes the 395 -- a perfect, zero-damage match -- and records the
+    # cast as doing nothing. But the 159 cannot be the newcomer, because
+    # newcomers are not damaged. So the arrivals are booked out of the
+    # pool first, from the end of the group, and what is left is the mob
+    # that was actually there.
+    for group_key, group in pools.items():
+        joined = len(group) - len(was.get(group_key, ()))
+        if joined <= 0:
+            continue
+        full = [j for j in group
+                if float(after[j].hp) >= float(after[j].max_hp) > 0]
+        for j in reversed(full):
+            if joined <= 0:
+                break
+            group.remove(j)
+            joined -= 1
+
     taken = set()
 
-    def claim(i, group, want_exact):
+    def claim(i, group):
+        """The closest health that did not go UP, smallest gap first."""
         best, gap = None, None
         for j in group:
             if j in taken:
                 continue
-            a = after[j]
-            delta = float(before[i].hp) - float(a.hp)
-            if want_exact:
-                if delta == 0.0:
-                    best = j
-                    break
-                continue
+            delta = float(before[i].hp) - float(after[j].hp)
             if delta < 0:
                 continue                    # health went up: a worse fit
             if gap is None or delta < gap:
@@ -286,12 +324,14 @@ def match_enemies(before, after):
         out[i] = after[best]
         return True
 
-    order = sorted(range(len(before)), key=lambda i: key(before[i]))
-    for want_exact in (True, False):
-        for i in order:
-            if out[i] is not None:
-                continue
-            claim(i, pools.get(key(before[i]), ()), want_exact)
+    # Damaged mobs first: they are the ones a full-health twin can steal
+    # a match from, and the twin has other candidates to fall back on.
+    order = sorted(range(len(before)),
+                   key=lambda i: (float(before[i].hp) >= float(before[i].max_hp),
+                                  key(before[i])))
+    for i in order:
+        if out[i] is None:
+            claim(i, pools.get(key(before[i]), ()))
 
     # Last resort: a mob whose health only makes sense as a heal still
     # has to be paired with something, or a healed target reads as a
@@ -624,7 +664,8 @@ class Telemetry:
         if prev is None or prev.predicted_damage is None:
             self._pending = None
             return
-        pairs = match_enemies(prev.enemies, list(read.state.enemies))
+        board = list(read.state.enemies)
+        pairs = match_enemies(prev.enemies, board)
         target = prev.target_name
         i = prev.target_index
         if i is None or not (0 <= i < len(prev.enemies)):
@@ -635,6 +676,19 @@ class Telemetry:
         if before is None:
             self._pending = None
             return
+        joined = len(board) - len(prev.enemies)
+        if joined > 0:
+            # `match_enemies` books arrivals out by the fact that they
+            # come in at full health, which is right often enough to be
+            # worth doing and is still a guess. Wizard101 seats a
+            # newcomer in whichever circle position is free, so two
+            # identical mobs and one arrival is genuinely ambiguous --
+            # and a guess that reads as a measurement is worse than no
+            # measurement.
+            prev.clean = False
+            prev.confounds.append(
+                f"{joined} mob(s) joined the duel this round, so which "
+                f"reading is the target is inferred rather than known")
         if after is None:
             # It died. The hit landed for at least its remaining HP; that
             # is a floor, not a measurement, so it is recorded unclean.
