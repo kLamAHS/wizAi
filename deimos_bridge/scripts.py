@@ -149,6 +149,22 @@ def check(source: str):
     return True, note
 
 
+def build_vm(clients, source: str):
+    """A loaded, running `VM` over `clients`.
+
+    One function because a restart builds one the same way a first start
+    does -- Deimos constructs a fresh VM per pass and so does this. See
+    `ScriptRunner.restart` for why reloading in place does not work.
+    """
+    _ensure_path()
+    from src.deimoslang import vm
+
+    machine = vm.VM(list(clients))
+    machine.load_from_text(source)
+    machine.running = True
+    return machine
+
+
 class ScriptRunner:
     """One deimoslang program, run in time-boxed bursts."""
 
@@ -255,20 +271,31 @@ class ScriptRunner:
         return done
 
     def restart(self) -> bool:
-        """Reload and run again, as Deimos does. False if it was killed.
+        """Run the program again from the top. False if it was killed.
 
         A program that runs off the end is not finished -- Deimos loops
         it (`Deimos.py:2144-2152`) and questers are written expecting
         that. Only `kill` ends a run.
+
+        A **fresh VM**, which is what Deimos builds each pass, and not
+        `load_from_text` on the existing one. `load_from_text` assigns
+        `program` and nothing else (`vm.py:127-129`): `current_task.ip`
+        is still past the end of the old program and `current_task.
+        running` is still the False the epilogue set when it got there
+        (`vm.py:1833-1834`), so the very next `step()` takes the
+        `if not self.current_task.running` branch (`vm.py:1619-1621`)
+        and returns without executing anything -- for ever. `until`
+        state, timers and constants would survive too. Rebuilding costs
+        one compile per pass and leaves nothing behind.
         """
         if self.killed:
             return False
         try:
-            self.vm.load_from_text(self.source)
-            self.vm.running = True
+            machine = build_vm(self.clients, self.source)
         except Exception as exc:
             self.last_error = f"{type(exc).__name__}: {exc}"
             return False
+        self.vm = machine
         self.restarts += 1
         self.finished = False
         self.stale = False
@@ -308,14 +335,11 @@ def make_runner(clients, source: str):
         raise RuntimeError(
             f"this script says it needs {need} wizards (its '@clients' "
             f"header) and {len(party)} {'is' if len(party) == 1 else 'are'} "
-            f"hooked. Every p{len(party) + 1}… command in it would run "
-            f"against nothing, because the VM answers None for a wizard it "
-            f"does not have. Set 'wizards' to {need} and log them all in.")
+            f"hooked. Running it anyway would not merely skip the "
+            f"p{len(party) + 1}… parts: the VM answers None for a wizard it "
+            f"does not have, commands over it become silent no-ops, and "
+            f"CONDITIONS over it come back true from an empty loop — so a "
+            f"'while p{len(party) + 1} …' whose body does nothing never "
+            f"ends. Set 'wizards' to {need} and log them all in.")
 
-    _ensure_path()
-    from src.deimoslang import vm
-
-    machine = vm.VM(party)
-    machine.load_from_text(source)
-    machine.running = True
-    return ScriptRunner(machine, source, party)
+    return ScriptRunner(build_vm(party, source), source, party)

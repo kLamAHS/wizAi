@@ -568,6 +568,14 @@ class LiveWorker(QThread):
         """
         import time
 
+        if seat.driver is not None:
+            # Not stuck -- queued behind something that is running and
+            # said so. A script burst can hold the wheel for longer than
+            # the TTL, and dropping the press with "press it again"
+            # while the thing it is waiting for is visibly working would
+            # be a lie as well as a lost keypress.
+            return
+
         now = time.monotonic()
         stale = [a for a in list(seat.requests)
                  if now - seat.queued_at.get(a, now) > self.REQUEST_TTL]
@@ -1612,9 +1620,17 @@ class LiveWorker(QThread):
                     self.set_policy(seat.policy_name, seat=seat.index)
                 seat.combat = make_combat_handler(client, backend)
 
-                if self.auto_quest:
+                if self.auto_quest and not self.script:
+                    # A script walks the party itself; a Deimos quester
+                    # built beside it is a second thing steering the
+                    # same wizard.
                     await self._setup_questing(client, seat)
-                if self.script:
+                if self.script and self._scripted(seat):
+                    # Seat 0 only. `_setup_script` builds a VM over
+                    # EVERY client, so calling it once per seat gives
+                    # four VMs each driving all four wizards -- four
+                    # copies of one quester, which is worse than the
+                    # per-seat single-client VM it replaced.
                     await self._setup_script(client, seat)
                 # Built here, not in __init__: an asyncio.Lock binds to
                 # the loop it is created on, and __init__ runs on the GUI

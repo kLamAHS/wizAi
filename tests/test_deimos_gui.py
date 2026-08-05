@@ -7974,13 +7974,19 @@ def test_a_burst_stops_the_moment_the_policy_needs_the_wizard():
     assert vm.running, "the VM was stopped rather than parked"
 
 
-def test_a_script_that_runs_off_the_end_starts_again():
+def test_a_script_that_runs_off_the_end_starts_again(monkeypatch):
     """Deimos reloads and reruns it (Deimos.py:2144-2152) and questers
     are written expecting that — 'If the script ever restarts…'. Only
     kill ends a run."""
     import asyncio
 
+    from deimos_bridge import scripts
     from deimos_bridge.scripts import ScriptRunner
+
+    fresh = []
+    monkeypatch.setattr(scripts, "build_vm",
+                        lambda c, s: fresh.append(_CountingVM(total=3))
+                        or fresh[-1])
 
     vm = _CountingVM(total=3)
     runner = ScriptRunner(vm, "src")
@@ -7988,7 +7994,8 @@ def test_a_script_that_runs_off_the_end_starts_again():
     assert not runner.running
 
     assert runner.restart() is True
-    assert vm.loads == 1 and runner.running and runner.restarts == 1
+    assert len(fresh) == 1 and runner.vm is fresh[0]
+    assert runner.running and runner.restarts == 1
 
     runner.stop()
     assert runner.restart() is False, "a killed script must stay dead"
@@ -8109,7 +8116,7 @@ def test_a_running_script_stops_wizai_walking_the_same_wizard(qapp):
     assert "quest" not in ran, "wizAi walked a wizard the script is driving"
 
 
-def test_an_instruction_that_never_finishes_reloads_the_script():
+def test_an_instruction_that_never_finishes_reloads_the_script(monkeypatch):
     """`waitforzonechange completion` blocks for a whole loading screen
     and the TTS Arc 1 script has 122 of them, so the burst cannot simply
     be cancelled at 30s. But there is no timeout inside the VM at all —
@@ -8118,21 +8125,21 @@ def test_an_instruction_that_never_finishes_reloads_the_script():
     way through one, so the only honest recovery is a reload."""
     import asyncio
 
+    from deimos_bridge import scripts
     from deimos_bridge.scripts import ScriptRunner
 
     class _Hangs:
         running = True
         killed = False
-        loads = 0
 
         async def step(self):
             await asyncio.Event().wait()
 
-        def load_from_text(self, _s):
-            self.loads += 1
-
         def kill(self):
             self.killed = True
+
+    fresh = _CountingVM(total=10)
+    monkeypatch.setattr(scripts, "build_vm", lambda c, s: fresh)
 
     vm = _Hangs()
     runner = ScriptRunner(vm, "src")
@@ -8143,7 +8150,8 @@ def test_an_instruction_that_never_finishes_reloads_the_script():
     assert "without finishing" in runner.last_error
 
     assert runner.restart() is True
-    assert vm.loads == 1 and runner.stale is False
+    assert runner.vm is fresh, "the half-executed VM was kept"
+    assert runner.stale is False
 
 
 def test_the_script_stage_limit_sits_above_the_runners_own(qapp):
@@ -8187,3 +8195,88 @@ def test_a_repeating_script_error_keeps_being_reported(qapp):
     errs = [m for m in said if "script error" in m]
     assert len(errs) >= 3, f"went silent after {len(errs)} reports"
     assert any("still failing" in m for m in errs)
+
+
+def test_a_restart_actually_runs_the_program_again(monkeypatch):
+    """`load_from_text` assigns `program` and nothing else (vm.py:127).
+    `current_task.ip` is still past the end of the old program and
+    `current_task.running` is still the False the epilogue set when it
+    got there (vm.py:1833), so the next step() takes the
+    `if not self.current_task.running` branch and returns without
+    executing anything — for ever. Deimos builds a fresh VM each pass."""
+    import asyncio
+
+    from deimos_bridge import scripts
+
+    built = []
+
+    def _build(clients, source):
+        built.append(list(clients))
+        return _CountingVM(total=10)
+
+    monkeypatch.setattr(scripts, "build_vm", _build)
+
+    dead = _CountingVM(total=1)
+    runner = scripts.ScriptRunner(dead, "src", clients=["a", "b"])
+    asyncio.run(runner.run_for(seconds=0.5))
+    assert not runner.running
+
+    assert runner.restart() is True
+    assert built == [["a", "b"]], "the old VM was reused"
+    assert runner.vm is not dead, "the exhausted VM was kept"
+    assert runner.running, "the fresh VM was not started"
+
+
+def test_only_one_seat_builds_the_partys_script(qapp, monkeypatch):
+    """`_setup_script` builds a VM over EVERY client, so calling it once
+    per seat gives four VMs each driving all four wizards — four copies
+    of one quester, worse than the single-client VM it replaced."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+    from deimos_bridge import scripts
+
+    built = []
+    monkeypatch.setattr(
+        scripts, "make_runner",
+        lambda clients, src: built.append(list(clients)) or
+        type("R", (), {"running": True, "stop": lambda self: None})())
+
+    w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1,
+                   seats=[SeatConfig(school="fire", deck=[]),
+                          SeatConfig(school="life", deck=[])],
+                   script="###deimos_expertmode\nsendkey W, 1\n")
+    w.status = type("S", (), {"emit": staticmethod(lambda *_: None)})()
+    for i, s in enumerate(w.seats):
+        s.client = f"client{i}"
+
+    for seat in w.seats:
+        if w._scripted(seat):
+            asyncio.run(w._setup_script(seat.client, seat))
+    assert len(built) == 1, f"{len(built)} VMs for one script"
+    assert built[0] == ["client0", "client1", "client2"]
+
+
+def test_a_press_is_not_dropped_while_it_can_see_what_it_waits_for(qapp):
+    """A script burst can hold the wheel for longer than the TTL.
+    Dropping the press with 'press it again' while the thing it is
+    waiting for is visibly working loses a keypress and lies."""
+    from deimos_bridge.gui.live import LiveWorker
+
+    said = []
+    w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    w.status = type("S", (), {"emit": staticmethod(said.append)})()
+    seat = w.seats[0]
+
+    assert w.request("teleport") is True
+    seat.queued_at["teleport"] -= w.REQUEST_TTL + 1
+
+    seat.driver = "script step"
+    w._expire_requests(seat)
+    assert seat.requests == ["teleport"], "dropped while something held the wheel"
+    assert not said
+
+    seat.driver = None
+    w._expire_requests(seat)
+    assert seat.requests == []
+    assert any("dropped the queued teleport" in m for m in said)
