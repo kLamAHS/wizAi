@@ -1340,12 +1340,22 @@ class LiveWorker(QThread):
         party = [s.client for s in self.seats if s.client is not None]
         try:
             seat.runner = scripts.make_runner(party or [client], self.script)
-            need = scripts.wants_clients(self.script)
             self._say(seat, "script loaded"
                       + (f" — driving {len(party)} wizard(s)"
-                         if len(party) > 1 else "")
-                      + (f", and it asks for {need}" if need > len(party)
-                         else ""))
+                         if len(party) > 1 else ""))
+            names = scripts.mentions_clients(self.script)
+            if names > max(1, len(party)):
+                # Not a refusal -- the parts that name p3 and p4 are
+                # usually behind the script's own configuration flags.
+                # But not always: a `teleport client 3` that does fire
+                # with two wizards hooked throws before the VM advances
+                # past it, and only the stuck-instruction reload gets
+                # the run back.
+                self._say(seat,
+                          f"this script names up to p{names} and {len(party)} "
+                          f"wizard(s) are hooked. Anything it does with the "
+                          f"others runs against nothing — check its own "
+                          f"account settings match your party.")
         except Exception as exc:
             seat.runner = None
             self._say(seat, f"script not loaded: {exc}")

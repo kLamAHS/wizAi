@@ -143,15 +143,92 @@ def describe_hanging(h) -> str:
     return f"{h.name} ({h.kind})"
 
 
+def _round_id(rec) -> str:
+    """"f6r8" -- which fight, which round."""
+    return f"f{getattr(rec, 'fight', 0)}r{getattr(rec, 'round', 0)}"
+
+
+def revision() -> str:
+    """The git revision this ran on, or "".
+
+    Stamped into every export. Two runs uploaded twenty minutes before
+    a fix landed were read as evidence about the fixed code, and there
+    was nothing in the file to say otherwise -- a measurement whose
+    provenance is a guess is not a measurement.
+    """
+    import os
+    import subprocess
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        out = subprocess.run(["git", "-C", root, "describe", "--always",
+                              "--dirty", "--abbrev=8"],
+                             capture_output=True, text=True, timeout=5)
+    except Exception:
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def _party_expected(party, target_name):
+    """What the WHOLE party expects to take off `target_name` this round.
+
+    The answer to a measurement problem that a party creates and cannot
+    escape. Settling one wizard's cast means differencing one mob's
+    health across a round -- and when two wizards fire into the same
+    mob, that delta is both of theirs and neither's. The honest thing
+    is to refuse the observation, which is what happens; the cost is
+    that in a real party most rounds are shared, so refusing them
+    starves the damage model to nothing. Over one live run it left
+    wizard 2 with two usable rounds out of seventy.
+
+    So the shared rounds are measured as what they actually are: a
+    claim by the party about a mob, checked against what the mob lost.
+    Every seat's expected damage on that mob, summed. It answers a
+    slightly different question from the solo residual -- it cannot say
+    which wizard was wrong -- but it is the same arithmetic under test,
+    it is available on nearly every round of a party run, and a number
+    from thirty rounds beats a number from two.
+
+    Returns None when the coordinator did not price the round, so a
+    missing plan is never confused with a plan that expects nothing.
+    """
+    moves = getattr(party, "moves", None)
+    if not moves or not target_name:
+        return None
+    total = 0.0
+    for move in moves:
+        if move.target_name != target_name:
+            continue
+        total += float(getattr(move, "damage", 0) or 0)
+    return total
+
+
 def _party_hits(party, seat):
-    """{enemy name: "wizard 2", ...} for the OTHER wizards' targets.
+    """{enemy name: "wizard 2", ...} for the OTHER wizards' DAMAGING casts.
 
     Only enemies, and only other seats: this wizard's own cast is the
     thing being measured, and a teammate's self-buff moves no health.
+
+    And only casts that move health, which is the whole point and was
+    the bug. Any card *aimed at* an enemy used to count -- and a trap,
+    a shield and a debuff are all aimed at an enemy while taking
+    nothing off it. Over one live party run that filed a false "the
+    other wizard also hit this mob" on 18 of Konstantin's 64 rounds
+    (Jeffrey had cast Ice Trap or Tower Shield) and 24 of Jeffrey's
+    (Konstantin had cast Fireblade, Fire Trap or Pixie). Each one marks
+    the round unclean, so it is not a cosmetic mislabel: it was the
+    single biggest reason the damage model came back with two usable
+    observations out of seventy.
+
+    `SeatMove.damage` is the coordinator's own estimate for that move,
+    which is exactly the question -- a card it scored at zero moves no
+    health and cannot be the reason this wizard's residual is off.
     """
     out = {}
     for move in getattr(party, "moves", ()) or ():
         if move.seat == seat or not move.card or not move.target_name:
+            continue
+        if not (getattr(move, "damage", 0) or 0) > 0:
             continue
         who = out.get(move.target_name)
         out[move.target_name] = (f"{who} and {move.name}" if who
@@ -413,6 +490,10 @@ class RoundRecord:
     #: residual that is the party's total -- which is not a measurement
     #: of anything. See `Telemetry._settle`.
     party_hits: dict = field(default_factory=dict)
+    #: what the WHOLE party expected to take off this round's target,
+    #: this wizard's own share included. The measurement that survives a
+    #: shared mob -- see `_party_expected`.
+    party_predicted: float = None
 
     @property
     def error(self):
@@ -421,16 +502,51 @@ class RoundRecord:
         return self.actual_damage - self.predicted_damage
 
     @property
-    def pct_error(self):
-        e = self.error
-        if e is None or not self.actual_damage:
+    def party_error(self):
+        """Residual of the PARTY's claim about this mob, or None.
+
+        Only where the party's claim is a different claim: a round this
+        wizard had to itself is already reported as a solo observation
+        and counting it twice would weight it twice.
+        """
+        if (self.party_predicted is None or self.actual_damage is None
+                or not self.party_hits):
             return None
-        return 100.0 * e / self.actual_damage
+        return self.actual_damage - self.party_predicted
+
+    @property
+    def pct_error(self):
+        """Error as a share of what was PREDICTED, not of what landed.
+
+        Dividing by the actual is the wrong denominator for this
+        question. The prediction is the claim under test, so it is the
+        thing the error is a percentage of -- and normalising by the
+        outcome inflates every over-prediction without bound (a cast
+        that lands for 1 against a prediction of 100 is -9,900%) while
+        squashing every under-prediction toward -100%. Live, that
+        reported wizard 2's model bias as -20.8% when it was -13.7%,
+        and the asymmetry made the direction itself hard to read.
+        """
+        e = self.error
+        if e is None or not self.predicted_damage:
+            return None
+        return 100.0 * e / self.predicted_damage
 
 
 @dataclass
 class FightRecord:
     index: int
+    #: the duel's opening board, as "Ice Weaver@395+Ice Weaver@395".
+    #:
+    #: The join key between two wizards' exports. `index` cannot be one:
+    #: it counts this seat's own fights, and seats do not see the same
+    #: fights -- one live party run had wizard 1's fight 1 be wizard 2's
+    #: fight 3, because wizard 2 had already fought two duels alone. So
+    #: the two files could not be lined up at all, and the obvious
+    #: fallback of matching on (board, round number) is ambiguous for a
+    #: quarter of the rounds: three Ice Weavers at 395 is the same key
+    #: in every fight against three Ice Weavers.
+    opening: str = ""
     rounds: int = 0
     won: bool = None
     damage_dealt: float = 0.0
@@ -506,6 +622,18 @@ class Telemetry:
         self._emit("fight_started", self.fights[-1])
         return self.fights[-1]
 
+    def fought(self):
+        """The fights that actually had a round in them.
+
+        `start_fight` is called before the wait for a duel, so a run
+        that is stopped while waiting leaves an empty record. It is not
+        dropped -- the GUI counts fights as they are claimed and the
+        indices have to keep meaning what they meant -- but it is not a
+        fight either, and counting it understated the win rate of every
+        run this app has exported.
+        """
+        return [f for f in self.fights if f.rounds]
+
     # -- the per-round hook ----------------------------------------------
     def observe(self, decision, read, sim=None, cards=None, party=None,
                 seat=0):
@@ -521,6 +649,12 @@ class Telemetry:
         if not self.fights:
             self.start_fight()
         s = read.state
+        if not self.fights[-1].opening:
+            # The first board this duel showed. Written once, here, so
+            # it is the board as fought rather than whatever is left of
+            # it -- see `FightRecord.opening`.
+            self.fights[-1].opening = "+".join(
+                f"{e.name}@{e.max_hp:.0f}" for e in s.enemies)
 
         self._settle(read)
 
@@ -580,6 +714,7 @@ class Telemetry:
         )
 
         rec.party_hits = _party_hits(party, seat)
+        rec.party_predicted = _party_expected(party, rec.target_name)
 
         unreadable = list(getattr(read, "unreadable", ()) or ())
         if unreadable:
@@ -664,6 +799,17 @@ class Telemetry:
         if prev is None or prev.predicted_damage is None:
             self._pending = None
             return
+        if not prev.predicted_damage:
+            # A trap, a shield, a debuff: aimed at an enemy and
+            # predicted at exactly zero. Settling it anyway hands the
+            # cast whatever the board lost that round, which is the
+            # PARTY's damage -- so a Fire Trap and the Frost Beetle
+            # that fired into the same mob both recorded 56, and the
+            # fight's `damage_dealt` counted those 56 twice. Nothing
+            # about the damage model is learnable from a card that was
+            # never going to move health.
+            self._pending = None
+            return
         board = list(read.state.enemies)
         pairs = match_enemies(prev.enemies, board)
         target = prev.target_name
@@ -709,6 +855,11 @@ class Telemetry:
                 prev.clean = False
                 prev.confounds.append(
                     f"{sharing} also hit {target} this round -- the board "
+                    f"delta is the party's damage, not this cast's, so it "
+                    f"is measured against what the party expected "
+                    f"({prev.party_predicted:,.0f}) instead"
+                    if prev.party_predicted is not None else
+                    f"{sharing} also hit {target} this round -- the board "
                     f"delta is the party's damage, not this cast's")
             for j, e in enumerate(prev.enemies):
                 other = pairs.get(j)
@@ -719,6 +870,22 @@ class Telemetry:
                         f"{e.name} also lost HP -- {who} hit it" if who
                         else f"{e.name} also lost HP -- AoE, DoT or a minion")
                     break
+            if (prev.party_predicted
+                    and prev.party_predicted > before.hp
+                    and prev.actual_damage < before.hp):
+                # The party expected to take more off this mob than it
+                # had, and the mob is still standing. The delta cannot
+                # exceed the health that was there, so the residual is
+                # bounded by the board rather than by the arithmetic --
+                # it measures a fizzle or a ward the read missed, not
+                # the model. Marked so the party series does not read a
+                # 90% over-prediction off a mob with 78 HP left.
+                prev.confounds.append(
+                    f"the party expected {prev.party_predicted:,.0f} off a "
+                    f"mob with {before.hp:,.0f} health and it survived — "
+                    f"something did not land, so the shortfall is not the "
+                    f"damage model's")
+                prev.clean = False
             if any("dot" in w.lower() or "over time" in w.lower()
                    for w in (before.wards or [])):
                 prev.clean = False
@@ -783,7 +950,55 @@ class Telemetry:
             "median_abs_error": statistics.median(abs(e) for e in errs),
             "rmse": math.sqrt(statistics.fmean(e * e for e in errs)),
             "mean_pct_error": statistics.fmean(pcts) if pcts else None,
-            "worst": max(obs, key=lambda r: abs(r.error)).round,
+            # "f6r8", not "8". A bare round number does not identify a
+            # round -- a run reporting `worst: 8` had two candidates in
+            # different fights and the interesting one was neither the
+            # first nor the last.
+            "worst": _round_id(max(obs, key=lambda r: abs(r.error))),
+        }
+
+    #: a shared round is unclean for the SOLO series by construction --
+    #: that is what makes it a party observation -- so this confound is
+    #: not disqualifying here. Anything else still is.
+    _SHARED = "also hit"
+
+    def party_observations(self):
+        """Rounds where the PARTY's claim about a mob can be checked.
+
+        Exactly the rounds the solo series has to throw away: two
+        wizards into one mob, one board delta. What cannot be split can
+        still be added up, and the sum is a claim the same arithmetic
+        made. See `_party_expected`.
+
+        Every other confound still disqualifies. A DoT ticking on the
+        target or a third mob losing health corrupts the party's number
+        exactly as much as it corrupts one wizard's.
+        """
+        out = []
+        for r in self.rounds:
+            if r.party_error is None or not (r.party_predicted
+                                             or r.actual_damage):
+                continue
+            if any(self._SHARED not in c for c in r.confounds):
+                continue
+            out.append(r)
+        return out
+
+    def party_error_stats(self):
+        obs = self.party_observations()
+        if not obs:
+            return {"n": 0}
+        errs = [r.party_error for r in obs]
+        pcts = [100.0 * r.party_error / r.party_predicted
+                for r in obs if r.party_predicted]
+        return {
+            "n": len(obs),
+            "mean_error": statistics.fmean(errs),
+            "mean_abs_error": statistics.fmean(abs(e) for e in errs),
+            "median_abs_error": statistics.median(abs(e) for e in errs),
+            "rmse": math.sqrt(statistics.fmean(e * e for e in errs)),
+            "mean_pct_error": statistics.fmean(pcts) if pcts else None,
+            "worst": _round_id(max(obs, key=lambda r: abs(r.party_error))),
         }
 
     def unresolved_names(self):
@@ -1077,13 +1292,23 @@ class Telemetry:
         return {
             "wizard": self.wizard or f"wizard {self.seat + 1}",
             "seat": self.seat + 1,
+            #: which build produced these numbers. See `revision`.
+            "revision": revision(),
             "policy": self.policy_name,
             "school": self.school,
-            "fights": len(self.fights),
+            # Fights that actually happened. The live worker claims a
+            # record at the top of its loop and then waits for a duel,
+            # so stopping the run leaves a 0-round record behind -- and
+            # counting it read as "9 wins from 13 fights" for a wizard
+            # that fought twelve and won nine.
+            "fights": len(self.fought()),
             "rounds": len(self.rounds),
             "passes": sum(f.passes for f in self.fights),
-            "wins": sum(1 for f in self.fights if f.won),
+            "wins": sum(1 for f in self.fought() if f.won),
             "damage_model": st,
+            # The same arithmetic, checked on the rounds the solo series
+            # cannot use. In a real party those are most of them.
+            "party_damage_model": self.party_error_stats(),
             "policy_mix": self.policy_mix(),
             "unresolved": self.unresolved_names(),
             "hand_visibility": self.hand_visibility(),

@@ -679,6 +679,9 @@ class HivemindPanel(QWidget):
             weights=(3, 2, 3, 3, 4, 1, 1, 4, 7))
         root.addWidget(self.roster)
 
+        self.model_lab = _label("", PALETTE["muted"])
+        root.addWidget(self.model_lab)
+
         self.roster_note = _label(
             "'doing' is where that wizard is in the run — in the circle, "
             "waiting for a fight, following the leader, or held up. A "
@@ -722,6 +725,33 @@ class HivemindPanel(QWidget):
         if hive is not None:
             self.hive = hive
         self.refresh()
+
+    def show_model(self, stats):
+        """The party's own damage-model number.
+
+        It belongs here rather than on the Damage model tab because it
+        is not one wizard's: when two wizards fire into the same mob the
+        board delta is both of theirs, so the per-wizard series has to
+        throw the round away — and in a real party that is most rounds.
+        One live run left a wizard with two usable observations out of
+        seventy. What cannot be split can still be added up, and the sum
+        is a claim the same arithmetic made.
+        """
+        n = (stats or {}).get("n", 0)
+        if not n:
+            self.model_lab.setText(
+                "no shared rounds measured yet — the party's damage "
+                "number needs two wizards firing into the same mob")
+            return
+        bias = stats.get("mean_error") or 0.0
+        pct = stats.get("mean_pct_error")
+        self.model_lab.setText(
+            f"party damage model: {n} shared round(s), "
+            f"{'over' if bias < 0 else 'under'}-predicting by "
+            f"{abs(bias):,.0f} HP"
+            + (f" ({abs(pct):.0f}% of what was expected)"
+               if pct is not None else "")
+            + f" · worst {stats.get('worst', '—')}")
 
     def show_party(self, rows, hive=None):
         """The live state of every wizard. `rows` is a list of dicts.

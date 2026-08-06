@@ -113,6 +113,23 @@ def wants_clients(source: str) -> int:
     return n + 1 if m.group(1) == ">" else n
 
 
+def mentions_clients(source: str) -> int:
+    """The highest wizard the text refers to at all, or 0.
+
+    An upper bound, not a requirement: TTS Arc 1 declares
+    `@clients: > 1` and still names p4 801 times, behind its own
+    configuration flags. So this cannot refuse a script -- it would
+    refuse every party script ever written for four and run with two.
+    It is worth saying out loud, though, because the parts it guards
+    are not always guarded: `teleport client 3` with two wizards
+    hooked is an AttributeError the VM never advances past.
+    """
+    import re
+
+    found = [int(m) for m in re.findall(r"\bp([1-9])\b", source or "")]
+    return max(found) if found else 0
+
+
 def check(source: str):
     """(ok, reason) — does this script compile?
 
@@ -192,6 +209,27 @@ class ScriptRunner:
     #: the runner is marked for a rebuild rather than stepped again.
     STEP_LIMIT = 180.0
 
+    #: identical failures at the same instruction before the VM is
+    #: written off and reloaded.
+    #:
+    #: deimoslang has instructions that raise without advancing the
+    #: instruction pointer, and the VM has no handler for them. The
+    #: reachable one here is `teleport client N` for a wizard the party
+    #: does not have: `player_by_num` answers None (`vm.py:137`) and
+    #: `target_client.body` is an AttributeError (`vm.py:1414-1419`),
+    #: thrown before the arm's `ip += 1` (`vm.py:1826`). Every later
+    #: burst re-enters the same instruction and throws the same way,
+    #: for the rest of the run.
+    #:
+    #: The `@clients` header cannot catch it. TTS Arc 1 declares
+    #: `@clients: > 1` and still contains `teleport client 3` and
+    #: `teleport client 4` behind its own configuration flags -- 18
+    #: reachable sites with two wizards hooked, 7 with three. So the
+    #: recovery is here rather than in a pre-flight: a script that is
+    #: stuck on one instruction is restarted, which is what Deimos does
+    #: with a program that fails for any other reason.
+    STUCK_AT = 25
+
     def __init__(self, machine, source, clients=()):
         self.vm = machine
         self.source = source
@@ -206,9 +244,12 @@ class ScriptRunner:
         #: invisible: one per half-second looks identical to none.
         self.steps = 0
         self.restarts = 0
-        #: set when an instruction had to be cancelled, so the VM is
-        #: part-way through one and cannot be trusted to carry on
+        #: set when the VM cannot be trusted to carry on -- an
+        #: instruction was cancelled part-way, or the program is wedged
+        #: on one that throws without advancing. See `STUCK_AT`.
         self.stale = False
+        self._stuck_ip = None
+        self._stuck = 0
 
     @property
     def running(self):
@@ -242,7 +283,25 @@ class ScriptRunner:
         except Exception as exc:
             self.failures += 1
             self.last_error = f"{type(exc).__name__}: {exc}"
+            here = self._ip()
+            if here is not None and here == self._stuck_ip:
+                self._stuck += 1
+            else:
+                self._stuck_ip, self._stuck = here, 1
+            if self._stuck >= self.STUCK_AT:
+                self.stale = True
+                self.last_error = (
+                    f"stuck on one instruction — it has raised "
+                    f"{self._stuck} times without the script moving on "
+                    f"({self.last_error}). Reloading, because an "
+                    f"instruction that throws before advancing is "
+                    f"re-entered for the rest of the run otherwise")
             return False
+
+    def _ip(self):
+        """Where the VM is, or None if it will not say."""
+        task = getattr(self.vm, "current_task", None)
+        return getattr(task, "ip", None)
 
     async def run_for(self, seconds=None, should_stop=None) -> int:
         """Step until the budget runs out. Returns instructions executed.
@@ -300,6 +359,7 @@ class ScriptRunner:
         self.finished = False
         self.stale = False
         self.failures = 0
+        self._stuck_ip, self._stuck = None, 0
         return True
 
     def stop(self):
