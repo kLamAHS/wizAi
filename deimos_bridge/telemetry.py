@@ -330,11 +330,20 @@ def match_enemies(before, after):
     a pairing, and the fallback takes over.
 
     When the shape changed -- something died, or something joined
-    mid-duel, which Wizard101 allows -- position means nothing and the
-    fallback runs. It matches per `(name, max health)` group, because
-    that is the only identity a read carries, taking the closest health
-    that did not go up, smallest gap first; anything left over died and
-    gets None. That is a guess, and `_settle` marks the round for it.
+    mid-duel, which Wizard101 allows -- position cannot be read off
+    directly, but it is not gone: a death REMOVES an entry and leaves
+    the rest in order, and an arrival INSERTS one. So the true pairing
+    is still order-preserving, and the only question is which entries
+    were skipped. `_monotone` searches for that exactly.
+
+    A greedy nearest-health match was tried first and gets an ordinary
+    board wrong. Three Sand Stalkers at `[211, 435, 201]`; the 211 is
+    hit for a predicted 294 and dies, so the board reads `[435, 201]`.
+    Nearest-health pairs the 211 with the 201 -- a drop of 10 -- and
+    declares the *survivor* dead, so the round records 10 damage
+    against a prediction of 294 and calls it clean. Order-preserving
+    alignment has one legal reading of that board: skip the 211, pair
+    435 with 435 and 201 with 201. Which is what happened.
     """
     out = {i: None for i in range(len(before))}
     if not after:
@@ -353,74 +362,85 @@ def match_enemies(before, after):
     if lines_up():
         return {i: after[i] for i in range(len(before))}
 
-    pools = {}
-    for j, a in enumerate(after):
-        pools.setdefault(key(a), []).append(j)
+    return _monotone(before, after, key)
 
-    was = {}
-    for i, b in enumerate(before):
-        was.setdefault(key(b), []).append(i)
 
-    # A mob that JOINS a duel mid-fight arrives at FULL health, and that
-    # is the one thing that makes a grown board readable at all. One
-    # Glacial Avenger at 395/395 is hit for a predicted 267; next round
-    # the board reads `[159/395, 395/395]`. Matching on health alone
-    # takes the 395 -- a perfect, zero-damage match -- and records the
-    # cast as doing nothing. But the 159 cannot be the newcomer, because
-    # newcomers are not damaged. So the arrivals are booked out of the
-    # pool first, from the end of the group, and what is left is the mob
-    # that was actually there.
-    for group_key, group in pools.items():
-        joined = len(group) - len(was.get(group_key, ()))
-        if joined <= 0:
-            continue
-        full = [j for j in group
-                if float(after[j].hp) >= float(after[j].max_hp) > 0]
-        for j in reversed(full):
-            if joined <= 0:
-                break
-            group.remove(j)
-            joined -= 1
+#: what one skipped entry costs the alignment, in health points. A death
+#: is ordinary -- fights kill things -- so it is cheap. A mob appearing
+#: from nowhere at LESS than full health is not something that happens,
+#: so reading a damaged after-entry as an arrival is the expensive
+#: mistake and is priced to be chosen only when nothing else fits.
+_DIED_COST = 500.0
+_JOINED_COST = 0.0
+_IMPOSSIBLE_JOIN_COST = 1000.0
 
-    taken = set()
 
-    def claim(i, group):
-        """The closest health that did not go UP, smallest gap first."""
-        best, gap = None, None
-        for j in group:
-            if j in taken:
-                continue
-            delta = float(before[i].hp) - float(after[j].hp)
-            if delta < 0:
-                continue                    # health went up: a worse fit
-            if gap is None or delta < gap:
-                best, gap = j, delta
-        if best is None:
+def _monotone(before, after, key):
+    """The best order-preserving pairing of `before` onto `after`.
+
+    Health may never go up, and a pairing costs the health it claims was
+    lost -- so among the readings a board admits, the one claiming the
+    least damage wins. Skipping a `before` entry means that mob died;
+    skipping an `after` entry means it joined.
+
+    An exact search rather than a heuristic: Wizard101 seats at most
+    eight participants, so the table is tiny and there is nothing to be
+    gained by guessing.
+    """
+    n, m = len(before), len(after)
+    INF = float("inf")
+
+    def arrived(j):
+        """Could `after[j]` be a mob that just joined? Only if unhurt."""
+        try:
+            return float(after[j].hp) >= float(after[j].max_hp) > 0
+        except (AttributeError, TypeError, ValueError):
             return False
-        taken.add(best)
-        out[i] = after[best]
-        return True
 
-    # Damaged mobs first: they are the ones a full-health twin can steal
-    # a match from, and the twin has other candidates to fall back on.
-    order = sorted(range(len(before)),
-                   key=lambda i: (float(before[i].hp) >= float(before[i].max_hp),
-                                  key(before[i])))
-    for i in order:
-        if out[i] is None:
-            claim(i, pools.get(key(before[i]), ()))
+    def join_cost(j):
+        return _JOINED_COST if arrived(j) else _IMPOSSIBLE_JOIN_COST
 
-    # Last resort: a mob whose health only makes sense as a heal still
-    # has to be paired with something, or a healed target reads as a
-    # corpse and its round is filed as "died -- lower bound".
-    for i in order:
-        if out[i] is not None:
-            continue
-        for j in pools.get(key(before[i]), ()):
-            if j not in taken:
-                taken.add(j)
-                out[i] = after[j]
-                break
+    def pairing(i, j):
+        """What it costs to say before[i] and after[j] are the same mob."""
+        if key(before[i]) != key(after[j]):
+            return INF
+        drop = float(before[i].hp) - float(after[j].hp)
+        return drop if drop >= 0 else INF        # health went up: not it
+
+    # cost[i][j]: the best cost of aligning before[i:] onto after[j:]
+    cost = [[INF] * (m + 1) for _ in range(n + 1)]
+    how = [[None] * (m + 1) for _ in range(n + 1)]
+    cost[n][m] = 0.0
+    for j in range(m - 1, -1, -1):               # only arrivals left
+        cost[n][j] = cost[n][j + 1] + join_cost(j)
+    for i in range(n - 1, -1, -1):               # only deaths left
+        cost[i][m] = cost[i + 1][m] + _DIED_COST
+        how[i][m] = ("died", None)
+
+    for i in range(n - 1, -1, -1):
+        for j in range(m - 1, -1, -1):
+            best, choice = cost[i + 1][j] + _DIED_COST, ("died", None)
+            pair = pairing(i, j)
+            if pair < INF and cost[i + 1][j + 1] + pair < best:
+                best, choice = cost[i + 1][j + 1] + pair, ("pair", j)
+            joined = cost[i][j + 1] + join_cost(j)
+            if joined < best:
+                best, choice = joined, ("joined", None)
+            cost[i][j], how[i][j] = best, choice
+
+    out = {i: None for i in range(n)}
+    i = j = 0
+    while i < n:
+        step = how[i][j] if j <= m else None
+        if step is None or step[0] == "died":
+            out[i] = None
+            i += 1
+        elif step[0] == "pair":
+            out[i] = after[step[1]]
+            i += 1
+            j = step[1] + 1
+        else:
+            j += 1
     return out
 
 

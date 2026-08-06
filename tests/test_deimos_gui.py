@@ -8880,3 +8880,59 @@ def test_a_cast_that_does_not_take_is_noticed_rather_than_waited_out():
 
 async def _value(v):
     return v
+
+
+def test_a_dead_mob_is_the_one_the_order_says_died():
+    """Greedy nearest-health gets an ordinary board wrong. Three Sand
+    Stalkers at [211, 435, 201]; the 211 is hit for a predicted 294 and
+    dies, so the board reads [435, 201]. Nearest-health pairs the 211
+    with the 201 — a drop of 10 — and declares the SURVIVOR dead, so the
+    round records 10 damage against a prediction of 294 and calls it
+    clean. Order-preserving alignment has one legal reading."""
+    from deimos_bridge.telemetry import match_enemies, EnemyView as E
+
+    def mob(hp):
+        return E("Sand Stalker", hp, 435.0)
+
+    before = [mob(211), mob(435), mob(201)]
+    after = [mob(435), mob(201)]
+    m = match_enemies(before, after)
+
+    assert m[0] is None, "the mob that was hit and died was reported alive"
+    assert m[1] is after[0] and m[2] is after[1]
+
+
+def test_the_alignment_keeps_every_case_it_already_had():
+    """The rules it replaced were each written for a real board."""
+    from deimos_bridge.telemetry import match_enemies, EnemyView as E
+
+    def board(hps, mx=395.0):
+        return [E("mob", h, mx) for h in hps]
+
+    def delta(before, after, i):
+        got = match_enemies(before, after).get(i)
+        return None if got is None else before[i].hp - got.hp
+
+    # the twin that was stealing the measurement
+    assert delta(board([395, 259]), board([376, 259]), 0) == 19
+    assert delta(board([395, 395, 395]), board([171, 395, 395]), 0) == 224
+    # one of two died — health says which
+    assert delta(board([19, 259]), board([259]), 0) is None
+    assert delta(board([19, 259]), board([259]), 1) == 0
+    # a mob joined: newcomers arrive unhurt, so the 159 was already there
+    assert delta(board([395]), board([159, 395]), 0) == 236
+
+
+def test_an_impossible_arrival_is_not_preferred_to_a_death():
+    """A mob does not appear from nowhere already hurt. Given the choice
+    between reading a damaged after-entry as a newcomer and reading a
+    before-entry as dead, the death is the one that happens."""
+    from deimos_bridge.telemetry import match_enemies, EnemyView as E
+
+    def mob(hp):
+        return E("mob", hp, 400.0)
+
+    # the 400 died; the 120 is the 300 having taken 180
+    m = match_enemies([mob(400), mob(300)], [mob(120)])
+    assert m[0] is None
+    assert m[1] is not None and m[1].hp == 120
