@@ -1344,3 +1344,51 @@ def test_incoming_damage_is_measured_rather_than_assumed_zero():
     be.attach_combat(board(400))           # lost 200 across two mobs
     run(be.decide())
     assert be.last_read.state.enemies[0].flat_hit == pytest.approx(100.0)
+
+
+def test_a_cast_that_does_not_take_is_reported_and_the_round_passed():
+    """Wizard101 deselects a card clicked at something it cannot be cast
+    on. `CombatCard.cast` clicks and returns — it raises nothing — so
+    the card comes back to the hand, the round passes with nothing
+    played, and the duel sits there until the round timer expires. The
+    round had already been recorded as a cast that was made, so next
+    round's unchanged health settled as the damage model's worst miss.
+
+    wizwalker checks this for its enchant branch and no other.
+    """
+    be = _backend(policy=lambda sim, s: "Fireblade")
+    told = []
+    be.on_failed_cast = told.append
+
+    card = MockCard("Fireblade")
+    card.misfires = True                 # clicks, does not take
+    combat = MockCombat(
+        [MockMember("Wizard", 2000, client=True, normal_pips=4, team_id=0),
+         MockMember("Lost Soul", 900, monster=True, team_id=1)],
+        [card])
+    h = _Handler(combat, be)
+    h.CAST_SETTLE, h.CAST_POLL = 0.2, 0.05
+    run(h.handle_round())
+
+    assert card.cast_log, "it never even tried"
+    assert combat.passed == 1, "the round was left to time out"
+    assert told, "the operator was never told the cast did not go through"
+    assert "still in hand" in told[0], told
+
+
+def test_a_cast_that_takes_is_not_reported_as_a_failure():
+    """The check must not turn every working cast into a false alarm."""
+    be = _backend(policy=lambda sim, s: "Fireblade")
+    told = []
+    be.on_failed_cast = told.append
+
+    combat = MockCombat(
+        [MockMember("Wizard", 2000, client=True, normal_pips=4, team_id=0),
+         MockMember("Lost Soul", 900, monster=True, team_id=1)],
+        [MockCard("Fireblade")])
+    h = _Handler(combat, be)
+    h.CAST_SETTLE, h.CAST_POLL = 0.2, 0.05
+    run(h.handle_round())
+
+    assert combat._cards[0].cast_log
+    assert combat.passed == 0 and told == []

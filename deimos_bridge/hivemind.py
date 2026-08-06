@@ -759,13 +759,18 @@ class Hivemind:
             card, target = _split(action)
             base_card, base_target = _split(solo.get(sub.seat))
             effect = effects.get(sub.seat) or CastEffect()
+            # An index only means something for a card that aims at one
+            # enemy. `_split` gives a bare action target 0, so without
+            # this every self-cast was labelled with `enemies[0]`.
+            aims = card is not None and _aims_at_an_enemy(card)
+            base_aims = base_card is not None and _aims_at_an_enemy(base_card)
             move = SeatMove(
                 seat=sub.seat, name=sub.name,
                 card=getattr(card, "name", "") or "",
-                target=(target if card is not None else None),
-                target_name=_enemy_name(sub.state, target if card else None),
+                target=(target if aims else None),
+                target_name=_enemy_name(sub.state, target if aims else None),
                 solo_card=getattr(base_card, "name", "") or "",
-                solo_target=(base_target if base_card is not None else None),
+                solo_target=(base_target if base_aims else None),
                 damage=effect.total, note=notes.get(sub.seat, ""))
             if move.retargeted:
                 retargets += 1
@@ -806,6 +811,27 @@ class Hivemind:
 def _move_id(action):
     card, target = _split(action)
     return (getattr(card, "name", None), target if card is not None else None)
+
+
+def _aims_at_an_enemy(card) -> bool:
+    """Does an enemy index mean anything for this card?
+
+    A heal, a blade and an aura do not aim at a mob, and `_split`
+    defaults a bare action's target to 0 -- so labelling every move with
+    `enemies[0]` put a mob's name on a self-cast. Live that read
+    "Pixie @Sokkwi Ripper" on the party plan, which is what a heal aimed
+    at a monster looks like from the outside. The cast itself went to
+    the caster (`WizAiCombatHandler._resolve_target` reads the card, not
+    the plan), so this was a lie about a correct action -- but it also
+    fed `_party_expected`, which sums a round's expected damage BY
+    TARGET NAME and was therefore crediting a heal to a mob.
+    """
+    try:
+        from .policies import aimed_at_one_enemy
+
+        return bool(aimed_at_one_enemy(card))
+    except Exception:
+        return False
 
 
 def _enemy_name(state, index):

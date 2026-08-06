@@ -35,6 +35,41 @@ from .policies import TARGET_OPS as _TARGET_OPS       # noqa: F401 re-export
 from .policies import primary_target as _primary_target
 
 
+#: what a card's `kind` implies about where it is clicked, for cards
+#: whose ops carry no `tgt` at all.
+_KIND_TARGETS = {"aura": "global", "global": "global", "blade": "self",
+                 "shield": "self", "heal": "self", "util": "global",
+                 "damage": "enemy", "drain": "enemy"}
+
+
+def _target_from_kind(card):
+    """Where to click a card whose ops do not say. None if even the kind
+    does not say.
+
+    349 of the 8,148 cards in the table have no `tgt` on any op --
+    almost all of them auras and globals, including plain Amplify. They
+    used to fall through to the enemy branch and be clicked on a mob,
+    and Wizard101 does not cast a self-buff at an enemy: the second
+    click deselects the card, the round passes with nothing played, and
+    the duel sits there until the round timer runs out. That is the
+    stall, and from outside it looks exactly like the bot deciding to
+    do nothing.
+
+    `kind` is the wizAi card table's own classification and it is
+    populated for every one of the 349, so it answers what the ops
+    forgot to.
+    """
+    return _KIND_TARGETS.get(getattr(card, "kind", None))
+
+
+def _missing_health(actor) -> float:
+    """How much health this wizard is down. 0 when it will not read."""
+    try:
+        return max(float(actor.max_hp) - float(actor.hp), 0.0)
+    except (AttributeError, TypeError, ValueError):
+        return 0.0
+
+
 class PolicyDecision:
     """What the policy decided, before it becomes a wizsprinter move.
 
@@ -1004,7 +1039,15 @@ class WizAiCombatHandler:
                 # reported and amended in telemetry, so if this machine
                 # needs slower clicks the operator sees it immediately
                 # instead of wondering.
+                held = await self._cards_in_hand()
                 await card.cast(target, sleep_time=self.backend.cast_time)
+                if not await self._card_left_the_hand(held):
+                    raise RuntimeError(
+                        "the card was still in hand after casting — the "
+                        "click did not take. Wizard101 deselects a card "
+                        "clicked at something it cannot be cast on, so "
+                        "this is usually a card aimed at the wrong kind "
+                        "of target")
             except Exception as exc:
                 # A misclick or a board that moved under us costs this
                 # round, not the fight -- but the round has *already*
@@ -1041,6 +1084,54 @@ class WizAiCombatHandler:
         cards = read.hand_cards.get(name) or []
         return cards[0] if cards else None
 
+    #: how long to wait for the hand to shrink after a cast, and how
+    #: often to look. A cast is two clicks and a server round-trip, so
+    #: the hand does not update the instant `cast` returns.
+    CAST_SETTLE = 2.0
+    CAST_POLL = 0.15
+
+    async def _cards_in_hand(self):
+        """How many cards are in hand, or None if it will not read."""
+        try:
+            return len(await self.get_cards())
+        except Exception:
+            return None
+
+    async def _card_left_the_hand(self, before):
+        """Did the cast actually go through?
+
+        `CombatCard.cast` clicks and returns; it raises nothing when the
+        click does not take. Wizard101 **deselects** a card clicked at
+        something it cannot be cast on -- a heal aimed at a monster, a
+        self-buff aimed at a mob -- so the card goes back to the hand,
+        the round passes with nothing played, and the duel sits there
+        until the round timer expires. From outside that is a bot that
+        decided to do nothing, and it was invisible: the round had
+        already been recorded as a cast that was made, so the next
+        board's unchanged health settled as the damage model's worst
+        miss of the run.
+
+        wizwalker checks this itself for the enchant branch
+        (`card.py:63-65`) and for no other. So it is checked here.
+
+        Unreadable counts are treated as success -- refusing to believe
+        a cast landed because the hand would not read would turn every
+        bad read into a false failure, and the settle already reports
+        those separately.
+        """
+        import asyncio
+
+        if before is None:
+            return True
+        deadline = self.CAST_SETTLE
+        while deadline > 0:
+            now = await self._cards_in_hand()
+            if now is None or now < before:
+                return True
+            await asyncio.sleep(self.CAST_POLL)
+            deadline -= self.CAST_POLL
+        return False
+
     async def _resolve_target(self, read, index, card=None):
         """What to click after clicking the card.
 
@@ -1055,16 +1146,38 @@ class WizAiCombatHandler:
         AoE and global spells take no target at all; `CombatCard.cast`
         treats `None` as "just click the card" (card.py:24-30).
         """
-        tgt = _primary_target(card)
+        tgt = _primary_target(card) or _target_from_kind(card)
 
         if tgt == "self":
             return read.client_member
         if tgt in ("enemies", "allies", "global"):
             return None                      # no target click
         if tgt == "ally":
-            allies = [m for m in read.members
-                      if m is not read.client_member]
-            return allies[0] if allies else read.client_member
+            # This wizard's own team, never `read.members` -- that is
+            # every participant in the duel, both sides, and the enemy
+            # team comes first. Picking "the first member that is not
+            # me" out of it therefore lands on a MOB, and in a solo
+            # fight there is nothing else in it to land on.
+            #
+            # Wizard101 does not cast a friend-only spell at an enemy;
+            # the click deselects the card. So Pixie was selected, aimed
+            # at a Sokkwi Ripper, unselected, and the round passed with
+            # nothing cast -- the duel then sat there until the round
+            # timer expired. It is the whole failure: not a misprediction
+            # but a wasted round, every time a heal came up.
+            #
+            # The hurt one, because that is what a heal is for, and it
+            # is the caster whenever it is alone.
+            mates = [m for m in read.ally_members if m is not None]
+            allies = list(getattr(read.state, "allies", ()) or ())
+            if not mates or not allies:
+                return read.client_member
+            hurt = max(allies, key=_missing_health)
+            if _missing_health(hurt) > _missing_health(read.state.player):
+                i = allies.index(hurt)
+                if 0 <= i < len(mates):
+                    return mates[i]
+            return read.client_member
 
         foes = read.enemy_members
         if not foes:

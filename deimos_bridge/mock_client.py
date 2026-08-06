@@ -111,8 +111,20 @@ class MockCard:
             "is_side_board": False,
         })
 
+    #: the combat this card is in, so casting can leave the hand the way
+    #: the game does. Set by `MockCombat`; None for a card on its own.
+    combat = None
+    #: set to make a cast go through the motions and NOT take -- which
+    #: is what Wizard101 does when a card is clicked at something it
+    #: cannot be cast on: it deselects, and the card comes back. It
+    #: raises nothing, which is why it needs modelling rather than
+    #: assuming every `cast` worked.
+    misfires = False
+
     async def cast(self, target=None, **kw):
         self.cast_log.append(target)
+        if not self.misfires and self.combat is not None:
+            self.combat.discard(self)
         return True
 
 
@@ -148,16 +160,41 @@ class MockCombat:
     """Stands in for `CombatHandler` / `SprintyCombat`."""
     def __init__(self, members, cards, round_number=1, client_index=0):
         self._members = list(members)
+        #: every card the fight was built with, cast or not, so a test
+        #: can still read `_cards[0].cast_log` after it has been played
         self._cards = list(cards)
+        #: what is actually in hand right now. Separate from `_cards`
+        #: because casting takes a card OUT of the hand, and that is the
+        #: only signal a cast went through -- see `discard`.
+        self._hand = list(cards)
         self._client = self._members[client_index]
         self.passed = 0
+        for c in self._cards:
+            c.combat = self
         _attrs(self, {
             "get_members": self._members,
-            "get_cards": self._cards,
+            "get_cards": self._hand,
             "get_client_member": self._client,
             "round_number": round_number,
             "in_combat": True,
         })
+
+    def discard(self, card):
+        """Take a cast card out of the hand, as the game does.
+
+        Not decoration: a card leaving the hand is the only signal that
+        a cast actually went through. `CombatCard.cast` clicks and
+        returns, raising nothing when the click does not take, so a mock
+        whose hand never changed made every cast look successful and
+        `WizAiCombatHandler._card_left_the_hand` untestable.
+
+        Mutates `_hand`, which is the list `_attrs` closed over --
+        `get_cards` is an instance attribute wrapping *that* object, so
+        removing from it is what the handler's next read sees. `_cards`
+        keeps every card so a test can still assert on what was played.
+        """
+        if card in self._hand:
+            self._hand.remove(card)
 
     async def pass_button(self):
         self.passed += 1

@@ -319,7 +319,14 @@ async def follow(follower, leader, leader_name=None,
     if gap is not None and gap <= radius and not leader_fighting:
         return False, ""              # already together, nothing to do
 
-    if gap is None or gap > radius:
+    # Onto the leader whenever they are fighting, however close this
+    # wizard already is. `join_the_fight` steps into the duel by
+    # teleporting to the CLOSEST mob, and closest is measured from
+    # wherever the follower is standing -- so a follower inside the
+    # radius but beside a different group walked into that group's fight
+    # instead, and the party spent the duel in two duels. Landing on the
+    # leader first makes "closest" mean the leader's circle.
+    if gap is None or gap > radius or leader_fighting:
         try:
             await follower.teleport(target)
         except Exception as exc:
