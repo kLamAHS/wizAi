@@ -769,6 +769,32 @@ class LiveWorker(QThread):
         elif action in ("wisps", "potion"):
             await self._upkeep_now(client, action)
 
+    async def _chores_can_wait(self, seat):
+        """False when this follower should be catching up, not sweeping.
+
+        The between-fights chores set `in_upkeep`, and the service task
+        skips its whole tick while that is set -- so a follower that
+        started a wisp sweep as the leader walked into a duel cannot
+        follow until the sweep finishes, which is up to two minutes. The
+        leader fights it alone, and the party plans a coordinated round
+        for one wizard.
+
+        Wisps keep. A duel does not.
+        """
+        if not self._follows(seat):
+            return True
+        boss = self.seats[self.leader]
+        if boss.client is None:
+            return True
+        from .. import party
+
+        if not await party.in_battle(boss.client):
+            return True
+        self._say(seat,
+                  "skipping the wisps — the leader is already in a fight and "
+                  "getting into it matters more")
+        return False
+
     def _script_drives(self, seat):
         """Is a running script steering this wizard?
 
@@ -1753,7 +1779,8 @@ class LiveWorker(QThread):
                           f"{t.seen + t.missed} boards "
                           f"({t.missed} fell back)")
 
-            if not self._stop and (self.collect_wisps or self.use_potions):
+            if (not self._stop and (self.collect_wisps or self.use_potions)
+                    and await self._chores_can_wait(seat)):
                 from .. import upkeep
                 try:
                     # Under the lock, and under a flag the service

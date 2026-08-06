@@ -35,6 +35,41 @@ from .policies import TARGET_OPS as _TARGET_OPS       # noqa: F401 re-export
 from .policies import primary_target as _primary_target
 
 
+#: what a card's `kind` implies about where it is clicked, for cards
+#: whose ops carry no `tgt` at all.
+_KIND_TARGETS = {"aura": "global", "global": "global", "blade": "self",
+                 "shield": "self", "heal": "self", "util": "global",
+                 "damage": "enemy", "drain": "enemy"}
+
+
+def _target_from_kind(card):
+    """Where to click a card whose ops do not say. None if even the kind
+    does not say.
+
+    349 of the 8,148 cards in the table have no `tgt` on any op --
+    almost all of them auras and globals, including plain Amplify. They
+    used to fall through to the enemy branch and be clicked on a mob,
+    and Wizard101 does not cast a self-buff at an enemy: the second
+    click deselects the card, the round passes with nothing played, and
+    the duel sits there until the round timer runs out. That is the
+    stall, and from outside it looks exactly like the bot deciding to
+    do nothing.
+
+    `kind` is the wizAi card table's own classification and it is
+    populated for every one of the 349, so it answers what the ops
+    forgot to.
+    """
+    return _KIND_TARGETS.get(getattr(card, "kind", None))
+
+
+def _missing_health(actor) -> float:
+    """How much health this wizard is down. 0 when it will not read."""
+    try:
+        return max(float(actor.max_hp) - float(actor.hp), 0.0)
+    except (AttributeError, TypeError, ValueError):
+        return 0.0
+
+
 class PolicyDecision:
     """What the policy decided, before it becomes a wizsprinter move.
 
@@ -1055,16 +1090,38 @@ class WizAiCombatHandler:
         AoE and global spells take no target at all; `CombatCard.cast`
         treats `None` as "just click the card" (card.py:24-30).
         """
-        tgt = _primary_target(card)
+        tgt = _primary_target(card) or _target_from_kind(card)
 
         if tgt == "self":
             return read.client_member
         if tgt in ("enemies", "allies", "global"):
             return None                      # no target click
         if tgt == "ally":
-            allies = [m for m in read.members
-                      if m is not read.client_member]
-            return allies[0] if allies else read.client_member
+            # This wizard's own team, never `read.members` -- that is
+            # every participant in the duel, both sides, and the enemy
+            # team comes first. Picking "the first member that is not
+            # me" out of it therefore lands on a MOB, and in a solo
+            # fight there is nothing else in it to land on.
+            #
+            # Wizard101 does not cast a friend-only spell at an enemy;
+            # the click deselects the card. So Pixie was selected, aimed
+            # at a Sokkwi Ripper, unselected, and the round passed with
+            # nothing cast -- the duel then sat there until the round
+            # timer expired. It is the whole failure: not a misprediction
+            # but a wasted round, every time a heal came up.
+            #
+            # The hurt one, because that is what a heal is for, and it
+            # is the caster whenever it is alone.
+            mates = [m for m in read.ally_members if m is not None]
+            allies = list(getattr(read.state, "allies", ()) or ())
+            if not mates or not allies:
+                return read.client_member
+            hurt = max(allies, key=_missing_health)
+            if _missing_health(hurt) > _missing_health(read.state.player):
+                i = allies.index(hurt)
+                if 0 <= i < len(mates):
+                    return mates[i]
+            return read.client_member
 
         foes = read.enemy_members
         if not foes:

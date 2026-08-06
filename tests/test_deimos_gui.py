@@ -8594,3 +8594,228 @@ def test_a_script_that_names_more_wizards_than_are_hooked_says_so(qapp,
     asyncio.run(w._setup_script("a", w.seats[0]))
     assert any("names up to p4" in m and "2 wizard(s) are hooked" in m
                for m in said), said
+
+
+# ------------------------------------------------- who a heal is clicked on
+def _healer_read(my_hp=500, my_max=1000, ally_hp=None, ally_max=1000):
+    """A duel read: me, some mobs, optionally one teammate."""
+    from w101_sim import Actor, State
+    from deimos_bridge.live_state import LiveRead
+
+    me = Actor(name="Konstantin", school="fire", hp=my_hp, max_hp=my_max,
+               team=0)
+    mobs = [Actor(name="Sokkwi Ripper", school="balance", hp=310, max_hp=310,
+                  team=1)]
+    allies, ally_members = [], []
+    if ally_hp is not None:
+        allies.append(Actor(name="Jeffrey", school="ice", hp=ally_hp,
+                            max_hp=ally_max, team=0))
+        ally_members.append("member:Jeffrey")
+    state = State(me, mobs, allies)
+    # `get_members()` returns the enemy team FIRST, which is the trap.
+    members = ["member:Sokkwi Ripper", "member:me"] + ally_members
+    return LiveRead(state, {}, _Resolver(), members, "member:me", 1,
+                    enemy_members=["member:Sokkwi Ripper"],
+                    ally_members=ally_members)
+
+
+class _Heal:
+    """A card whose ops say it goes on a friend, as Pixie's do."""
+    ops = [{"op": "heal", "tgt": "ally"}]
+
+
+def test_a_heal_is_never_clicked_on_a_mob(qapp):
+    """The stall. `read.members` is every participant in the duel, both
+    sides, and the enemy team comes first — so "the first member that is
+    not me" is a MOB, and in a solo fight there is nothing else in it.
+
+    Wizard101 does not cast a friend-only spell at an enemy; the second
+    click deselects the card. Pixie was selected, aimed at a Sokkwi
+    Ripper, unselected, and the round passed with nothing cast — the
+    duel then sat there until the round timer expired.
+    """
+    import asyncio
+
+    from deimos_bridge.live_backend import WizAiCombatHandler
+
+    handler = WizAiCombatHandler.__new__(WizAiCombatHandler)
+
+    read = _healer_read(my_hp=500)          # solo: no teammate at all
+    got = asyncio.run(handler._resolve_target(read, None, _Heal()))
+    assert got == "member:me", f"a heal was aimed at {got!r}"
+    assert got not in read.enemy_members
+
+
+def test_a_heal_goes_to_whoever_is_hurt(qapp):
+    """It is a heal. The caster whenever it is the worst off, and the
+    teammate when they are — never a mob either way."""
+    import asyncio
+
+    from deimos_bridge.live_backend import WizAiCombatHandler
+
+    handler = WizAiCombatHandler.__new__(WizAiCombatHandler)
+
+    # teammate is on 200/1000, I am on 900/1000 -> heal them
+    read = _healer_read(my_hp=900, ally_hp=200)
+    assert asyncio.run(handler._resolve_target(read, None, _Heal())) \
+        == "member:Jeffrey"
+
+    # I am the hurt one -> heal me
+    read = _healer_read(my_hp=100, ally_hp=950)
+    assert asyncio.run(handler._resolve_target(read, None, _Heal())) \
+        == "member:me"
+
+
+def test_an_attack_still_goes_to_the_chosen_mob(qapp):
+    """The fix must not move where a nuke lands."""
+    import asyncio
+
+    from deimos_bridge.live_backend import WizAiCombatHandler
+
+    class _Nuke:
+        ops = [{"op": "hit", "tgt": "enemy"}]
+
+    handler = WizAiCombatHandler.__new__(WizAiCombatHandler)
+    read = _healer_read(my_hp=500, ally_hp=500)
+    assert asyncio.run(handler._resolve_target(read, 0, _Nuke())) \
+        == "member:Sokkwi Ripper"
+
+
+def _party_client(in_fight=False, pos=(0, 0, 0), zone_name="Zafaria"):
+    class _XYZ:
+        def __init__(self, x, y, z):
+            self.x, self.y, self.z = x, y, z
+
+    class _Body:
+        def __init__(self, p):
+            self._p = _XYZ(*p)
+
+        async def position(self):
+            return self._p
+
+    class _C:
+        def __init__(self):
+            self.body = _Body(pos)
+            self.tped = []
+
+        async def in_battle(self):
+            return in_fight
+
+        async def zone_name(self):
+            return zone_name
+
+        async def teleport(self, xyz):
+            self.tped.append((xyz.x, xyz.y, xyz.z))
+
+    return _C()
+
+
+def test_a_follower_lands_on_the_leader_before_stepping_into_the_duel():
+    """`join_the_fight` steps in by teleporting to the CLOSEST mob, and
+    closest is measured from wherever the follower is standing. A
+    follower inside the radius but beside a different group walked into
+    that group's fight instead, and the party spent the duel in two
+    duels."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    follower = _party_client(pos=(100, 0, 0))     # well inside the radius
+    leader = _party_client(in_fight=True, pos=(200, 0, 0))
+    stepped = []
+
+    real = party.join_the_fight
+    party.join_the_fight = lambda f: _joined(stepped)
+    try:
+        moved, why = asyncio.run(party.follow(follower, leader))
+    finally:
+        party.join_the_fight = real
+
+    assert follower.tped == [(200, 0, 0)], \
+        "the follower stepped in from wherever it happened to be standing"
+    assert stepped == [1]
+    assert moved and "joined" in why
+
+
+async def _joined(seen):
+    seen.append(1)
+    return True, ""
+
+
+def test_a_follower_still_does_not_teleport_for_nothing():
+    """A party standing together with nobody fighting must not
+    re-teleport every tick."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    follower = _party_client(pos=(100, 0, 0))
+    leader = _party_client(pos=(200, 0, 0))
+    moved, why = asyncio.run(party.follow(follower, leader))
+    assert follower.tped == [] and not moved and why == ""
+
+
+def test_wisps_wait_when_the_leader_is_already_fighting(qapp):
+    """The chores set `in_upkeep`, and the service task skips its whole
+    tick while that is set — so a follower that started a wisp sweep as
+    the leader walked into a duel could not follow for up to two
+    minutes. The leader fought it alone and the party planned a
+    coordinated round for one wizard."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    said = []
+    w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1,
+                   seats=[SeatConfig(school="fire", deck=[])],
+                   follow_leader=True, collect_wisps=True)
+    w.status = type("S", (), {"emit": staticmethod(said.append)})()
+    w.seats[0].client = _party_client(in_fight=True)
+    w.seats[1].client = _party_client()
+
+    # seat 1 follows, and the leader is mid-duel
+    assert asyncio.run(w._chores_can_wait(w.seats[1])) is False
+    assert any("skipping the wisps" in m for m in said), said
+
+    # the leader is free again -> the chores are fine
+    w.seats[0].client = _party_client(in_fight=False)
+    assert asyncio.run(w._chores_can_wait(w.seats[1])) is True
+
+    # and the leader itself never skips them for its own sake
+    assert asyncio.run(w._chores_can_wait(w.seats[0])) is True
+
+
+def test_a_card_whose_ops_forgot_the_target_is_not_aimed_at_a_mob(qapp):
+    """349 of the 8,148 cards in the table carry no `tgt` on any op —
+    almost all auras and globals, including plain Amplify. They fell
+    through to the enemy branch and were clicked on a mob, and Wizard101
+    does not cast a self-buff at an enemy: the second click deselects
+    the card, the round passes with nothing played, and the duel sits
+    there until the round timer runs out."""
+    import asyncio
+
+    from data_full import load_spells_full
+    from deimos_bridge.live_backend import WizAiCombatHandler
+    from deimos_bridge.policies import primary_target
+
+    handler = WizAiCombatHandler.__new__(WizAiCombatHandler)
+    read = _healer_read(my_hp=500)
+    amplify = load_spells_full()["Amplify"]
+    assert primary_target(amplify) is None, "the card table changed"
+
+    got = asyncio.run(handler._resolve_target(read, 0, amplify))
+    assert got is None, f"an aura was aimed at {got!r}"
+    assert got not in read.enemy_members
+
+
+def test_every_card_in_the_table_resolves_to_somewhere_sensible(qapp):
+    """No card should reach the enemy branch by accident. Whatever a
+    card's ops leave out, its `kind` answers."""
+    from data_full import load_spells_full
+    from deimos_bridge.live_backend import _target_from_kind
+    from deimos_bridge.policies import primary_target
+
+    unknown = [c.name for c in load_spells_full().values()
+               if primary_target(c) is None and _target_from_kind(c) is None]
+    assert not unknown, f"{len(unknown)} cards would be clicked on a mob " \
+                        f"by default, e.g. {sorted(unknown)[:5]}"

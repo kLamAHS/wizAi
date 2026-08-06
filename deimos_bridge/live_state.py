@@ -420,7 +420,7 @@ class LiveRead:
     that the client does not directly expose."""
 
     def __init__(self, state, hand_cards, resolver, members, client_member,
-                 round_number, enemy_members=(), hidden=()):
+                 round_number, enemy_members=(), hidden=(), ally_members=()):
         self.state = state
         #: wizAi card name -> the live CombatCards that produced it.
         #: Populated only for cards that both resolved *and* are castable.
@@ -444,6 +444,16 @@ class LiveRead:
         #: separately-built enemy list would drift the moment something
         #: dies, and would fail silently as bad targeting.
         self.enemy_members = list(enemy_members)
+        #: The live members behind `state.allies` -- this wizard's OWN
+        #: team, minus itself. `members` is every participant in the
+        #: duel, both sides, so picking "an ally" out of it lands on a
+        #: mob: `get_members()` returns the enemy team first, and in a
+        #: solo fight there is nothing else in it at all. A friend-only
+        #: heal aimed at a mob does not cast -- the second click
+        #: deselects the card -- so the round silently does nothing and
+        #: the duel stalls until the timer runs out. See
+        #: `WizAiBackend._resolve_target`.
+        self.ally_members = list(ally_members)
         #: Castable cards in hand this round that could NOT be turned into
         #: a wizAi Card. The policy did not see them. A run with a high
         #: `hand_visibility` deficit is not measuring the policy.
@@ -663,7 +673,7 @@ async def read_state(combat, resolver: NameResolver, school: str,
     player.charms = await _hangings(me, "charm", "you", actor=player)
     player.wards = await _hangings(me, "ward", "you", actor=player)
 
-    enemies, allies, enemy_members = [], [], []
+    enemies, allies, enemy_members, ally_members = [], [], [], []
     me_name = await me.name()
     my_team = await _team_id(me)
     for m in members:
@@ -681,6 +691,7 @@ async def read_state(combat, resolver: NameResolver, school: str,
             enemy_members.append(m)      # kept index-aligned with `enemies`
         else:
             allies.append(actor)
+            ally_members.append(m)       # kept index-aligned with `allies`
 
     hand, hand_cards, hidden = [], {}, []
     for c in await combat.get_cards():
@@ -716,7 +727,8 @@ async def read_state(combat, resolver: NameResolver, school: str,
     state = State(player, enemies or [Actor(name="none", school="ice", hp=0,
                                             max_hp=1, team=1)], allies)
     read = LiveRead(state, hand_cards, resolver, members, me,
-                    await combat.round_number(), enemy_members, hidden)
+                    await combat.round_number(), enemy_members, hidden,
+                    ally_members)
     read.unreadable = unreadable
     # The client's own answer, for checking the configuration against.
     # Empty rather than "balance" on a failed read: an unreadable school

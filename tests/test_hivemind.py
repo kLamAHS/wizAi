@@ -604,7 +604,17 @@ def test_arriving_beside_a_fighting_leader_is_not_joining_it(monkeypatch):
 
 def test_a_fighting_leader_is_joined_even_from_right_beside_it(monkeypatch):
     """Standing in range is not being in the duel, so the distance check
-    must not short-circuit the sigil step."""
+    must not short-circuit the sigil step.
+
+    And the follower lands ON the leader first, close or not. This test
+    used to assert the opposite -- no teleport, because it was already
+    there -- and that was the bug: `join_the_fight` steps in via
+    `tp_to_closest_mob`, and closest is measured from wherever the
+    follower is STANDING. A follower inside the radius but beside a
+    different group walked into that group's fight, and the party spent
+    the duel in two duels. Landing on the leader makes "closest" mean
+    the leader's circle.
+    """
     from deimos_bridge import party
 
     stepped = []
@@ -618,7 +628,8 @@ def test_a_fighting_leader_is_joined_even_from_right_beside_it(monkeypatch):
     follower = _FakeClient(pos=(110, 100, 0))
     moved, _why = asyncio.run(party.follow(follower, leader))
     assert moved is True and stepped == [follower]
-    assert follower.teleports == []          # it was already there
+    assert [(p.x, p.y, p.z) for p in follower.teleports] == [(100, 100, 0)], \
+        "the follower stepped in from where it happened to be standing"
 
 
 def test_an_unreadable_leader_is_reported_rather_than_chased_to_zero():
