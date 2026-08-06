@@ -171,6 +171,10 @@ class WizAiBackend:
         self.on_decision = on_decision
         self.on_lost_round = on_lost_round
         self.on_failed_cast = None
+        #: optional callback(message) when a cast had to be retried more
+        #: slowly. NOT `on_failed_cast` -- nothing has failed yet, and
+        #: that one rewrites the round. See `report_slow_cast`.
+        self.on_slow_cast = None
         #: optional callback(actual school) for a wizard whose client
         #: disagrees with the school it was configured with. See
         #: `_check_school`.
@@ -851,6 +855,26 @@ class WizAiBackend:
         if self.on_failed_cast:
             self.on_failed_cast(reason)
 
+    def report_slow_cast(self, card_name):
+        """The fast cast did not take; trying again slowly.
+
+        Its own channel, deliberately NOT `on_failed_cast`: that one
+        amends the round to "nothing was played" and drops the
+        prediction, which would be a lie told before the retry has even
+        run. Nothing has failed yet.
+
+        Said out loud because it is the measurement. A card that only
+        goes out on the second, slower attempt is telling us the two
+        clicks are too close together for it -- which is a knob
+        (`cast_time`) rather than a mystery. A card that fails both ways
+        is a different problem and reports itself separately.
+        """
+        if self.on_slow_cast:
+            self.on_slow_cast(
+                f"{card_name} did not go out on the first click — trying "
+                f"again with a longer pause between selecting the card and "
+                f"clicking the target")
+
     def _deck_remaining(self, read_hand):
         """Best-effort undrawn deck. Only its *size* and the kinds in it
         matter -- `Featurizer.key` uses it for a scarcity count and
@@ -1042,12 +1066,37 @@ class WizAiCombatHandler:
                 held = await self._cards_in_hand()
                 await card.cast(target, sleep_time=self.backend.cast_time)
                 if not await self._card_left_the_hand(held):
-                    raise RuntimeError(
-                        "the card was still in hand after casting — the "
-                        "click did not take. Wizard101 deselects a card "
-                        "clicked at something it cannot be cast on, so "
-                        "this is usually a card aimed at the wrong kind "
-                        "of target")
+                    # Once more, slowly, before giving the round away.
+                    #
+                    # The two clicks are "select the card" and "click the
+                    # target", `sleep_time` apart. A card the game can
+                    # cast without asking anything goes out on the first
+                    # click; one that has to put the board into target
+                    # selection first needs the UI to be up before the
+                    # second click lands, and 0.3s is not obviously long
+                    # enough for that. Live, Pixie -- a heal, which is
+                    # the one card in these decks that makes the game ask
+                    # who -- failed twice this way while blades, traps
+                    # and nukes from the same hands went out fine.
+                    #
+                    # So the retry is at wizwalker's own default rather
+                    # than ours, and it SAYS which attempt worked. If the
+                    # slow one lands, the cause is this timing and the
+                    # cure is a bigger `cast_time`; if it does not, the
+                    # card really cannot be cast where it was aimed, and
+                    # the round is passed exactly as before.
+                    self.backend.report_slow_cast(decision.card_name)
+                    held = await self._cards_in_hand()
+                    await card.cast(target, sleep_time=self.RETRY_CAST_TIME)
+                    if not await self._card_left_the_hand(held):
+                        raise RuntimeError(
+                            f"the card was still in hand after casting, "
+                            f"twice — once at {self.backend.cast_time:.1f}s "
+                            f"between clicks and once at "
+                            f"{self.RETRY_CAST_TIME:.1f}s. Wizard101 "
+                            f"deselects a card clicked at something it "
+                            f"cannot be cast on, so this is usually a card "
+                            f"aimed at the wrong kind of target")
             except Exception as exc:
                 # A misclick or a board that moved under us costs this
                 # round, not the fight -- but the round has *already*
@@ -1089,6 +1138,9 @@ class WizAiCombatHandler:
     #: the hand does not update the instant `cast` returns.
     CAST_SETTLE = 2.0
     CAST_POLL = 0.15
+    #: `sleep_time` for the second attempt -- wizwalker's own default,
+    #: which is what the fast one is a deliberate reduction from.
+    RETRY_CAST_TIME = 1.0
 
     async def _cards_in_hand(self):
         """How many cards are in hand, or None if it will not read."""

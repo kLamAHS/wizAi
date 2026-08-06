@@ -1646,6 +1646,7 @@ class LiveWorker(QThread):
                 backend.on_failed_cast = self._failed_cast_hook(seat)
                 backend.on_school_mismatch = self._school_hook(seat)
                 backend.on_defeated = self._defeated_hook(seat)
+                backend.on_slow_cast = self._slow_cast_hook(seat)
                 seat.tel.resolver = backend.resolver
                 seat.backend = backend
                 if seat.policy_name != built_as:
@@ -1832,6 +1833,10 @@ class LiveWorker(QThread):
 
     def _school_hook(self, seat):
         return lambda actual: self._on_school_mismatch(actual, seat)
+
+    def _slow_cast_hook(self, seat):
+        """A retry notice. Status only -- the round is still in play."""
+        return lambda message: self._say(seat, message)
 
     def _defeated_hook(self, seat):
         return lambda: self._say(

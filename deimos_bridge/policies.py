@@ -65,6 +65,46 @@ TARGET_OPS = ("hit", "dot", "drain", "charm", "ward", "prism", "heal",
               "absorb", "dispel", "stun", "aura")
 
 
+def _is_inert(card, state) -> bool:
+    """Would this card provably do nothing at all right now?
+
+    One case: **a heal on a wizard already at full health.**
+    `Sim._heal` caps a heal at `max_hp - hp`, so at full health it banks
+    exactly nothing -- and a card worth nothing should not be able to
+    win a round. It reaches the top anyway because candidates are ranked
+    by rollout: when no line kills inside the horizon every candidate
+    ties on turns, and the tie-break is then free to pick the one move
+    that is certainly worthless.
+
+    This is a *waste* rule, not a legality one. It was written on the
+    theory that Wizard101 refuses a heal at full health, which the next
+    live run refuted -- a Pixie failed to cast at 526/897, with 371
+    health missing. So it does not fix that, and does not claim to; it
+    only stops a round being spent on a heal that would restore zero.
+
+    Deliberately narrow. A blade on a wizard that already has three is
+    not inert -- it stacks -- and a trap on a mob that is about to die
+    is a judgement call the rollout is better placed to make than a
+    rule here.
+    """
+    if getattr(card, "kind", "") != "heal":
+        return False
+    me = getattr(state, "player", None)
+    if me is None:
+        return False
+    try:
+        if float(me.hp) < float(me.max_hp):
+            return False
+    except (TypeError, ValueError):
+        return False
+    # A heal that also does something else -- a HoT, a charm -- still has
+    # a reason to be cast at full health.
+    for op in getattr(card, "ops", None) or []:
+        if op.get("op") not in ("heal",):
+            return False
+    return True
+
+
 def primary_target(card):
     """'self' | 'enemy' | 'enemies' | 'ally' | 'allies' | 'global' | None.
 
@@ -1124,6 +1164,8 @@ def greedy_ttk(max_turns: int = None, continuation=None):
                 continue
             # A self-buff or an AoE has one version of itself; only a
             # single-enemy card is worth rolling out once per mob.
+            if _is_inert(card, s):
+                continue
             aims = foes if aimed_at_one_enemy(card) else foes[:1]
             playable = [t for t in aims if sim.can_cast(s, card, t)]
             if not playable:

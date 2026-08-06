@@ -1392,3 +1392,68 @@ def test_a_cast_that_takes_is_not_reported_as_a_failure():
 
     assert combat._cards[0].cast_log
     assert combat.passed == 0 and told == []
+
+
+def test_a_cast_that_needs_a_slower_click_gets_one():
+    """The two clicks are "select the card" and "click the target",
+    `sleep_time` apart. A card the game casts without asking anything
+    goes out on the first click; one that has to put the board into
+    target selection first needs the UI up before the second click
+    lands, and 0.3s may not be long enough. Live, Pixie — a heal, the
+    one card in these decks that makes the game ask who — failed twice
+    this way while blades, traps and nukes from the same hands went out
+    fine."""
+    be = _backend(policy=lambda sim, s: "Fireblade")
+    slow, failed = [], []
+    be.on_slow_cast = slow.append
+    be.on_failed_cast = failed.append
+
+    class _SlowCard(MockCard):
+        """Only takes when given wizwalker's full pause."""
+
+        async def cast(self, target=None, sleep_time=None, **kw):
+            self.cast_log.append((target, sleep_time))
+            if sleep_time is not None and sleep_time >= 1.0:
+                self.combat.discard(self)
+            return True
+
+    card = _SlowCard("Fireblade")
+    combat = MockCombat(
+        [MockMember("Wizard", 2000, client=True, normal_pips=4, team_id=0),
+         MockMember("Lost Soul", 900, monster=True, team_id=1)],
+        [card])
+    h = _Handler(combat, be)
+    h.CAST_SETTLE, h.CAST_POLL = 0.2, 0.05
+    run(h.handle_round())
+
+    assert len(card.cast_log) == 2, "it never tried again"
+    assert card.cast_log[0][1] == be.cast_time      # the fast one first
+    assert card.cast_log[1][1] == h.RETRY_CAST_TIME
+    assert slow, "the retry was silent"
+    assert "longer pause" in slow[0]
+    assert failed == [], "a cast that worked was reported as a failure"
+    assert combat.passed == 0, "the round was given away after it worked"
+
+
+def test_a_card_that_fails_both_ways_says_it_tried_twice():
+    """A card that cannot be cast where it was aimed is a different
+    problem from one that needed a slower click, and has to read as one."""
+    be = _backend(policy=lambda sim, s: "Fireblade")
+    slow, failed = [], []
+    be.on_slow_cast = slow.append
+    be.on_failed_cast = failed.append
+
+    card = MockCard("Fireblade")
+    card.misfires = True
+    combat = MockCombat(
+        [MockMember("Wizard", 2000, client=True, normal_pips=4, team_id=0),
+         MockMember("Lost Soul", 900, monster=True, team_id=1)],
+        [card])
+    h = _Handler(combat, be)
+    h.CAST_SETTLE, h.CAST_POLL = 0.2, 0.05
+    run(h.handle_round())
+
+    assert len(card.cast_log) == 2
+    assert slow, "the retry was silent"
+    assert failed and "twice" in failed[0], failed
+    assert combat.passed == 1
