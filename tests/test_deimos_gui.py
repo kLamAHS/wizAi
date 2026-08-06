@@ -150,7 +150,13 @@ def test_actual_damage_is_settled_from_the_next_round():
 def test_blade_rounds_are_not_damage_observations():
     """A blade predicts 0 and delivers 0. Counting it as a perfect
     prediction would make a buff-heavy deck look more accurate purely for
-    casting fewer nukes."""
+    casting fewer nukes.
+
+    It is not settled at all now, rather than settled to zero. A card
+    predicted at exactly zero moves no health, so whatever the board
+    lost that round belongs to somebody else — live, a Fire Trap and
+    the Frost Beetle that fired into the same mob both recorded 56 and
+    the fight counted those 56 twice."""
     tel = Telemetry()
     tel.start_fight()
     blade = tel.observe(_Decision("Fireblade"), _read(2000, 1))
@@ -159,7 +165,7 @@ def test_blade_rounds_are_not_damage_observations():
     nuke.predicted_damage = 500.0
     tel.observe(_Decision("Sunbird"), _read(1600, 3))
 
-    assert blade.actual_damage == 0.0
+    assert blade.actual_damage is None, "a buff was credited with damage"
     obs = tel.damage_observations()
     assert [o.round for o in obs] == [2]
     assert tel.error_stats()["n"] == 1
@@ -7903,3 +7909,688 @@ def test_the_wheel_is_given_back_between_stages(qapp):
     # the press got in at the gap between two stages rather than after
     # every stage of the tick
     assert order[:2] == ["dialogue", "teleport"], order
+
+
+# ------------------------------------------------- deimoslang scripts, for real
+class _CountingVM:
+    """A VM that runs `total` instructions and then stops, like a real one."""
+
+    def __init__(self, total=5000):
+        self.running = True
+        self.killed = False
+        self.total = total
+        self.done = 0
+        self.loads = 0
+
+    async def step(self):
+        self.done += 1
+        if self.done >= self.total:
+            self.running = False
+
+    def load_from_text(self, _src):
+        self.loads += 1
+        self.done = 0
+
+    def kill(self):
+        self.killed = True
+        self.running = False
+
+
+def test_a_burst_runs_thousands_of_instructions_not_one():
+    """The reason a real Deimos quester "does nothing" under wizAi.
+
+    `VM.step()` runs ONE instruction. The TTS Arc 1 script people
+    actually use compiles to 18,366 of them, so at one per half-second
+    service tick it needs two and a half hours to reach the end of the
+    program once — and its opening Close_Menus block alone takes
+    seventeen seconds to do what Deimos does instantly. Deimos runs
+    `while v.running: await v.step()`.
+    """
+    import asyncio
+
+    from deimos_bridge.scripts import ScriptRunner
+
+    vm = _CountingVM(total=10 ** 9)
+    runner = ScriptRunner(vm, "src")
+    runner.SLICE = 0.2
+
+    done = asyncio.run(runner.run_for())
+    assert done > 500, f"only {done} instructions in a 0.2s burst"
+    assert runner.steps == done
+
+
+def test_a_burst_stops_the_moment_the_policy_needs_the_wizard():
+    """A duel starting mid-burst has to end the burst, or the script
+    keeps clicking through the policy's planning phase."""
+    import asyncio
+
+    from deimos_bridge.scripts import ScriptRunner
+
+    vm = _CountingVM(total=10 ** 9)
+    runner = ScriptRunner(vm, "src")
+    runner.SLICE = 5.0
+    fighting = []
+
+    def should_stop():
+        fighting.append(1)
+        return len(fighting) > 50
+
+    done = asyncio.run(runner.run_for(should_stop=should_stop))
+    assert done == 50, done
+    assert vm.running, "the VM was stopped rather than parked"
+
+
+def test_a_script_that_runs_off_the_end_starts_again(monkeypatch):
+    """Deimos reloads and reruns it (Deimos.py:2144-2152) and questers
+    are written expecting that — 'If the script ever restarts…'. Only
+    kill ends a run."""
+    import asyncio
+
+    from deimos_bridge import scripts
+    from deimos_bridge.scripts import ScriptRunner
+
+    fresh = []
+    monkeypatch.setattr(scripts, "build_vm",
+                        lambda c, s: fresh.append(_CountingVM(total=3))
+                        or fresh[-1])
+
+    vm = _CountingVM(total=3)
+    runner = ScriptRunner(vm, "src")
+    asyncio.run(runner.run_for(seconds=1.0))
+    assert not runner.running
+
+    assert runner.restart() is True
+    assert len(fresh) == 1 and runner.vm is fresh[0]
+    assert runner.running and runner.restarts == 1
+
+    runner.stop()
+    assert runner.restart() is False, "a killed script must stay dead"
+
+
+def test_a_non_expert_script_is_named_not_compiled(monkeypatch):
+    """Deimos's older one-command-per-line format is a different
+    language sharing a text box. Handing it to the deimoslang compiler
+    produces a parse error about a token the author never thought of as
+    one."""
+    from deimos_bridge import scripts
+
+    monkeypatch.setattr(scripts, "available", lambda: (True, ""))
+    ok, why = scripts.check("sendkey W 1\nteleport 10, 10, 0\n")
+    assert ok is False
+    assert "not an expert-mode script" in why
+    assert "###deimos_expertmode" in why
+
+    with pytest.raises(RuntimeError, match="not an expert-mode script"):
+        scripts.make_runner([object()], "sendkey W 1\n")
+
+
+def test_the_clients_header_is_read_and_enforced(monkeypatch):
+    """A four-wizard quester run with one client hooked does not fail —
+    it walks one wizard into a dungeon and waits forever for three that
+    are not there. p2..p4 resolve to None (vm.py:135), which surfaces as
+    an AttributeError somewhere unrelated."""
+    from deimos_bridge import scripts
+
+    assert scripts.wants_clients("# @clients: > 1\n") == 2
+    assert scripts.wants_clients("# @clients: 4\n") == 4
+    assert scripts.wants_clients("# @clients: >= 3\n") == 3
+    assert scripts.wants_clients("no header here") == 0
+
+    monkeypatch.setattr(scripts, "available", lambda: (True, ""))
+    src = "###deimos_expertmode\n# @clients: > 1\nsendkey W, 1\n"
+    with pytest.raises(RuntimeError) as got:
+        scripts.make_runner([object()], src)
+    assert "needs 2 wizards" in str(got.value)
+    assert "1 is hooked" in str(got.value)
+
+
+def test_the_party_gets_one_vm_over_every_client(qapp, monkeypatch):
+    """deimoslang addresses wizards as p1..p4 and there is ONE program.
+    A runner per seat is four copies of the same quester each believing
+    it is p1, walking four wizards to four places."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+    from deimos_bridge import scripts
+
+    built = []
+
+    def _fake(clients, source):
+        built.append(list(clients))
+        return type("R", (), {"running": True, "stop": lambda self: None,
+                              "steps": 0, "failures": 0})()
+
+    monkeypatch.setattr(scripts, "make_runner", _fake)
+
+    w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1,
+                   seats=[SeatConfig(school="fire", deck=[])],
+                   script="###deimos_expertmode\nsendkey W, 1\n")
+    w.status = type("S", (), {"emit": staticmethod(lambda *_: None)})()
+    w.seats[0].client = "clientA"
+    w.seats[1].client = "clientB"
+
+    asyncio.run(w._sync_script(w.seats[0]))
+    assert built == [["clientA", "clientB"]], built
+
+    # and seat 1 does not build a second one
+    asyncio.run(w._sync_script(w.seats[1]))
+    assert len(built) == 1, "a second VM was built for the other seat"
+    assert w.seats[1].runner is None
+
+
+def test_a_running_script_stops_wizai_walking_the_same_wizard(qapp):
+    """The script walks the wizard. wizAi's own quest hop or follow
+    would walk it somewhere else between two of the script's
+    instructions, which is how a scripted run ends up in a doorway."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    class _Client:
+        async def in_battle(self):
+            return False
+
+    ran = []
+
+    w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1, auto_quest=True)
+    w.status = type("S", (), {"emit": staticmethod(lambda *_: None)})()
+    seat = w.seats[0]
+    seat.client = client = _Client()
+
+    async def quest(_c):
+        ran.append("quest")
+
+    async def script(_s=None):
+        ran.append("script")
+
+    async def drive():
+        seat.drive = asyncio.Lock()
+        w._quest_step = quest
+        w._script_step = script
+        seat.runner = type("R", (), {"running": True})()
+        task = asyncio.ensure_future(w._service_loop(client, seat))
+        await asyncio.sleep(0.6)
+        w._stop = True
+        task.cancel()
+        try:
+            await task
+        except BaseException:
+            pass
+
+    asyncio.run(drive())
+    assert "script" in ran, ran
+    assert "quest" not in ran, "wizAi walked a wizard the script is driving"
+
+
+def test_an_instruction_that_never_finishes_reloads_the_script(monkeypatch):
+    """`waitforzonechange completion` blocks for a whole loading screen
+    and the TTS Arc 1 script has 122 of them, so the burst cannot simply
+    be cancelled at 30s. But there is no timeout inside the VM at all —
+    a zone change that never comes waits for the rest of the run holding
+    the wizard's wheel. Cancelling mid-instruction leaves the VM half
+    way through one, so the only honest recovery is a reload."""
+    import asyncio
+
+    from deimos_bridge import scripts
+    from deimos_bridge.scripts import ScriptRunner
+
+    class _Hangs:
+        running = True
+        killed = False
+
+        async def step(self):
+            await asyncio.Event().wait()
+
+        def kill(self):
+            self.killed = True
+
+    fresh = _CountingVM(total=10)
+    monkeypatch.setattr(scripts, "build_vm", lambda c, s: fresh)
+
+    vm = _Hangs()
+    runner = ScriptRunner(vm, "src")
+    runner.STEP_LIMIT = 0.2
+
+    assert asyncio.run(runner.step()) is False
+    assert runner.stale, "a cancelled instruction left the VM trusted"
+    assert "without finishing" in runner.last_error
+
+    assert runner.restart() is True
+    assert runner.vm is fresh, "the half-executed VM was kept"
+    assert runner.stale is False
+
+
+def test_the_script_stage_limit_sits_above_the_runners_own(qapp):
+    """Otherwise the stage cancel fires first and cancels an instruction
+    the runner was going to bound and reload by itself."""
+    from deimos_bridge.gui.live import LiveWorker
+    from deimos_bridge.scripts import ScriptRunner
+
+    assert (LiveWorker.STAGE_LIMITS["script step"]
+            > ScriptRunner.STEP_LIMIT), "the backstop fires before the bound"
+
+
+def test_a_repeating_script_error_keeps_being_reported(qapp):
+    """The old rule said it at failure 1 and failure 10 and then went
+    silent forever, while the runner sat retrying the same instruction
+    every tick for the rest of the run."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    said = []
+    w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    w.status = type("S", (), {"emit": staticmethod(said.append)})()
+    seat = w.seats[0]
+
+    class _Runner:
+        running = True
+        stale = False
+        failures = 0
+        steps = 0
+        last_error = "RuntimeError: no such window"
+
+        async def run_for(self, **_kw):
+            self.failures += 1
+            return 0
+
+    seat.runner = _Runner()
+    for _ in range(60):
+        asyncio.run(w._script_step(seat))
+
+    errs = [m for m in said if "script error" in m]
+    assert len(errs) >= 3, f"went silent after {len(errs)} reports"
+    assert any("still failing" in m for m in errs)
+
+
+def test_a_restart_actually_runs_the_program_again(monkeypatch):
+    """`load_from_text` assigns `program` and nothing else (vm.py:127).
+    `current_task.ip` is still past the end of the old program and
+    `current_task.running` is still the False the epilogue set when it
+    got there (vm.py:1833), so the next step() takes the
+    `if not self.current_task.running` branch and returns without
+    executing anything — for ever. Deimos builds a fresh VM each pass."""
+    import asyncio
+
+    from deimos_bridge import scripts
+
+    built = []
+
+    def _build(clients, source):
+        built.append(list(clients))
+        return _CountingVM(total=10)
+
+    monkeypatch.setattr(scripts, "build_vm", _build)
+
+    dead = _CountingVM(total=1)
+    runner = scripts.ScriptRunner(dead, "src", clients=["a", "b"])
+    asyncio.run(runner.run_for(seconds=0.5))
+    assert not runner.running
+
+    assert runner.restart() is True
+    assert built == [["a", "b"]], "the old VM was reused"
+    assert runner.vm is not dead, "the exhausted VM was kept"
+    assert runner.running, "the fresh VM was not started"
+
+
+def test_only_one_seat_builds_the_partys_script(qapp, monkeypatch):
+    """`_setup_script` builds a VM over EVERY client, so calling it once
+    per seat gives four VMs each driving all four wizards — four copies
+    of one quester, worse than the single-client VM it replaced."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+    from deimos_bridge import scripts
+
+    built = []
+    monkeypatch.setattr(
+        scripts, "make_runner",
+        lambda clients, src: built.append(list(clients)) or
+        type("R", (), {"running": True, "stop": lambda self: None})())
+
+    w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1,
+                   seats=[SeatConfig(school="fire", deck=[]),
+                          SeatConfig(school="life", deck=[])],
+                   script="###deimos_expertmode\nsendkey W, 1\n")
+    w.status = type("S", (), {"emit": staticmethod(lambda *_: None)})()
+    for i, s in enumerate(w.seats):
+        s.client = f"client{i}"
+
+    for seat in w.seats:
+        if w._scripted(seat):
+            asyncio.run(w._setup_script(seat.client, seat))
+    assert len(built) == 1, f"{len(built)} VMs for one script"
+    assert built[0] == ["client0", "client1", "client2"]
+
+
+def test_a_press_is_not_dropped_while_it_can_see_what_it_waits_for(qapp):
+    """A script burst can hold the wheel for longer than the TTL.
+    Dropping the press with 'press it again' while the thing it is
+    waiting for is visibly working loses a keypress and lies."""
+    from deimos_bridge.gui.live import LiveWorker
+
+    said = []
+    w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    w.status = type("S", (), {"emit": staticmethod(said.append)})()
+    seat = w.seats[0]
+
+    assert w.request("teleport") is True
+    seat.queued_at["teleport"] -= w.REQUEST_TTL + 1
+
+    seat.driver = "script step"
+    w._expire_requests(seat)
+    assert seat.requests == ["teleport"], "dropped while something held the wheel"
+    assert not said
+
+    seat.driver = None
+    w._expire_requests(seat)
+    assert seat.requests == []
+    assert any("dropped the queued teleport" in m for m in said)
+
+
+class _Move:
+    def __init__(self, seat, name, card="", target_name="", damage=0.0):
+        self.seat, self.name, self.card = seat, name, card
+        self.target_name, self.damage = target_name, damage
+        self.target = 0
+        self.solo_card, self.solo_target, self.note = card, 0, ""
+
+
+class _Plan:
+    def __init__(self, *moves):
+        self.moves = list(moves)
+
+
+def test_a_teammates_trap_is_not_a_teammate_hitting_the_mob():
+    """Any card AIMED at an enemy used to count as the teammate having
+    hit it — and a trap, a shield and a debuff are all aimed at an enemy
+    while taking nothing off it. Live that filed a false 'also hit' on
+    18 of one wizard's 64 rounds and 24 of the other's, each one marking
+    the round unclean. It was the single biggest reason the damage model
+    came back with two usable observations out of seventy."""
+    from deimos_bridge.telemetry import _party_hits
+
+    plan = _Plan(_Move(0, "Jeffrey", "Ice Trap", "Mob", damage=0.0),
+                 _Move(1, "Konstantin", "Fire Cat", "Mob", damage=104.0))
+
+    assert _party_hits(plan, seat=1) == {}, "a trap counted as a hit"
+    assert _party_hits(plan, seat=0) == {"Mob": "Konstantin"}
+
+
+def test_a_shared_mob_is_measured_as_the_partys_claim():
+    """Two wizards into one mob is one board delta that is both of
+    theirs and neither's, so the solo residual has to refuse it. In a
+    real party that is most rounds — one live run left a wizard with two
+    usable rounds out of seventy. What cannot be split can still be
+    added up."""
+    tel = Telemetry(seat=1)
+    tel.start_fight()
+
+    plan = _Plan(_Move(0, "Jeffrey", "Frost Beetle", "Mob", damage=90.0),
+                 _Move(1, "Konstantin", "Fire Cat", "Mob", damage=110.0))
+    r = tel.observe(_Decision("Fire Cat", target_index=0), _read(2000, 1),
+                    party=plan, seat=1)
+    r.predicted_damage = 110.0
+    assert r.party_predicted == 200.0, "the party's claim was not recorded"
+
+    tel.observe(_Decision("Fire Cat", target_index=0), _read(1810, 2),
+                party=plan, seat=1)
+
+    assert r.actual_damage == 190.0
+    assert r.clean is False, "a shared delta is not a solo measurement"
+    assert tel.error_stats()["n"] == 0
+
+    # but the party's claim about that mob IS checkable, and was right
+    assert r.party_error == pytest.approx(-10.0)
+    party = tel.party_error_stats()
+    assert party["n"] == 1
+    assert party["mean_error"] == pytest.approx(-10.0)
+    assert party["mean_pct_error"] == pytest.approx(-5.0)
+
+
+def test_a_solo_round_is_not_counted_twice():
+    """A round this wizard had to itself is already a solo observation;
+    counting it in the party series as well would weight it twice."""
+    tel = Telemetry(seat=0)
+    tel.start_fight()
+    plan = _Plan(_Move(0, "Jeffrey", "Frost Beetle", "Mob", damage=90.0))
+    r = tel.observe(_Decision("Frost Beetle", target_index=0), _read(2000, 1),
+                    party=plan, seat=0)
+    r.predicted_damage = 90.0
+    tel.observe(_Decision("Frost Beetle", target_index=0), _read(1910, 2),
+                party=plan, seat=0)
+
+    assert tel.error_stats()["n"] == 1
+    assert tel.party_error_stats()["n"] == 0
+    assert r.party_error is None
+
+
+def test_a_dirty_shared_round_is_still_refused():
+    """A DoT ticking on the target corrupts the party's number exactly
+    as much as it corrupts one wizard's."""
+    from w101_sim import Actor, State
+
+    tel = Telemetry(seat=1)
+    tel.start_fight()
+    plan = _Plan(_Move(0, "Jeffrey", "Frost Beetle", "Mob", damage=90.0),
+                 _Move(1, "Konstantin", "Fire Cat", "Mob", damage=110.0))
+
+    burning = _read(2000, 1)
+    r = tel.observe(_Decision("Fire Cat", target_index=0), burning,
+                    party=plan, seat=1)
+    r.predicted_damage = 110.0
+    r.enemies[0].wards.append("50/tick x3 dot")
+
+    tel.observe(_Decision("Fire Cat", target_index=0), _read(1810, 2),
+                party=plan, seat=1)
+
+    assert any("DoT" in c for c in r.confounds), r.confounds
+    assert tel.party_error_stats()["n"] == 0
+
+
+def test_the_export_says_which_build_made_it():
+    """Two runs uploaded twenty minutes before a fix landed were read as
+    evidence about the fixed code, and there was nothing in the file to
+    say otherwise."""
+    tel = Telemetry()
+    rev = tel.summary()["revision"]
+    assert isinstance(rev, str)
+    if rev:                       # a git checkout; empty in a tarball
+        assert len(rev) >= 7
+
+
+def test_a_run_stopped_while_waiting_does_not_invent_a_fight():
+    """`start_fight` is called before the wait for a duel, so stopping
+    leaves a 0-round record — and counting it read as '9 wins from 13
+    fights' for a wizard that fought twelve and won nine."""
+    tel = Telemetry()
+    tel.start_fight()
+    tel.observe(_Decision("Sunbird", target_index=0), _read(2000, 1))
+    tel.fights[-1].rounds = 1
+    tel.end_fight(won=True)
+    tel.start_fight()             # the next duel, which never started
+
+    assert len(tel.fights) == 2, "the record is kept"
+    assert tel.summary()["fights"] == 1, "but it is not a fight"
+    assert tel.summary()["wins"] == 1
+
+
+def test_the_party_series_refuses_a_mob_that_could_not_absorb_the_claim():
+    """The delta cannot exceed the health that was there. A party that
+    expects 586 off a mob with 78 left and finds it standing has learnt
+    about a fizzle, not about the arithmetic — and would otherwise
+    report a 90% over-prediction."""
+    tel = Telemetry(seat=1)
+    tel.start_fight()
+    plan = _Plan(_Move(0, "Jeffrey", "Evil Snowman", "Mob", damage=400.0),
+                 _Move(1, "Konstantin", "Sunbird", "Mob", damage=186.0))
+
+    r = tel.observe(_Decision("Sunbird", target_index=0), _read(200, 1),
+                    party=plan, seat=1)
+    r.predicted_damage = 186.0
+    tel.observe(_Decision("Sunbird", target_index=0), _read(122, 2),
+                party=plan, seat=1)
+
+    assert r.party_predicted == 586.0
+    assert any("could not" in c or "did not land" in c for c in r.confounds), \
+        r.confounds
+    assert tel.party_error_stats()["n"] == 0
+
+
+def test_two_wizards_exports_can_be_joined_on_the_opening_board():
+    """`index` counts this seat's own fights and seats do not see the
+    same fights — one live run had wizard 1's fight 1 be wizard 2's
+    fight 3. Matching on (board, round) instead is ambiguous for a
+    quarter of the rounds: three Ice Weavers at 395 is the same key in
+    every fight against three Ice Weavers."""
+    from w101_sim import Actor, State
+
+    def board(*hps):
+        player = Actor(name="W", school="ice", hp=100, max_hp=100, team=0)
+        mobs = [Actor(name="Ice Weaver", school="balance", hp=h, max_hp=395,
+                      team=1) for h in hps]
+        return _Read(State(player, mobs), 1, ("Frost Beetle",))
+
+    a, b = Telemetry(seat=0), Telemetry(seat=1)
+    for tel in (a, b):
+        tel.start_fight()
+        tel.observe(_Decision("Frost Beetle", target_index=0),
+                    board(395, 395, 395))
+
+    assert a.fights[-1].opening == "Ice Weaver@395+Ice Weaver@395+Ice Weaver@395"
+    assert a.fights[-1].opening == b.fights[-1].opening, \
+        "the two seats cannot line their fights up"
+
+    # and a different duel is a different key
+    c = Telemetry(seat=0)
+    c.start_fight()
+    c.observe(_Decision("Frost Beetle", target_index=0), board(395, 395))
+    assert c.fights[-1].opening != a.fights[-1].opening
+
+
+def test_the_party_damage_number_counts_each_round_once(qapp):
+    """Every seat that fired into the shared mob records the same claim
+    about the same board delta, so adding the seats' series together
+    would count one measurement twice for two wizards and four times for
+    four."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.wizards.setValue(2)
+
+    plan = _Plan(_Move(0, "Jeffrey", "Frost Beetle", "Mob", damage=90.0),
+                 _Move(1, "Konstantin", "Fire Cat", "Mob", damage=110.0))
+    for seat in (0, 1):
+        tel = win.tels[seat]
+        tel.start_fight()
+        r = tel.observe(_Decision("Fire Cat", target_index=0), _read(2000, 1),
+                        party=plan, seat=seat)
+        r.predicted_damage = 90.0 if seat == 0 else 110.0
+        tel.observe(_Decision("Fire Cat", target_index=0), _read(1810, 2),
+                    party=plan, seat=seat)
+        assert tel.party_error_stats()["n"] == 1
+
+    pooled = win._party_model()
+    assert pooled["n"] == 1, f"one round counted {pooled['n']} times"
+    assert pooled["mean_error"] == pytest.approx(-10.0)
+
+    win.party.show_model(pooled)
+    assert "1 shared round" in win.party.model_lab.text()
+    assert "over-predicting by 10 HP" in win.party.model_lab.text()
+
+
+def test_a_script_wedged_on_one_instruction_reloads_itself():
+    """deimoslang has instructions that raise WITHOUT advancing the
+    instruction pointer, and the VM has no handler. `teleport client 3`
+    with two wizards hooked is one: player_by_num answers None
+    (vm.py:137) and `target_client.body` throws (vm.py:1414) before the
+    arm's `ip += 1` (vm.py:1826). Every later burst re-enters the same
+    instruction and throws the same way, for the rest of the run.
+
+    The @clients header cannot catch it — TTS Arc 1 declares
+    `@clients: > 1` and still has 18 reachable such sites with two
+    wizards hooked."""
+    import asyncio
+
+    from deimos_bridge.scripts import ScriptRunner
+
+    class _Task:
+        ip = 8907                       # never advances
+
+    class _Wedged:
+        running = True
+        killed = False
+        current_task = _Task()
+
+        async def step(self):
+            raise AttributeError("'NoneType' object has no attribute 'body'")
+
+        def kill(self):
+            self.killed = True
+
+    runner = ScriptRunner(_Wedged(), "src", clients=["a", "b"])
+    for _ in range(ScriptRunner.STUCK_AT - 1):
+        assert asyncio.run(runner.step()) is False
+        assert not runner.stale, "gave up while the script might still move on"
+
+    asyncio.run(runner.step())
+    assert runner.stale, "spun on one instruction for the rest of the run"
+    assert "stuck on one instruction" in runner.last_error
+    assert "NoneType" in runner.last_error, "the real cause was lost"
+
+
+def test_a_moving_script_is_never_called_stuck():
+    """Errors at different instructions are a script having a bad time,
+    not a wedge — reloading would throw away its progress."""
+    import asyncio
+
+    from deimos_bridge.scripts import ScriptRunner
+
+    class _Task:
+        ip = 0
+
+    class _Unlucky:
+        running = True
+        killed = False
+        current_task = _Task()
+
+        async def step(self):
+            self.current_task.ip += 1
+            raise RuntimeError("no such window")
+
+        def kill(self):
+            pass
+
+    runner = ScriptRunner(_Unlucky(), "src")
+    for _ in range(ScriptRunner.STUCK_AT * 2):
+        asyncio.run(runner.step())
+    assert not runner.stale
+    assert runner.failures == ScriptRunner.STUCK_AT * 2
+
+
+def test_a_script_that_names_more_wizards_than_are_hooked_says_so(qapp,
+                                                                  monkeypatch):
+    """Not a refusal — the parts that name p3 and p4 are usually behind
+    the script's own configuration flags, so refusing would refuse every
+    party script written for four and run with two."""
+    import asyncio
+
+    from deimos_bridge import scripts
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    assert scripts.mentions_clients("p1 sendkey W\np4 sendkey W\n") == 4
+    assert scripts.mentions_clients("###deimos_expertmode\n") == 0
+
+    monkeypatch.setattr(scripts, "make_runner",
+                        lambda c, s: type("R", (), {"running": True})())
+    said = []
+    w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1,
+                   seats=[SeatConfig(school="fire", deck=[])],
+                   script="###deimos_expertmode\np1 sendkey W, 1\n"
+                          "p4 sendkey W, 1\n")
+    w.status = type("S", (), {"emit": staticmethod(said.append)})()
+    w.seats[0].client, w.seats[1].client = "a", "b"
+
+    asyncio.run(w._setup_script("a", w.seats[0]))
+    assert any("names up to p4" in m and "2 wizard(s) are hooked" in m
+               for m in said), said

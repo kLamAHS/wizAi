@@ -141,6 +141,9 @@ class _Seat:
         #: what `runner` was built from, so the service tick can notice
         #: the operator turning the script on, off, or replacing it
         self.script_source = None
+        #: whether "the script is running" has been said for this
+        #: runner. Said once, because the alternative is once per burst.
+        self.script_said = False
         #: this wizard's in-game name, learned from its first duel. The
         #: client will not say it outside the character-select screen,
         #: but a combat read names the client's own member -- and the
@@ -473,10 +476,12 @@ class LiveWorker(QThread):
                 # so a press could wait out an auto-dialogue and a follow
                 # before its own turn. Released between them, a queued
                 # request gets the wizard at the next gap.
-                if self.auto_dialogue and seat.quester is None:
+                driven = self._script_drives(seat)
+                if self.auto_dialogue and seat.quester is None and not driven:
                     # Deimos's questing does its own dialogue handling,
                     # so a second clicker would race it for the same
-                    # button.
+                    # button. A running script is the same problem: they
+                    # all reach for the dialogue box.
                     await self._stage(seat, "auto-dialogue",
                                       self._auto_dialogue(client), wheel=True)
 
@@ -484,7 +489,13 @@ class LiveWorker(QThread):
                     await self._stage(seat, "script step",
                                       self._script_step(seat), wheel=True)
 
-                if self._follows(seat):
+                if driven:
+                    # The script walks this wizard. wizAi's own questing
+                    # or follow would walk it somewhere else between two
+                    # of the script's instructions, which is how a
+                    # scripted run ends up standing in a doorway.
+                    pass
+                elif self._follows(seat):
                     # A follower does not quest. Two wizards taking their
                     # own quests walk to two places, and then the party
                     # coordinates beautifully with nobody.
@@ -557,6 +568,14 @@ class LiveWorker(QThread):
         """
         import time
 
+        if seat.driver is not None:
+            # Not stuck -- queued behind something that is running and
+            # said so. A script burst can hold the wheel for longer than
+            # the TTL, and dropping the press with "press it again"
+            # while the thing it is waiting for is visibly working would
+            # be a lie as well as a lost keypress.
+            return
+
         now = time.monotonic()
         stale = [a for a in list(seat.requests)
                  if now - seat.queued_at.get(a, now) > self.REQUEST_TTL]
@@ -616,9 +635,16 @@ class LiveWorker(QThread):
     #: teleport animation. The limits are generous enough that nothing
     #: which is working gets cut off, and short enough that nothing which
     #: is stuck owns the wizard.
+    #: `script step` is the odd one. It is a time-boxed burst that
+    #: returns on its own (`ScriptRunner.SLICE`), so this is only a
+    #: backstop -- and it has to sit ABOVE `ScriptRunner.STEP_LIMIT`,
+    #: because a single deimoslang instruction legitimately blocks for
+    #: a whole loading screen and cancelling one mid-flight leaves the
+    #: VM half-way through it. The runner bounds and reloads itself;
+    #: this only catches a burst that somehow never returns at all.
     STAGE_LIMITS = {"auto-dialogue": 45.0,
                     "script": 20.0,
-                    "script step": 30.0,
+                    "script step": 240.0,
                     "following the leader": 60.0,
                     "quest step": 60.0}
     #: the fallback for a stage with no entry above, including the
@@ -743,15 +769,38 @@ class LiveWorker(QThread):
         elif action in ("wisps", "potion"):
             await self._upkeep_now(client, action)
 
+    def _script_drives(self, seat):
+        """Is a running script steering this wizard?
+
+        Every wizard's, not just seat 0's: the party's one VM moves
+        `p1`..`p4`, so while it is running none of them should also be
+        taking their own quest or chasing the leader. Two things walking
+        one wizard is how a scripted run ends up in a doorway.
+        """
+        runner = self.seats[0].runner
+        return runner is not None and runner.running
+
+    def _scripted(self, seat):
+        """Does this seat run the party's script?
+
+        Seat 0 and only seat 0. A deimoslang program addresses the whole
+        party as `p1`..`p4` and there is one of it, so there is one VM
+        over every client -- not one per seat, which is four copies of
+        the same quester each believing it is `p1`. See `scripts.py`.
+        """
+        return seat.index == 0
+
     async def _sync_script(self, seat):
-        """Build, replace or tear down this seat's script runner.
+        """Build, replace or tear down the party's script runner.
 
         The script was read once at Play live and never again, so
         ticking "Run script" mid-run did nothing and unticking it did
         nothing either -- the runner built at connect kept stepping.
         Done here rather than from the GUI thread because building one
-        takes the client, and the client belongs to this loop.
+        takes the clients, and they belong to this loop.
         """
+        if not self._scripted(seat):
+            return
         want = self.script or ""
         if seat.script_source == want:
             return
@@ -765,12 +814,52 @@ class LiveWorker(QThread):
             await self._setup_script(seat.client, seat)
 
     async def _script_step(self, seat=None):
+        """One burst of the script, not one instruction.
+
+        `VM.step()` runs a single instruction. A real quester compiles
+        to tens of thousands of them -- the TTS Arc 1 script is 18,366
+        -- so one per half-second tick is two and a half hours to reach
+        the end of the program once, and the wizard visibly does
+        nothing. Deimos runs `while v.running: await v.step()`; this
+        runs that loop for `ScriptRunner.SLICE` seconds at a time, which
+        keeps the wheel available to a hotkey between bursts.
+        """
         seat = self.seats[0] if seat is None else seat
-        if not await seat.runner.step() and seat.runner.finished:
+        runner = seat.runner
+        if runner is None:
+            return
+        done = await runner.run_for(
+            should_stop=lambda: self._stop or seat.in_upkeep)
+        if runner.stale:
+            # An instruction had to be cancelled, so the VM is part-way
+            # through one. Reloading is the only honest recovery.
+            self._say(seat, runner.last_error)
+            if not runner.restart():
+                self._say(seat, "script stopped — it could not be reloaded")
+                seat.runner = None
+            return
+        if runner.failures:
+            # Thinned rather than reported at exactly the first and
+            # tenth: an instruction that always raises is retried every
+            # burst, and after the tenth the old rule went silent
+            # forever while the script sat on the same instruction.
+            self._say_once(seat, "script-error",
+                           f"script error: {runner.last_error}")
+            return
+        if done or runner.running:
+            if runner.steps and not seat.script_said:
+                seat.script_said = True
+                self._say(seat, f"script running — {runner.steps:,} "
+                                f"instructions so far")
+            return
+        # It ran off the end. Deimos reloads and runs it again, and
+        # questers are written expecting that; only `kill` ends a run.
+        if runner.restart():
+            self._say(seat, f"script reached the end — restarting it "
+                            f"(pass {runner.restarts + 1})")
+        else:
             self._say(seat, "script finished")
             seat.runner = None
-        elif seat.runner is not None and seat.runner.failures in (1, 10):
-            self._say(seat, f"script error: {seat.runner.last_error}")
 
     async def _auto_dialogue(self, client, seat=None):
         """Open and clear dialogue, but only the quest's.
@@ -1236,13 +1325,37 @@ class LiveWorker(QThread):
             self._say(seat, f"using the light questing ({type(exc).__name__})")
 
     async def _setup_script(self, client, seat=None):
+        """Compile the party's script over every hooked client.
+
+        Every client, not this one: deimoslang addresses wizards as
+        `p1`..`p4`, and a VM built over a single client answers `None`
+        for the others rather than raising, so a party script fails as
+        an `AttributeError` somewhere unrelated. See `scripts.py`.
+        """
         from .. import scripts
 
         seat = self._seat_for(client) if seat is None else seat
         seat.script_source = self.script or ""
+        seat.script_said = False
+        party = [s.client for s in self.seats if s.client is not None]
         try:
-            seat.runner = scripts.make_runner(client, self.script)
-            self._say(seat, "script loaded")
+            seat.runner = scripts.make_runner(party or [client], self.script)
+            self._say(seat, "script loaded"
+                      + (f" — driving {len(party)} wizard(s)"
+                         if len(party) > 1 else ""))
+            names = scripts.mentions_clients(self.script)
+            if names > max(1, len(party)):
+                # Not a refusal -- the parts that name p3 and p4 are
+                # usually behind the script's own configuration flags.
+                # But not always: a `teleport client 3` that does fire
+                # with two wizards hooked throws before the VM advances
+                # past it, and only the stuck-instruction reload gets
+                # the run back.
+                self._say(seat,
+                          f"this script names up to p{names} and {len(party)} "
+                          f"wizard(s) are hooked. Anything it does with the "
+                          f"others runs against nothing — check its own "
+                          f"account settings match your party.")
         except Exception as exc:
             seat.runner = None
             self._say(seat, f"script not loaded: {exc}")
@@ -1517,9 +1630,17 @@ class LiveWorker(QThread):
                     self.set_policy(seat.policy_name, seat=seat.index)
                 seat.combat = make_combat_handler(client, backend)
 
-                if self.auto_quest:
+                if self.auto_quest and not self.script:
+                    # A script walks the party itself; a Deimos quester
+                    # built beside it is a second thing steering the
+                    # same wizard.
                     await self._setup_questing(client, seat)
-                if self.script:
+                if self.script and self._scripted(seat):
+                    # Seat 0 only. `_setup_script` builds a VM over
+                    # EVERY client, so calling it once per seat gives
+                    # four VMs each driving all four wizards -- four
+                    # copies of one quester, which is worse than the
+                    # per-seat single-client VM it replaced.
                     await self._setup_script(client, seat)
                 # Built here, not in __init__: an asyncio.Lock binds to
                 # the loop it is created on, and __init__ runs on the GUI

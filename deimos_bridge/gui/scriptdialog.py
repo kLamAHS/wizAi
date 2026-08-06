@@ -12,13 +12,24 @@ from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QFileDialog,
 from .theme import PALETTE, stylesheet
 
 PLACEHOLDER = """\
-# Paste a Deimos bot script (deimoslang) here.
+# Paste a Deimos EXPERT-MODE script here -- one whose first line is
+# ###deimos_expertmode. Deimos's older one-command-per-line format is a
+# different language and does not run here; Check will say so.
 #
 # It runs alongside the combat policy and steps only while you are OUT
 # of combat, so wizAi still fights every duel -- a `waitfor combat` line
-# parks harmlessly until the policy has finished.
+# parks harmlessly until the policy has finished. That is the intended
+# arrangement for a quester: scripts like TTS Arc 1 say "Combat should
+# be enabled" because they expect the BOT to fight, not the script.
+# Anything in the script that casts cards will not run.
 #
-# Anything Deimos's bot editor accepts works here.
+# A multi-wizard script gets one VM over every hooked client, so p1..p4
+# mean what they mean in Deimos. If its @clients header asks for more
+# wizards than you have configured, loading it will say so rather than
+# running it against wizards that are not there.
+#
+# While a script is running, auto-quest and follow-the-leader stand
+# down: two things walking one wizard is how a run ends up in a doorway.
 """
 
 

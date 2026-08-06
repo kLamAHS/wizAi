@@ -2492,6 +2492,40 @@ class MainWindow(QMainWindow):
                 "last_said": live.get("last_said", ""),
             })
         self.party.show_party(rows, hive)
+        self.party.show_model(self._party_model())
+
+    def _party_model(self):
+        """The party's damage-model number, counted once per round.
+
+        Every seat that fired into the shared mob records the same
+        claim about the same board delta, so adding the seats' series
+        together would count one measurement twice for two wizards and
+        four times for four. Deduped on the round it describes: which
+        duel (by opening board, since fight numbers are per seat), which
+        round, which mob.
+        """
+        import statistics
+
+        seen, obs = set(), []
+        for seat in range(self.party_size()):
+            tel = self.tels[seat]
+            by_index = {f.index: f.opening for f in tel.fights}
+            for r in tel.party_observations():
+                key = (by_index.get(r.fight, r.fight), r.round, r.target_name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                obs.append(r)
+        if not obs:
+            return {"n": 0}
+        errs = [r.party_error for r in obs]
+        pcts = [100.0 * r.party_error / r.party_predicted
+                for r in obs if r.party_predicted]
+        worst = max(obs, key=lambda r: abs(r.party_error))
+        return {"n": len(obs),
+                "mean_error": statistics.fmean(errs),
+                "mean_pct_error": statistics.fmean(pcts) if pcts else None,
+                "worst": f"f{worst.fight}r{worst.round}"}
 
     def on_seat_named(self, seat, name):
         """A duel told us which wizard this client is actually driving.

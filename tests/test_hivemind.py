@@ -779,11 +779,15 @@ def test_a_mob_two_wizards_hit_is_not_a_damage_measurement():
             unreadable = ()
         return _Read()
 
+    # `damage` is what the coordinator scored each move at, and it is
+    # load-bearing: a move it priced at zero moves no health, so a
+    # teammate's trap or shield is not a reason this cast's residual is
+    # off. Only a damaging cast contaminates the measurement.
     plan = PartyPlan(moves=[
         SeatMove(seat=0, name="wizard 1", card="Frost Beetle", target=0,
-                 target_name="Lord Nightshade"),
+                 target_name="Lord Nightshade", damage=85.0),
         SeatMove(seat=1, name="wizard 2", card="Fire Cat", target=0,
-                 target_name="Lord Nightshade")])
+                 target_name="Lord Nightshade", damage=76.0)])
 
     tel = Telemetry()
     tel.start_fight()
@@ -807,14 +811,22 @@ def test_collateral_damage_names_the_wizard_that_caused_it():
 
     plan = PartyPlan(moves=[
         SeatMove(seat=0, name="wizard 1", card="Frost Beetle", target=0,
-                 target_name="Lord Nightshade"),
+                 target_name="Lord Nightshade", damage=85.0),
         SeatMove(seat=1, name="wizard 2", card="Fire Elf", target=1,
-                 target_name="Field Guard")])
+                 target_name="Field Guard", damage=104.0)])
     assert _party_hits(plan, 0) == {"Field Guard": "wizard 2"}
     assert _party_hits(plan, 1) == {"Lord Nightshade": "wizard 1"}
     # A wizard that held its card moved no health and is not a cause.
     held = PartyPlan(moves=[SeatMove(seat=1, name="wizard 2", note="held")])
     assert _party_hits(held, 0) == {}
+    # Nor is one whose card was aimed at an enemy but takes nothing off
+    # it. A trap, a shield and a debuff all look like a cast at a mob,
+    # and counting them marked 42 rounds of one live party run unclean
+    # for nothing.
+    trapped = PartyPlan(moves=[
+        SeatMove(seat=1, name="wizard 2", card="Ice Trap", target=0,
+                 target_name="Lord Nightshade", damage=0.0)])
+    assert _party_hits(trapped, 0) == {}
 
 
 # --------------------------------- what the first NAMED party run said
