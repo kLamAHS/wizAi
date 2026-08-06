@@ -1039,7 +1039,15 @@ class WizAiCombatHandler:
                 # reported and amended in telemetry, so if this machine
                 # needs slower clicks the operator sees it immediately
                 # instead of wondering.
+                held = await self._cards_in_hand()
                 await card.cast(target, sleep_time=self.backend.cast_time)
+                if not await self._card_left_the_hand(held):
+                    raise RuntimeError(
+                        "the card was still in hand after casting — the "
+                        "click did not take. Wizard101 deselects a card "
+                        "clicked at something it cannot be cast on, so "
+                        "this is usually a card aimed at the wrong kind "
+                        "of target")
             except Exception as exc:
                 # A misclick or a board that moved under us costs this
                 # round, not the fight -- but the round has *already*
@@ -1075,6 +1083,54 @@ class WizAiCombatHandler:
     def _pick_card(self, read, name):
         cards = read.hand_cards.get(name) or []
         return cards[0] if cards else None
+
+    #: how long to wait for the hand to shrink after a cast, and how
+    #: often to look. A cast is two clicks and a server round-trip, so
+    #: the hand does not update the instant `cast` returns.
+    CAST_SETTLE = 2.0
+    CAST_POLL = 0.15
+
+    async def _cards_in_hand(self):
+        """How many cards are in hand, or None if it will not read."""
+        try:
+            return len(await self.get_cards())
+        except Exception:
+            return None
+
+    async def _card_left_the_hand(self, before):
+        """Did the cast actually go through?
+
+        `CombatCard.cast` clicks and returns; it raises nothing when the
+        click does not take. Wizard101 **deselects** a card clicked at
+        something it cannot be cast on -- a heal aimed at a monster, a
+        self-buff aimed at a mob -- so the card goes back to the hand,
+        the round passes with nothing played, and the duel sits there
+        until the round timer expires. From outside that is a bot that
+        decided to do nothing, and it was invisible: the round had
+        already been recorded as a cast that was made, so the next
+        board's unchanged health settled as the damage model's worst
+        miss of the run.
+
+        wizwalker checks this itself for the enchant branch
+        (`card.py:63-65`) and for no other. So it is checked here.
+
+        Unreadable counts are treated as success -- refusing to believe
+        a cast landed because the hand would not read would turn every
+        bad read into a false failure, and the settle already reports
+        those separately.
+        """
+        import asyncio
+
+        if before is None:
+            return True
+        deadline = self.CAST_SETTLE
+        while deadline > 0:
+            now = await self._cards_in_hand()
+            if now is None or now < before:
+                return True
+            await asyncio.sleep(self.CAST_POLL)
+            deadline -= self.CAST_POLL
+        return False
 
     async def _resolve_target(self, read, index, card=None):
         """What to click after clicking the card.

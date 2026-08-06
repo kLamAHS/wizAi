@@ -8819,3 +8819,64 @@ def test_every_card_in_the_table_resolves_to_somewhere_sensible(qapp):
                if primary_target(c) is None and _target_from_kind(c) is None]
     assert not unknown, f"{len(unknown)} cards would be clicked on a mob " \
                         f"by default, e.g. {sorted(unknown)[:5]}"
+
+
+def test_a_self_cast_is_not_labelled_with_a_mobs_name():
+    """`_split` gives a bare action target 0, so every move that did not
+    aim at an enemy was labelled `enemies[0]`. Live that read
+    "Pixie @Sokkwi Ripper" on the party plan, which is exactly what a
+    heal aimed at a monster looks like from the outside — and it fed
+    `_party_expected`, which sums a round's expected damage BY TARGET
+    NAME, so a heal was credited to a mob."""
+    from deimos_bridge.hivemind import _aims_at_an_enemy
+
+    class _Card:
+        def __init__(self, ops):
+            self.ops = ops
+
+    heal = _Card([{"op": "heal", "tgt": "self"}])
+    blade = _Card([{"op": "charm", "tgt": "self"}])
+    nuke = _Card([{"op": "hit", "tgt": "enemy"}])
+    aoe = _Card([{"op": "hit", "tgt": "enemies"}])
+
+    assert _aims_at_an_enemy(nuke) is True
+    for c in (heal, blade, aoe):
+        assert _aims_at_an_enemy(c) is False
+    assert _aims_at_an_enemy(None) is False
+
+
+def test_a_cast_that_does_not_take_is_noticed_rather_than_waited_out():
+    """`CombatCard.cast` clicks and returns; it raises nothing when the
+    click does not take. Wizard101 deselects a card clicked at something
+    it cannot be cast on, so the card goes back to the hand, the round
+    passes with nothing played, and the duel sits until the round timer
+    expires — recorded, meanwhile, as a cast that was made."""
+    import asyncio
+
+    from deimos_bridge.live_backend import WizAiCombatHandler
+
+    handler = WizAiCombatHandler.__new__(WizAiCombatHandler)
+    handler.CAST_SETTLE = 0.3
+    handler.CAST_POLL = 0.05
+
+    hand = [1, 2, 3]
+    handler.get_cards = lambda: _value(hand)
+
+    # the card never left the hand -> the cast did not go through
+    assert asyncio.run(handler._card_left_the_hand(3)) is False
+
+    # it did -> fine
+    hand = [1, 2]
+    assert asyncio.run(handler._card_left_the_hand(3)) is True
+
+    # a hand that will not read is not evidence of failure
+    async def _boom():
+        raise RuntimeError("memory read failed")
+
+    handler.get_cards = _boom
+    assert asyncio.run(handler._card_left_the_hand(3)) is True
+    assert asyncio.run(handler._card_left_the_hand(None)) is True
+
+
+async def _value(v):
+    return v
