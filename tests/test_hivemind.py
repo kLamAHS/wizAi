@@ -1151,3 +1151,81 @@ def test_the_rate_never_includes_the_seat_it_is_planning_for():
 
     later = {s: p for s, step, p in seen if step == 1}
     assert later == {0: 500.0, 1: 400.0, 2: 300.0}
+
+
+# ------------------------------------------------ tests that CAN see the key
+#
+# The suite could not. 855 tests passed both with and without d3b7962,
+# a change that resolved roughly a third of their `greedy_ttk` decisions
+# differently -- because 44% of decisions tie at (turns, damage) and
+# every test that asserts a specific card makes one or two decisions,
+# none of which tie. These force the tie so the later keys are covered
+# by something.
+def test_a_tie_at_turns_and_damage_is_the_common_case_not_the_edge():
+    """The premise the two tests below rest on, asserted rather than
+    assumed. If ties were rare, the ranking tail would not matter and
+    nor would testing it."""
+    from deimos_bridge.policies import greedy_ttk
+
+    tied = seen = 0
+    for hp in (60, 150, 400, 800, 1600):
+        for pips in (1, 3, 5, 7):
+            sim, state = wizard(school="fire", pips=pips,
+                                hand=("Fire Cat", "Fire Elf", "Fireblade",
+                                      "Fire Trap"),
+                                board=((hp, "ice"), (hp, "ice")))
+            policy = greedy_ttk()
+            policy(sim, state)
+            cards = policy.last_candidates
+            if len(cards) < 2:
+                continue
+            seen += 1
+            best = min((c.turns, -c.damage) for c in cards)
+            if sum(1 for c in cards
+                   if (c.turns, -c.damage) == best) > 1:
+                tied += 1
+
+    assert seen >= 15, f"only {seen} usable boards"
+    assert tied >= seen // 4, (
+        f"only {tied} of {seen} boards tied at (turns, damage); if that is "
+        f"really the rate, the keys after them barely matter")
+
+
+def test_between_equal_outcomes_the_cheaper_card_wins(monkeypatch):
+    """The third key, forced. Every candidate scores the same `turns` and
+    the same banked damage, so the rollout is saying it cannot tell them
+    apart -- and between genuinely equivalent outcomes the cheaper card
+    is better, because it leaves the pip banked and the big card in hand.
+
+    Reversing this was shipped and reverted; the comment on the key
+    carries the measurement both ways. The test exists so the next
+    attempt is at least visible.
+    """
+    from deimos_bridge import policies as P
+
+    monkeypatch.setattr(P, "_rollout", lambda *a, **kw: (13.0, -600.0))
+    sim, state = wizard(school="fire", hand=("Fire Cat", "Sunbird"),
+                        pips=7, hp=1500, board=((800, "ice"),))
+    chosen = P.greedy_ttk()(sim, state)
+    card, _t = chosen if isinstance(chosen, tuple) else (chosen, 0)
+    assert card is not None and card.name == "Fire Cat", (
+        f"played {getattr(card, 'name', card)!r}: a 3-pip Sunbird beat a "
+        f"1-pip Fire Cat on outcomes the rollout scored identically")
+
+
+def test_the_ranking_is_total_enough_that_hand_order_does_not_decide():
+    """A complete tie leaves `min` returning whatever the hand listed
+    first, which is not a decision. Two copies of one card at different
+    targets are the sharpest case: same pips, same damage, same
+    everything but the mob."""
+    from deimos_bridge import policies as P
+
+    sim, state = wizard(school="fire", hand=("Fire Cat",), pips=7,
+                        board=((400, "ice"), (120, "ice")))
+    policy = P.greedy_ttk()
+    policy(sim, state)
+    keys = [(c.turns, -c.damage, c.pips, c.target)
+            for c in policy.last_candidates if c.card != "pass"]
+    assert len(keys) == len(set(keys)), (
+        f"two candidates are indistinguishable to the recorded ranking: "
+        f"{keys}")

@@ -1347,6 +1347,41 @@ def greedy_ttk(max_turns: int = None, continuation=None):
         # toward overkill at once: a 300-damage nuke into a mob with 50
         # left both scored 300 of "banked damage" and won the tiebreak
         # for being large.
+        #
+        # Putting `-card.damage` BACK in front of pips was tried, shipped
+        # and reverted (d3b7962, bd99c57). Do not re-derive it from a
+        # single regime; it is measured, and it is measured BOTH ways:
+        #
+        #   solo, in horizon, the project's own decks and bosses:
+        #     WORSE. Three of six myth cells lose five points of kill
+        #     rate (97.0 -> 91.5, 97.0 -> 92.5, 82.5 -> 77.5) at n=200
+        #     paired seeds, and an independent 66-cell sweep at 13,200
+        #     seeds puts it at 572 shipped wins against 357.
+        #
+        #   in a party, on the boards the live run actually fought
+        #     (2-3 mobs at 395-435, power pips 0.12 as measured, a
+        #     teammate dealing 54 a round):
+        #     BETTER, and not marginally -- 16 shipped-only wins against
+        #     205, and 0.30 turns faster.
+        #
+        # Both are mine and both reproduce. The change is not a better
+        # tiebreak, it is a more aggressive one -- on the same boards it
+        # spends 1.13x the pips and throws 1.20x the damage past lethal
+        # -- and aggression wins a race and loses an attrition fight.
+        # Which of those a wizard is in is not something this key can
+        # see, and a conditional on the sentinel (cheaper in horizon,
+        # bigger hit past it) does NOT capture it: measured, that lands
+        # bit-identical to this key in both regimes, because the party
+        # gain comes from in-horizon rounds.
+        #
+        # A warning for whoever measures it next: **the test suite
+        # cannot see this key at all.** 855 tests pass either way while
+        # roughly a third of their `greedy_ttk` decisions resolve
+        # differently, because 44% of decisions tie at (turns, damage)
+        # and every test that asserts a specific card makes one or two
+        # decisions, none of which tie. A green suite is not evidence
+        # about this line. See the forced-tie tests in
+        # `tests/test_hivemind.py`, which exist so that stops being true.
         scored = []
         for card, target in candidates:
             turns, neg_damage = _rollout(sim, s, card, max_turns, target,
