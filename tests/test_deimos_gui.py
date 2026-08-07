@@ -1986,6 +1986,128 @@ def test_after_fight_takes_wisps_before_potions(monkeypatch):
     assert order == ["wisps", "check"]
 
 
+def test_buying_survives_the_keyboardinterrupt_deimos_raises(monkeypatch):
+    """`src/utils.buy_potions` ends `except: raise KeyboardInterrupt`
+    (utils.py:487-489). That is a BaseException, so an ordinary
+    `except Exception` does not catch it and one failed purchase would
+    tear down the whole run."""
+    import asyncio
+
+    from deimos_bridge import upkeep
+
+    async def _boom(client, **kw):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(upkeep, "_refill", _boom)
+    said = []
+    assert asyncio.run(upkeep.buy_potions(_UpkeepClient(),
+                                          on_status=said.append)) is False
+    assert any("KeyboardInterrupt" in m for m in said), said
+
+    # It has to be converted INSIDE the task. `asyncio.wait_for` runs the
+    # coroutine as a Task, and a Task raising a BaseException that is not
+    # an Exception propagates past the awaiting frame and out of the loop
+    # -- so a handler wrapped around the `wait_for` never fires. Measured
+    # here rather than asserted, because it is the whole reason
+    # `_refill_guarded` exists.
+    async def _escapes():
+        async def boom():
+            raise KeyboardInterrupt
+        try:
+            await asyncio.wait_for(boom(), 5)
+        except (Exception, KeyboardInterrupt):
+            return "caught"
+        return "no exception"
+
+    with pytest.raises(KeyboardInterrupt):
+        asyncio.run(_escapes())
+
+
+def test_buying_never_swallows_a_cancellation(monkeypatch):
+    """`CancelledError` is a BaseException too, and catching it would
+    make stopping the run stop meaning anything."""
+    import asyncio
+
+    from deimos_bridge import upkeep
+
+    async def _cancel(client, **kw):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(upkeep, "_refill", _cancel)
+
+    async def drive():
+        with pytest.raises(asyncio.CancelledError):
+            await upkeep.buy_potions(_UpkeepClient())
+
+    asyncio.run(drive())
+
+
+def test_a_vendor_trip_only_happens_for_an_empty_bottle(monkeypatch):
+    """The one failure a vendor can fix. A click that failed or a read
+    that raised will not be any better after crossing two zones."""
+    import asyncio
+
+    from deimos_bridge import upkeep
+
+    trips = []
+
+    async def _no_wisps(client, **kw):
+        return 0
+
+    async def _needs(client, **kw):
+        return True
+
+    async def _buy(client, on_status=None):
+        trips.append(client)
+        return False
+
+    monkeypatch.setattr(upkeep, "collect_wisps", _no_wisps)
+    monkeypatch.setattr(upkeep, "needs_potion", _needs)
+    monkeypatch.setattr(upkeep, "buy_potions", _buy)
+
+    async def _empty(client):
+        _empty.last_error = "your potion bottle is empty — this never buys refills"
+        return False
+    _empty.last_error = ""
+
+    async def _broke(client):
+        _broke.last_error = "could not read your potion charges (RuntimeError: x)"
+        return False
+    _broke.last_error = ""
+
+    monkeypatch.setattr(upkeep, "drink_potion", _empty)
+    asyncio.run(upkeep.after_fight(_UpkeepClient(), buy=True))
+    assert len(trips) == 1, "an empty bottle should send it to the vendor"
+
+    trips.clear()
+    monkeypatch.setattr(upkeep, "drink_potion", _broke)
+    asyncio.run(upkeep.after_fight(_UpkeepClient(), buy=True))
+    assert trips == [], "a failed READ is not something a vendor can fix"
+
+    trips.clear()
+    monkeypatch.setattr(upkeep, "drink_potion", _empty)
+    asyncio.run(upkeep.after_fight(_UpkeepClient(), buy=False))
+    assert trips == [], "buying must not happen unless it was asked for"
+
+
+def test_buy_refills_is_off_until_it_is_switched_on(qapp):
+    """It spends real gold and crosses two zone changes, either of which
+    can leave the wizard somewhere the quest is not. Worth doing when a
+    run would otherwise halt on an empty bottle; not worth doing behind
+    anyone's back."""
+    from deimos_bridge.gui.app import MainWindow
+    from deimos_bridge.gui.live import LiveWorker
+
+    win = MainWindow(Telemetry())
+    assert not win.buy_potions.isChecked()
+    assert LiveWorker(Telemetry(), "ice", [], "school-aware", 1).buy_potions \
+        is False
+
+    # ...and it is a LIVE toggle, like the chores beside it, so it can be
+    # turned on without restarting a run.
+    assert "buy_potions" in MainWindow.LIVE_TOGGLES
+
+
 def test_upkeep_toggles_reach_the_worker(qapp):
     from deimos_bridge.gui.app import MainWindow
     from deimos_bridge.gui.live import LiveWorker
