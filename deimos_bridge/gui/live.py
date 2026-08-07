@@ -2180,10 +2180,31 @@ class LiveWorker(QThread):
                       f"that wait has no timeout at all and would have "
                       f"blocked the script for good")
 
-        ok, why = scripts.on_waitfor_timeout(gave_up)
-        if not ok:
-            self._say_once(self.seats[0], "waitfor-hook", why,
-                           kind="stage-failed", detail=why)
+        def teleported(landed, how, zone):
+            # Only the failures. A run makes thousands of these and the
+            # ones that worked are what the `zone` entries already show.
+            if landed:
+                return
+            for other in self.seats:
+                try:
+                    other.tel.note_questing(
+                        "teleport-failed",
+                        f"a scripted teleport did not land — {how}"
+                        + (f" (in {zone})" if zone else ""))
+                except Exception:
+                    pass
+            self._say_once(
+                self.seats[0], "tp-failed",
+                f"a scripted teleport did not land — {how}. Upstream this "
+                f"returns nothing at all, so the script cannot tell and its "
+                f"next instruction is for wherever it meant to be")
+
+        for install, key in ((scripts.on_waitfor_timeout, "waitfor-hook"),
+                             (scripts.on_teleport_result, "teleport-hook")):
+            ok, why = install(gave_up if key == "waitfor-hook" else teleported)
+            if not ok:
+                self._say_once(self.seats[0], key, why,
+                               kind="stage-failed", detail=why)
 
     #: how often a wedged scripted wizard is looked at. The condition it
     #: is waiting on changes on the scale of a conversation, not a tick.
