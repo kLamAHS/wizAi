@@ -1151,3 +1151,91 @@ def test_the_rate_never_includes_the_seat_it_is_planning_for():
 
     later = {s: p for s, step, p in seen if step == 1}
     assert later == {0: 500.0, 1: 400.0, 2: 300.0}
+
+
+# --------------------------------------------------- what breaks a tied score
+def test_the_bigger_hit_wins_a_tie_before_the_cheaper_card_does(monkeypatch):
+    """`card.pips` was the third key and it decided more rounds than
+    `turns` did -- 24% against 22%, replayed over the first live
+    two-wizard run's own candidate tables, with 17 of 60 rounds handed to
+    a free 0-pip setup card that had tied a real nuke on BOTH earlier
+    keys.
+
+    "Cheaper between equivalent outcomes" is only sound when the earlier
+    keys captured the outcome. Where they tie because the rollout could
+    not tell the lines apart, it is not choosing between equals -- it is
+    buying pip economy with damage.
+
+    The tie is FORCED rather than hunted for on some board. Every
+    attempt to construct one from real cards was separated by the
+    banked-damage key before the third key was ever consulted, which
+    would have made this a test of the board and not of the change.
+    """
+    from deimos_bridge import policies as P
+
+    # Every line scores the same sentinel and the same banked damage --
+    # exactly the "the rollout cannot tell these apart" case.
+    monkeypatch.setattr(P, "_rollout",
+                        lambda *a, **kw: (13.0, -600.0))
+
+    sim, state = wizard(school="fire", hand=("Fire Cat", "Fireblade"),
+                        pips=7, hp=1500, board=((800, "ice"),))
+    chosen = P.greedy_ttk()(sim, state)
+    card, _t = chosen if isinstance(chosen, tuple) else (chosen, 0)
+    assert card is not None and card.name == "Fire Cat", (
+        f"played {getattr(card, 'name', card)!r}; a free Fireblade must not "
+        f"beat a real hit just for costing nothing")
+
+    # And the cheaper card still wins between two REAL hits that tie,
+    # because pips is still a key -- it only moved behind damage.
+    sim, state = wizard(school="fire", hand=("Fire Cat", "Fire Cat"),
+                        pips=7, hp=1500, board=((800, "ice"),))
+    state.player.hand[1] = cards()["Sunbird"]
+    chosen = P.greedy_ttk()(sim, state)
+    card, _t = chosen if isinstance(chosen, tuple) else (chosen, 0)
+    assert card.name == "Sunbird", "the bigger hit is the point of the key"
+
+
+def test_a_tie_the_rollout_cannot_split_lands_on_the_focus():
+    """The last key was the enemy INDEX, so among lines the rollout could
+    not separate the winner was whichever mob the participant list
+    happened to put first. Measured on the first live two-wizard run: 17
+    of 46 aimed rounds had the same card scoring identically on another
+    mob, index 0 won 16 of the 17, and 13 of the 17 landed somewhere
+    other than the lowest-health mob -- the opening move disagreeing with
+    `focus_target`, which is what the continuation that scored it aims
+    at.
+    """
+    from deimos_bridge.policies import focus_target, greedy_ttk
+
+    # Identical mobs but for health, and the healthiest listed FIRST, so
+    # an index tiebreak and a focus tiebreak give different answers.
+    sim, state = wizard(school="fire", hand=("Fire Cat",), pips=7, hp=1500,
+                        board=((900, "ice"), (900, "ice"), (400, "ice")))
+    assert focus_target(state) == 2
+
+    policy = greedy_ttk()
+    chosen = policy(sim, state)
+    _card, target = chosen if isinstance(chosen, tuple) else (chosen, 0)
+    assert target == 2, f"aimed at mob {target}, not the focus"
+
+
+def test_the_runner_up_is_ranked_the_same_way_the_winner_was():
+    """The live handler picks a runner-up when the chosen card will not
+    go out, and it has to use the policy's key or it plays something the
+    policy ranked below other options."""
+    from deimos_bridge.policies import Candidate, rank_candidate
+
+    cheap = Candidate(card="Ice Trap", target=0, turns=13, damage=600,
+                      pips=0, horizon=12)
+    big = Candidate(card="Snow Serpent", target=0, turns=13, damage=600,
+                    pips=2, horizon=12)
+
+    # With no way to look a card's damage up, the best it can do is the
+    # first two keys and then pips -- and the free card wins.
+    assert min([cheap, big], key=rank_candidate) is cheap
+
+    # Given the lookup, it reproduces the policy's order: the real hit.
+    damage = {"Ice Trap": 0, "Snow Serpent": 175}.get
+    assert min([cheap, big],
+               key=lambda c: rank_candidate(c, damage)) is big

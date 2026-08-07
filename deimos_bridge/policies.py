@@ -976,7 +976,7 @@ def party_rate(dps):
         set_ally_rate(before)
 
 
-def rank_candidate(cand):
+def rank_candidate(cand, damage_of=None):
     """`greedy_ttk`'s ranking, as far as a recorded `Candidate` can say it.
 
     For a caller holding the decision *after* the fact -- the live
@@ -984,19 +984,23 @@ def rank_candidate(cand):
     rather than the policy, which ranks live card objects and has more
     to go on.
 
-    An approximation, and the gap is worth naming: the policy's key ends
-    `..., card.pips, card.damage, target`, and `card.damage` is the
-    card's nominal damage, which a `Candidate` does not record.
-    `Candidate.damage` is a different quantity entirely -- damage banked
-    over the whole rollout. So this reproduces the first three keys
-    exactly and stops, which is enough to order a hand and is honest
-    about not being the same function.
+    The gap is worth naming, because it is exactly one key. The policy
+    ranks on `(turns, banked, -card.damage, card.pips, target health,
+    target)`, and `card.damage` -- the card's NOMINAL damage -- is not
+    on a `Candidate`. (`Candidate.damage` is a different quantity
+    entirely: damage banked over the whole rollout.) A caller that can
+    look a card's damage up passes `damage_of`, a name -> damage
+    callable, and gets the real order; one that cannot gets the first
+    two keys and then pips, which is enough to order a hand.
 
     Kept here rather than in the handler so the ranking has one home; a
     copy over there would drift the first time this key changes, and it
-    has changed before.
+    has changed twice.
     """
-    return (cand.turns, -cand.damage, cand.pips)
+    if damage_of is None:
+        return (cand.turns, -cand.damage, cand.pips)
+    return (cand.turns, -cand.damage, -(damage_of(cand.card) or 0),
+            cand.pips)
 
 
 def rollout_throughput(candidates):
@@ -1335,24 +1339,69 @@ def greedy_ttk(max_turns: int = None, continuation=None):
         if not candidates:
             return None
 
-        # Third key: spend the least that still gets there. Damage is
-        # counted floored at each mob's health, so two lines that kill on
-        # the same turn and bank the same *effective* damage are
-        # genuinely equivalent in outcome -- and between equivalent
-        # outcomes the cheaper card is strictly better, because it leaves
-        # pips banked and the bigger card still in hand.
+        # Third key: take the bigger hit. Fourth: spend the least that
+        # still gets there. Those two were the other way round, and the
+        # order matters more than it looks, because `turns` is not the
+        # key that usually decides. Replayed over every candidate table
+        # of the first live two-wizard run, `turns` separates the winner
+        # in 13 of 58 rounds (22%); `card.pips` decides 14 (24%) and a
+        # complete tie broken by hand order decides 9 (16%). In 17 of
+        # those 60 rounds a free 0-pip setup card tied a real nuke on
+        # BOTH `turns` and banked damage and won for costing nothing.
         #
-        # This key used to be `-card.damage`, i.e. deliberately take the
-        # biggest hit. Combined with uncapped damage that was two pushes
-        # toward overkill at once: a 300-damage nuke into a mob with 50
-        # left both scored 300 of "banked damage" and won the tiebreak
-        # for being large.
+        # "Cheaper between equivalent outcomes" is a good rule and it is
+        # only sound when the earlier keys really captured the outcome.
+        # Where they tie because the rollout could not tell the lines
+        # apart at all, it is not choosing between equals, it is buying
+        # pip economy with damage.
+        #
+        # `-card.damage` was this key once and was removed because
+        # "combined with uncapped damage that was two pushes toward
+        # overkill at once". Half that pairing is gone: `board_hp()`
+        # floors each mob at zero, which is the half that actually fixed
+        # overkill, so the reason for the removal no longer holds.
+        #
+        # Measured, paired seeds, in the regime that ships -- a real
+        # two-wizard duel where the teammate deals 54 a round AND the
+        # policy is told so, three decks x three boards, n=200 a cell:
+        #
+        #                            pooled discordant   McNemar
+        #     shipped order                        --         --
+        #     bigger hit first              103 / 362      143.1
+        #     ...and focus last              87 / 396      196.4
+        #
+        # Both beat the shipped order on every cell that moves. The
+        # buff-heavy deck -- the documented risk, where the leaf value
+        # measured -15.8 -- gains the most rather than regressing
+        # (ice/stack 800/700/600: 43.0% -> 72.5%).
+        #
+        # This was measured in the party regime deliberately. Scoring it
+        # at ally=0 measures a collapse `set_ally_rate` and the incoming
+        # prior weight already fix, and the honest objection to changing
+        # the key at all was that "take the biggest hit" might only be
+        # good BECAUSE `turns` had stopped discriminating. It is not:
+        # with both collapses repaired the effect roughly doubles
+        # (McNemar 116 -> 238 on the same boards).
+        #
+        # Last key: the target's HEALTH, not its index. Among lines the
+        # rollout genuinely cannot separate, the raw index picked
+        # whichever mob the participant list happened to put first --
+        # measured on that run, 17 of 46 aimed rounds had the same card
+        # scoring identically on another mob, index 0 won 16 of the 17,
+        # and 13 of the 17 landed somewhere other than the lowest-health
+        # mob. That is the opening move disagreeing with `focus_target`,
+        # which is what the continuation that scored it aims at. It is
+        # worth its own +53 of McNemar above, and on the one cell where
+        # the bigger-hit key alone was a null (fire/live four mobs, 71.0%
+        # -> 70.0%, discordant 31/29) it is what turns it into 80.0%.
         scored = []
         for card, target in candidates:
             turns, neg_damage = _rollout(sim, s, card, max_turns, target,
                                          continuation=fixed_continuation)
-            scored.append(((turns, neg_damage, card.pips, card.damage,
-                            target), (card, target)))
+            focus = (float(s.enemies[target].hp)
+                     if 0 <= target < len(s.enemies) else 0.0)
+            scored.append(((turns, neg_damage, -(card.damage or 0),
+                            card.pips, focus, target), (card, target)))
         best_score, best_action = min(scored, key=lambda sc: sc[0])
 
         # Keep the whole comparison, not just its winner. A decision log
