@@ -1199,14 +1199,41 @@ def test_a_tie_at_turns_and_damage_is_the_common_case_not_the_edge():
 
 
 def test_between_equal_outcomes_the_cheaper_card_wins(monkeypatch):
-    """The third key, forced. Every candidate scores the same `turns` and
-    the same banked damage, so the rollout is saying it cannot tell them
-    apart -- and between genuinely equivalent outcomes the cheaper card
-    is better, because it leaves the pip banked and the big card in hand.
+    """The third key IN HORIZON, forced. Every candidate scores the same
+    real turn count and the same banked damage, so the outcomes really
+    are equivalent -- and the cheaper card is better, because it leaves
+    the pip banked and the big card in hand.
 
-    Reversing this was shipped and reverted; the comment on the key
-    carries the measurement both ways. The test exists so the next
-    attempt is at least visible.
+    Two rounds of the second live party run are exactly this and the
+    cheap card is right in both: a 190hp board where Frost Beetle and
+    Evil Snowman both clear on turn 1, and a 348hp board where both
+    clear on turn 2.
+    """
+    from deimos_bridge import policies as P
+
+    # turns=5 with a horizon of 12: a real turn count, not a sentinel.
+    monkeypatch.setattr(P, "_rollout", lambda *a, **kw: (5.0, -600.0))
+    sim, state = wizard(school="fire", hand=("Fire Cat", "Sunbird"),
+                        pips=7, hp=1500, board=((800, "ice"),))
+    chosen = P.greedy_ttk()(sim, state)
+    card, _t = chosen if isinstance(chosen, tuple) else (chosen, 0)
+    assert card is not None and card.name == "Fire Cat", (
+        f"played {getattr(card, 'name', card)!r}: a 3-pip Sunbird beat a "
+        f"1-pip Fire Cat on outcomes the rollout scored identically")
+
+
+def test_above_the_horizon_the_bigger_hit_wins_instead(monkeypatch):
+    """...and the same tie ABOVE the horizon means the opposite thing.
+
+    `turns` is a sentinel, `neg_damage` is the whole rollout line's
+    board delta, and a tie says only that the lookahead could not tell
+    the candidates apart -- so "cheapest" is not thrift, it is a coin
+    flip that always lands on the free card. Measured over the second
+    live party run's 197 scored rounds, 107 have no candidate killing
+    inside the horizon and 38 of those played a weaker card that tied a
+    stronger one exactly; three consecutive rounds of its fight 14 spent
+    4, 5 and 6 pips' worth of banked pips on 85-damage chip while Evil
+    Snowman sat in hand.
     """
     from deimos_bridge import policies as P
 
@@ -1215,9 +1242,29 @@ def test_between_equal_outcomes_the_cheaper_card_wins(monkeypatch):
                         pips=7, hp=1500, board=((800, "ice"),))
     chosen = P.greedy_ttk()(sim, state)
     card, _t = chosen if isinstance(chosen, tuple) else (chosen, 0)
-    assert card is not None and card.name == "Fire Cat", (
-        f"played {getattr(card, 'name', card)!r}: a 3-pip Sunbird beat a "
-        f"1-pip Fire Cat on outcomes the rollout scored identically")
+    assert card is not None and card.name == "Sunbird", (
+        f"played {getattr(card, 'name', card)!r}: nothing kills inside the "
+        f"horizon, so the tie is meaningless and the free card won it")
+
+
+def test_a_stall_that_killed_three_mobs_is_still_a_stall(monkeypatch):
+    """`turns > horizon` is the obvious sentinel test and it is wrong.
+    `_lost_score` credits a losing line 0.4 a kill, so a stalled rollout
+    that killed three of four mobs scores 13 - 1.2 = 11.8 -- below the
+    horizon, and indistinguishable from a real turn count by size."""
+    from deimos_bridge import policies as P
+
+    assert P.is_sentinel(11.8, 12), "a 3-kill stall reads as in-horizon"
+    assert not P.is_sentinel(12, 12), "a 12-turn clear is a real count"
+
+    monkeypatch.setattr(P, "_rollout", lambda *a, **kw: (11.8, -600.0))
+    sim, state = wizard(school="fire", hand=("Fire Cat", "Sunbird"),
+                        pips=7, hp=1500, board=((800, "ice"),))
+    chosen = P.greedy_ttk()(sim, state)
+    card, _t = chosen if isinstance(chosen, tuple) else (chosen, 0)
+    assert card is not None and card.name == "Sunbird", (
+        f"played {getattr(card, 'name', card)!r}: 11.8 is a stall wearing a "
+        f"turn count's clothes, and the thrifty branch fired on it")
 
 
 def test_the_ranking_is_total_enough_that_hand_order_does_not_decide():
