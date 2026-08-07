@@ -397,6 +397,17 @@ class SeatMove:
     solo_card: str = ""
     solo_target: int = None
     damage: float = 0.0
+    #: {enemy name: expected damage} — every mob this cast takes health
+    #: off, not just the one it was aimed at. `target_name` cannot
+    #: answer that: an AoE aims at nothing in particular, so
+    #: `_aims_at_an_enemy` gives it no index and no name, and the
+    #: telemetry that keys off the name then cannot see it at all. The
+    #: run at rev 8666bda7 is what that costs -- every one of the five
+    #: rounds where the fire wizard cast Meteor Strike reported an
+    #: empty `party_hits` on the ice wizard's side, so his residual
+    #: silently absorbed the whole AoE. One round recorded 987 damage
+    #: against a 115 prediction and was filed as clean.
+    hit: dict = field(default_factory=dict)
     note: str = ""
 
     @property
@@ -822,6 +833,19 @@ class Hivemind:
             # this every self-cast was labelled with `enemies[0]`.
             aims = card is not None and _aims_at_an_enemy(card)
             base_aims = base_card is not None and _aims_at_an_enemy(base_card)
+            # By name rather than by index, because the readers are other
+            # seats and an index only means anything on the board it was
+            # read from. Summed per name, which conflates same-named mobs
+            # -- three O'Leary Nappers on one board are one key -- but
+            # that is what `_party_hits` and `_party_expected` already do
+            # with `target_name`, so this changes nothing about it.
+            hit = {}
+            for i, dmg in (effect.damage or {}).items():
+                if not dmg:
+                    continue
+                nm = _enemy_name(sub.state, i)
+                if nm:
+                    hit[nm] = hit.get(nm, 0.0) + float(dmg)
             move = SeatMove(
                 seat=sub.seat, name=sub.name,
                 card=getattr(card, "name", "") or "",
@@ -829,7 +853,7 @@ class Hivemind:
                 target_name=_enemy_name(sub.state, target if aims else None),
                 solo_card=getattr(base_card, "name", "") or "",
                 solo_target=(base_target if base_aims else None),
-                damage=effect.total, note=notes.get(sub.seat, ""))
+                damage=effect.total, hit=hit, note=notes.get(sub.seat, ""))
             if move.retargeted:
                 retargets += 1
             if notes.get(sub.seat) == "held":

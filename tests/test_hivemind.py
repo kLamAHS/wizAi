@@ -845,6 +845,57 @@ def test_collateral_damage_names_the_wizard_that_caused_it():
     assert _party_hits(trapped, 0) == {}
 
 
+def test_a_teammates_aoe_is_a_hit_on_every_mob_it_touched():
+    """The one the name-keying could not see at all.
+
+    An AoE aims at nothing in particular, so `_aims_at_an_enemy` gives
+    it no index and `target_name` is empty -- and a lookup keyed on the
+    name then reports that nobody hit anything. Every Meteor Strike
+    round of the run at rev 8666bda7 did exactly that, and on one of
+    them the ice wizard's Snow Serpent banked 987 damage against a 115
+    prediction as a clean solo observation.
+    """
+    from deimos_bridge.hivemind import PartyPlan, SeatMove
+    from deimos_bridge.telemetry import _party_expected, _party_hits
+
+    plan = PartyPlan(moves=[
+        SeatMove(seat=0, name="wizard 1", card="Snow Serpent", target=0,
+                 target_name="Pops", damage=115.0, hit={"Pops": 115.0}),
+        # no target, no target_name -- exactly what `plan` builds for one
+        SeatMove(seat=1, name="wizard 2", card="Meteor Strike",
+                 damage=877.0, hit={"Pops": 500.0, "Napper": 377.0})])
+    assert _party_hits(plan, 0) == {"Pops": "wizard 2", "Napper": "wizard 2"}
+    assert _party_expected(plan, "Pops") == 615.0     # 115 + 500, not 115
+    assert _party_expected(plan, "Napper") == 377.0
+
+
+def test_a_plan_without_the_per_mob_breakdown_still_reads():
+    """`hit` is newer than `SeatMove`, and a plan built without it --
+    an older export, a hand-made stub -- must still attribute by name
+    rather than silently reporting nothing."""
+    from deimos_bridge.hivemind import PartyPlan, SeatMove
+    from deimos_bridge.telemetry import _party_expected, _party_hits
+
+    plan = PartyPlan(moves=[
+        SeatMove(seat=1, name="wizard 2", card="Fire Elf", target=0,
+                 target_name="Pops", damage=104.0)])
+    assert _party_hits(plan, 0) == {"Pops": "wizard 2"}
+    assert _party_expected(plan, "Pops") == 104.0
+
+
+def test_the_coordinator_fills_in_what_each_cast_touched():
+    """End to end, off a real plan rather than a stub: an AoE's entry
+    has to name every living mob."""
+    subs = party(2, hand=("Meteor Strike", "Fire Cat"),
+                 board=((400, "ice"), (400, "ice")))
+    _actions, plan_out = Hivemind(passes=1).plan(subs)
+    aoe = [m for m in plan_out.moves if m.card == "Meteor Strike"]
+    if not aoe:
+        pytest.skip("neither seat chose the AoE on this board")
+    assert len(aoe[0].hit) == 2, aoe[0].hit
+    assert all(v > 0 for v in aoe[0].hit.values())
+
+
 # --------------------------------- what the first NAMED party run said
 def test_a_record_never_holds_two_wizards():
     """The window keeps one record per SEAT and reuses it across Play

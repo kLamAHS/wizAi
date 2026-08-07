@@ -191,15 +191,24 @@ def _party_expected(party, target_name):
 
     Returns None when the coordinator did not price the round, so a
     missing plan is never confused with a plan that expects nothing.
+
+    Read off `SeatMove.hit`, which names every mob a cast takes health
+    off, rather than off `target_name`, which names only the one it was
+    aimed at. An AoE is aimed at nothing in particular and so carries no
+    name at all, and it was contributing zero here -- the party claim on
+    a round somebody cast Meteor Strike was the other seats' damage
+    only.
     """
     moves = getattr(party, "moves", None)
     if not moves or not target_name:
         return None
     total = 0.0
     for move in moves:
-        if move.target_name != target_name:
-            continue
-        total += float(getattr(move, "damage", 0) or 0)
+        hit = getattr(move, "hit", None)
+        if hit:
+            total += float(hit.get(target_name, 0.0) or 0.0)
+        elif move.target_name == target_name:
+            total += float(getattr(move, "damage", 0) or 0)
     return total
 
 
@@ -223,16 +232,34 @@ def _party_hits(party, seat):
     `SeatMove.damage` is the coordinator's own estimate for that move,
     which is exactly the question -- a card it scored at zero moves no
     health and cannot be the reason this wizard's residual is off.
+
+    And EVERY mob it moves health on, via `SeatMove.hit`. Keying off
+    `target_name` missed an AoE completely: `_aims_at_an_enemy` gives a
+    card that hits the whole board no index and no name, so a teammate's
+    Meteor Strike registered as nobody hitting anything. In the run at
+    rev 8666bda7 that is all five Meteor Strike rounds, and on one of
+    them the ice wizard's Snow Serpent was credited with 987 damage
+    against a 115 prediction -- the fire wizard's AoE, banked as a clean
+    solo observation. It is the reverse of the trap-and-shield bug above
+    and it is worse: that one refused good rounds, this one accepts bad
+    ones.
     """
     out = {}
     for move in getattr(party, "moves", ()) or ():
-        if move.seat == seat or not move.card or not move.target_name:
+        if move.seat == seat or not move.card:
             continue
-        if not (getattr(move, "damage", 0) or 0) > 0:
-            continue
-        who = out.get(move.target_name)
-        out[move.target_name] = (f"{who} and {move.name}" if who
-                                 else move.name)
+        hit = getattr(move, "hit", None)
+        if not hit:
+            # a plan from before `hit` existed, or a cast that moved no
+            # health at all
+            if not move.target_name or not (getattr(move, "damage", 0) or 0) > 0:
+                continue
+            hit = {move.target_name: move.damage}
+        for name, dmg in hit.items():
+            if not name or not (dmg or 0) > 0:
+                continue
+            who = out.get(name)
+            out[name] = f"{who} and {move.name}" if who else move.name
     return out
 
 
