@@ -10573,3 +10573,80 @@ def test_an_unreadable_box_is_still_clicked_through():
     clicks, why = asyncio.run(
         advance_dialogue(client, max_clicks=5, settle=0.02, poll=0.01))
     assert (clicks, why) == (5, "")
+
+
+# --------------------------------------------- the run must never stop silently
+def test_a_stranded_wizard_in_a_duel_is_told_about_rather_than_dropped(
+        monkeypatch):
+    """The run at rev 85a68184: two `stranded` entries, no `rejoined`,
+    no `rejoin-failed`, no third attempt. `party.follow` returns
+    (False, "") when the follower is in a duel -- leaving Sebastian
+    alone with Foulgaze was right, saying nothing about it was not."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    worker, _read = _zoned_party(["Olde Town", "Olde Town", "Unicorn Way"])
+    seat, target = worker.seats[2], worker.seats[0]
+    seat.stranded_where, target.zone_seen = "Unicorn Way", "Olde Town"
+
+    async def nothing_to_do(*a, **k):
+        return False, ""
+
+    async def in_a_duel(client):
+        return True
+
+    # Through monkeypatch, so these are put back. Assigning to the
+    # module directly leaked into every later test that follows a
+    # leader, and six of them failed on the way past.
+    monkeypatch.setattr(party, "follow", nothing_to_do)
+    monkeypatch.setattr(party, "in_battle", in_a_duel)
+    asyncio.run(worker._rejoin(seat, target))
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert kinds == ["stranded", "rejoin-skipped"]
+    assert "still in a duel" in seat.tel.questing[-1]["detail"]
+
+
+def test_waiting_to_heal_is_written_down_where_the_export_can_see_it():
+    """The one place the run deliberately stops for up to
+    LOW_HEALTH_WAIT a fight, and the one place that left no trace --
+    so "it gets stuck" and "it is healing, as designed" read the
+    same."""
+    import asyncio
+
+    worker, _read = _zoned_party(["Olde Town", "Olde Town"])
+    seat = worker.seats[0]
+    worker.use_potions = worker.collect_wisps = worker.buy_potions = False
+    # Short, but not zero: the give-up check runs before the first
+    # report, so a zero wait would skip straight past the hold the test
+    # is about. In production the wait is 150s and cannot.
+    worker.LOW_HEALTH_WAIT = 0.01
+    worker.LOW_HEALTH_POLL = 0.05
+
+    async def hurt(_seat):
+        return 0.05
+
+    worker._health_left = hurt
+    asyncio.run(worker._let_it_heal(seat))
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert "waiting-to-heal" in kinds
+    assert "went-in-hurt" in kinds
+    assert "5%" in seat.tel.questing[0]["detail"]
+
+
+def test_a_wizard_that_heals_up_says_so_too():
+    import asyncio
+
+    worker, _read = _zoned_party(["Olde Town", "Olde Town"])
+    seat = worker.seats[0]
+    worker.use_potions = worker.collect_wisps = worker.buy_potions = False
+    worker.LOW_HEALTH_POLL = 0.01
+    reads = iter([0.05, 0.9, 0.9, 0.9])
+
+    async def recovering(_seat):
+        return next(reads, 0.9)
+
+    worker._health_left = recovering
+    asyncio.run(worker._let_it_heal(seat))
+    assert [e["kind"] for e in seat.tel.questing] == ["waiting-to-heal",
+                                                      "healed"]

@@ -2293,6 +2293,25 @@ class LiveWorker(QThread):
             self._say_once(seat, "rejoin",
                            f"left behind in {adrift} and cannot get back — "
                            f"{why}")
+        else:
+            # `party.follow` returns (False, "") for its two "nothing to
+            # do" cases -- the follower is in a duel, or they are
+            # already together -- and this used to drop both. So the log
+            # recorded a wizard stranded and then said nothing about it
+            # ever again, which reads as the rescue having hung.
+            #
+            # It is what the run at rev 85a68184 shows: two `stranded`
+            # entries, no `rejoined`, no `rejoin-failed`, and no third
+            # attempt. Sebastian was fighting Foulgaze on his own in
+            # WC_OldeTown_T2 while the other two were in WC_Hub. Leaving
+            # him alone was right. Not saying so was not.
+            seat.stranded_since = None
+            fighting = await party.in_battle(seat.client)
+            detail = ("still in a duel, so there is nothing to teleport "
+                      "out of" if fighting else
+                      "already close enough by the time the follow ran")
+            seat.tel.note_questing("rejoin-skipped", detail)
+            self._say(seat, f"left behind in {adrift} — {detail}")
 
     #: how often the party's whereabouts are compared. Three zone reads
     #: a tick for the life of a run is a lot of memory traffic for a
@@ -2413,6 +2432,10 @@ class LiveWorker(QThread):
                 if said:
                     self._say(seat, f"back to {left:.0%} — carrying on"
                               if left is not None else "carrying on")
+                    seat.tel.note_questing(
+                        "healed",
+                        f"back to {left:.0%} after {time.monotonic() - started:.0f}s"
+                        if left is not None else "carrying on")
                 return
             if time.monotonic() - started > self.LOW_HEALTH_WAIT:
                 self._say(seat,
@@ -2421,6 +2444,10 @@ class LiveWorker(QThread):
                           f"fixing it — going into the next fight anyway, "
                           f"because a run that stops here reports nothing "
                           f"at all")
+                seat.tel.note_questing(
+                    "went-in-hurt",
+                    f"gave up after {self.LOW_HEALTH_WAIT:.0f}s on "
+                    f"{left:.0%} health, needing {floor:.0%}")
                 return
             if not said:
                 said = True
@@ -2428,6 +2455,22 @@ class LiveWorker(QThread):
                           f"on {left:.0%} health and the last few fights "
                           f"have cost up to {floor:.0%} — not starting "
                           f"another one yet")
+                # In the questing log, not just the status line. This is
+                # the one place the run deliberately stops for up to
+                # `LOW_HEALTH_WAIT` a fight, and it was the one place
+                # that left no trace in the export -- so "it gets stuck"
+                # and "it is healing, as designed" were the same picture.
+                #
+                # The run at rev 85a68184 is why it matters: Phönix
+                # finished a fight on 27% against a 40% floor and opened
+                # Lord Nightshade on 8.8%, then died; Konstantin ended
+                # his on 4.5% and died too. Whether the gate held and
+                # gave up, or never ran at all, is not answerable from
+                # that export, and it has to be.
+                seat.tel.note_questing(
+                    "waiting-to-heal",
+                    f"on {left:.0%} health, needing {floor:.0%} before "
+                    f"the next fight")
             try:
                 async with self._driving(seat, "waiting to heal up"):
                     await asyncio.wait_for(
