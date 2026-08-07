@@ -55,6 +55,63 @@ class Scheduler:
         self.current_task_index = (self.current_task_index + 1) % len(self.tasks)
 
 
+
+# --------------------------------------------------------------------- wizAi
+#: How long a `waitfor` may poll before giving up, per kind, in seconds.
+#:
+#: Upstream, `waitfor_coro` is `while not cond(): await sleep(0.25)` with
+#: no timeout at all, so a condition that never becomes true parks the VM
+#: forever. That is the single largest reason a scripted run needs a
+#: human: wizAi's telemetry at rev 07ef3fa7 caught two wizards parked on
+#: one instruction for minutes at a time on `Talk To` steps, and the
+#: operator reports the run did not recover on its own -- they fixed it
+#: by hand.
+#:
+#: Per kind because the honest limits differ by two orders of magnitude.
+#: A dialogue box appears in seconds or not at all; a `waitfor battle
+#: completion` legitimately spans a fifteen-round duel. These are
+#: generous rather than tight -- the purpose is to bound a hang, not to
+#: police a slow game.
+#:
+#: Giving up RETURNS rather than raising. deimoslang scripts are built
+#: out of retry loops (2,438 bounded and 528 unbounded across the arc
+#: scripts wizAi was tested against), so falling through lands in one and
+#: gets another attempt. Raising would end the program instead, which is
+#: the failure this exists to prevent.
+#:
+#: Set a value to 0 or None to restore the upstream unbounded behaviour.
+WAITFOR_TIMEOUTS = {
+    "dialog": 90.0,
+    "window": 90.0,
+    "zonechange": 150.0,
+    "free": 150.0,
+    "battle": 900.0,
+}
+DEFAULT_WAITFOR_TIMEOUT = 300.0
+
+#: Called as (kind, seconds, inverted) when a wait gives up. wizAi sets
+#: this so the giving-up lands in the run's questing log; left as None
+#: the patch is silent and behaves exactly as a bounded wait should.
+on_waitfor_timeout = None
+
+
+def waitfor_timeout(kind) -> float:
+    name = getattr(kind, "name", None) or str(kind).rsplit(".", 1)[-1]
+    if name in WAITFOR_TIMEOUTS:
+        return WAITFOR_TIMEOUTS[name] or 0.0
+    return DEFAULT_WAITFOR_TIMEOUT or 0.0
+
+
+def _waitfor_gave_up(kind, waited, inverted):
+    name = getattr(kind, "name", None) or str(kind).rsplit(".", 1)[-1]
+    if on_waitfor_timeout is None:
+        return
+    try:
+        on_waitfor_timeout(name, waited, bool(inverted))
+    except Exception:
+        pass
+
+
 class VMError(Exception):
     pass
 
@@ -1431,9 +1488,22 @@ class VM:
                 completion: bool = args[-1]
                 assert type(completion) == bool
 
-                async def waitfor_coro(coro, invert: bool, interval=0.25):
+                # wizAi patch -- see WAITFOR_TIMEOUTS at the top of this
+                # module. Upstream this loop has no timeout of any kind,
+                # so any `waitfor` whose condition never comes true
+                # blocks the VM permanently.
+                kind = args[0]
+
+                async def waitfor_coro(coro, invert: bool, interval=0.25,
+                                       kind=kind):
+                    waited = 0.0
+                    limit = waitfor_timeout(kind)
                     while not (invert ^ await coro()):
                         await asyncio.sleep(interval)
+                        waited += interval
+                        if limit and waited >= limit:
+                            _waitfor_gave_up(kind, waited, invert)
+                            return
 
                 async def waitfor_impl(coro, interval=0.25):
                     nonlocal completion

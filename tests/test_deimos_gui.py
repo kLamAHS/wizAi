@@ -10847,10 +10847,9 @@ def test_a_script_wedged_on_a_dialogue_gets_the_box_cleared(monkeypatch):
 
 
 def test_a_wedged_script_with_no_box_open_is_only_reported(monkeypatch):
-    """The log could not tell "the box is open and the script cannot
-    advance it" from "the box never opened", and those need opposite
-    fixes. Nothing is clicked in the second case -- opening a
-    conversation the script did not ask for changes the quest state."""
+    """A retry loop with nothing open is not a dialogue problem. The log
+    could not tell "the box is open and the script cannot advance it"
+    from "the box never opened", and those want opposite fixes."""
     import asyncio
 
     worker, seat = _wedged(dialogue=False, monkeypatch=monkeypatch)
@@ -10858,7 +10857,69 @@ def test_a_wedged_script_with_no_box_open_is_only_reported(monkeypatch):
     kinds = [e["kind"] for e in seat.tel.questing]
     assert kinds == ["stuck-detail"]
     assert "dialogue closed" in seat.tel.questing[0]["detail"]
+    assert "looping" in seat.tel.questing[0]["detail"]
     assert "the marker is 900 away" in seat.tel.questing[0]["detail"]
+
+
+def test_a_script_parked_on_a_dialogue_that_never_opened_gets_an_x(
+        monkeypatch):
+    """`waitfordialog` is `while not await is_in_dialog(): sleep(0.25)`
+    with no timeout (`command_parser.py:67`). A script parked on that
+    with no box open is waiting for one that is not coming, and pressing
+    X is the thing that makes its condition true -- the one case where
+    an unrequested interact is exactly what the script is asking for."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, seat = _wedged(dialogue=False, monkeypatch=monkeypatch)
+    worker.seats[0].runner = type("R", (), {"running": True,
+                                            "steps": 11582})()
+    pressed = []
+
+    async def press_x(_c, **kw):
+        pressed.append(True)
+        return True, ""
+
+    async def opened(_c, **kw):
+        return True
+
+    monkeypatch.setattr(questing, "press_x", press_x)
+    monkeypatch.setattr(questing, "dialogue_opened", opened)
+
+    asyncio.run(worker._unstick(seat))          # first look: no baseline
+    assert not pressed, "parked is unknowable on the first sample"
+    seat.unstuck_at = 0.0
+    asyncio.run(worker._unstick(seat))          # counter has not moved
+    assert pressed == [True]
+    note = [e for e in seat.tel.questing if e["kind"] == "unstuck-pressed-x"]
+    assert "came up" in note[0]["detail"]
+
+
+def test_a_script_still_running_instructions_never_gets_an_x(monkeypatch):
+    """The dangerous direction. A climbing counter means the script is
+    not waiting on anything, so an interact it did not ask for is a
+    quest-state change nobody requested."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, seat = _wedged(dialogue=False, monkeypatch=monkeypatch)
+    runner = type("R", (), {"running": True, "steps": 11582})()
+    worker.seats[0].runner = runner
+    pressed = []
+
+    async def press_x(_c, **kw):
+        pressed.append(True)
+        return True, ""
+
+    monkeypatch.setattr(questing, "press_x", press_x)
+
+    asyncio.run(worker._unstick(seat))
+    runner.steps = 12403                        # the loop is running
+    seat.unstuck_at = 0.0
+    asyncio.run(worker._unstick(seat))
+    assert not pressed
 
 
 def test_a_script_that_is_making_progress_is_left_completely_alone(
@@ -10917,3 +10978,44 @@ def test_the_heartbeat_beats_while_a_wizard_is_in_a_duel():
     asyncio.run(worker._heartbeat(seat, driven=True, fighting=True))
     beat = [e for e in seat.tel.questing if e["kind"] == "heartbeat"][0]
     assert "in a duel" in beat["detail"]
+
+
+def test_a_waitfor_that_gives_up_is_reported_to_every_seat(monkeypatch):
+    """A bounded wait that gives up silently is only half a fix: the
+    script falls through into a retry loop and the run looks normal
+    again, so the thing that went wrong has to be said."""
+    from deimos_bridge import scripts
+
+    worker, _read = _zoned_party(["Olde Town", "Olde Town"])
+    worker.seats[0].runner = type("R", (), {"running": True, "steps": 1})()
+    installed = []
+    monkeypatch.setattr(scripts, "on_waitfor_timeout",
+                        lambda hook: (installed.append(hook), (True, ""))[1])
+
+    worker._watch_waitfor(worker.seats[0])
+    assert len(installed) == 1
+    worker._watch_waitfor(worker.seats[0])
+    assert len(installed) == 1, "the VM hook is module-level, install it once"
+
+    installed[0]("dialog", 90.0, False)
+    for seat in worker.seats:
+        note = [e for e in seat.tel.questing
+                if e["kind"] == "waitfor-gave-up"]
+        assert len(note) == 1
+        assert "`waitfor dialog` polled for 90s" in note[0]["detail"]
+
+
+def test_a_deimos_without_the_hook_is_reported_not_ignored(monkeypatch):
+    """A Deimos update that renames the hook must not stop wizAi
+    starting, but it must not pass unnoticed either."""
+    from deimos_bridge import scripts
+
+    worker, _read = _zoned_party(["Olde Town", "Olde Town"])
+    worker.seats[0].runner = type("R", (), {"running": True, "steps": 1})()
+    monkeypatch.setattr(scripts, "on_waitfor_timeout",
+                        lambda hook: (False, "this Deimos has no hook"))
+
+    worker._watch_waitfor(worker.seats[0])           # must not raise
+    note = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "stage-failed"]
+    assert note and "no hook" in note[0]["detail"]
