@@ -180,6 +180,63 @@ def test_a_ward_one_wizard_lays_lands_on_the_next_wizards_board():
     assert ledger.apply(other, [0]).enemies[0].wards
 
 
+def test_a_second_copy_of_the_partys_trap_adds_nothing_to_the_same_hit():
+    """Casting for others, which is where the operator saw it worst.
+
+    Traps are the party's shared currency -- one wizard lays it, every
+    wizard cashes it -- so "is this trap already up?" is a question the
+    coordinator asks about somebody ELSE's cast, on a board it was
+    handed rather than one it read. The ice wizard's hand carries both
+    `Ice Trap` and `Ice Trap - Amulet@item`, and under the old
+    `(name, source)` identity those were two spells: laying the second
+    on a mob the party had already trapped looked like 1.4 x 1.4.
+
+    One spell, one template id (`spell_effect_stacking_id`), one trap
+    per strike. The second is still worth carrying -- it fires on the
+    NEXT hit -- but it does not double this one.
+    """
+    import copy
+    import dataclasses
+
+    from deimos_bridge.telemetry import predict_damage
+    from w101_sim import Actor, Boss, Rules, Sim, State
+
+    table = dict(cards())
+    table["Ice Trap - Amulet@item"] = dataclasses.replace(
+        table["Ice Trap"], name="Ice Trap - Amulet@item", source="item")
+
+    def seat(hand):
+        p = Actor(name="W", school="ice", hp=1500, max_hp=1500, team=0,
+                  norm_pips=7)
+        p.hand = [table[n] for n in hand]
+        foes = [Actor(name="Mob", school="fire", hp=900, max_hp=900, team=1,
+                      flat_hit=40)]
+        sim = Sim(cards=table, decklist=list(hand), school="ice",
+                  boss=Boss("Mob", 900, "fire", 40), rules=Rules(),
+                  player_hp=1500)
+        return sim, State(p, foes)
+
+    sim_a, a = seat(["Ice Trap", "Frost Beetle"])
+    ledger = Ledger()
+    ledger.add(measure_cast(sim_a, a, (table["Ice Trap"], 0)), [0])
+
+    sim_b, b = seat(["Ice Trap - Amulet@item", "Frost Beetle"])
+    board = ledger.apply(b, [0])
+    assert board.enemies[0].wards, "the ally's trap has to be on this board"
+
+    def hit(state):
+        beetle = next(c for c in state.player.hand if c.name == "Frost Beetle")
+        return predict_damage(sim_b, state, beetle, 0)
+
+    one_trap = hit(board)
+    doubled = copy.deepcopy(board)
+    sim_b.cast(doubled, next(c for c in doubled.player.hand
+                             if c.name == "Ice Trap - Amulet@item"), 0)
+    assert hit(doubled) == pytest.approx(one_trap), \
+        "an amulet Ice Trap is an Ice Trap"
+    assert len(doubled.enemies[0].wards) == 2, "and it does go up"
+
+
 def test_a_shared_ward_is_copied_not_handed_round():
     """A `Hanging` carries charges and is consumed in place; one object
     shared by four rollouts lets one wizard's hit spend a trap the other

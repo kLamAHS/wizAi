@@ -2,7 +2,7 @@
 Mechanics test suite for the v0.3 engine.
 
 Each test pins one documented combat rule (see the research notes / README):
-stacking-by-provenance, FIFO ward processing with prism conversion, DoT/HoT
+stacking by (spell, enchantment), FIFO ward processing with prism conversion, DoT/HoT
 snapshots, drain semantics, multi-hit consumption, X-pip scaling, cheats,
 treasure cards, stuns, threat, crit/block/pierce machinery, and the v0.2
 compatibility surface used by the DP transfer and the tabular RL agent.
@@ -206,15 +206,71 @@ def test_same_name_same_source_is_placeable_but_fires_one_at_a_time():
     assert len(s.player.charms) == 1        # banked for the next strike
 
 
-def test_provenance_stacks():
+def test_a_treasure_copy_is_the_same_spell_and_only_one_of_them_fires():
+    """This test used to be `test_provenance_stacks` and to assert the
+    opposite, 1.35 x 1.35, on the theory that the `source` tier splits a
+    spell's stacking identity.
+
+    It does not, and the client says so. Deimos reads the game's own
+    fields (`Deimos/src/combat_math.py`):
+
+        def spell_effect_stacking_id(spell_template_id,
+                                     enchantment_spell_template_id)
+        If two stacking IDs match, the spell effects do not stack.
+
+    Two fields, neither of them provenance. A deck Fireblade and a
+    treasure-card Fireblade are one spell with one template id, so they
+    share an identity and only one fires per strike. The other stays up,
+    which is what makes carrying a second copy worth anything.
+
+    Live this was not academic: the ice wizard's hand holds `Ice Trap`
+    AND `Ice Trap - Amulet@item`, and the policy was told that laying
+    the second on a mob that already had the first multiplied it.
+    """
     sim, s = fresh()
     b1, b2 = give(sim, s, "Fireblade", "Fireblade@tc")
     cast(sim, s, b1)
-    cast(sim, s, b2)                                  # tc copy stacks
+    cast(sim, s, b2)                        # legal, and it does go up
+    assert len(s.player.charms) == 2
     shark = give(sim, s, "Fire Shark")
     hp0 = s.boss_hp
     cast(sim, s, shark)
-    assert s.boss_hp == pytest.approx(hp0 - 405 * 1.35 * 1.35)
+    assert s.boss_hp == pytest.approx(hp0 - 405 * 1.35)
+    assert len(s.player.charms) == 1        # banked for the next strike
+
+
+def test_an_enchantment_is_the_one_thing_that_does_split_the_identity():
+    """`enchantment_spell_template_id` is the second half of the game's
+    key, so a Sharpened Fireblade and a plain one are two effects and
+    both multiply the same hit. This is the case the provenance rule got
+    right by accident, and it has to survive the correction."""
+    sim, s = fresh()
+    sharp = sharpened(sim.cards, "Fireblade")
+    assert sharp.percent == pytest.approx(0.45)
+    b1 = give(sim, s, "Fireblade")
+    s.hand.append(sharp)
+    cast(sim, s, b1)
+    cast(sim, s, sharp)
+    shark = give(sim, s, "Fire Shark")
+    hp0 = s.boss_hp
+    cast(sim, s, shark)
+    assert s.boss_hp == pytest.approx(hp0 - 405 * 1.35 * 1.45)
+    assert not s.player.charms              # both consumed by one strike
+
+
+def test_an_item_card_decoration_is_not_a_different_spell():
+    """The live form, and the one that was actually costing rounds:
+    `Ice Trap - Amulet@item` is an Ice Trap the amulet handed over, not
+    a second trap spell."""
+    from w101_sim import spell_identity
+
+    assert spell_identity("Ice Trap - Amulet@item") == ("Ice Trap", "")
+    assert spell_identity("Ice Trap") == ("Ice Trap", "")
+    assert spell_identity("Snow Serpent - T02 - A") == ("Snow Serpent", "")
+    assert spell_identity("Fireblade@tc") == ("Fireblade", "")
+    assert spell_identity("Fireblade+sharpened") == ("Fireblade", "sharpened")
+    # a hyphen inside a name is not a decoration marker -- ` - ` is
+    assert spell_identity("Wand-Myth-T3-012@item") == ("Wand-Myth-T3-012", "")
 
 
 def test_a_blade_read_off_the_client_is_the_same_blade_as_the_one_in_hand():
@@ -274,20 +330,36 @@ def test_a_read_trap_is_the_same_trap_as_the_one_in_hand():
     assert s.boss_hp == pytest.approx(hp0 - 405 * 1.25)
 
 
-def test_nothing_offline_can_reach_the_live_rule():
-    """The asymmetry is scoped by `source == "live"`, and only
-    `read_hangings` ever mints that. Stated as a test because the whole
-    safety argument for the pinned tables above is this one fact."""
+def test_nothing_offline_can_reach_the_live_shape_rule():
+    """`_StackSeen`'s shape fallback is scoped by `source == "live"`, and
+    only `read_hangings` ever mints that. Stated as a test because it is
+    the whole safety argument for the shape rule: offline, two effects
+    are the same only when they are the same spell.
+
+    Both mechanisms are needed and they cover different gaps.
+    `stack_key` matches a card against a card by name; the shape rule
+    matches a memory read, which has no card name to match, against
+    either.
+    """
     from w101_sim import _StackSeen, Hanging
 
     deck = Hanging(name="Fireblade", slot="charm", kind="damage",
                    percent=0.35, schools={"fire"}, source="deck")
-    tc = Hanging(name="Fireblade@tc", slot="charm", kind="damage",
-                 percent=0.35, schools={"fire"}, source="tc")
+    sharp = Hanging(name="Fireblade+sharpened", slot="charm", kind="damage",
+                    percent=0.45, schools={"fire"}, source="enchant")
+    twin = Hanging(name="Balanceblade", slot="charm", kind="damage",
+                   percent=0.35, schools={"fire"}, source="deck")
     seen = _StackSeen()
     seen.add(deck)
     assert seen.saw(deck)          # itself, obviously
-    assert not seen.saw(tc)        # provenance still stacks
+    assert not seen.saw(sharp)     # a different enchantment is a second effect
+    # Same shape, different spell. Only a LIVE read may collapse these,
+    # because a live read has no name to compare -- offline it must not.
+    assert not seen.saw(twin)
+    live = Hanging(name="live:2337", slot="charm", kind="damage",
+                   percent=0.35, schools={"fire"}, source="live",
+                   sub="kBlade:2:35")
+    assert seen.saw(live)
 
 
 def test_sharpened_variant_stacks_and_is_stronger():
@@ -495,7 +567,33 @@ def test_shield_reduces_hit_and_dot_of_linked_spell():
 def test_minotaur_first_hit_eats_all_matching_shields():
     """One strike consumes ALL wards that match it: Minotaur's 50-hit
     strips both universal shields at once and the 445 lands clean — the
-    classic shield-breaker play."""
+    classic shield-breaker play.
+
+    Two DISTINCT shields, which the pair here was not. It used to be a
+    Tower Shield and `Tower Shield@tc`, and the shield-breaker read came
+    entirely from provenance splitting the stacking identity. It does
+    not: one spell, one template id, one shield per strike. The play is
+    real, so the test keeps it and uses two spells to make it.
+    """
+    sim, s = fresh(school="myth")
+    boss = s.enemies[0]
+    boss.wards.append(Hanging("Tower Shield", "ward", "damage",
+                              percent=-0.50, schools=None))
+    boss.wards.append(Hanging("Legend Shield", "ward", "damage",
+                              percent=-0.50, schools=None))
+    mino = give(sim, s, "Minotaur")
+    hp0 = s.boss_hp
+    cast(sim, s, mino)
+    assert s.boss_hp == pytest.approx(hp0 - (50 * 0.5 * 0.5 + 445))
+    assert not boss.wards
+
+
+def test_a_second_copy_of_one_shield_survives_the_first_strike():
+    """And the same board with two copies of ONE shield is a different
+    fight: the 50-hit spends one of them, and the 445 walks into the
+    other. 247.5 through, not 457.5 — the shield-breaker does not work
+    on a doubled-up single shield, which is the whole reason players
+    carry two."""
     sim, s = fresh(school="myth")
     boss = s.enemies[0]
     boss.wards.append(Hanging("Tower Shield", "ward", "damage",
@@ -505,8 +603,7 @@ def test_minotaur_first_hit_eats_all_matching_shields():
     mino = give(sim, s, "Minotaur")
     hp0 = s.boss_hp
     cast(sim, s, mino)
-    assert s.boss_hp == pytest.approx(hp0 - (50 * 0.5 * 0.5 + 445))
-    assert not boss.wards
+    assert s.boss_hp == pytest.approx(hp0 - (50 * 0.5 + 445 * 0.5))
 
 
 def test_enemy_summon_joins_enemy_side():

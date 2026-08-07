@@ -5,10 +5,15 @@ Objective: turns-to-kill / survival substrate for DP + RL.
 v0.3 rebuilds the engine around the offline-ML design notes ("factored
 simulator, symbolic state, effect provenance"). Changes from v0.2:
 
-  - HANGING EFFECTS ARE STRUCTURED OBJECTS with provenance. Every charm/
-    ward carries (name, source) as its stack key: a deck Fireblade, a
-    treasure-card Fireblade ("Fireblade@tc") and a Sharpened Fireblade all
-    stack with each other, while two copies of the same one stay illegal.
+  - HANGING EFFECTS ARE STRUCTURED OBJECTS with a stacking identity.
+    Every charm/ward keys on (spell, enchantment) -- `spell_identity` --
+    which is the game's own `(spell_template_id,
+    enchantment_spell_template_id)`. One per identity fires per hit, and
+    the rest stay standing for the next one. So a Fireblade and a
+    Sharpened Fireblade both multiply a strike, while a deck Fireblade
+    and a treasure-card Fireblade are ONE spell and only one of them
+    does. Provenance was in this key and should never have been: see
+    `spell_identity` for what that cost live.
     Wards process FIFO in placement order with a running damage school, so
     trap -> prism -> shield ordering resolves exactly like the game.
   - FULL EFFECT TAXONOMY: shields (single/dual/universal), prisms (school
@@ -136,7 +141,58 @@ class Card:
 
     @property
     def stack_key(self):
-        return (self.name, self.source)
+        return spell_identity(self.name)
+
+
+def spell_identity(name: str) -> tuple:
+    """(spell, enchantment) — the client's own stacking identity.
+
+    Deimos computes it from the game's own fields and it is worth
+    quoting, because wizAi had it wrong in a way no amount of reasoning
+    from the card table would have caught (`Deimos/src/combat_math.py`,
+    `spell_effect_stacking_id`):
+
+        Calculate a spell effect stacking ID by combining
+        spell_template_id and enchantment_spell_template_id.
+        If two stacking IDs match, the spell effects do not stack.
+
+    Two fields, and **provenance is not one of them.** A deck Fireblade,
+    a treasure-card Fireblade and an amulet Fireblade are one spell with
+    one template id, so only one of them fires on any single hit. wizAi
+    keyed on `(name, source)` and therefore had all three compounding --
+    a wizard holding both `Ice Trap` and `Ice Trap - Amulet@item`, which
+    is exactly what the live ice wizard holds, was told that laying the
+    second on the same mob multiplied the first, 1.4 x 1.4 = 1.96 where
+    the game gives 1.4. That is a trap that appears to pay for itself
+    twice, and it is what the operator reported as the bot not knowing
+    when traps stack.
+
+    The *enchantment* does split the id, and it is the only thing that
+    does: a Sharpened Fireblade and a plain one are two effects and both
+    fire. So the two halves come off the name, which is where wizAi
+    already encodes both:
+
+      `Fireblade`                 -> ('Fireblade', '')
+      `Fireblade@tc`              -> ('Fireblade', '')     provenance
+      `Ice Trap - Amulet@item`    -> ('Ice Trap', '')      item decoration
+      `Snow Serpent - T02 - A`    -> ('Snow Serpent', '')  tier decoration
+      `Fireblade+sharpened`       -> ('Fireblade', 'sharpened')
+
+    `@` and ` - ` are decoration and come off; `+` is the enchantment
+    and stays. Note what this does NOT do: two genuinely different
+    spells that happen to have identical effects keep separate
+    identities, because they have separate names and separate template
+    ids. That is why this keys on the name rather than on the effect's
+    shape -- shape would merge a Fireblade with a pet-granted +35% fire
+    blade, and the game does not.
+
+    Not modelled: Aegis and Indemnity, which Deimos special-cases as
+    stacking with their own unenchanted forms. wizAi carries those as
+    `Hanging.protected` and never reaches this.
+    """
+    base = (name or "").split("@", 1)[0]
+    base, _, enchant = base.partition("+")
+    return base.split(" - ", 1)[0].strip(), enchant
 
 
 # --------------------------------------------------------- enchantments
@@ -556,18 +612,31 @@ class Hanging:
 
     @property
     def stack_key(self):
-        return (self.name, self.source, self.sub)
+        """One effect per (spell, enchantment) fires per hit.
+
+        `sub` is deliberately absent. It exists so one cast can place
+        several same-named hangings that "stack-check independently",
+        and per hit they do not: Khonsu's Dual Balanceblade puts up two
+        +25% universal blades and the next strike gets 1.25, not
+        1.5625, because both carry the same spell template id. Same for
+        Blade Dance and the double-weakness Loremaster variants -- 130
+        cards in the table place two or more identically-shaped
+        hangings, and every one of them was doubling.
+
+        It stays on the dataclass because absorbs are separate pools and
+        `_absorb_pass` needs per-instance identity, but absorbs never
+        reach a stacking test.
+        """
+        return spell_identity(self.name)
 
     @property
     def shape_key(self):
-        """The effect itself, with the provenance taken off.
+        """The effect itself, with the name taken off.
 
         Only `_StackSeen` reads this, and only to close the live/deck
-        gap -- see there. Provenance stays in `stack_key`, because
-        provenance is what the repo owner's worked examples turn on: a
-        deck Fireblade and a treasure-card Fireblade compound
-        (`test_provenance_stacks`), and so do the three feints of
-        `1.7 x 1.8 x 1.8 = 5.508x`.
+        gap -- see there. A hanging read out of memory is named
+        `live:<template id>` and can never match a card name, so for
+        that one comparison the effect's shape is all there is.
         """
         return (self.slot, self.kind, self.percent, self.convert_to,
                 None if self.schools is None else frozenset(self.schools))
