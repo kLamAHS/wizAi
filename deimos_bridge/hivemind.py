@@ -37,6 +37,11 @@ decisions see each other before any of them is clicked:
   each commitment is priced at accuracy × damage, so a 75%-accurate nuke
   never persuades three other wizards that a mob is dead.
 
+  **Pressure through the horizon.** The ledger tells a seat what the
+  party is doing *this* round. `_decide_one` also tells its rollout how
+  fast the rest of the circle keeps clearing the board for the other
+  eleven, via `policies.set_ally_rate`.
+
 **What it buys.** Measured over 120 sampled planning phases per party
 size -- boards of one to four mobs between 40 and 1,100 HP, mixed
 schools, wizards drawn from four different school decks at 2-7 pips --
@@ -57,11 +62,6 @@ doing its job: a cast believed at 75% still leaves a sliver, and three
 wizards can each add a legitimate share to a mob that then dies to the
 first of them.
 
-  **Pressure through the horizon.** The ledger tells a seat what the
-  party is doing *this* round. `_decide_one` also tells its rollout how
-  fast the rest of the circle keeps clearing the board for the other
-  eleven, via `policies.set_ally_rate`.
-
 The last of those was measured and rejected once, and shipping it now is
 a correction rather than a change of mind. `party_pressure_probe.py`
 scored 18 cells on kill rate and turns-to-kill and found +0.74 points
@@ -72,33 +72,36 @@ won fight was won. It never recorded the quantity that actually breaks:
 whether `turns` carries any signal at all.
 
 The first real two-wizard run against three 435hp Sand Stalkers made
-that regime unmissable. Re-scoring all 58 of its scored rounds offline
-with the shipped code:
+that regime unmissable. Straight off its own exported candidate tables,
+no reconstruction involved: in 28 of the 58 scored rounds not one
+candidate killed inside the horizon, and 17 of the 58 played a card the
+rollout scored bit-identical to passing.
 
-    modelled ally damage    no candidate kills   every candidate tied
-    per round               inside the horizon   on `turns`
-    0 (as shipped before)   48 of 58             36 of 58
-    100                      0 of 58              9 of 58
-    172                      0 of 58             12 of 58
-    200                      0 of 58              9 of 58
-    300                      0 of 58             25 of 58
+The arithmetic behind it is in those tables too. Banked damage over the
+horizon is the line's own throughput, so board health divided by it is
+turns-to-clear alone. Of the 21 rounds where both wizards were scored
+against the same board, 10 read "the party clears inside twelve turns
+and neither wizard alone does":
 
-Alone, a level-six wizard cannot clear 1305 HP inside twelve turns
-whatever it plays, so every candidate came back a sentinel and the whole
-decision fell through to the damage tiebreak -- which cannot tell a
-Tower Shield from passing, and chose one six times in 36 rounds. Two
-wizards clear that board in about nine. Raising the horizon does not
-help: reconstructed at 40 seeded decks a cell, the sentinel rate goes
-82.6% at horizon 12 to 36.7% at 16 and stays at 36.7% at 20, 24, 32 and
-40, because the wizard genuinely cannot out-damage the board alone
-however long it looks.
+    fight round   board   alone (ice / fire)   together
+    1     3        1305   15.0 / 21.9          8.9
+    1     4        1305   13.6 / 36.0          9.9
+    2     4        1103   16.8 / 12.9          7.3
+    4     2        1265   21.7 / 13.8          8.4
 
-The rate has to be honest in both directions -- 300 a round puts the
-ties straight back, because a party modelled as overwhelming wins every
-line in the same number of turns. So it is measured
-(`Telemetry.damage_rate`, 51 and 57 a round for those two wizards) and
-not taken from the coordinator's own priced plan, which reads 172 and
-201. `minion_power` is still 0.0 and the allies still stand there doing
+Fights 1 and 2 were both lost. Raising the horizon is not the
+alternative: reconstructed at 40 seeded decks a cell, the sentinel rate
+goes 82.6% at horizon 12 to 36.7% at 16 and stays at 36.7% at 20, 24, 32
+and 40, because a wizard cannot out-damage the board alone however long
+it looks.
+
+The rate has to be honest in both directions. Too low and the sentinel
+stays; too high and it returns for the opposite reason, since a party
+modelled as overwhelming clears the board on turn one of every line and
+`turns` ties again at 1. So it is measured (`Telemetry.damage_rate`, 51
+and 57 a round for those two wizards) and not taken from the
+coordinator's own priced plan, which reads 172 and 201 because it prices
+a single cast and no wizard casts its best card every round. `minion_power` is still 0.0 and the allies still stand there doing
 nothing: `_minion_turn` funnels every ally's damage into `enemies[0]`
 whatever the ledger assigned, so the pressure is applied by
 `policies._allies_hit` instead, weakest mob first.
@@ -853,10 +856,10 @@ class Hivemind:
         order to see past the next twelve turns.
 
         Without the second a seat plans every fight as though it were
-        alone in it. Against the three 435hp Sand Stalkers of the day's
-        two-wizard run that meant no candidate could kill inside the
-        horizon in 48 of 58 scored rounds -- the sentinel for every one
-        of them, `turns` tied, and the whole decision handed to a
+        alone in it. Against the three 435hp Sand Stalkers of the first
+        live two-wizard run that meant no candidate could kill inside
+        the horizon in 28 of 58 scored rounds -- the sentinel for every
+        one of them, `turns` tied, and the whole decision handed to a
         tiebreak that rates a Tower Shield exactly as highly as doing
         nothing. It played one six times.
 

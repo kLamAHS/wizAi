@@ -921,37 +921,33 @@ def set_ally_rate(dps):
     """Tell the rollout how hard the rest of the party is hitting.
 
     A rollout that models only its own caster is not merely pessimistic,
-    it is *blind in a way that destroys the ranking*, and both exports
-    from the day's two-wizard run show it. Re-scoring all 58 of their
-    scored rounds offline:
+    it is *blind in a way that destroys the ranking*. In 28 of the 58
+    scored rounds of the first live two-wizard run, no candidate killed
+    inside the horizon -- so `turns`, the objective this policy is named
+    for, was the same sentinel for every option and the whole decision
+    fell through to the damage tiebreak. That tiebreak cannot tell a
+    Tower Shield from doing nothing: 17 of those 58 rounds played a card
+    the rollout scored bit-identical to passing.
 
-      ==============  ================  ===============
-      modelled ally   rounds where NO   rounds where
-      damage a round  candidate kills   every candidate
-                      inside the        tied on `turns`
-                      horizon
-      ==============  ================  ===============
-      0 (shipped)     48 of 58          36 of 58
-      100             0 of 58            9 of 58
-      200             0 of 58            9 of 58
-      300             0 of 58           25 of 58
-      ==============  ================  ===============
+    The reason nothing kills is arithmetic, and the exports state it
+    themselves -- no reconstruction involved. Each candidate table
+    carries the banked damage of the best line over the horizon, so
+    board health divided by that rate is turns-to-clear alone. Of the 21
+    rounds where both wizards were scored against the same board, 10
+    read "the party clears inside twelve turns and neither wizard alone
+    does". Fight 1 round 3, three 435hp Sand Stalkers: 15.0 turns for
+    the ice wizard alone, 21.9 for the fire one, 8.9 together. Both of
+    them lost that fight.
 
-    Alone against three 435hp Sand Stalkers a level-six wizard cannot
-    clear the board inside twelve turns no matter what it plays, so
-    every candidate came back with the `stalled` sentinel, `turns` tied
-    for all of them, and the entire decision fell through to the damage
-    tiebreak. Two wizards clear that board comfortably -- and once the
-    rollout knows it, `turns` starts discriminating again, which is the
-    key the policy was designed around.
-
-    The measured rates from that run are 99 damage a round for the ice
-    wizard and 151 for the fire one, so the honest number sits in the
-    band where this helps most. It is not knife-edge -- 100 and 200 score
-    the same -- but 300 puts it back where it started for the opposite
-    reason: model the party as overwhelming and every line wins in the
-    same number of turns, so the ties come back. Feed this what the
-    party is actually measured to do, never a hopeful number.
+    So the rate has to be honest in both directions. Too low and the
+    sentinel stays; too high and it returns for the opposite reason,
+    since a party modelled as overwhelming clears the board on turn one
+    of every line and `turns` ties again at 1. Feed this what the party
+    is measured to do (`Telemetry.damage_rate`, 51 and 57 a round for
+    those two wizards), never a hopeful number, and never the
+    coordinator's priced plan for the round -- that reads 172 and 201,
+    because it prices a single cast and no wizard casts its best card
+    every round.
     """
     global _ALLY_RATE
     _ALLY_RATE = max(0.0, float(dps or 0.0))
