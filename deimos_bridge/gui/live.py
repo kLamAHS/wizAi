@@ -154,6 +154,9 @@ class _Seat:
         self.progress = None
         self.progress_at = 0.0
         self.said_stuck = ""
+        #: when this seat last wrote a heartbeat to the questing log.
+        #: See `LiveWorker._heartbeat`.
+        self.beat_at = 0.0
         #: what `runner` was built from, so the service tick can notice
         #: the operator turning the script on, off, or replacing it
         self.script_source = None
@@ -542,6 +545,7 @@ class LiveWorker(QThread):
                 await self._read_goal(seat)
                 self._check_in_step(seat)
                 self._check_progress(seat)
+                await self._heartbeat(seat, driven)
 
                 if seat.runner is not None:
                     await self._stage(seat, "script step",
@@ -2043,6 +2047,75 @@ class LiveWorker(QThread):
             seat.progress_at = now
             seat.said_stuck = ""
 
+    #: seconds between heartbeat entries per wizard. A minute is fine
+    #: enough to see a stall start and end, and coarse enough that an
+    #: hour of three wizards is 180 entries.
+    HEARTBEAT_EVERY = 60.0
+
+    async def _heartbeat(self, seat, driven=False):
+        """One line a minute saying where this wizard is and what it is on.
+
+        Everything else in the questing log is an alarm, and alarms only
+        describe the moments somebody already wrote code to notice. The
+        report this exists for -- "it's really stuck" -- is about the
+        time BETWEEN them, and the run at rev 85a68184 had 99 combat
+        rounds and eight questing entries to account for a whole
+        session. There was no way to tell a wizard grinding fights from
+        a wizard standing in a doorway.
+
+        So: zone, health, whether it is in a duel, its quest goal, how
+        long since any of that last moved, and what is driving it. A
+        stall is then obvious by inspection -- the same line repeating
+        with a climbing idle time -- without needing a detector to have
+        anticipated its cause.
+
+        Cheap on purpose. The zone and goal were already read this tick;
+        only health and the duel flag are fetched here, once a minute,
+        which is less memory traffic than a single round of combat.
+        """
+        import time
+
+        from .. import party
+
+        now = time.monotonic()
+        if now - seat.beat_at < self.HEARTBEAT_EVERY:
+            return
+        seat.beat_at = now
+
+        # Nothing a report does may take the run down. This is the whole
+        # body, not just the write, and it is not defensiveness for its
+        # own sake: the first version read `runner.steps` unguarded, and
+        # a runner without that attribute raised straight out of the
+        # service tick and killed the loop for that wizard -- turning
+        # the instrument for diagnosing a stuck wizard into a cause of
+        # one. A heartbeat that occasionally says less is fine; a
+        # heartbeat that can stop the tick is not.
+        try:
+            bits = [seat.zone_seen or "zone unread"]
+            left = await self._health_left(seat)
+            if left is not None:
+                bits.append(f"{left:.0%} health")
+            try:
+                bits.append("in a duel" if await party.in_battle(seat.client)
+                            else "out of combat")
+            except Exception:
+                bits.append("combat state unread")
+            bits.append(seat.goal or "no quest goal")
+            if seat.progress_at:
+                idle = now - seat.progress_at
+                bits.append(f"unchanged for {idle / 60:.0f} min"
+                            if idle >= 60 else "moving")
+            steps = getattr(self.seats[0].runner, "steps", None)
+            if driven and isinstance(steps, int):
+                bits.append(f"script at {steps:,} instructions")
+            elif driven:
+                bits.append("script driving")
+            seat.tel.note_questing("heartbeat", " · ".join(bits))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
     def _check_progress(self, seat):
         """Say so when a running script is getting nowhere.
 
@@ -2080,6 +2153,15 @@ class LiveWorker(QThread):
                   f"nothing has changed for {idle / 60:.0f} min — same zone, "
                   f"same spot, same quest goal ({note}) — while {steps}. "
                   f"That is a retry loop that is not working, not progress")
+        # This is THE stuck report, and it only ever went to the status
+        # line -- which is read live, by somebody who is already watching
+        # because something looks wrong. The export is what gets read
+        # afterwards, and it had no entry for the one condition it most
+        # needed to explain.
+        seat.tel.note_questing(
+            "no-progress",
+            f"{idle / 60:.0f} min with no change — {note} — while "
+            f"{steps.replace(' in', '')} ran")
 
     def _check_in_step(self, seat):
         """Say so when the party has drifted onto different quests.
@@ -2139,6 +2221,17 @@ class LiveWorker(QThread):
         if where != getattr(self, "_said_desync", ""):
             self._said_desync = where
             behind = getattr(self, "_behind", None)
+            # Every seat's log, not just the one this tick belongs to: a
+            # desync is a fact about the party, and whichever export gets
+            # opened first should show it.
+            for other in self.seats:
+                try:
+                    other.tel.note_questing(
+                        "quest-desync",
+                        f"{now - since:.0f}s on different quests — {where}"
+                        + (f" — {behind.name} is behind" if behind else ""))
+                except Exception:
+                    pass
             self._say(seat,
                       f"the party has been on different quests for "
                       f"{now - since:.0f}s — {where}"
@@ -2201,6 +2294,17 @@ class LiveWorker(QThread):
                     # "left there on purpose" test below.
                     seat.zone_left.append((seat.zone_seen, now))
                     del seat.zone_left[:-8]
+                    # Free: this poll already runs every TOGETHER_POLL
+                    # seconds for the stranded check. Recording it turns
+                    # the log into a route -- where each wizard went and
+                    # when -- which is what "one of them wandered off"
+                    # needs in order to be checkable rather than
+                    # inferred from two stranded entries.
+                    try:
+                        seat.tel.note_questing(
+                            "zone", f"{seat.zone_seen} -> {zones[seat]}")
+                    except Exception:
+                        pass
                 if zones[seat] != seat.zone_seen:
                     seat.zone_since = now
                 seat.zone_seen = zones[seat]
@@ -2578,11 +2682,34 @@ class LiveWorker(QThread):
             card, target, first, seat)
 
     def _defeated_hook(self, seat):
-        return lambda: self._say(
-            seat,
-            "defeated — left the party's circle so the others stop waiting "
-            "for it every round, and its rounds are no longer recorded. It "
-            "rejoins when this fight ends.")
+        """Say a defeat out loud AND write it down.
+
+        A defeat is the most disruptive thing that can happen to a
+        scripted run, and the only one that was not in the log. The game
+        teleports the wizard to the commons, so the script's next
+        instruction is aimed at a place it is no longer in -- and that
+        desync is invisible to everything else here. `_check_in_step`
+        sees an unchanged quest goal; `_check_together` sees a zone
+        change like any other and cannot say why. Six of the eighteen
+        recorded fights at rev 85a68184 were losses.
+        """
+        def defeated():
+            where = seat.zone_seen or "an unreadable zone"
+            try:
+                seat.tel.note_questing(
+                    "defeated",
+                    f"{seat.name} was defeated in {where} and sent to the "
+                    f"commons — the script's next instruction is for "
+                    f"somewhere else")
+            except Exception:
+                pass
+            self._say(
+                seat,
+                "defeated — left the party's circle so the others stop "
+                "waiting for it every round, and its rounds are no longer "
+                "recorded. It rejoins when this fight ends.")
+
+        return defeated
 
     def _on_school_mismatch(self, actual, seat):
         """This client is not the wizard this seat was configured as.

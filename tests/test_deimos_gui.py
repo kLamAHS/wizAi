@@ -10702,3 +10702,96 @@ def test_an_ordinary_say_once_still_stays_out_of_the_questing_log():
     seat = worker.seats[0]
     worker._say_once(seat, "quest-arrow", "switch the quest arrow on")
     assert seat.tel.questing == []
+
+
+# ------------------------------------------------------------- the timeline
+def _beating(zones=("Olde Town", "Olde Town")):
+    worker, _read = _zoned_party(list(zones))
+    seat = worker.seats[0]
+
+    class _C:
+        async def in_battle(self):
+            return False
+
+    seat.client = _C()
+    seat.zone_seen = zones[0]
+    return worker, seat
+
+
+def test_the_heartbeat_says_where_a_wizard_is_and_what_it_is_on():
+    """Everything else in the questing log is an alarm, and alarms only
+    cover the moments somebody wrote code to notice. "It's really stuck"
+    is about the time between them -- rev 85a68184 had 99 combat rounds
+    and eight questing entries for a whole session."""
+    import asyncio
+
+    worker, seat = _beating()
+    seat.goal = "Defeat Foulgaze"
+
+    async def half(_seat):
+        return 0.5
+
+    worker._health_left = half
+    asyncio.run(worker._heartbeat(seat, driven=False))
+    beat = [e for e in seat.tel.questing if e["kind"] == "heartbeat"]
+    assert len(beat) == 1
+    for expected in ("Olde Town", "50% health", "out of combat",
+                     "Defeat Foulgaze"):
+        assert expected in beat[0]["detail"], beat[0]["detail"]
+
+
+def test_the_heartbeat_is_throttled_to_one_a_minute():
+    import asyncio
+
+    worker, seat = _beating()
+
+    async def unread(_seat):
+        return None
+
+    worker._health_left = unread
+    asyncio.run(worker._heartbeat(seat))
+    asyncio.run(worker._heartbeat(seat))
+    assert len([e for e in seat.tel.questing if e["kind"] == "heartbeat"]) == 1
+
+
+def test_a_heartbeat_can_never_take_the_service_tick_down():
+    """The first version read `runner.steps` unguarded, and a runner
+    without it raised out of the service tick and killed the loop for
+    that wizard -- the instrument for diagnosing a stuck wizard became a
+    cause of one."""
+    import asyncio
+
+    worker, seat = _beating()
+    worker.seats[0].runner = type("R", (), {"running": True})()  # no `steps`
+
+    async def boom(_seat):
+        raise RuntimeError("the health read exploded")
+
+    worker._health_left = boom
+    asyncio.run(worker._heartbeat(seat, driven=True))   # must not raise
+
+
+def test_a_defeat_is_written_down_not_just_announced():
+    """The game teleports a defeated wizard to the commons, so the
+    script's next instruction is for somewhere it is not. Nothing else
+    here can attribute that: the quest goal is unchanged and the zone
+    change looks like any other."""
+    worker, seat = _beating()
+    seat.zone_seen = "WizardCity/WC_Streets/WC_OldeTown"
+    worker._defeated_hook(seat)()
+    lost = [e for e in seat.tel.questing if e["kind"] == "defeated"]
+    assert len(lost) == 1
+    assert "WC_OldeTown" in lost[0]["detail"]
+
+
+def test_every_zone_change_lands_in_the_log(monkeypatch):
+    """Free -- the stranded check already polls every seat's zone. It
+    turns the log into a route, which is what "one of them wandered off"
+    needs to be checkable rather than inferred."""
+    worker, read_zone = _zoned_party(["Olde Town", "Olde Town"])
+    _look(worker, read_zone, monkeypatch)
+    worker.seats[1]._zone = "Unicorn Way"
+    _look(worker, read_zone, monkeypatch)
+    moved = [e for e in worker.seats[1].tel.questing if e["kind"] == "zone"]
+    assert moved == [{"at": moved[0]["at"], "fight": 0, "kind": "zone",
+                      "detail": "Olde Town -> Unicorn Way"}]

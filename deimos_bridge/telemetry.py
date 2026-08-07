@@ -825,7 +825,13 @@ class Telemetry:
     #: otherwise put a megabyte of "teleported" in every export; the
     #: interesting ones are the recent ones, because the operator uploads
     #: after noticing something.
-    QUESTING_LOG = 400
+    #: Raised from 400 when the log went from "a few notable events" to
+    #: a timeline: a heartbeat a minute per wizard, every zone change,
+    #: every defeat, every stall report. An hour of three wizards is
+    #: roughly 250 entries, and the point of the file is to answer "what
+    #: was it doing for those twenty minutes" afterwards -- a cap that
+    #: throws the beginning away cannot.
+    QUESTING_LOG = 2000
 
     def note_questing(self, kind, detail=""):
         """Record something that happened OUTSIDE a duel.
