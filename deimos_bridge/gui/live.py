@@ -174,6 +174,15 @@ class _Seat:
         #: when this wizard last tried to catch up with the leader. See
         #: `LiveWorker.FOLLOW_EVERY`.
         self.followed_at = 0.0
+        #: since when this wizard has been in a different zone from the
+        #: rest of the party, and which zone that is. See
+        #: `LiveWorker._check_together`.
+        self.stranded_since = None
+        self.stranded_where = None
+        self.rejoined_at = 0.0
+        #: the zone this seat was last read in, so a message can name
+        #: where the party actually is rather than "another zone"
+        self.zone_seen = None
         #: stage name -> how many times it has failed, so a broken stage
         #: is reported rather than retried silently twice a second
         self.stage_errors = {}
@@ -534,6 +543,16 @@ class LiveWorker(QThread):
                     # is also steering. See `_should_catch_up`.
                     await self._stage(seat, "going back for the others",
                                       self._catch_up(seat), wheel=True)
+                elif driven and self._due_to_regroup():
+                    # The other one, and the reason a scripted run needs a
+                    # human every ten minutes: a wizard whose teleport
+                    # silently did not land. It is a comparison BETWEEN
+                    # seats, so it is throttled on the worker rather than
+                    # run once per seat -- and driven by whichever seat's
+                    # loop is alive, because the seat that owns the
+                    # script may be the one in a duel, or the one adrift.
+                    await self._stage(seat, "keeping the party together",
+                                      self._regroup(), wheel=True)
                 elif driven:
                     # The script walks this wizard. wizAi's own questing
                     # or follow would walk it somewhere else between two
@@ -2070,6 +2089,149 @@ class LiveWorker(QThread):
                         "pointer is fine, and deimoslang can only ask "
                         "whether a wizard is on a NAMED quest, never "
                         "whether two wizards are on the same one")
+
+    #: how long a wizard may be in a different zone from the rest of the
+    #: party before it counts as left behind. Zone changes are not
+    #: simultaneous -- one client finishes loading seconds before
+    #: another -- so a bare inequality would fire on every door.
+    STRANDED_AFTER = 25.0
+    #: ...and how long between attempts to bring it back, so this and
+    #: the script are not pulling at once every tick.
+    REJOIN_EVERY = 12.0
+
+    async def _check_together(self):
+        """Which wizard, if any, the party has left behind.
+
+        The failure the operator is actually losing days to: "occasionally
+        one wizard might get through with a teleport, but the others
+        might stop teleporting or get stuck". Nothing could see it.
+        `_check_in_step` compares QUEST GOALS, and a wizard whose
+        teleport silently failed is still on the same quest -- its goal
+        is identical, its instruction pointer is fine, and the script
+        keeps issuing instructions to a wizard standing in the last
+        zone. `_check_progress` does see it, after five minutes, and
+        only says so.
+
+        So this compares WHERE they are. A scripted party is one party:
+        if two wizards are in Olde Town and one is in Unicorn Way, the
+        one on its own is the one that missed the teleport, and the
+        majority is the answer to where it should be. No majority means
+        the party is mid-transition -- which is most of a zone change --
+        and nothing is decided.
+
+        Returns (stranded seat, a seat to follow) or (None, None).
+        """
+        import time
+
+        from .. import party
+
+        live = [s for s in self.seats if s.client is not None]
+        if len(live) < 2:
+            return None, None
+
+        zones = {}
+        for seat in live:
+            zones[seat] = await party.zone(seat.client)
+            if zones[seat]:
+                seat.zone_seen = zones[seat]
+        known = [z for z in zones.values() if z]
+        if len(known) < len(live):
+            return None, None            # a read failed; no evidence
+
+        counts = {}
+        for z in known:
+            counts[z] = counts.get(z, 0) + 1
+        best, n = max(counts.items(), key=lambda kv: kv[1])
+        if n < 2 or n == len(live):
+            return None, None            # no majority, or nobody adrift
+
+        odd = [s for s in live if zones[s] != best]
+        if len(odd) != 1:
+            return None, None            # two adrift is a split, not a
+                                         # straggler, and following one
+                                         # of them could be the wrong way
+        seat = odd[0]
+
+        now = time.monotonic()
+        if seat.stranded_since is None or seat.stranded_where != zones[seat]:
+            seat.stranded_since = now
+            seat.stranded_where = zones[seat]
+            return None, None
+        if now - seat.stranded_since < self.STRANDED_AFTER:
+            return None, None
+
+        target = next(s for s in live if zones[s] == best)
+        return seat, target
+
+    async def _rejoin(self, seat, target):
+        """Bring the wizard the party left behind back to the party.
+
+        `party.follow`, the same teleport a follower uses, aimed at
+        whichever wizard is in the majority zone -- so it handles the
+        cross-zone hop, the distance close, and stepping into the duel
+        if the others are already fighting.
+
+        This breaks the rule that a script owns every wizard it drives,
+        and the justification is the same one `_should_catch_up` makes:
+        the rule exists because two things walking one wizard put it in
+        a doorway, and a wizard in the wrong ZONE is not being walked
+        anywhere useful at all. Every instruction the script issues it
+        is for a place it is not.
+
+        Bounded three ways so it cannot become a second driver: a
+        majority has to exist, the wizard has to have been adrift for
+        `STRANDED_AFTER`, and attempts are `REJOIN_EVERY` apart.
+        """
+        import time
+
+        from .. import party
+
+        now = time.monotonic()
+        if now - seat.rejoined_at < self.REJOIN_EVERY:
+            return
+        seat.rejoined_at = now
+        adrift = seat.stranded_where or "somewhere else"
+        seat.tel.note_questing(
+            "stranded",
+            f"{seat.name} is in {adrift}; {target.name} and the rest of "
+            f"the party are in {getattr(target, 'zone_seen', '') or 'another zone'}")
+        moved, why = await party.follow(seat.client, target.client,
+                                        leader_name=target.wizard_name)
+        if moved:
+            seat.stranded_since = None
+            seat.tel.note_questing("rejoined", why or f"went to {target.name}")
+            self._say(seat, f"was left behind in {adrift} — {why}")
+        elif why:
+            seat.tel.note_questing("rejoin-failed", why)
+            self._say_once(seat, "rejoin",
+                           f"left behind in {adrift} and cannot get back — "
+                           f"{why}")
+
+    #: how often the party's whereabouts are compared. Three zone reads
+    #: a tick for the life of a run is a lot of memory traffic for a
+    #: question whose answer changes on the scale of a zone change.
+    TOGETHER_POLL = 6.0
+
+    def _due_to_regroup(self):
+        """Is it this tick's turn to check whether the party is together?
+
+        On the worker rather than the seat: the check reads every
+        client, so running it once per seat would triple the cost and
+        answer the same question three times.
+        """
+        import time
+
+        now = time.monotonic()
+        if now - getattr(self, "_together_at", 0.0) < self.TOGETHER_POLL:
+            return False
+        self._together_at = now
+        return True
+
+    async def _regroup(self):
+        """Find the wizard the party left behind, and go get it."""
+        seat, target = await self._check_together()
+        if seat is not None:
+            await self._rejoin(seat, target)
 
     def _should_catch_up(self, seat):
         """Should this wizard abandon its own errand and go help?
