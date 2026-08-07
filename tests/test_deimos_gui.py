@@ -1027,6 +1027,124 @@ def test_service_loop_leaves_the_mouse_alone_during_combat(qapp):
     assert client.mouse_handler.clicks == []
 
 
+def test_a_script_hammering_a_loop_that_never_works_says_so(qapp):
+    """Across KamarJ's three arc questers there are 2,438 bounded retry
+    loops and 528 unbounded ones, and `tp` alone appears in 331 of the
+    unbounded ones -- because Deimos's `navmap_tp` returns nothing at
+    all, so a script cannot ask whether a teleport landed and has to
+    poll windows and try again.
+
+    When that never succeeds the run still looks alive from outside:
+    instructions execute, the counter climbs, and the wizard stands
+    still. That is "one wizard might get through, while the other is
+    still trying to", and nothing could see it.
+    """
+    import time
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    said = []
+    worker.status = type("S", (), {"emit": staticmethod(said.append)})()
+
+    class _Runner:
+        running = True
+        steps = 41_233
+
+    seat = worker.seats[0]
+    seat.runner = _Runner()
+    seat.progress = ("Krokotopia/KT_Interior", (3, 1, 0), "Defeat Krokopatra")
+    seat.progress_at = time.monotonic() - (worker.STUCK_AFTER + 1)
+
+    worker._check_progress(seat)
+    assert any("retry loop that is not working" in m for m in said), said
+    # Named: which zone and which goal, plus how far the script has got.
+    assert any("Defeat Krokopatra" in m and "41,233" in m for m in said), said
+
+    # Said once per distinct situation, not every half-second.
+    said.clear()
+    worker._check_progress(seat)
+    assert said == [], said
+
+
+def test_progress_is_not_stuck_while_something_is_changing(qapp):
+    import time
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    said = []
+    worker.status = type("S", (), {"emit": staticmethod(said.append)})()
+
+    class _Runner:
+        running = True
+        steps = 10
+
+    seat = worker.seats[0]
+    seat.runner = _Runner()
+    seat.progress = ("Wizard City", (1, 1, 1), "Talk to Ambrose")
+    seat.progress_at = time.monotonic()        # just moved
+    worker._check_progress(seat)
+    assert said == [], said
+
+
+def test_a_wizard_no_script_is_driving_is_not_called_stuck(qapp):
+    """Standing still between fights is not a stuck script, and the run
+    must not narrate it as one."""
+    import time
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    said = []
+    worker.status = type("S", (), {"emit": staticmethod(said.append)})()
+
+    seat = worker.seats[0]
+    seat.runner = None                          # nothing is driving
+    seat.progress = ("Wizard City", (1, 1, 1), "Talk to Ambrose")
+    seat.progress_at = time.monotonic() - 10_000
+    worker._check_progress(seat)
+    assert said == [], said
+
+
+def test_breathing_does_not_count_as_progress(qapp):
+    """A wizard's idle animation moves it by a fraction constantly. A
+    progress check that counts that as movement never fires."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    class _XYZ:
+        def __init__(self, x, y, z):
+            self.x, self.y, self.z = x, y, z
+
+    drift = [0.0]
+
+    class _Body:
+        async def position(self):
+            drift[0] += 0.4                    # a fraction, every read
+            return _XYZ(100.0 + drift[0], 200.0, 0.0)
+
+    class _Client:
+        body = _Body()
+        root_window = _Win("root", [])
+
+        async def zone_name(self):
+            return "Wizard City"
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    worker.status = type("S", (), {"emit": staticmethod(lambda *_: None)})()
+    worker.GOAL_POLL = 0.0
+    seat = worker.seats[0]
+    seat.client = _Client()
+
+    asyncio.run(worker._read_goal(seat))
+    first = seat.progress_at
+    for _ in range(5):
+        asyncio.run(worker._read_goal(seat))
+    assert seat.progress_at == first, "idle drift reset the progress clock"
+
+
 def _goal_client(goal):
     """A client whose quest tracker reads `goal`."""
     text = _Win("txtGoalName", text=goal)
