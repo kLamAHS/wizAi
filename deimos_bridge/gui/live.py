@@ -506,11 +506,13 @@ class LiveWorker(QThread):
                 # party can drift onto different quests, and a script in
                 # particular cannot notice because its own instruction
                 # pointer is fine. Reading is throttled internally.
-                await self._read_goal(seat)
-                self._check_in_step(seat)
-                self._check_progress(seat)
-
                 driven = self._script_drives(seat)
+                # FIRST, ahead of the reads below. An open dialogue box
+                # blocks movement, so every millisecond it stays up is a
+                # wizard standing still -- and this used to run after the
+                # goal read, the in-step check and the script sync, so it
+                # waited on all three every tick before it even looked.
+                # Reported live as auto-dialogue being slow to trigger.
                 if self.auto_dialogue and seat.quester is None and not driven:
                     # Deimos's questing does its own dialogue handling,
                     # so a second clicker would race it for the same
@@ -518,6 +520,10 @@ class LiveWorker(QThread):
                     # all reach for the dialogue box.
                     await self._stage(seat, "auto-dialogue",
                                       self._auto_dialogue(client), wheel=True)
+
+                await self._read_goal(seat)
+                self._check_in_step(seat)
+                self._check_progress(seat)
 
                 if seat.runner is not None:
                     await self._stage(seat, "script step",
@@ -699,6 +705,19 @@ class LiveWorker(QThread):
     #: dying again", and it wants a floor that a full-health wizard can
     #: never trip.
     LOW_HEALTH = 0.35
+    #: ...but 0.35 was chosen against "essentially 0", and a fight costs
+    #: far more than that. Over the two-wizard run at rev 8666bda7 the
+    #: fire wizard's fights took 191 to 630 health out of 1,196 -- 16% to
+    #: 53% -- so he walked into his eighth on 53% and left it on nothing.
+    #: The floor is therefore what the fights have ACTUALLY cost this
+    #: wizard rather than a number picked once: see `_health_needed`.
+    #: This stays as the answer before there is any history, and as the
+    #: lower bound.
+    LOW_HEALTH_CAP = 0.75
+    #: how many recent fights the floor is taken from. Long enough to see
+    #: a hard pull, short enough that one bad dungeon does not hold a
+    #: wizard out of easy street content for the rest of the session.
+    LOW_HEALTH_WINDOW = 5
     #: how long to keep trying to fix that before going anyway. A run
     #: that blocks forever on an empty potion bottle is as broken as one
     #: that suicides, so this ends -- loudly.
@@ -976,11 +995,18 @@ class LiveWorker(QThread):
                     ok, pressed_why = await questing.press_x(client)
                     if ok:
                         self._say(seat, "opened the quest dialogue")
-                        await asyncio.sleep(0.6)
+                        await questing.dialogue_opened(client)
                     elif pressed_why:
                         self._say_once(seat, "press-x", pressed_why)
-                elif (why and "quest marker" not in why
-                        and not seat.warned_quest_arrow):
+                elif why and not seat.warned_quest_arrow:
+                    # Including the too-far-from-the-marker case, which
+                    # used to be filtered out here and is the one that
+                    # looks like the feature is dead: the press-X prompt
+                    # is up, the wizard is standing at somebody, and
+                    # nothing happens. `at_quest_marker` now says how far
+                    # away it thinks the marker is, which is the number
+                    # that decides whether the radius is wrong or the
+                    # wizard simply is not there yet.
                     seat.warned_quest_arrow = True
                     self._say(
                         seat,
@@ -2133,7 +2159,8 @@ class LiveWorker(QThread):
         said = False
         while not self._stop:
             left = await self._health_left(seat)
-            if left is None or left >= self.LOW_HEALTH:
+            floor = self._health_needed(seat)
+            if left is None or left >= floor:
                 if said:
                     self._say(seat, f"back to {left:.0%} — carrying on"
                               if left is not None else "carrying on")
@@ -2149,8 +2176,9 @@ class LiveWorker(QThread):
             if not said:
                 said = True
                 self._say(seat,
-                          f"on {left:.0%} health — not starting another "
-                          f"fight yet")
+                          f"on {left:.0%} health and the last few fights "
+                          f"have cost up to {floor:.0%} — not starting "
+                          f"another one yet")
             try:
                 async with self._driving(seat, "waiting to heal up"):
                     await asyncio.wait_for(
@@ -2166,6 +2194,37 @@ class LiveWorker(QThread):
             except Exception:
                 pass                  # the health read below is the check
             await asyncio.sleep(self.LOW_HEALTH_POLL)
+
+    def _health_needed(self, seat):
+        """How much health this wizard has actually needed to survive.
+
+        The worst fraction of its own health any of the last few fights
+        took off it, floored at `LOW_HEALTH` and capped at
+        `LOW_HEALTH_CAP`. "Do not start a fight you could lose to",
+        measured per wizard rather than guessed once -- a level-10 fire
+        wizard in Triton Avenue and the same wizard in a dungeon need
+        very different numbers, and only the wizard knows which it is in.
+
+        Capped because one catastrophic pull must not wedge the run: a
+        fight that took 95% would otherwise mean never fighting again.
+        Floored at the old constant so this can only ever be more
+        cautious than what shipped, never less.
+
+        `damage_taken` is an estimate (`_estimate_incoming` integrated
+        over the fight), not a measurement, so this is a rough number by
+        construction -- which is why it decides a *threshold* and not an
+        action.
+        """
+        fights = [f for f in (getattr(seat.tel, "fights", None) or ())
+                  if f.rounds > 0 and f.damage_taken > 0]
+        if not fights:
+            return self.LOW_HEALTH
+        top = getattr(seat, "max_hp", 0) or 0
+        if not top:
+            return self.LOW_HEALTH
+        worst = max(f.damage_taken / top
+                    for f in fights[-self.LOW_HEALTH_WINDOW:])
+        return min(max(worst, self.LOW_HEALTH), self.LOW_HEALTH_CAP)
 
     async def _health_left(self, seat):
         """This wizard's health as a fraction, or None if it will not read.

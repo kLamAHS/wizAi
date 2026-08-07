@@ -216,6 +216,26 @@ async def _dialogue_moved(client, before, settle, poll):
     return False
 
 
+async def dialogue_opened(client, settle: float = 0.6,
+                          poll: float = 0.05) -> bool:
+    """Wait for the box the press-X just asked for, rather than sleeping.
+
+    The same trick `_dialogue_moved` uses on the other side of the
+    conversation, for the same reason: the game answers in its own time
+    and the answer is readable, so a flat `sleep(0.6)` after every
+    press-X is 0.6s of a wizard standing still whether the box took
+    30ms or never came. Worst case is unchanged -- it falls through to
+    the full `settle` -- and the common case is one poll interval.
+    """
+    waited = 0.0
+    while waited < settle:
+        await asyncio.sleep(poll)
+        waited += poll
+        if await in_dialogue(client):
+            return True
+    return False
+
+
 async def advance_dialogue(client, max_clicks: int = 40,
                            settle: float = 0.5, poll: float = 0.05):
     """(clicks, reason). Click through dialogue until it stops appearing.
@@ -358,8 +378,15 @@ async def at_quest_marker(client, radius: float = QUEST_RADIUS):
     # Flat distance. Z is height, and a quest NPC one storey up a ramp is
     # still the quest NPC -- including it would refuse the very cases
     # where standing next to someone is unambiguous.
-    if (dx * dx + dy * dy) ** 0.5 > radius:
-        return False, "not at the quest marker"
+    away = (dx * dx + dy * dy) ** 0.5
+    if away > radius:
+        # With the distance in it. "not at the quest marker" is the same
+        # sentence whether the wizard is standing on the NPC's toes with
+        # a marker that reads oddly, or is genuinely across the zone --
+        # and the first of those is auto-dialogue looking broken while
+        # working exactly as written.
+        return False, (f"not at the quest marker — standing {away:,.0f} "
+                       f"away and the cutoff is {radius:,.0f}")
     return True, ""
 
 

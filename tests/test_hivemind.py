@@ -1205,6 +1205,117 @@ def test_allies_finish_the_weakest_mob_rather_than_spreading_out():
     assert _Board.enemies[0].hp == 330.0        # the other 70 spilled over
 
 
+# ------------------------------------------------- healing when hurt
+#
+# The observation is real: over the run at rev 8666bda7 the ice wizard
+# held a Pixie for 44 rounds and cast it never, five of those below half
+# health, and the fire wizard walked into his eighth fight on 53% and
+# the client read him at zero when it ended.
+#
+# The obvious fix was tried and MEASURED AS HARMFUL, which is why there
+# is a test here and no feature. `died()` ranks a losing line by kills
+# and banked damage, so crediting it for dying later looks like exactly
+# the missing health term -- and it does produce healing: at 60/40/17%
+# health on a 900hp board the wizard cannot clear, the same decision
+# goes Ice Trap -> Pixie. But paired against the shipped behaviour on a
+# brutal fire board it loses 8.7, 10.0 and 12.3 points of kill rate on
+# three independent seed streams at n=600. Scaling the credit by how
+# hurt the wizard already is does not rescue it, because on those boards
+# the wizard IS hurt.
+#
+# The reason is in the ranking that is already there. `stalled` outranks
+# `died` by a whole point, so a heal that genuinely SAVES the wizard
+# already wins on its own -- and the credit only ever fires on the
+# remaining case, a heal that delays a death it cannot prevent. There,
+# racing is better, and the arithmetic says so three times over.
+#
+# What did happen to the fire wizard is upstream of the fight: he
+# started it on 53%. That is `_health_needed` below.
+
+def test_a_heal_at_full_health_is_not_even_offered():
+    """`_is_inert` has the first word and keeps it: a Pixie at full
+    health restores exactly nothing and must not win anything."""
+    from deimos_bridge.policies import greedy_ttk
+
+    sim, state = wizard(school="ice", hand=("Pixie", "Ice Trap",
+                                            "Frost Beetle"),
+                        pips=4, hp=1500, board=((900, "balance"),))
+    policy = greedy_ttk()
+    policy(sim, state)
+    assert not any(c.card == "Pixie" for c in policy.last_candidates)
+
+
+def test_a_heal_that_actually_saves_the_wizard_already_wins():
+    """The case the credit was reaching for is covered without it: a
+    Pixie that carries the wizard past the horizon moves the line from
+    `died` to `stalled`, which is a whole rank better."""
+    from deimos_bridge import policies
+
+    sim, state = wizard(school="ice", hand=("Pixie", "Ice Trap",
+                                            "Frost Beetle"),
+                        pips=4, hp=1500, board=((150, "balance"),))
+    state.player.hp = 250.0
+    for e in state.enemies:
+        e.flat_hit = 40
+    scores = {c.name: policies._rollout(sim, state, c, 12, 0)
+              for c in state.player.hand}
+    assert scores["Pixie"][0] < scores["Ice Trap"][0], scores
+    choice = policies.greedy_ttk()(sim, state)
+    card, _t = choice if isinstance(choice, tuple) else (choice, None)
+    assert card.name == "Pixie"
+
+
+def test_the_floor_for_the_next_fight_is_what_the_fights_have_cost():
+    """0.35 was chosen against "essentially 0". A fight costs far more:
+    the fire wizard's took 191 to 630 out of 1,196, so he started his
+    eighth on 53% and did not finish it."""
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from deimos_bridge.gui.live import LiveWorker
+    from deimos_bridge.telemetry import FightRecord, Telemetry
+
+    worker = LiveWorker(Telemetry(), "fire", [], "ttk-lookahead", 1)
+    seat = worker.seats[0]
+    seat.max_hp = 1196
+
+    # nothing fought yet: the old constant, unchanged
+    assert worker._health_needed(seat) == worker.LOW_HEALTH
+
+    # a fight that cost 630 of 1196 -- 53%
+    seat.tel.fights.append(FightRecord(index=1, rounds=12,
+                                       damage_taken=630.0))
+    assert worker._health_needed(seat) == pytest.approx(630 / 1196)
+
+    # a cheap fight after it does not lower the floor while the hard one
+    # is still in the window
+    seat.tel.fights.append(FightRecord(index=2, rounds=4,
+                                       damage_taken=191.0))
+    assert worker._health_needed(seat) == pytest.approx(630 / 1196)
+
+    # ...and one catastrophic pull cannot wedge the run forever
+    seat.tel.fights.append(FightRecord(index=3, rounds=20,
+                                       damage_taken=1190.0))
+    assert worker._health_needed(seat) == worker.LOW_HEALTH_CAP
+
+
+def test_the_floor_is_never_lower_than_what_shipped():
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from deimos_bridge.gui.live import LiveWorker
+    from deimos_bridge.telemetry import FightRecord, Telemetry
+
+    worker = LiveWorker(Telemetry(), "fire", [], "ttk-lookahead", 1)
+    seat = worker.seats[0]
+    seat.max_hp = 1196
+    seat.tel.fights.append(FightRecord(index=1, rounds=2, damage_taken=10.0))
+    assert worker._health_needed(seat) == worker.LOW_HEALTH
+    # an unreadable max health is no evidence either way
+    seat.max_hp = 0
+    assert worker._health_needed(seat) == worker.LOW_HEALTH
+
+
 # ------------------------------------------- blading the other wizard
 #
 # The party's seats are not interchangeable: a level-10 ice wizard
