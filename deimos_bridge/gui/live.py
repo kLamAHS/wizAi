@@ -143,6 +143,13 @@ class _Seat:
         #: `LiveWorker._check_in_step`.
         self.goal = ""
         self.goal_read = 0.0
+        #: (zone, rounded position, goal) as last seen, and when it last
+        #: CHANGED. A script that is stepping while none of these move is
+        #: a script hammering something that is not working -- see
+        #: `LiveWorker._check_progress`.
+        self.progress = None
+        self.progress_at = 0.0
+        self.said_stuck = ""
         #: what `runner` was built from, so the service tick can notice
         #: the operator turning the script on, off, or replacing it
         self.script_source = None
@@ -488,6 +495,7 @@ class LiveWorker(QThread):
                 # pointer is fine. Reading is throttled internally.
                 await self._read_goal(seat)
                 self._check_in_step(seat)
+                self._check_progress(seat)
 
                 driven = self._script_drives(seat)
                 if self.auto_dialogue and seat.quester is None and not driven:
@@ -682,6 +690,12 @@ class LiveWorker(QThread):
     #: how often to re-read a wizard's quest tracker. It only changes
     #: when a step completes, so this is cheap to do rarely.
     GOAL_POLL = 8.0
+    #: how long a scripted wizard may change nothing at all -- zone,
+    #: position, quest goal -- before the run says so. Generous, because
+    #: a long fight or a slow dungeon legitimately looks like this: five
+    #: minutes of a wizard standing in the same spot on the same quest
+    #: is not patience, it is a loop that is not working.
+    STUCK_AFTER = 300.0
     #: how long the party may be on different quest goals before it is
     #: called a desync. Turning a step in is not simultaneous -- one
     #: wizard clicks the NPC seconds before the other -- so a bare
@@ -1863,7 +1877,12 @@ class LiveWorker(QThread):
                       if not self._stop else "stopping…")
 
     async def _read_goal(self, seat):
-        """Refresh this seat's quest goal, at most every `GOAL_POLL`."""
+        """Refresh what this wizard is doing, at most every `GOAL_POLL`.
+
+        The quest goal, its zone and roughly where it is standing --
+        enough to answer "has anything happened since last time?", which
+        is what `_check_progress` needs and what nothing was asking.
+        """
         import time
 
         from .. import questing
@@ -1876,6 +1895,65 @@ class LiveWorker(QThread):
             seat.goal = await questing.read_quest_goal(seat.client)
         except Exception:
             seat.goal = ""
+
+        zone = position = None
+        try:
+            zone = await seat.client.zone_name()
+        except Exception:
+            pass
+        try:
+            at = await seat.client.body.position()
+            # Rounded hard: the idle animation moves a wizard by a
+            # fraction constantly, and a progress check that counts
+            # breathing as progress never fires.
+            position = (round(at.x / 50.0), round(at.y / 50.0),
+                        round(at.z / 50.0))
+        except Exception:
+            pass
+
+        where = (zone, position, seat.goal)
+        if where != seat.progress:
+            seat.progress = where
+            seat.progress_at = now
+            seat.said_stuck = ""
+
+    def _check_progress(self, seat):
+        """Say so when a running script is getting nowhere.
+
+        The scripts hammer. Across KamarJ's three arc questers there are
+        2,438 bounded retry loops and 528 unbounded ones, and `tp` alone
+        appears in 331 of the unbounded ones -- because the primitive
+        under it, Deimos's `navmap_tp`, returns nothing at all. Every one
+        of its returns is bare, including the `if not await
+        is_free(client): return` at the top, so a script cannot ask
+        whether a teleport landed and has to poll the game's windows and
+        try again. When that never succeeds, the loop simply runs, and
+        from outside the run looks alive: instructions are being
+        executed, the counter climbs, and the wizard is standing still.
+
+        That is the shape of the operator's report -- "one wizard might
+        get through, while the other is still trying to" -- and nothing
+        could see it. This does not fix the hammering. It ends the
+        silence, which is the part that made it hard to act on.
+        """
+        import time
+
+        if seat.progress is None or not self._script_drives(seat):
+            return
+        idle = time.monotonic() - seat.progress_at
+        if idle < self.STUCK_AFTER:
+            return
+        zone, _where, goal = seat.progress
+        note = f"{zone or 'an unreadable zone'} · {goal or 'no quest goal'}"
+        if note == seat.said_stuck:
+            return
+        seat.said_stuck = note
+        runner = self.seats[0].runner
+        steps = f"{runner.steps:,} instructions in" if runner else "the script"
+        self._say(seat,
+                  f"nothing has changed for {idle / 60:.0f} min — same zone, "
+                  f"same spot, same quest goal ({note}) — while {steps}. "
+                  f"That is a retry loop that is not working, not progress")
 
     def _check_in_step(self, seat):
         """Say so when the party has drifted onto different quests.
