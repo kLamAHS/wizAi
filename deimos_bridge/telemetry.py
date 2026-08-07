@@ -624,6 +624,9 @@ class Telemetry:
         self.resolver = resolver
         self.rounds = []
         self.fights = []
+        #: what happened between the fights -- see `note_questing`
+        self.questing = []
+        self.started_at = None
         self._fight = 0
         self._pending = None       # RoundRecord awaiting its actual damage
         self._listeners = []
@@ -817,6 +820,52 @@ class Telemetry:
         f.passes += 1
         self._emit("round", rec)
         return rec
+
+    #: How many questing events a run keeps. Days of running would
+    #: otherwise put a megabyte of "teleported" in every export; the
+    #: interesting ones are the recent ones, because the operator uploads
+    #: after noticing something.
+    QUESTING_LOG = 400
+
+    def note_questing(self, kind, detail=""):
+        """Record something that happened OUTSIDE a duel.
+
+        The exports had nothing at all between fights -- not a teleport,
+        not a zone change, not a stall -- so a run whose combat is
+        healthy and whose questing wedges every ten minutes exports as a
+        clean run. Three wizards uploaded at rev 3c8b8087 won every one
+        of their seventeen fights and said nothing whatever about the
+        thing the operator was actually fighting with.
+
+        `kind` is a short slug ("stranded", "rejoined", "stuck",
+        "desync") so a reader can count them; `detail` is the sentence a
+        human needs. Timestamps are relative to the run so two wizards'
+        logs line up without a clock.
+        """
+        import time
+
+        if self.started_at is None:
+            self.started_at = time.monotonic()
+        self.questing.append({
+            "at": round(time.monotonic() - self.started_at, 1),
+            "fight": len(self.fights),
+            "kind": kind,
+            "detail": detail,
+        })
+        del self.questing[:-self.QUESTING_LOG]
+
+    def questing_counts(self):
+        """{kind: n} over the whole log, for the summary.
+
+        A count is what says "this run needed a human": eleven
+        `stranded` in an hour is the report, and it is one line rather
+        than four hundred.
+        """
+        out = {}
+        for event in self.questing:
+            kind = event.get("kind") or "?"
+            out[kind] = out.get(kind, 0) + 1
+        return out
 
     def note_failed_cast(self, reason):
         """The round in hand claimed a cast that never went out.
@@ -1424,6 +1473,7 @@ class Telemetry:
             "unresolved": self.unresolved_names(),
             "hand_visibility": self.hand_visibility(),
             "hidden_cards": self.hidden_cards(),
+            "questing": self.questing_counts(),
         }
 
     def to_json(self, path):
@@ -1431,6 +1481,11 @@ class Telemetry:
             "summary": self.summary(),
             "fights": [asdict(f) for f in self.fights],
             "rounds": [asdict(r) for r in self.rounds],
+            # Everything that happened between the fights. A run can be
+            # perfect in every duel and still need a human every ten
+            # minutes, and until this existed the export could not tell
+            # the two apart.
+            "questing": list(self.questing),
         }
         with open(path, "w") as f:
             json.dump(payload, f, indent=2, default=str)

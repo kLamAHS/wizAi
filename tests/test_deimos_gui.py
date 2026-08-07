@@ -10190,3 +10190,217 @@ def test_being_too_far_from_the_marker_says_how_far():
         questing.read_quest_position = orig
     assert near is False
     assert "4,000" in why and "750" in why
+
+
+# ------------------------------------------ the wizard left behind
+#
+# The failure the operator is losing days to: "occasionally one wizard
+# might get through with a teleport, but the others might stop
+# teleporting or get stuck ... not a fully automatic bot until it can run
+# for days without needing to fix teleporting and questing every 5-15
+# minutes."
+#
+# Nothing could see it. `_check_in_step` compares QUEST GOALS and a
+# wizard whose teleport silently failed is on the same quest -- same
+# goal, same instruction pointer, standing in the last zone.
+# `_check_progress` does see it, after five minutes, and only says so.
+# So this compares WHERE they are.
+
+def _zoned_party(zones):
+    """A worker whose seats read the given zone names."""
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from deimos_bridge import party
+    from deimos_bridge.gui.live import LiveWorker
+    from deimos_bridge.telemetry import Telemetry
+
+    from deimos_bridge.gui.live import SeatConfig
+
+    extra = [SeatConfig(school="fire", deck=[], policy_name="ttk-lookahead",
+                        telemetry=Telemetry())
+             for _ in zones[1:]]
+    worker = LiveWorker(Telemetry(), "fire", [], "ttk-lookahead", 1,
+                        seats=extra)
+    assert len(worker.seats) == len(zones)
+    for i, (seat, zone) in enumerate(zip(worker.seats, zones)):
+        seat.client = object()
+        seat.name = f"w{i}"
+        seat.wizard_name = f"w{i}"
+        if seat.tel is None:
+            seat.tel = Telemetry()
+        seat._zone = zone
+
+    async def read_zone(client):
+        for s in worker.seats:
+            if s.client is client:
+                return s._zone
+        return None
+
+    return worker, read_zone
+
+
+def _look(worker, read_zone, monkeypatch):
+    import asyncio
+
+    from deimos_bridge import party
+
+    monkeypatch.setattr(party, "zone", read_zone)
+    return asyncio.run(worker._check_together())
+
+
+def test_the_wizard_in_the_other_zone_is_the_one_that_missed_the_teleport(
+        monkeypatch):
+    """Two in Olde Town and one in Unicorn Way: the one on its own is
+    the one whose teleport did not land, and the majority says where it
+    should be."""
+    worker, read_zone = _zoned_party(
+        ["Olde Town", "Olde Town", "Unicorn Way"])
+    # first look only starts the clock -- a zone change is not
+    # simultaneous and a bare inequality fires on every door
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+    worker.seats[2].stranded_since -= worker.STRANDED_AFTER + 1
+    seat, target = _look(worker, read_zone, monkeypatch)
+    assert seat is worker.seats[2]
+    assert target.zone_seen == "Olde Town"
+
+
+def test_a_party_mid_transition_is_not_a_straggler(monkeypatch):
+    """Half in each zone is a zone change in progress, which is most of
+    every zone change. Following one of them could be the wrong way."""
+    worker, read_zone = _zoned_party(
+        ["Olde Town", "Unicorn Way", "Unicorn Way", "Olde Town"])
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+
+
+def test_two_adrift_is_a_split_not_a_straggler(monkeypatch):
+    worker, read_zone = _zoned_party(
+        ["Olde Town", "Olde Town", "Unicorn Way", "The Commons"])
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+
+
+def test_a_party_that_is_together_is_left_alone(monkeypatch):
+    worker, read_zone = _zoned_party(["Olde Town"] * 3)
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+
+
+def test_a_zone_that_will_not_read_is_no_evidence(monkeypatch):
+    """None rather than a guess. Deciding a wizard is adrift because a
+    read failed would teleport a wizard that was exactly where it should
+    be, which is worse than the failure being fixed."""
+    worker, read_zone = _zoned_party(["Olde Town", "Olde Town", None])
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+
+
+def test_moving_zone_restarts_the_clock(monkeypatch):
+    """A wizard walking through two zones on its own is not adrift for
+    the sum of both -- it is adrift in whichever one it stops in."""
+    worker, read_zone = _zoned_party(
+        ["Olde Town", "Olde Town", "Unicorn Way"])
+    _look(worker, read_zone, monkeypatch)
+    worker.seats[2].stranded_since -= worker.STRANDED_AFTER + 1
+    worker.seats[2]._zone = "The Commons"
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+    assert worker.seats[2].stranded_where == "The Commons"
+
+
+def test_a_solo_wizard_is_never_left_behind(monkeypatch):
+    worker, read_zone = _zoned_party(["Olde Town"])
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+
+
+def test_bringing_it_back_uses_the_ordinary_follow(monkeypatch):
+    """`party.follow` and nothing new: it already handles the cross-zone
+    hop, the distance close and stepping into the duel if the others are
+    already fighting."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    worker, _read = _zoned_party(["Olde Town", "Olde Town", "Unicorn Way"])
+    seat, target = worker.seats[2], worker.seats[0]
+    seat.stranded_where = "Unicorn Way"
+    target.zone_seen = "Olde Town"
+    called = {}
+
+    async def follow(follower, leader, leader_name=None, **kw):
+        called["to"] = leader_name
+        return True, "followed the leader into Olde Town"
+
+    monkeypatch.setattr(party, "follow", follow)
+    asyncio.run(worker._rejoin(seat, target))
+    assert called["to"] == "w0"
+    assert seat.stranded_since is None            # cleared once it moved
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert kinds == ["stranded", "rejoined"]
+
+
+def test_a_rejoin_that_fails_is_recorded_rather_than_retried_silently(
+        monkeypatch):
+    import asyncio
+
+    from deimos_bridge import party
+
+    worker, _read = _zoned_party(["Olde Town", "Olde Town", "Unicorn Way"])
+    seat, target = worker.seats[2], worker.seats[0]
+    seat.stranded_where = "Unicorn Way"
+
+    async def follow(follower, leader, leader_name=None, **kw):
+        return False, "could not read the leader's position"
+
+    monkeypatch.setattr(party, "follow", follow)
+    seat.stranded_since = 12345.0                  # adrift, clock running
+    asyncio.run(worker._rejoin(seat, target))
+    assert [e["kind"] for e in seat.tel.questing] == ["stranded",
+                                                      "rejoin-failed"]
+    # still adrift: the clock is NOT cleared, so the next look still
+    # sees it and the throttle decides when to try again
+    assert seat.stranded_since == 12345.0
+
+
+def test_rejoining_is_throttled_so_it_does_not_fight_the_script(monkeypatch):
+    import asyncio
+
+    from deimos_bridge import party
+
+    worker, _read = _zoned_party(["Olde Town", "Olde Town", "Unicorn Way"])
+    seat, target = worker.seats[2], worker.seats[0]
+    tries = {"n": 0}
+
+    async def follow(follower, leader, leader_name=None, **kw):
+        tries["n"] += 1
+        return False, "nope"
+
+    monkeypatch.setattr(party, "follow", follow)
+    asyncio.run(worker._rejoin(seat, target))
+    asyncio.run(worker._rejoin(seat, target))
+    assert tries["n"] == 1, "the second attempt should be inside the throttle"
+
+
+def test_the_export_carries_what_happened_between_the_fights():
+    """A run can be perfect in every duel and still need a human every
+    ten minutes. Three wizards at rev 3c8b8087 won all seventeen of
+    their fights and the exports said nothing whatever about the thing
+    the operator was actually fighting with."""
+    from deimos_bridge.telemetry import Telemetry
+
+    tel = Telemetry()
+    tel.note_questing("stranded", "w2 is in Unicorn Way")
+    tel.note_questing("rejoined", "followed into Olde Town")
+    tel.note_questing("stranded", "again")
+    assert tel.questing_counts() == {"stranded": 2, "rejoined": 1}
+    assert tel.summary()["questing"] == {"stranded": 2, "rejoined": 1}
+    assert [e["kind"] for e in tel.questing][:2] == ["stranded", "rejoined"]
+    assert all("at" in e and "fight" in e for e in tel.questing)
+
+
+def test_the_questing_log_does_not_grow_without_bound():
+    """Days of running would otherwise put a megabyte of "teleported"
+    in every export."""
+    from deimos_bridge.telemetry import Telemetry
+
+    tel = Telemetry()
+    for i in range(tel.QUESTING_LOG + 50):
+        tel.note_questing("tick", str(i))
+    assert len(tel.questing) == tel.QUESTING_LOG
+    assert tel.questing[-1]["detail"] == str(tel.QUESTING_LOG + 49)

@@ -1259,7 +1259,15 @@ def _rollout(sim, state, first_action, max_turns=12, target=0,
     #: Ranks worse than any line that clears the board, and worse than
     #: one that merely runs out of horizon while alive. `unplayable` is
     #: for a move that cannot be made at all.
-    unplayable = (max_turns + 3, 0.0)
+    def health_left():
+        """This wizard's health at the end of the line, as a fraction."""
+        try:
+            return max(0.0, min(1.0, float(s.player.hp)
+                                / float(s.player.max_hp)))
+        except (AttributeError, TypeError, ValueError, ZeroDivisionError):
+            return 0.0
+
+    unplayable = (max_turns + 3, 0.0, 0.0)
 
     def kills():
         return sum(1 for e in s.enemies if not e.alive)
@@ -1330,15 +1338,28 @@ def _rollout(sim, state, first_action, max_turns=12, target=0,
             # casts nothing, which is the conservative direction.
             _allies_hit(s, allies, _ALLY_SCHOOLS, probe)
         if not enemy_alive():
-            return turn, -dealt_now()
+            return turn, -dealt_now(), -health_left()
         try:
             probe.end_round(s)
         except Exception:
-            return stalled(turn)
+            return stalled(turn) + (0.0,)
         if not enemy_alive():
-            return turn, -dealt_now()
+            # THIRD element, and it only ever has a value here: the board
+            # is clear and what is left of this wizard is what the NEXT
+            # fight starts on. Winning a boss at 45% and winning it at
+            # 90% scored identically, and over a session that is how the
+            # fire wizard reached his eighth fight on 53% and did not
+            # leave it.
+            #
+            # Confined to winning lines on purpose. Crediting SURVIVAL on
+            # lines that LOSE was tried and measured at -8.7/-10.0/-12.3
+            # points of kill rate across three seed streams, so every
+            # losing return below carries 0.0 and this cannot reach
+            # them. It is a tiebreak between two ways of winning the same
+            # fight on the same turn, and nothing else.
+            return turn, -dealt_now(), -health_left()
         if not s.player.alive:
-            return died(turn)
+            return died(turn) + (0.0,)
 
         action, target = _split(continuation(probe, s))
         if not (0 <= target < len(s.enemies)) or not s.enemies[target].alive:
@@ -1346,7 +1367,7 @@ def _rollout(sim, state, first_action, max_turns=12, target=0,
             # continuation re-aim rather than casting into a corpse.
             target = focus_target(s)
 
-    return stalled(max_turns)
+    return stalled(max_turns) + (0.0,)
 
 
 #: The rollout horizon `greedy_ttk` uses when the caller does not say.
@@ -1537,9 +1558,9 @@ def greedy_ttk(max_turns: int = None, continuation=None):
         def score_all(allies):
             out = []
             for card, target in candidates:
-                turns, neg_damage = _rollout(sim, s, card, max_turns, target,
-                                             continuation=fixed_continuation,
-                                             allies=allies)
+                turns, neg_damage, health = _rollout(
+                    sim, s, card, max_turns, target,
+                    continuation=fixed_continuation, allies=allies)
                 # Mixed semantics in one tuple is safe here and only here:
                 # element 0 is `turns`, and two candidates can only reach
                 # element 2 by tying on it -- which puts them on the same
@@ -1547,8 +1568,8 @@ def greedy_ttk(max_turns: int = None, continuation=None):
                 thrift = ((-reach[card.name], price[card.name])
                           if is_sentinel(turns, max_turns)
                           else (price[card.name], reach[card.name]))
-                out.append(((turns, neg_damage) + thrift + (target,),
-                            (card, target)))
+                out.append(((turns, neg_damage, health)
+                            + thrift + (target,), (card, target)))
             return out
 
         scored = score_all(None)
@@ -1588,7 +1609,12 @@ def greedy_ttk(max_turns: int = None, continuation=None):
         # or tuning sweep can reach it, and it costs nothing when the
         # rate is zero.
         strat.last_party_blind = False
-        if _ALLY_RATE > 0 and (best_score[0], best_score[1]) == pass_score:
+        # On the first two only. The third is health left, and "this
+        # move is indistinguishable from doing nothing" is a claim about
+        # the BOARD -- a shield that leaves the wizard healthier than
+        # passing has still not moved the fight along, which is exactly
+        # the case this exists to catch.
+        if _ALLY_RATE > 0 and best_score[:2] == pass_score[:2]:
             scored = score_all(0.0)
             best_score, best_action = min(scored, key=lambda sc: sc[0])
             pass_score = _rollout(sim, s, None, max_turns,
@@ -1629,7 +1655,7 @@ def greedy_ttk(max_turns: int = None, continuation=None):
         # the damage tiebreak instead made it pass almost every turn: a
         # line that skips a turn accumulates pips and so does more total
         # damage later, which is not a reason to do nothing now.
-        pass_turns, pass_damage = pass_score
+        pass_turns, pass_damage, _pass_health = pass_score
         passing = pass_turns < best_score[0]
         strat.last_candidates = mark(scored, passing)
         strat.last_candidates.append(

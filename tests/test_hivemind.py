@@ -1150,7 +1150,7 @@ def test_a_lone_wizard_cannot_clear_the_board_the_party_clears_easily():
     with policies.party_rate(120.0):
         reached = [policies._rollout(sim, state, c, horizon, 0)
                    for c in state.player.hand]
-    assert any(t <= horizon for t, _ in reached), \
+    assert any(t <= horizon for t, _d, _hp in reached), \
         "with a teammate hitting, something has to kill inside the horizon"
 
     # And the move it settles on is still an attack, which is the only
@@ -1263,6 +1263,66 @@ def test_a_heal_that_actually_saves_the_wizard_already_wins():
     choice = policies.greedy_ttk()(sim, state)
     card, _t = choice if isinstance(choice, tuple) else (choice, None)
     assert card.name == "Pixie"
+
+
+def test_winning_at_ninety_percent_beats_winning_at_forty():
+    """The third element of every score, and the other half of "health
+    is never valued". The rollout's objective ended the moment the board
+    cleared, so a line that won a boss on 45% scored identically to one
+    that won it on 90% -- and the health a fight ends on is the health
+    the NEXT fight starts on.
+
+    Measured paired on three seed streams at n=400: kill rate +0.12,
+    +0.00, +0.13 points (noise) and health left +2.0, +2.1, +1.8 --
+    +4.0 and +5.4 on the hard fire boards, which is where the decay was.
+    """
+    from deimos_bridge import policies
+
+    sim, state = wizard(school="ice", hand=("Frost Beetle", "Tower Shield"),
+                        pips=4, hp=1500, board=((60, "balance"),))
+    for e in state.enemies:
+        e.flat_hit = 200
+    scored = {c.name: policies._rollout(sim, state, c, 12, 0)
+              for c in state.player.hand}
+    assert all(len(v) == 3 for v in scored.values()), scored
+    # a line that clears the board carries the health it ended on
+    winners = [v for v in scored.values() if v[0] <= 12]
+    assert winners, scored
+    assert all(v[2] < 0 for v in winners), winners
+
+
+def test_a_line_that_loses_carries_no_health_at_all():
+    """The restriction that keeps the reverted change reverted.
+    Crediting survival on losing lines cost 8.7-12.3 points of kill
+    rate; the third element is therefore 0.0 for `died`, `stalled` and
+    `unplayable` alike, so no ranking between two losing lines can ever
+    turn on health."""
+    from deimos_bridge import policies
+
+    sim, state = wizard(school="ice", hand=("Frost Beetle", "Tower Shield"),
+                        pips=1, hp=1500, board=((9000, "balance"),))
+    scored = [policies._rollout(sim, state, c, 12, 0)
+              for c in state.player.hand]
+    assert all(v[0] > 12 for v in scored), scored      # all sentinels
+    assert all(v[2] == 0.0 for v in scored), scored
+
+
+def test_health_does_not_decide_whether_a_move_ties_doing_nothing():
+    """The free-rider fallback asks whether the rollout could tell this
+    move from passing, and that is a claim about the BOARD. A shield
+    leaves the wizard healthier than passing does and has still not
+    moved the fight along -- which is the exact case the fallback
+    exists to catch, so it must not be excused by it."""
+    from deimos_bridge.policies import greedy_ttk, party_rate
+
+    sim, state = wizard(school="ice",
+                        hand=("Ice Trap", "Snow Serpent", "Frost Beetle",
+                              "Tower Shield"),
+                        pips=4, hp=1270, board=((420, "fire"),))
+    policy = greedy_ttk()
+    with party_rate(900.0):
+        policy(sim, state)
+    assert policy.last_party_blind is True
 
 
 def test_the_floor_for_the_next_fight_is_what_the_fights_have_cost():
@@ -1674,7 +1734,9 @@ def test_a_board_the_party_clears_anyway_ties_every_move_with_passing():
         scored = [pol._rollout(sim, state, c, 12, 0)
                   for c in state.player.hand]
         passing = pol._rollout(sim, state, None, 12)
-    assert all(sc == passing for sc in scored), \
+    # On the board terms only -- the third element is health left, and
+    # the fallback's tie test is deliberately scoped the same way.
+    assert all(sc[:2] == passing[:2] for sc in scored), \
         f"the ally rate is supposed to flatten this board: {scored} vs {passing}"
 
 
@@ -1770,11 +1832,13 @@ def test_the_rollout_does_not_hit_twice_for_the_round_already_on_the_board():
     # damage is the ally's and the count is unambiguous.
     state.player.hand[:] = []
     state.player.deck[:] = []
-    _turns, banked = _rollout(sim, state, None, max_turns=3, allies=100.0)
+    _turns, banked, _hp = _rollout(sim, state, None, max_turns=3,
+                                   allies=100.0)
     # Three turns, ally pressure on two of them: 200, not 300.
     assert -banked == pytest.approx(200.0)
 
-    _turns, solo = _rollout(sim, state, None, max_turns=3, allies=0.0)
+    _turns, solo, _hp = _rollout(sim, state, None, max_turns=3,
+                                 allies=0.0)
     assert solo == 0.0
 
 
@@ -1903,7 +1967,7 @@ def test_between_equal_outcomes_the_cheaper_card_wins(monkeypatch):
     from deimos_bridge import policies as P
 
     # turns=5 with a horizon of 12: a real turn count, not a sentinel.
-    monkeypatch.setattr(P, "_rollout", lambda *a, **kw: (5.0, -600.0))
+    monkeypatch.setattr(P, "_rollout", lambda *a, **kw: (5.0, -600.0, 0.0))
     sim, state = wizard(school="fire", hand=("Fire Cat", "Sunbird"),
                         pips=7, hp=1500, board=((800, "ice"),))
     chosen = P.greedy_ttk()(sim, state)
@@ -1928,7 +1992,7 @@ def test_above_the_horizon_the_bigger_hit_wins_instead(monkeypatch):
     """
     from deimos_bridge import policies as P
 
-    monkeypatch.setattr(P, "_rollout", lambda *a, **kw: (13.0, -600.0))
+    monkeypatch.setattr(P, "_rollout", lambda *a, **kw: (13.0, -600.0, 0.0))
     sim, state = wizard(school="fire", hand=("Fire Cat", "Sunbird"),
                         pips=7, hp=1500, board=((800, "ice"),))
     chosen = P.greedy_ttk()(sim, state)
@@ -1948,7 +2012,7 @@ def test_a_stall_that_killed_three_mobs_is_still_a_stall(monkeypatch):
     assert P.is_sentinel(11.8, 12), "a 3-kill stall reads as in-horizon"
     assert not P.is_sentinel(12, 12), "a 12-turn clear is a real count"
 
-    monkeypatch.setattr(P, "_rollout", lambda *a, **kw: (11.8, -600.0))
+    monkeypatch.setattr(P, "_rollout", lambda *a, **kw: (11.8, -600.0, 0.0))
     sim, state = wizard(school="fire", hand=("Fire Cat", "Sunbird"),
                         pips=7, hp=1500, board=((800, "ice"),))
     chosen = P.greedy_ttk()(sim, state)
