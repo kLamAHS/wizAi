@@ -1146,7 +1146,8 @@ class WizAiCombatHandler:
                     # the round is passed exactly as before.
                     self.backend.report_slow_cast(decision.card_name)
                     held = await self._cards_in_hand()
-                    await card.cast(target, sleep_time=self.RETRY_CAST_TIME)
+                    await card.cast(self._retry_target(read, decision, target),
+                                    sleep_time=self.RETRY_CAST_TIME)
                     if not await self._card_left_the_hand(held):
                         raise RuntimeError(
                             f"the card was still in hand after casting, "
@@ -1305,6 +1306,41 @@ class WizAiCombatHandler:
             await asyncio.sleep(self.CAST_POLL)
             deadline -= self.CAST_POLL
         return False
+
+    def _retry_target(self, read, decision, first):
+        """What to aim at on the SECOND attempt, which is not the first.
+
+        Retrying identically but slower tests one hypothesis, timing, and
+        the instrumented run answered it: not timing. Across that run
+        every self-targeted cast that costs no pips went out -- eleven of
+        eleven, Tower Shield four times and Fireblade seven -- and every
+        self-targeted cast that costs pips failed, three of three, all of
+        them Pixie. The diagnostic line rules out the rest: aimed at
+        self, a card sharing that aim in the same hand went out, the pips
+        were there, and the client still called it castable.
+
+        What separates them is the second click. `CombatCard.cast` with a
+        `CombatMember` clicks the card, waits, then clicks the TARGET'S
+        HEALTH TEXT -- for a self-cast, the caster's own number in the
+        HUD. With `None` it clicks the card once and stops
+        (`card.py:72-76`). If the game has already aimed the spell at the
+        only wizard it can go on, that second click is at best redundant
+        and at worst deselects it, which is exactly what the operator
+        described: "it double clicks, which unselects the spell after it
+        tries to cast it so nothing happens".
+
+        So the retry drops the second click for self-casts. Deliberately
+        only the RETRY: the two-click path is working for eleven of
+        eleven zero-pip self-casts, and there is no reason to disturb
+        those to fix three. If a single click turns out to be right in
+        general, the next run says so and it can move.
+        """
+        card = self.backend.cards.get(decision.card_name)
+        tgt = (_primary_target(card) or _target_from_kind(card)) if card \
+            else None
+        if tgt == "self":
+            return None
+        return first
 
     def _who_needs_the_shield(self, read):
         """The wizard in most danger, which is not always the caster.

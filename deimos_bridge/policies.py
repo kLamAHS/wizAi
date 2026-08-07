@@ -83,11 +83,34 @@ def _is_inert(card, state) -> bool:
     health missing. So it does not fix that, and does not claim to; it
     only stops a round being spent on a heal that would restore zero.
 
-    Deliberately narrow. A blade on a wizard that already has three is
-    not inert -- it stacks -- and a trap on a mob that is about to die
-    is a judgement call the rollout is better placed to make than a
-    rule here.
+    The other case: **an X-pip card, which the engine cannot price at
+    all.** Heck Hound, Chromatic Blast, Dryad and 2,109 others carry
+    `x_pips`, meaning they consume the whole pip rack and scale with it.
+    The card table records them as costing 0 pips, and `Sim` gives them
+    0 damage at every pip count -- measured 1, 2, 3, 4 and 6 pips
+    against an 800hp mob, and it is 0 immediately and 0 after the DoT
+    would have ticked, with the pips not even spent.
+
+    So to the policy an X-pip card is free AND does nothing: exactly
+    indistinguishable from passing, and it wins the pip tiebreak because
+    nothing is cheaper than zero. In the game it is the opposite of
+    free. The second live party run shows what that costs -- the fire
+    wizard chose Heck Hound eight times, every time holding one or two
+    pips, and dealt 0.0 damage across the fifteen rounds of its first
+    two fights.
+
+    `cheapest_lethal` already skips X-pip cards for the same reason. The
+    day `Sim` prices them, this goes: the rule is about the model's
+    blindness, not about the cards, and Heck Hound on a full rack is a
+    genuinely strong play that the policy currently has no way to see.
+
+    Deliberately narrow otherwise. A blade on a wizard that already has
+    three is not inert -- it stacks -- and a trap on a mob that is about
+    to die is a judgement call the rollout is better placed to make than
+    a rule here.
     """
+    if getattr(card, "x_pips", False):
+        return True
     if getattr(card, "kind", "") != "heal":
         return False
     me = getattr(state, "player", None)

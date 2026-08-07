@@ -9292,6 +9292,69 @@ def test_a_blade_is_not_moved_to_a_teammate(qapp):
         == "member:me"
 
 
+def test_the_retry_drops_the_second_click_for_a_self_cast(qapp):
+    """Retrying identically but slower tests timing, and the instrumented
+    run answered that: not timing. Every self-targeted cast costing no
+    pips went out -- eleven of eleven -- and every self-targeted cast
+    costing pips failed, three of three, all Pixie. The diagnostic ruled
+    out aim, affordability and castability.
+
+    What is left is the second click. `CombatCard.cast` with a member
+    clicks the card, waits, then clicks the target's HEALTH TEXT; with
+    `None` it clicks once and stops. On a spell the game has already
+    aimed at the only wizard it can go on, that second click is what the
+    operator described unselecting it.
+    """
+    from deimos_bridge.live_backend import WizAiCombatHandler
+
+    class _Pixie:
+        kind = "heal"
+        ops = [{"op": "heal", "tgt": "self"}]
+
+    class _Nuke:
+        kind = "damage"
+        ops = [{"op": "hit", "tgt": "enemy"}]
+
+    class _Backend:
+        cards = {"Pixie": _Pixie(), "Sunbird": _Nuke()}
+
+    handler = WizAiCombatHandler.__new__(WizAiCombatHandler)
+    handler.backend = _Backend()
+    read = _healer_read(my_hp=651, my_max=1064)
+
+    class _D:
+        card_name = "Pixie"
+
+    # the first attempt aimed at the caster; the retry aims at nothing,
+    # which is one click instead of two
+    assert handler._retry_target(read, _D(), "member:me") is None
+
+    # ...and a cast at a mob is untouched, because nothing about it is
+    # in question
+    class _E:
+        card_name = "Sunbird"
+
+    assert handler._retry_target(read, _E(), "member:Sokkwi Ripper") \
+        == "member:Sokkwi Ripper"
+
+
+def test_an_unknown_card_keeps_the_target_it_was_given(qapp):
+    """A card the catalog cannot resolve must not have its aim silently
+    dropped -- that would turn a targeted nuke into a bare click."""
+    from deimos_bridge.live_backend import WizAiCombatHandler
+
+    class _Backend:
+        cards = {}
+
+    class _D:
+        card_name = "Something Unresolvable"
+
+    handler = WizAiCombatHandler.__new__(WizAiCombatHandler)
+    handler.backend = _Backend()
+    assert handler._retry_target(_healer_read(), _D(), "member:mob") \
+        == "member:mob"
+
+
 def test_a_failed_cast_reports_facts_not_a_theory(qapp):
     """The message this replaced asserted a cause, and asserted the wrong
     one at the card it kept being printed on.
