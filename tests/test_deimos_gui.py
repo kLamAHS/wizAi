@@ -10650,3 +10650,55 @@ def test_a_wizard_that_heals_up_says_so_too():
     asyncio.run(worker._let_it_heal(seat))
     assert [e["kind"] for e in seat.tel.questing] == ["waiting-to-heal",
                                                       "healed"]
+
+
+def test_a_stage_that_keeps_timing_out_keeps_saying_so_in_the_export():
+    """The run at rev 85a68184 has 99 combat rounds and eight questing
+    entries to account for the rest of the session. A stage that times
+    out on every tick was announced on the status line once and written
+    down nowhere, so "really stuck" and "working fine" exported the
+    same."""
+    import asyncio
+
+    worker, _read = _zoned_party(["Olde Town", "Olde Town"])
+    seat = worker.seats[0]
+
+    async def never_returns():
+        await asyncio.sleep(10)
+
+    async def drive():
+        for _ in range(worker.STUCK_EVERY + 1):
+            await worker._stage(seat, "auto-dialogue", never_returns(),
+                                limit=0.001)
+
+    asyncio.run(drive())
+    stuck = [e for e in seat.tel.questing if e["kind"] == "stage-timeout"]
+    assert len(stuck) == 2, "the first, then one per STUCK_EVERY"
+    assert "auto-dialogue" in stuck[0]["detail"]
+    assert "in a row" in stuck[1]["detail"]
+
+
+def test_a_stage_that_raises_says_which_and_why():
+    import asyncio
+
+    worker, _read = _zoned_party(["Olde Town", "Olde Town"])
+    seat = worker.seats[0]
+
+    async def broken():
+        raise ValueError("no child window named wndCharacter")
+
+    asyncio.run(worker._stage(seat, "follow-the-leader", broken()))
+    stuck = [e for e in seat.tel.questing if e["kind"] == "stage-failed"]
+    assert len(stuck) == 1
+    assert "follow-the-leader" in stuck[0]["detail"]
+    assert "wndCharacter" in stuck[0]["detail"]
+
+
+def test_an_ordinary_say_once_still_stays_out_of_the_questing_log():
+    """Only the callers that pass a `kind` are stall reports. The rest
+    are advice -- "auto-dialogue only talks to quest NPCs" -- and the
+    questing log is not where those belong."""
+    worker, _read = _zoned_party(["Olde Town", "Olde Town"])
+    seat = worker.seats[0]
+    worker._say_once(seat, "quest-arrow", "switch the quest arrow on")
+    assert seat.tel.questing == []

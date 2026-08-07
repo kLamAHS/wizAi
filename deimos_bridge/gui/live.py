@@ -797,7 +797,9 @@ class LiveWorker(QThread):
                 f"{name} ran for {limit:.0f}s without finishing and was cut "
                 f"off. It holds the wheel while it runs, so everything else "
                 f"for this wizard — the hotkeys included — was waiting "
-                f"behind it.")
+                f"behind it.",
+                kind="stage-timeout",
+                detail=f"{name} cut off after {limit:.0f}s")
         except Exception as exc:
             self._stage_failed(seat, name, exc)
 
@@ -814,15 +816,31 @@ class LiveWorker(QThread):
 
     def _stage_failed(self, seat, name, exc):
         self._say_once(seat, name,
-                       f"{name} failed — {type(exc).__name__}: {exc}")
+                       f"{name} failed — {type(exc).__name__}: {exc}",
+                       kind="stage-failed",
+                       detail=f"{name}: {type(exc).__name__}: {exc}")
 
-    def _say_once(self, seat, key, message):
+    #: how many repeats of the same stage failure before the questing log
+    #: says so again. The status line thins out at 20 because it is read
+    #: live; the export is read afterwards, and one entry per 60 is
+    #: enough to show a stall lasting minutes without burying the rest.
+    STUCK_EVERY = 60
+
+    def _say_once(self, seat, key, message, kind="", detail=""):
         """Say it the first time, then every 20th -- twice a second is spam.
 
         The service tick runs twice a second, so a stage that is broken
         rather than unlucky would fill the status bar with one line and
         nothing else. Reporting the first and then thinning out keeps
         the failure visible without burying everything around it.
+
+        `kind` also writes it to the questing log, and that is the half
+        that was missing. A stage that times out on EVERY tick was
+        announced once and then never again, anywhere -- so a wizard
+        wedged for ten minutes and a wizard working normally produced
+        identical exports. The operator's report was "it's really
+        stuck", and the run at rev 85a68184 has 99 combat rounds and
+        eight questing entries to explain the rest of the session.
         """
         seat = self.seats[0] if seat is None else seat
         n = seat.stage_errors.get(key, 0) + 1
@@ -830,6 +848,12 @@ class LiveWorker(QThread):
         if n == 1 or n % 20 == 0:
             self._say(seat, message + (f" (still failing after {n} tries)"
                                        if n > 1 else ""))
+        if kind and (n == 1 or n % self.STUCK_EVERY == 0):
+            try:
+                seat.tel.note_questing(
+                    kind, detail + (f" — {n} times in a row" if n > 1 else ""))
+            except Exception:
+                pass
 
     async def _drain_requests(self, client, seat=None):
         """Perform the queued button/hotkey actions, one at a time.
