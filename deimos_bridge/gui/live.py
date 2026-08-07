@@ -157,6 +157,12 @@ class _Seat:
         #: when this seat last wrote a heartbeat to the questing log.
         #: See `LiveWorker._heartbeat`.
         self.beat_at = 0.0
+        #: when a wedged scripted wizard was last looked at, and the
+        #: script's instruction count then. A count that has not moved
+        #: between two looks means the script is inside `wait_for_coro`.
+        #: See `LiveWorker._unstick`.
+        self.unstuck_at = 0.0
+        self.steps_seen = None
         #: what `runner` was built from, so the service tick can notice
         #: the operator turning the script on, off, or replacing it
         self.script_source = None
@@ -327,6 +333,11 @@ class LiveWorker(QThread):
         #: seat numbering only exists inside this program.
         self.label_windows = bool(label_windows)
         self._stop = False
+        #: whether the VM's give-up hook has been installed. Once per
+        #: worker, not once per seat: it is module-level in the VM and
+        #: fires for every wizard the script drives. See
+        #: `LiveWorker._watch_waitfor`.
+        self._waitfor_hooked = False
 
     # -- seat 0, reachable where it always was -----------------------------
     tel = _seat_property("tel")
@@ -492,7 +503,18 @@ class LiveWorker(QThread):
         seat = self._seat_for(client) if seat is None else seat
         while not self._stop:
             try:
-                if await questing.in_battle(client) or seat.in_upkeep:
+                fighting = await questing.in_battle(client)
+                # BEFORE the guard below. Konstantin's log has one
+                # heartbeat at t=0 and the next at t=531.7 -- nine
+                # missed beats, because he spent them in a fourteen-round
+                # duel and every stage of this tick is skipped while a
+                # wizard is in combat. A wizard wedged inside a fight is
+                # exactly as stuck as one wedged outside it, and that
+                # nine-minute hole was the one place the timeline could
+                # not account for.
+                await self._heartbeat(seat, self._script_drives(seat),
+                                      fighting=fighting)
+                if fighting or seat.in_upkeep:
                     await asyncio.sleep(0.5)
                     continue
 
@@ -514,6 +536,7 @@ class LiveWorker(QThread):
                 # wizard that also had auto-dialogue on and no Deimos
                 # quester running.
                 await self._stage(seat, "script", self._sync_script(seat))
+                self._watch_waitfor(seat)
 
                 # The wheel is taken per stage, not for the whole tick.
                 # It exists to stop two coroutines steering one wizard at
@@ -545,11 +568,17 @@ class LiveWorker(QThread):
                 await self._read_goal(seat)
                 self._check_in_step(seat)
                 self._check_progress(seat)
-                await self._heartbeat(seat, driven)
 
                 if seat.runner is not None:
                     await self._stage(seat, "script step",
                                       self._script_step(seat), wheel=True)
+
+                if driven:
+                    # Unconditional, ahead of the chain below: a wedged
+                    # script needs looking at whether or not this tick
+                    # also decided to catch up or regroup.
+                    await self._stage(seat, "unwedging a stuck script",
+                                      self._unstick(seat), wheel=True)
 
                 if driven and self._should_catch_up(seat):
                     # The one case where wizAi steers a wizard the script
@@ -2052,7 +2081,7 @@ class LiveWorker(QThread):
     #: hour of three wizards is 180 entries.
     HEARTBEAT_EVERY = 60.0
 
-    async def _heartbeat(self, seat, driven=False):
+    async def _heartbeat(self, seat, driven=False, fighting=None):
         """One line a minute saying where this wizard is and what it is on.
 
         Everything else in the questing log is an alarm, and alarms only
@@ -2096,8 +2125,9 @@ class LiveWorker(QThread):
             if left is not None:
                 bits.append(f"{left:.0%} health")
             try:
-                bits.append("in a duel" if await party.in_battle(seat.client)
-                            else "out of combat")
+                if fighting is None:
+                    fighting = await party.in_battle(seat.client)
+                bits.append("in a duel" if fighting else "out of combat")
             except Exception:
                 bits.append("combat state unread")
             bits.append(seat.goal or "no quest goal")
@@ -2115,6 +2145,161 @@ class LiveWorker(QThread):
             raise
         except Exception:
             pass
+
+    def _watch_waitfor(self, seat):
+        """Put a `waitfor` that gave up into the run's log.
+
+        The VM's waits are bounded now rather than infinite (see
+        `WAITFOR_TIMEOUTS` in `Deimos/src/deimoslang/vm.py`), and a
+        bounded wait that gives up silently is only half a fix: the
+        script falls through into a retry loop and the run looks normal
+        again, so the thing that actually went wrong has to be said.
+
+        Installed once, on whichever seat owns the runner, and it is the
+        VM's own module-level hook -- so it fires for every wizard the
+        script drives, not just this one.
+        """
+        if self._waitfor_hooked or self.seats[0].runner is None:
+            return
+        self._waitfor_hooked = True
+        from .. import scripts
+
+        def gave_up(kind, seconds, inverted):
+            what = f"waitfor {kind}" + (" completion" if inverted else "")
+            for other in self.seats:
+                try:
+                    other.tel.note_questing(
+                        "waitfor-gave-up",
+                        f"`{what}` polled for {seconds:.0f}s and gave up — "
+                        f"the script has fallen through to whatever comes "
+                        f"next")
+                except Exception:
+                    pass
+            self._say(self.seats[0],
+                      f"`{what}` waited {seconds:.0f}s and gave up. Upstream "
+                      f"that wait has no timeout at all and would have "
+                      f"blocked the script for good")
+
+        ok, why = scripts.on_waitfor_timeout(gave_up)
+        if not ok:
+            self._say_once(self.seats[0], "waitfor-hook", why,
+                           kind="stage-failed", detail=why)
+
+    #: how often a wedged scripted wizard is looked at. The condition it
+    #: is waiting on changes on the scale of a conversation, not a tick.
+    UNSTICK_EVERY = 30.0
+
+    async def _unstick(self, seat):
+        """Unwedge a scripted wizard, in the direction its own wait needs.
+
+        The reason wizAi keeps its hands off a scripted wizard's
+        dialogue is concrete, and it is in `command_parser.py:67`::
+
+            async def wait_for_coro(coro, wait_for_not=False, interval=0.25):
+                while not await coro():
+                    await asyncio.sleep(interval)
+
+        `waitfordialog` is that, polling `is_in_dialog` every 250ms with
+        no timeout of any kind. Click the box away between two polls and
+        the script's wait never satisfies -- not late, never -- so an
+        override that always clears dialogue turns a ten-minute stall
+        into a permanent one.
+
+        But the same shape says which action IS safe, because the
+        script's instruction counter separates the two states from
+        outside. Parked on one instruction means it is inside
+        `wait_for_coro`, waiting for something to become true. Climbing
+        means it is running a retry loop and waiting for nothing.
+
+        Straight off seat 2's own heartbeats at rev 07ef3fa7::
+
+            361.1   11,582   climbing
+            421.1   11,582   +0      parked
+            481.6   11,582   +0      parked
+            542.0   11,830   +248    climbing
+            ...
+            903.7   15,485   +588    climbing
+            964.0   24,656   +9,171  broke out
+
+        Both wedges open the same way -- two minutes parked, then eight
+        of a retry loop -- so:
+
+          * Box open, script parked past a full look: it is in
+            `waitfordialog completion`, waiting for the box to CLOSE.
+            Clearing it satisfies the wait rather than racing it.
+          * Box open, script looping: nothing is waiting on it, so
+            clearing it cannot deadlock anything.
+          * No box, script parked: it is waiting for a box that is not
+            coming. Pressing X makes its condition true -- the one case
+            where an unrequested interact is exactly what the script is
+            asking for. Gated on something being in range, so it is a
+            press at an NPC and not into empty air.
+          * No box, script looping: not a dialogue problem. Reported,
+            nothing touched.
+
+        Never before `STUCK_AFTER`, so an ordinary conversation is never
+        raced, and every read is written down either way.
+        """
+        import time
+
+        from .. import questing
+
+        if seat.progress is None:
+            return
+        now = time.monotonic()
+        if now - seat.progress_at < self.STUCK_AFTER:
+            seat.unstuck_at = 0.0
+            seat.steps_seen = None
+            return
+        if now - seat.unstuck_at < self.UNSTICK_EVERY:
+            return
+        seat.unstuck_at = now
+
+        steps = getattr(self.seats[0].runner, "steps", None)
+        was, seat.steps_seen = seat.steps_seen, steps
+        # Only once there is a previous number to compare against.
+        # "Parked" is unknowable on the first sample, and guessing it
+        # would press X at a script that is merely slow.
+        parked = (was is not None and steps is not None and steps == was)
+
+        open_box = await questing.in_dialogue(seat.client)
+        near = await questing.near_interactable(seat.client)
+        at_marker, why = await questing.at_quest_marker(seat.client)
+        seat.tel.note_questing(
+            "stuck-detail",
+            f"script {'parked on one instruction' if parked else 'looping'}"
+            f" · dialogue {'open' if open_box else 'closed'}"
+            f" · {'an interactable in range' if near else 'nothing in range'}"
+            f" · {'at the quest marker' if at_marker else (why or 'not at the marker')}")
+
+        mins = (now - seat.progress_at) / 60.0
+        if open_box:
+            n, click_why = await questing.advance_dialogue(seat.client)
+            seat.tel.note_questing(
+                "unstuck-dialogue",
+                f"cleared {n} window(s) the script had left open"
+                if n else (click_why or "the box would not click"))
+            self._say(seat,
+                      f"stuck {mins:.0f} min with a dialogue box open — "
+                      f"cleared {n} window(s). wizAi normally leaves a "
+                      f"scripted wizard's dialogue alone; this one was "
+                      f"measurably not being handled, and it blocks movement")
+            return
+
+        if parked and near:
+            ok, press_why = await questing.press_x(seat.client)
+            opened = await questing.dialogue_opened(seat.client)
+            seat.tel.note_questing(
+                "unstuck-pressed-x",
+                (f"the script was parked waiting for a dialogue that never "
+                 f"opened; pressed X and a box "
+                 f"{'came up' if opened else 'did not come up'}")
+                if ok else (press_why or "could not press X"))
+            self._say(seat,
+                      f"stuck {mins:.0f} min with the script parked on one "
+                      f"instruction and no dialogue open — pressed X. "
+                      f"`waitfordialog` polls until a box exists and never "
+                      f"times out, so making one exist is what it waits for")
 
     def _check_progress(self, seat):
         """Say so when a running script is getting nowhere.
@@ -2149,6 +2334,12 @@ class LiveWorker(QThread):
         seat.said_stuck = note
         runner = self.seats[0].runner
         steps = f"{runner.steps:,} instructions in" if runner else "the script"
+        # Built separately rather than edited out of `steps`. The first
+        # version did `steps.replace(' in', '')` to drop the trailing
+        # "in", and " in" also occurs inside "instructions" -- so the
+        # live log said "while 12,620structions ran".
+        count = (f"{runner.steps:,} instructions" if runner
+                 else "the script")
         self._say(seat,
                   f"nothing has changed for {idle / 60:.0f} min — same zone, "
                   f"same spot, same quest goal ({note}) — while {steps}. "
@@ -2161,7 +2352,7 @@ class LiveWorker(QThread):
         seat.tel.note_questing(
             "no-progress",
             f"{idle / 60:.0f} min with no change — {note} — while "
-            f"{steps.replace(' in', '')} ran")
+            f"{count} ran")
 
     def _check_in_step(self, seat):
         """Say so when the party has drifted onto different quests.

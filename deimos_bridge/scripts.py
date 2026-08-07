@@ -182,6 +182,34 @@ def build_vm(clients, source: str):
     return machine
 
 
+def on_waitfor_timeout(hook):
+    """Report a `waitfor` that gave up. Returns (ok, reason).
+
+    The VM's `waitfor` used to poll forever -- see `WAITFOR_TIMEOUTS` in
+    `Deimos/src/deimoslang/vm.py`, and `tests/test_deimos_patches.py`
+    for why that is patched rather than worked around. A bounded wait
+    that gives up silently is only half a fix: the script carries on
+    into a retry loop and the run looks normal, so the thing that
+    actually went wrong has to be said out loud.
+
+    Reported rather than raised if the symbol is missing, because a
+    Deimos update that renames it must not stop wizAi starting. The
+    guard test is what catches it properly.
+    """
+    _ensure_path()
+    try:
+        from src.deimoslang import vm
+    except Exception as exc:
+        return False, f"deimoslang did not import ({type(exc).__name__}: {exc})"
+    if not hasattr(vm, "on_waitfor_timeout"):
+        return False, ("this Deimos has no `on_waitfor_timeout` hook, so a "
+                       "`waitfor` that gives up will do it silently — the "
+                       "timeout patch in vm.py has probably been lost to an "
+                       "update (see tests/test_deimos_patches.py)")
+    vm.on_waitfor_timeout = hook
+    return True, ""
+
+
 class ScriptRunner:
     """One deimoslang program, run in time-boxed bursts."""
 
