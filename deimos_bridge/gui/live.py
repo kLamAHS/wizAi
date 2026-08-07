@@ -1652,6 +1652,32 @@ class LiveWorker(QThread):
                         f"driver {driver or 'ttk'}")
         return build_continuation(name), horizon, driver
 
+    def _on_plan(self, party):
+        """The Party panel, plus one thing the panel cannot keep.
+
+        A split party is the questing failure, seen from inside combat.
+        The exports at rev 3c8b8087 have seat 2 fighting two Fire Elf
+        Pathfinders end to end on its own while the other two logged no
+        rounds at all -- and the only trace of it was `party_hits`
+        coming back empty, which is a thing you have to already suspect
+        in order to look for. So it is written down as it happens, next
+        to the teleports and the rejoins it is a consequence of.
+        """
+        self.party_plan.emit(party)
+        circles = int(getattr(party, "circles", 1) or 1)
+        was, self._circles = getattr(self, "_circles", 1), circles
+        if circles == was:
+            return
+        for seat in self.seats:
+            if circles > 1:
+                seat.tel.note_questing(
+                    "party-split",
+                    f"{len(party.moves)} wizard(s) fighting in {circles} "
+                    f"separate battle circles")
+            else:
+                seat.tel.note_questing("party-together",
+                                       "one battle circle again")
+
     def _make_hive(self):
         """The coordinator, when there is a party to coordinate.
 
@@ -1665,7 +1691,7 @@ class LiveWorker(QThread):
 
         hive = Hivemind(passes=self.passes,
                         on_status=self.status.emit,
-                        on_plan=self.party_plan.emit)
+                        on_plan=self._on_plan)
         if self.barrier is not None:
             hive.timeout = float(self.barrier)
         for seat in self.seats:

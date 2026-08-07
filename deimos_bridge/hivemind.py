@@ -436,11 +436,16 @@ class PartyPlan:
     retargets: int = 0
     #: seats putting a blade on a teammate rather than on themselves
     redirected: int = 0
+    #: battle circles this round covered. More than one means the party
+    #: is split -- see `_duel_groups`.
+    circles: int = 1
 
     def summary(self):
         if not self.moves:
             return "no party round planned yet"
         bits = [f"{len(self.moves)} wizard(s)"]
+        if self.circles > 1:
+            bits.append(f"split across {self.circles} circles")
         if self.retargets:
             bits.append(f"{self.retargets} re-aimed")
         if self.redirected:
@@ -537,6 +542,9 @@ class Hivemind:
         #: next round's gather before a slow one has read the last one.
         self._moves = {}
         #: lifetime counters, for the Party panel
+        #: seat -> board health when it last held a card because the
+        #: ledger said the board was already dead. See `_hold_was_kept`.
+        self._held = {}
         self.rounds = 0
         self.saved = 0
         self.retargets = 0
@@ -762,6 +770,42 @@ class Hivemind:
     def plan(self, subs):
         """({seat: action}, PartyPlan) for one round of the whole party.
 
+        One joint plan PER BATTLE CIRCLE. `_fighting` only knows that a
+        seat is in *a* fight, not which one, and two wizards in
+        different circles are a normal state of a questing run: one gets
+        through a teleport, another is still walking, a third pulls a
+        mob on the way. Planning them as one party is not merely
+        useless, it is actively wrong -- `align_enemies` matches on
+        name, so the Fire Elf Pathfinder in one wizard's solo duel is
+        indistinguishable from the same-named mob in the other two
+        wizards' duel, and the ledger then credits casts that can never
+        land on it. In the run at rev 3c8b8087 that is exactly what
+        happened: seat 2 fought two Pathfinders alone and was told twice
+        to hold its card because "the party already has this board
+        dead", while the party was in another circle entirely.
+        """
+        started = time.monotonic()
+        if not subs:
+            return {}, PartyPlan()
+
+        groups = _duel_groups(subs)
+        if len(groups) == 1:
+            actions, party = self._plan_group(subs, started)
+            return actions, party
+
+        self._say(f"the party is split across {len(groups)} battle circles — "
+                  f"planning each one on its own")
+        actions, parties = {}, []
+        for group in groups:
+            got, party = self._plan_group(group, started)
+            actions.update(got)
+            parties.append(party)
+        return actions, _merge_plans(parties, len(groups),
+                                     time.monotonic() - started)
+
+    def _plan_group(self, subs, started):
+        """The joint plan for seats known to share one battle circle.
+
         Pass 0 is every seat deciding alone — the uncoordinated answer,
         kept as the baseline the readout compares against. Each pass
         after it re-plans every seat against the *other* seats' current
@@ -769,10 +813,6 @@ class Hivemind:
         an order-dependent sweep), and stops early the moment nothing
         moves.
         """
-        started = time.monotonic()
-        if not subs:
-            return {}, PartyPlan()
-
         reference = max(subs, key=lambda s: len(s.state.enemies))
         ref_enemies = list(reference.state.enemies)
         for sub in subs:
@@ -843,6 +883,7 @@ class Hivemind:
         # what the wizard receiving it goes on to hit for, which is a
         # comparison across seats that no seat's own rollout can make.
         redirected = _redirect_blades(subs, actions, effects, rates, notes)
+        self._remember_holds(subs, notes)
 
         moves, retargets = [], 0
         for sub in subs:
@@ -929,7 +970,7 @@ class Hivemind:
         if step and self.overkill_guard and ledger.casts:
             alive_now = any(e.alive for e in board.enemies)
             alive_before = any(e.alive for e in sub.state.enemies)
-            if alive_before and not alive_now:
+            if alive_before and not alive_now and self._hold_was_kept(sub):
                 # Every mob is spoken for. Firing into it buys nothing
                 # and spends a card the next fight will want.
                 policy = sub.policy
@@ -942,6 +983,141 @@ class Hivemind:
             return sub.policy(sub.sim, board), ("party" if step else "solo")
         except Exception as exc:
             return None, f"policy raised {type(exc).__name__}: {exc}"
+
+    # -- holding twice on the same broken promise --------------------------
+    def _hold_was_kept(self, sub):
+        """Did the last hold this seat made actually get paid?
+
+        The overkill guard holds a card because the ledger says the
+        board is already dead. The ledger is a PREDICTION, and when it
+        is wrong the round is simply gone -- and, worse, nothing stops
+        the identical prediction being believed again next round.
+
+        Konstantin's fight 1 at rev 3c8b8087 is two rounds of it: the
+        Skeletal Warrior sat on 177/235 while Phönix's Lightning Bats
+        (265 predicted) landed for nothing, and Konstantin held on r4
+        and then held again on r5 against a board that had not moved by
+        a single point. Two rounds out of a five-round fight.
+
+        So one hold is a bet and two on the same board is a bug. If the
+        board is no better than it was when this seat last held, the
+        guard stands down and the policy gets its round back. Recording
+        the board rather than the round number on purpose: a hold that
+        was PARTLY paid -- the mob is alive but hurt -- is still evidence
+        the party is doing its job, and only a board that has not moved
+        at all is evidence that it is not.
+        """
+        held_at = self._held.get(sub.seat)
+        if held_at is None:
+            return True
+        return _board_hp(sub.state) < held_at - 1e-6
+
+    def _remember_holds(self, subs, notes):
+        for sub in subs:
+            if notes.get(sub.seat) == "held":
+                self._held[sub.seat] = _board_hp(sub.state)
+            else:
+                self._held.pop(sub.seat, None)
+
+
+def _board_hp(state):
+    return sum(max(float(e.hp), 0.0) for e in state.enemies if e.alive)
+
+
+def _ally_names(sub):
+    """Who this seat can SEE on its own team, or None if it cannot say.
+
+    `LiveRead` builds `state.allies` from the duel's participant list
+    minus this wizard, filtered by `team_id` -- so it is exactly "the
+    other members of my battle circle, on my side". An empty set is a
+    real answer (fighting alone); `None` means there was no read to ask,
+    which is every headless caller and every test that hands the
+    coordinator a bare state.
+    """
+    if getattr(sub, "read", None) is None:
+        return None
+    try:
+        return frozenset(a.name for a in sub.state.allies if a.name)
+    except (AttributeError, TypeError):
+        return None
+
+
+def _duel_groups(subs):
+    """Partition `subs` into battle circles. One list per circle.
+
+    Split only on POSITIVE evidence, and that restraint is the whole
+    design. A seat with no read cannot be placed, and a run where no
+    seat can name an ally -- headless tests, mock clients, a version of
+    wizwalker whose participant list will not read -- must behave
+    exactly as it did before this existed, which means one group. So
+    the rule is: two seats are apart only when at least one of them
+    positively named its allies and the other is not among them.
+
+    Union-find over "A names B, or B names A" rather than requiring
+    both, because the two reads are taken at different moments and one
+    of them can be a round stale. Agreeing to coordinate on one wizard's
+    word is the conservative direction: the cost of wrongly grouping is
+    what the code did before, and the cost of wrongly splitting is a
+    party that stops helping itself.
+    """
+    if len(subs) < 2:
+        return [list(subs)]
+
+    seen = {sub.seat: _ally_names(sub) for sub in subs}
+    if not any(seen.values()):
+        # Nobody could name anybody. No evidence, no split.
+        return [list(subs)]
+
+    parent = {sub.seat: sub.seat for sub in subs}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+
+    for i, one in enumerate(subs):
+        for other in subs[i + 1:]:
+            mine, theirs = seen[one.seat], seen[other.seat]
+            if mine is None or theirs is None:
+                # An unplaceable seat is kept with the party rather than
+                # pushed out of it -- see the docstring.
+                union(one.seat, other.seat)
+            elif other.name in mine or one.name in theirs:
+                union(one.seat, other.seat)
+
+    groups = {}
+    for sub in subs:
+        groups.setdefault(find(sub.seat), []).append(sub)
+    return [groups[k] for k in sorted(groups)]
+
+
+def _merge_plans(parties, circles, seconds):
+    """One `PartyPlan` covering several circles, for the one GUI panel.
+
+    The board and round number come from the biggest circle: the panel
+    shows one board, and the one worth showing is where most of the
+    party is.
+    """
+    parties = [p for p in parties if p is not None]
+    if not parties:
+        return PartyPlan(circles=circles, seconds=seconds)
+    biggest = max(parties, key=lambda p: len(p.moves))
+    return PartyPlan(
+        round_number=biggest.round_number,
+        moves=[m for p in parties for m in p.moves],
+        board=list(biggest.board),
+        passes=max(p.passes for p in parties),
+        seconds=seconds,
+        saved=sum(p.saved for p in parties),
+        retargets=sum(p.retargets for p in parties),
+        redirected=sum(p.redirected for p in parties),
+        circles=circles)
 
 
 def _blade_for(sub, school):
