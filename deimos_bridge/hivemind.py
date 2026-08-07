@@ -396,6 +396,11 @@ class SeatMove:
     #: what this seat would have cast with no party around it
     solo_card: str = ""
     solo_target: int = None
+    #: the teammate this cast is aimed at, when it is a blade being put
+    #: on somebody else's wizard rather than on this one. Name, not
+    #: seat: the reader is another client, and a seat index means
+    #: nothing in its own participant list.
+    buff_ally: str = ""
     damage: float = 0.0
     #: {enemy name: expected damage} — every mob this cast takes health
     #: off, not just the one it was aimed at. `target_name` cannot
@@ -429,6 +434,8 @@ class PartyPlan:
     saved: int = 0
     #: seats whose move changed once they could see the others
     retargets: int = 0
+    #: seats putting a blade on a teammate rather than on themselves
+    redirected: int = 0
 
     def summary(self):
         if not self.moves:
@@ -436,6 +443,8 @@ class PartyPlan:
         bits = [f"{len(self.moves)} wizard(s)"]
         if self.retargets:
             bits.append(f"{self.retargets} re-aimed")
+        if self.redirected:
+            bits.append(f"{self.redirected} buffing a teammate")
         if self.saved:
             bits.append(f"{self.saved} held (board already lethal)")
         bits.append(f"{self.seconds * 1000:.0f} ms")
@@ -830,6 +839,11 @@ class Hivemind:
                         f"over the {self.budget:.0f}s budget")
                 break
 
+        # After the descent has settled, and only then: a blade is worth
+        # what the wizard receiving it goes on to hit for, which is a
+        # comparison across seats that no seat's own rollout can make.
+        redirected = _redirect_blades(subs, actions, effects, rates, notes)
+
         moves, retargets = [], 0
         for sub in subs:
             action = actions.get(sub.seat)
@@ -861,10 +875,12 @@ class Hivemind:
                 target_name=_enemy_name(sub.state, target if aims else None),
                 solo_card=getattr(base_card, "name", "") or "",
                 solo_target=(base_target if base_aims else None),
-                damage=effect.total, hit=hit, note=notes.get(sub.seat, ""))
+                buff_ally=note[5:] if (note := notes.get(sub.seat, "") or "")
+                .startswith("buff:") else "",
+                damage=effect.total, hit=hit, note=note)
             if move.retargeted:
                 retargets += 1
-            if notes.get(sub.seat) == "held":
+            if note == "held":
                 saved += 1
             moves.append(move)
 
@@ -875,7 +891,7 @@ class Hivemind:
             board=[(e.name, float(e.hp), float(e.max_hp))
                    for e in ref_enemies],
             passes=passes_run, seconds=time.monotonic() - started,
-            saved=saved, retargets=retargets)
+            saved=saved, retargets=retargets, redirected=redirected)
         return actions, party
 
     def _decide_one(self, sub, board, ledger, step, pressure=0.0,
@@ -926,6 +942,129 @@ class Hivemind:
             return sub.policy(sub.sim, board), ("party" if step else "solo")
         except Exception as exc:
             return None, f"policy raised {type(exc).__name__}: {exc}"
+
+
+def _blade_for(sub, school):
+    """The best blade in this seat's hand that would multiply `school`.
+
+    Blades only, and that narrowness is deliberate. Wizard101 lets a
+    Charm go on any friendly target, which is what makes "blade the
+    hitter" the oldest team play in the game -- but the extracted spell
+    data carries no target-type field at all (`spells_full.json` has
+    `type`/`type_name` and nothing about who may receive it), so which
+    cards are legal on a teammate is a judgement rather than a lookup.
+    A wrong judgement is not a misprediction, it is a wasted round: the
+    click lands on a target the game refuses and the card deselects,
+    exactly as the Pixie-at-a-mob bug did.
+
+    So this takes the family where the answer is not in doubt. Shields
+    and heals are also friendly-target spells and could follow once the
+    blade path has been seen to work live.
+
+    `buff_applies` is the engine's own question -- a Fireblade multiplies
+    fire and nothing else, an Elemental Blade multiplies three schools --
+    so a blade that cannot touch the recipient's damage is not offered.
+    """
+    from w101_sim import buff_applies
+
+    best = None
+    seen = set()
+    for card in getattr(sub.state.player, "hand", ()) or ():
+        if getattr(card, "kind", "") != "blade" or card.name in seen:
+            continue
+        seen.add(card.name)
+        if not (card.percent or 0) > 0:
+            continue
+        if not buff_applies(card, school):
+            continue
+        try:
+            if not sub.sim.afford(sub.state, card):
+                continue
+        except Exception:
+            continue
+        if best is None or card.percent > best.percent:
+            best = card
+    return best
+
+
+def _redirect_blades(subs, actions, effects, rates, notes):
+    """Move a blade off the wizard casting it and onto the one who hits.
+
+    The party's whole point is that the seats are not interchangeable: a
+    level-10 ice wizard removes about 85 a round and the fire wizard
+    beside it removes 200 with one Meteor Strike. A +35% blade is worth
+    30 on the first and 70 on the second, and until now every seat could
+    only ever put one on itself -- so the ice wizard spent rounds
+    buffing the smaller of the two hits available to the party.
+
+    Two cases, and both are conservative on purpose:
+
+      * **the seat already chose a blade.** Then the round is spent on a
+        blade either way and the only question is whose. Redirect it to
+        whichever teammate's measured rate it multiplies by most,
+        including the caster -- so a seat that IS the big hitter keeps
+        its own blade and nothing changes.
+      * **the seat's chosen move puts nothing on the board this round**
+        -- a shield, a held card, a trap the rollout is buying on
+        speculation. Then a blade on a teammate who is actually hitting
+        is a real, same-currency gain, and it takes the round.
+
+    A seat whose cast does damage is never redirected. Trading a hit for
+    a buff is a judgement the rollout is better placed to make than a
+    rule here, and it is not what the operator asked for.
+
+    Priced on `rate`, the measured health-a-round each seat removes,
+    rather than on this round's cast. Wizard101 resolves a round's casts
+    in pip order and the coordinator does not know that order, so a
+    blade laid this round may or may not be up before the teammate
+    swings -- but it is certainly up for the swing after. The rate is
+    the honest currency for "what does this blade go on to multiply",
+    and it is the same number `set_ally_rate` already carries.
+    """
+    if len(subs) < 2:
+        return 0
+    by_seat = {s.seat: s for s in subs}
+    moved = 0
+    for sub in subs:
+        own = effects.get(sub.seat)
+        own_damage = float(getattr(own, "total", 0.0) or 0.0)
+        card, _target = _split(actions.get(sub.seat))
+        chose_blade = card is not None and getattr(card, "kind", "") == "blade"
+        # Only a seat that actually made a choice. "held" is the overkill
+        # guard, which held for a reason, and a note that is neither
+        # means the policy raised -- a seat that could not decide must
+        # not be handed a move by this.
+        if notes.get(sub.seat) not in ("solo", "party"):
+            continue
+        if own_damage > 0 and not chose_blade:
+            continue
+
+        best = None                      # (rate, seat, card)
+        for other in subs:
+            school = _seat_school(other)
+            if not school:
+                continue
+            blade = _blade_for(sub, school)
+            if blade is None:
+                continue
+            rate = float(rates.get(other.seat, 0.0) or 0.0)
+            if rate <= 0:
+                continue
+            worth = rate * float(blade.percent or 0.0)
+            if best is None or worth > best[0]:
+                best = (worth, other.seat, blade)
+        if best is None:
+            continue
+        worth, seat, blade = best
+        if seat == sub.seat:
+            continue                     # it is already the right wizard
+        if not chose_blade and worth <= own_damage:
+            continue
+        actions[sub.seat] = (blade, None)
+        effects[sub.seat] = CastEffect(card=blade.name)
+        notes[sub.seat] = f"buff:{by_seat[seat].name}"
+        moved += 1
+    return moved
 
 
 def _seat_school(sub):

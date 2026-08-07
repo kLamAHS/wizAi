@@ -78,11 +78,16 @@ class PolicyDecision:
     """
 
     def __init__(self, card_name=None, target_index=None, passing=False,
-                 reason="", policy="", target_kind=None):
+                 reason="", policy="", target_kind=None, ally_name=""):
         self.card_name = card_name
         self.target_index = target_index
         self.passing = passing
         self.reason = reason
+        #: the teammate this cast goes on, when the coordinator moved a
+        #: blade off this wizard and onto the one that hits harder.
+        #: Overrides the card's own target -- a Fireblade reads
+        #: `tgt: 'self'` and would otherwise be clicked on the caster.
+        self.ally_name = ally_name
         #: what the card is aimed at -- 'enemy', 'self', 'enemies', ... .
         #: Kept so a log can say "on myself" rather than naming a mob the
         #: cast never touched; `target_index` only means something when
@@ -427,6 +432,12 @@ class WizAiBackend:
         if move.note == "held":
             decision.reason = ("held this card — the rest of the party "
                                "already has this board dead this round")
+        elif getattr(move, "buff_ally", ""):
+            decision.ally_name = move.buff_ally
+            decision.target_index = None
+            decision.target_kind = "ally"
+            decision.reason += (f" (put on {move.buff_ally}, who hits "
+                                f"harder with it than this wizard does)")
         elif move.retargeted:
             was = move.solo_card or "pass"
             if move.solo_target is not None:
@@ -1119,7 +1130,8 @@ class WizAiCombatHandler:
 
             target = await self._resolve_target(
                 read, decision.target_index,
-                self.backend.cards.get(decision.card_name))
+                self.backend.cards.get(decision.card_name),
+                ally=getattr(decision, "ally_name", ""))
             try:
                 # `sleep_time` is per pause and wizwalker pauses twice --
                 # after clicking the card and after aiming -- so the
@@ -1484,7 +1496,30 @@ class WizAiCombatHandler:
 
         return ". " + "; ".join(bits)
 
-    async def _resolve_target(self, read, index, card=None):
+    def _named_ally(self, read, name):
+        """The member for a named teammate on this client's own team.
+
+        By name because the coordinator speaks in wizard names and this
+        client's participant list is its own: seat 2 is not index 2 in
+        anybody else's read. `ally_members` is index-aligned with
+        `state.allies`, which is how the heal branch below already finds
+        the hurt one.
+
+        None when the teammate is not in this duel's list at all, which
+        is a real case -- a client that read a round late, or a wizard
+        that has not joined the circle yet -- and the caller falls back
+        to the card's own target rather than clicking something wrong.
+        """
+        if not name:
+            return None
+        mates = list(getattr(read, "ally_members", ()) or ())
+        allies = list(getattr(getattr(read, "state", None), "allies", ()) or ())
+        for i, ally in enumerate(allies):
+            if getattr(ally, "name", None) == name and i < len(mates):
+                return mates[i]
+        return None
+
+    async def _resolve_target(self, read, index, card=None, ally=""):
         """What to click after clicking the card.
 
         Not always an enemy, which is what the first version assumed. A
@@ -1499,6 +1534,18 @@ class WizAiCombatHandler:
         treats `None` as "just click the card" (card.py:24-30).
         """
         tgt = _primary_target(card) or _target_from_kind(card)
+
+        # The coordinator's cross-seat call, and it has to come first: a
+        # blade reads `tgt: 'self'` and would otherwise be clicked on the
+        # caster, which is the whole thing being overridden.
+        if ally:
+            mate = self._named_ally(read, ally)
+            if mate is not None:
+                return mate
+            # Not in this client's participant list. Fall through to the
+            # card's own target rather than click something arbitrary --
+            # the blade on the wrong wizard is still a blade, and a click
+            # at a mob deselects the card and wastes the round outright.
 
         if tgt == "self":
             if getattr(card, "kind", "") == "shield":
