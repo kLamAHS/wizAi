@@ -2166,6 +2166,11 @@ def _circled(names_by_seat, board=((285, "fire"),)):
     subs = []
     for i, mates in enumerate(names_by_seat):
         sim, state = wizard(board=board)
+        # The name the GAME gives this wizard, which is what the other
+        # seats see in their ally lists -- not the GUI's seat label,
+        # which is still "wizard 2" on the first round of the first
+        # fight. See `_own_name`.
+        state.player.name = f"wizard {i + 1}"
         state.allies = [Actor(name=m, school="life", hp=500, max_hp=500,
                               team=0) for m in mates]
         read = type("Read", (), {"round_number": 1, "state": state})()
@@ -2274,3 +2279,20 @@ def test_a_hold_that_was_partly_paid_is_still_believed():
     _actions, second = hive.plan(again)
     repeat = [m for m in second.moves if m.seat == seat][0]
     assert repeat.note == "held"
+
+
+def test_a_seat_label_the_game_has_not_named_yet_is_not_a_separate_circle():
+    """Rev 228d4f50 logged "3 wizard(s) fighting in 3 separate battle
+    circles" at t=0.0 and took it back 22 seconds later. `Hivemind.join`
+    is called first with the seat's configured label and only again once
+    the client's name reads, so on round one `sub.name` was "wizard 2"
+    while every other seat's ally list already said "Phönix"."""
+    from deimos_bridge.hivemind import _duel_groups
+
+    subs = _circled([["Phönix", "Sebastian"],
+                     ["Konstantin", "Sebastian"],
+                     ["Konstantin", "Phönix"]])
+    for sub, real in zip(subs, ["Konstantin", "Phönix", "Sebastian"]):
+        sub.state.player.name = real       # the game knows
+        sub.name = f"wizard {sub.seat + 1}"  # the GUI does not, yet
+    assert len(_duel_groups(subs)) == 1

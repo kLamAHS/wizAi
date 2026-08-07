@@ -647,10 +647,16 @@ def test_a_dialogue_that_never_changes_still_waits_the_full_settle():
                                             [_Win("txtMessage",
                                                   text="same")])])])])
 
+    from deimos_bridge.questing import STALLED
+
     started = time.monotonic()
     moved = asyncio.run(_dialogue_moved(_Stuck(), "same", 0.2, 0.02))
     took = time.monotonic() - started
-    assert moved is False
+    # STALLED, not merely falsy: the box is up, its text read, and the
+    # text did not change, so the click provably did not take. That is a
+    # different fact from "could not tell", and `advance_dialogue` acts
+    # on one and not the other.
+    assert moved == STALLED
     assert took >= 0.2, f"gave up after {took:.2f}s of a 0.2s settle"
 
 
@@ -10404,3 +10410,166 @@ def test_the_questing_log_does_not_grow_without_bound():
         tel.note_questing("tick", str(i))
     assert len(tel.questing) == tel.QUESTING_LOG
     assert tel.questing[-1]["detail"] == str(tel.QUESTING_LOG + 49)
+
+
+# ---------------------------------------------- ahead is not the same as behind
+def test_a_wizard_is_not_dragged_back_to_a_zone_it_just_left(monkeypatch):
+    """The run at rev 228d4f50, end to end. Sebastian went into
+    WC_Firecat_T1 while the other two were in WC_Firecat, was pulled
+    back out, walked in again, was pulled out again -- five times in
+    four minutes, each pull throwing away the step he had just
+    finished. The majority is not the same thing as the right answer."""
+    worker, read_zone = _zoned_party(
+        ["WC_Firecat", "WC_Firecat", "WC_Firecat"])
+    _look(worker, read_zone, monkeypatch)          # everyone together
+
+    worker.seats[2]._zone = "WC_Firecat_T1"        # he goes in
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+    assert worker.seats[2].zone_left[-1][0] == "WC_Firecat"
+
+    # ...and now he is the odd one out, adrift for long enough to be
+    # fetched. He must not be, because he left WC_Firecat on purpose.
+    worker.seats[2].stranded_since = 0.0
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+
+
+def test_the_wizard_that_never_got_there_is_still_fetched(monkeypatch):
+    """The case the mechanism is for, and the one the fix must not cost:
+    Konstantin at t=550 was in WC_Firecat while the party had moved into
+    WC_Firecat_T1, and he had never been in T1 at all."""
+    worker, read_zone = _zoned_party(
+        ["WC_Firecat", "WC_Firecat", "WC_Firecat"])
+    _look(worker, read_zone, monkeypatch)
+    for seat in worker.seats[:2]:
+        seat._zone = "WC_Firecat_T1"               # the party teleports
+    _look(worker, read_zone, monkeypatch)
+    worker.seats[2].stranded_since -= worker.STRANDED_AFTER + 1
+    seat, target = _look(worker, read_zone, monkeypatch)
+    assert seat is worker.seats[2]
+    assert target.zone_seen == "WC_Firecat_T1"
+
+
+def test_leaving_a_zone_long_ago_does_not_protect_a_wizard_forever(
+        monkeypatch):
+    """A wizard that passed through a zone half an hour ago and is now
+    genuinely stuck is stuck, not making progress."""
+    worker, read_zone = _zoned_party(["Olde Town", "Olde Town", "Olde Town"])
+    _look(worker, read_zone, monkeypatch)
+    worker.seats[2]._zone = "Unicorn Way"
+    _look(worker, read_zone, monkeypatch)
+    stale = worker.LEFT_ON_PURPOSE + 60.0
+    worker.seats[2].zone_left = [(z, at - stale)
+                                 for z, at in worker.seats[2].zone_left]
+    _look(worker, read_zone, monkeypatch)          # the clock starts
+    worker.seats[2].stranded_since -= worker.STRANDED_AFTER + 1
+    seat, _target = _look(worker, read_zone, monkeypatch)
+    assert seat is worker.seats[2]
+
+
+def test_three_pulls_into_one_zone_is_a_loop_and_stops(monkeypatch):
+    """Belt and braces. Even if the reasoning above is wrong about a
+    board it has not seen, a rescue that keeps repeating is a loop, and
+    a loop must not be able to run for days."""
+    import time
+
+    worker, read_zone = _zoned_party(["Olde Town", "Olde Town", "Olde Town"])
+    _look(worker, read_zone, monkeypatch)
+    worker.seats[2]._zone = "Unicorn Way"
+    _look(worker, read_zone, monkeypatch)
+    worker.seats[2].zone_left = []                 # not the other guard
+    _look(worker, read_zone, monkeypatch)          # the clock starts
+    worker.seats[2].stranded_since -= worker.STRANDED_AFTER + 1
+    seat, _t = _look(worker, read_zone, monkeypatch)
+    assert seat is worker.seats[2], "the fixture must reach a real rescue"
+
+    worker.seats[2].rejoin_history = [("Olde Town", time.monotonic())] * 2
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+
+
+# ------------------------------------------ clicking through what is actually up
+def _services_root(visible=True):
+    """The quest-picker an NPC with several things to say puts up.
+
+    No `btnRight` anywhere -- that is the whole point of it.
+    """
+    exit_button = _Win("Exit", visible=visible)
+    return _Win("root", [
+        _Win("WorldView", [
+            _Win("NPCServicesWin", [_Win("wndDialogMain",
+                                         [exit_button])])])]), exit_button
+
+
+def test_a_quest_picker_is_a_dialogue_even_without_an_advance_button():
+    """Reported live as "it says it detected dialogue but does not clear
+    it". wizwalker's own `Client.is_in_dialog` counts `NPCServicesWin`;
+    wizAi only looked for `wndDialogMain/btnRight`, so an NPC offering
+    several quests read as "no dialogue open" at a wizard that could not
+    move."""
+    import asyncio
+
+    from deimos_bridge.questing import in_dialogue
+    root, _ = _services_root()
+    assert asyncio.run(in_dialogue(_QuestClient(root)))
+    root, _ = _services_root(visible=False)
+    assert not asyncio.run(in_dialogue(_QuestClient(root)))
+
+
+def test_the_quest_picker_is_closed_rather_than_left_blocking():
+    import asyncio
+
+    from deimos_bridge.questing import advance_dialogue
+    root, exit_button = _services_root()
+    client = _QuestClient(root)
+    clicks, why = asyncio.run(advance_dialogue(client, settle=0))
+    assert (clicks, why) == (1, "")
+    assert client.mouse_handler.clicks == [exit_button]
+
+
+def test_a_click_that_changes_nothing_is_not_a_window_advanced():
+    """The other half of the same report, and the reason it was slow.
+
+    `click_window` raises nothing when the click does not reach the game
+    -- it simply has no effect. The outcome of `_dialogue_moved` was
+    thrown away, so forty of those counted as forty cleared windows at
+    half a second each: twenty seconds of "clicking through dialogue…"
+    against a box that never moved, then a report of success.
+    """
+    import asyncio
+
+    from deimos_bridge.questing import advance_dialogue
+
+    class _Deaf(_Mouse):
+        async def click_window(self, window):
+            self.clicks.append(window)      # lands nowhere, raises nothing
+
+    root, _ = _dialogue_root()
+    client = _QuestClient(root)
+    client.mouse_handler = _Deaf()
+    clicks, why = asyncio.run(
+        advance_dialogue(client, max_clicks=40, settle=0.05, poll=0.01))
+    assert clicks == 0, "a click that moved nothing is not a window cleared"
+    assert "not reaching the game" in why
+    assert len(client.mouse_handler.clicks) == 2, \
+        "gave up after two dead clicks rather than forty"
+
+
+def test_an_unreadable_box_is_still_clicked_through():
+    """A stall verdict needs the text to have been READ. A dialogue whose
+    text will not read is no evidence either way, and must not be
+    mistaken for a dead click -- that would abandon a working
+    conversation after two pages."""
+    import asyncio
+
+    from deimos_bridge.questing import advance_dialogue
+
+    class _Sticky(_Mouse):
+        async def click_window(self, window):
+            self.clicks.append(window)
+
+    button = _Win("btnRight", visible=True)
+    root = _Win("root", [_Win("WorldView", [_Win("wndDialogMain", [button])])])
+    client = _QuestClient(root)
+    client.mouse_handler = _Sticky()
+    clicks, why = asyncio.run(
+        advance_dialogue(client, max_clicks=5, settle=0.02, poll=0.01))
+    assert (clicks, why) == (5, "")
