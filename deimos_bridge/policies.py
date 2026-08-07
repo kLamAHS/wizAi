@@ -976,6 +976,29 @@ def party_rate(dps):
         set_ally_rate(before)
 
 
+def rank_candidate(cand):
+    """`greedy_ttk`'s ranking, as far as a recorded `Candidate` can say it.
+
+    For a caller holding the decision *after* the fact -- the live
+    handler picking a runner-up when the chosen card would not go out --
+    rather than the policy, which ranks live card objects and has more
+    to go on.
+
+    An approximation, and the gap is worth naming: the policy's key ends
+    `..., card.pips, card.damage, target`, and `card.damage` is the
+    card's nominal damage, which a `Candidate` does not record.
+    `Candidate.damage` is a different quantity entirely -- damage banked
+    over the whole rollout. So this reproduces the first three keys
+    exactly and stops, which is enough to order a hand and is honest
+    about not being the same function.
+
+    Kept here rather than in the handler so the ranking has one home; a
+    copy over there would drift the first time this key changes, and it
+    has changed before.
+    """
+    return (cand.turns, -cand.damage, cand.pips)
+
+
 def rollout_throughput(candidates):
     """Damage a round the best line in `candidates` expects to deal.
 

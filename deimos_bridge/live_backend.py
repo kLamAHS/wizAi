@@ -175,6 +175,11 @@ class WizAiBackend:
         #: slowly. NOT `on_failed_cast` -- nothing has failed yet, and
         #: that one rewrites the round. See `report_slow_cast`.
         self.on_slow_cast = None
+        #: optional callback(card, target, first choice) when the chosen
+        #: card would not go out and the runner-up was played instead.
+        #: NOT `on_failed_cast` -- that one has already run and recorded
+        #: the round as a pass, which this has to undo.
+        self.on_recovered_cast = None
         #: optional callback(actual school) for a wizard whose client
         #: disagrees with the school it was configured with. See
         #: `_check_school`.
@@ -868,6 +873,18 @@ class WizAiBackend:
         if self.on_failed_cast:
             self.on_failed_cast(reason)
 
+    def report_recovered_cast(self, pick, first_choice):
+        """The runner-up went out after the chosen card would not.
+
+        Its own channel again, and for the same reason `on_slow_cast` is
+        separate: `on_failed_cast` has already run and marked the round
+        a pass, which is now wrong. See
+        `Telemetry.note_recovered_cast` for what has to be undone and
+        what deliberately is not.
+        """
+        if self.on_recovered_cast:
+            self.on_recovered_cast(pick.card, pick.target, first_choice)
+
     def report_slow_cast(self, card_name):
         """The fast cast did not take; trying again slowly.
 
@@ -1106,10 +1123,8 @@ class WizAiCombatHandler:
                             f"the card was still in hand after casting, "
                             f"twice — once at {self.backend.cast_time:.1f}s "
                             f"between clicks and once at "
-                            f"{self.RETRY_CAST_TIME:.1f}s. Wizard101 "
-                            f"deselects a card clicked at something it "
-                            f"cannot be cast on, so this is usually a card "
-                            f"aimed at the wrong kind of target")
+                            f"{self.RETRY_CAST_TIME:.1f}s"
+                            + await self._why_not(read, decision, card))
             except Exception as exc:
                 # A misclick or a board that moved under us costs this
                 # round, not the fight -- but the round has *already*
@@ -1119,7 +1134,72 @@ class WizAiCombatHandler:
                 # prediction, and a cast that never happened is charged
                 # to the damage model as its worst miss of the run.
                 self.backend.report_failed_cast(decision.card_name, exc)
-                await self.pass_button()
+                if not await self._try_the_next_best(read, decision):
+                    await self.pass_button()
+
+    async def _try_the_next_best(self, read, decision):
+        """The runner-up, once, rather than surrendering the round.
+
+        A card that will not go out used to cost the whole round: the
+        handler passed, and against a board that is out-damaging the
+        party a free round is the difference between winning and not.
+        The operator's report of it is exact -- "it double clicks, which
+        unselects the spell, so nothing happens and the fight stalls
+        until the round counter hits 0".
+
+        The policy already ranked every other move it weighed this round
+        and the list is sitting on the decision. So the answer to "the
+        best card did not go out" is the second best, not nothing.
+
+        Once. If the card failed because the board moved under us, the
+        alternative is likely to fail the same way, and a loop of them
+        would spend the planning window clicking instead of playing. One
+        attempt turns a lost round into a played one where the cause was
+        the card; where the cause is the board, the round is passed
+        exactly as it was before.
+
+        Deliberately silent about `report_failed_cast`, which has
+        already run: the round's record now says nothing was played, and
+        if this succeeds it is amended by the cast that did.
+
+        What it costs if `_card_left_the_hand` is ever wrong: that check
+        is a hand-COUNT drop, so a false negative means the first cast
+        committed and the count had not caught up. Clicking another card
+        then does not cast twice -- Wizard101 allows one spell a round
+        and a second selection replaces the queued one -- it downgrades
+        the round from the best card to the second best. That is the
+        bound on the damage, against a benefit of nothing-to-second-best
+        in the case this exists for, and it only fires at all once the
+        handler already believes nothing was played.
+        """
+        alternatives = [c for c in (decision.candidates or ())
+                        if c.card and c.card != decision.card_name
+                        and c.card != "pass"]
+        if not alternatives:
+            return False
+        # The candidate list is not stored in rank order -- it is in the
+        # order the rollout scored the hand -- so the runner-up has to be
+        # taken by score, by the same key `greedy_ttk` chose the winner
+        # by. `rank_candidate` is that key, and lives over there so it
+        # has one home.
+        from .policies import rank_candidate
+        pick = min(alternatives, key=rank_candidate)
+
+        card = self._pick_card(read, pick.card)
+        if card is None:
+            return False
+        spec = self.backend.cards.get(pick.card)
+        try:
+            target = await self._resolve_target(read, pick.target, spec)
+            held = await self._cards_in_hand()
+            await card.cast(target, sleep_time=self.RETRY_CAST_TIME)
+            if not await self._card_left_the_hand(held):
+                return False
+        except Exception:
+            return False
+
+        self.backend.report_recovered_cast(pick, decision.card_name)
+        return True
 
     async def _report_lost_round(self, exc):
         """Put the dropped round in the record, not just in a counter.
@@ -1196,6 +1276,76 @@ class WizAiCombatHandler:
             await asyncio.sleep(self.CAST_POLL)
             deadline -= self.CAST_POLL
         return False
+
+    async def _why_not(self, read, decision, clicked):
+        """Everything that could distinguish the causes, in one line.
+
+        The message this replaced asserted a cause: "Wizard101 deselects
+        a card clicked at something it cannot be cast on, so this is
+        usually a card aimed at the wrong kind of target." That is a
+        good explanation of *a* failure and the wrong one for the
+        failure it kept being printed on. Pixie is `tgt: 'self'`, so
+        `_resolve_target` hands it `read.client_member` -- the identical
+        object, down the identical branch, that Fireblade and Tower
+        Shield get. In the run that prompted this the fire wizard cast
+        Fireblade in round 1 and Pixie failed in round 3 of the same
+        duel, on the same client, aimed at the same member. Whatever
+        stopped it, it was not the kind of target.
+
+        So this states facts instead of a theory, and states the ones
+        that separate the surviving explanations:
+
+          * what it was aimed at, and what else in hand aims at the same
+            thing -- if a self-cast card fails while another self-cast
+            card in the same hand went out, aiming is exonerated;
+          * the card's school and cost against the wizard's pips, since
+            a power pip is worth 2 only for the caster's own school and
+            an off-school card is the one that can be unaffordable while
+            looking affordable;
+          * whether the client still calls the card castable, which is
+            the game's own answer and worth more than any of ours.
+
+        Best effort throughout: this runs while a round is already being
+        given away, so a read that fails here must not replace the
+        failure being reported with its own.
+        """
+        bits = []
+        card = self.backend.cards.get(decision.card_name)
+        tgt = (_primary_target(card) or _target_from_kind(card)) if card \
+            else None
+        bits.append(f"aimed at {tgt or 'nothing'}")
+
+        try:
+            same = sorted({c.name for c in read.state.player.hand
+                           if c.name != decision.card_name
+                           and (_primary_target(c) or _target_from_kind(c))
+                           == tgt})
+            if same:
+                bits.append("same aim in hand: " + ", ".join(same))
+        except Exception:
+            pass
+
+        try:
+            me = read.state.player
+            own = (card.school or "") == (self.backend.school or "")
+            worth = 2 if own else 1
+            bits.append(
+                f"{card.pips}-pip {card.school} card, {'own' if own else 'off'}"
+                f" school, and the wizard holds {me.norm_pips} normal + "
+                f"{me.pow_pips} power (worth {worth} each here) = "
+                f"{me.norm_pips + me.pow_pips * worth}")
+        except Exception:
+            pass
+
+        try:
+            bits.append("the client "
+                        + ("still calls it castable"
+                           if await clicked.is_castable()
+                           else "no longer calls it castable"))
+        except Exception:
+            pass
+
+        return ". " + "; ".join(bits)
 
     async def _resolve_target(self, read, index, card=None):
         """What to click after clicking the card.

@@ -8681,6 +8681,237 @@ def test_an_attack_still_goes_to_the_chosen_mob(qapp):
         == "member:Sokkwi Ripper"
 
 
+def test_a_failed_cast_reports_facts_not_a_theory(qapp):
+    """The message this replaced asserted a cause, and asserted the wrong
+    one at the card it kept being printed on.
+
+    "Wizard101 deselects a card clicked at something it cannot be cast
+    on, so this is usually a card aimed at the wrong kind of target" is
+    a fine explanation of *a* failure. It is not the explanation of
+    Pixie's: Pixie is `tgt: 'self'`, so it is handed `read.client_member`
+    down the identical branch Fireblade and Tower Shield take, and in
+    the run that prompted this the fire wizard cast Fireblade in round 1
+    and Pixie failed in round 3 of the same duel on the same client. The
+    line has to carry what separates the surviving explanations instead.
+    """
+    import asyncio
+
+    from deimos_bridge.live_backend import WizAiCombatHandler
+
+    class _Card:
+        name, school, pips = "Pixie", "life", 2
+        kind = "heal"
+        ops = [{"op": "heal", "tgt": "self"}]
+
+    class _Blade:
+        name, school, pips = "Fireblade", "fire", 0
+        kind = "blade"
+        ops = [{"op": "charm", "tgt": "self"}]
+
+    class _Nuke:
+        name, school, pips = "Sunbird", "fire", 3
+        kind = "damage"
+        ops = [{"op": "hit", "tgt": "enemy"}]
+
+    class _Backend:
+        school = "fire"
+        cards = {"Pixie": _Card()}
+
+    class _Clicked:
+        async def is_castable(self):
+            return True
+
+    class _Decision:
+        card_name = "Pixie"
+        target_index = None
+
+    read = _healer_read(my_hp=526, my_max=897)
+    read.state.player.hand = [_Card(), _Blade(), _Nuke()]
+    read.state.player.norm_pips, read.state.player.pow_pips = 1, 2
+
+    handler = WizAiCombatHandler.__new__(WizAiCombatHandler)
+    handler.backend = _Backend()
+    said = asyncio.run(handler._why_not(read, _Decision(), _Clicked()))
+
+    # Aiming is exonerated by naming the card that shares the aim and
+    # went out -- that is the whole point of the line.
+    assert "aimed at self" in said
+    assert "Fireblade" in said
+    assert "Sunbird" not in said, "only cards with the SAME aim are relevant"
+    # A power pip is worth 2 only for the caster's own school, so an
+    # off-school card is the one that can be unaffordable while looking
+    # affordable. Here it was affordable, and the line says so.
+    assert "off school" in said and "worth 1 each" in said
+    assert "= 3" in said
+    assert "still calls it castable" in said
+    assert "wrong kind of target" not in said
+
+
+def test_the_failure_line_survives_a_client_that_will_not_answer(qapp):
+    """It runs while a round is already being given away. A read that
+    fails here must not replace the failure being reported."""
+    import asyncio
+
+    from deimos_bridge.live_backend import WizAiCombatHandler
+
+    class _Backend:
+        school = "fire"
+        cards = {}                       # the card is not even known
+
+    class _Broken:
+        async def is_castable(self):
+            raise RuntimeError("the client went away")
+
+    class _Decision:
+        card_name = "Pixie"
+        target_index = None
+
+    handler = WizAiCombatHandler.__new__(WizAiCombatHandler)
+    handler.backend = _Backend()
+    said = asyncio.run(handler._why_not(_healer_read(), _Decision(), _Broken()))
+    assert "aimed at nothing" in said       # said something, raised nothing
+
+
+def test_a_card_that_will_not_go_out_costs_the_best_move_not_the_round(qapp):
+    """The stall, as the operator described it: "it double clicks, which
+    unselects the spell, so nothing happens and the fight stalls until
+    the round counter hits 0".
+
+    Against a board out-damaging the party a free round decides fights.
+    The policy already ranked every other move it weighed, so the answer
+    to "the best card did not go out" is the second best, not nothing.
+    """
+    import asyncio
+
+    from deimos_bridge.live_backend import WizAiCombatHandler
+    from deimos_bridge.policies import Candidate
+
+    cast = []
+
+    class _Card:
+        def __init__(self, name):
+            self.name = name
+
+        async def cast(self, target, sleep_time=None):
+            cast.append((self.name, target))
+
+    class _Decision:
+        card_name = "Pixie"
+        target_index = None
+        candidates = [
+            Candidate(card="Pixie", target=None, turns=5, damage=400, pips=2),
+            Candidate(card="Sunbird", target=0, turns=4, damage=338, pips=3),
+            Candidate(card="Fire Cat", target=0, turns=6, damage=197, pips=1),
+            Candidate(card="pass", target=None, turns=9, damage=0, pips=0),
+        ]
+
+    told = []
+
+    class _Backend:
+        school = "fire"
+        cards = {"Sunbird": None}
+        RETRY = 1.0
+
+        def report_recovered_cast(self, pick, first):
+            told.append((pick.card, pick.target, first))
+
+    handler = WizAiCombatHandler.__new__(WizAiCombatHandler)
+    handler.backend = _Backend()
+    handler._pick_card = lambda read, name: _Card(name)
+    handler._cards_in_hand = lambda: _value({"Pixie", "Sunbird", "Fire Cat"})
+    handler._card_left_the_hand = lambda before: _value(True)
+
+    read = _healer_read(my_hp=526, my_max=897)
+    assert asyncio.run(handler._try_the_next_best(read, _Decision()))
+    # Sunbird, not Fire Cat: the runner-up is taken by SCORE. The
+    # candidate list is in the order the rollout scored the hand, so
+    # "the next one along" would have played whatever came next.
+    assert [c[0] for c in cast] == ["Sunbird"]
+    assert told == [("Sunbird", 0, "Pixie")]
+
+
+def test_the_fallback_gives_up_after_one_try(qapp):
+    """If the board moved under us the alternative fails the same way,
+    and a loop of them spends the planning window clicking."""
+    import asyncio
+
+    from deimos_bridge.live_backend import WizAiCombatHandler
+    from deimos_bridge.policies import Candidate
+
+    tried = []
+
+    class _Card:
+        def __init__(self, name):
+            self.name = name
+
+        async def cast(self, target, sleep_time=None):
+            tried.append(self.name)
+
+    class _Decision:
+        card_name = "Pixie"
+        target_index = None
+        candidates = [
+            Candidate(card="Pixie", target=None, turns=5, damage=400, pips=2),
+            Candidate(card="Sunbird", target=0, turns=4, damage=338, pips=3),
+            Candidate(card="Fire Cat", target=0, turns=6, damage=197, pips=1),
+        ]
+
+    class _Backend:
+        school = "fire"
+        cards = {}
+
+        def report_recovered_cast(self, pick, first):
+            raise AssertionError("nothing went out; nothing to report")
+
+    handler = WizAiCombatHandler.__new__(WizAiCombatHandler)
+    handler.backend = _Backend()
+    handler._pick_card = lambda read, name: _Card(name)
+    handler._cards_in_hand = lambda: _value(set())
+    handler._card_left_the_hand = lambda before: _value(False)   # never goes
+
+    assert not asyncio.run(
+        handler._try_the_next_best(_healer_read(), _Decision()))
+    assert tried == ["Sunbird"], f"tried {tried}"
+
+
+def test_a_recovered_round_stops_claiming_it_passed(qapp):
+    """`note_failed_cast` ran first and was right at the time. A round
+    that then played its second choice is not a pass, and differencing
+    the next board against one would fold the real cast's damage into
+    the round after it."""
+    from deimos_bridge.telemetry import Telemetry
+
+    tel = Telemetry()
+    tel.start_fight()
+
+    class _Decision:
+        card_name = "Pixie"
+        target_index = None
+        target_kind = "self"
+        passing = False
+        reason = "policy choice"
+        policy = "ttk"
+        candidates = ()
+
+    rec = tel.observe(_Decision(), _healer_read(my_hp=526, my_max=897))
+    rec.predicted_damage = 400.0
+
+    tel.note_failed_cast("Pixie did not go through")
+    assert rec.passing is True
+    assert tel.fights[-1].passes == 1
+
+    tel.note_recovered_cast("Sunbird", 0, "Pixie")
+    assert rec.passing is False
+    assert rec.chosen == "Sunbird" and rec.target_index == 0
+    assert tel.fights[-1].passes == 0
+    assert not any("nothing was played" in c for c in rec.confounds)
+    # The prediction stays dropped: it was priced for Pixie, and scoring
+    # Sunbird's damage against it would charge the model for a number it
+    # never produced.
+    assert rec.predicted_damage is None
+    assert rec not in [o for o in tel.damage_observations()]
+
+
 def _party_client(in_fight=False, pos=(0, 0, 0), zone_name="Zafaria"):
     class _XYZ:
         def __init__(self, x, y, z):

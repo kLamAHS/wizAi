@@ -1650,6 +1650,8 @@ class LiveWorker(QThread):
                 # Bound late and read per round: the rate only becomes
                 # non-zero once this seat has finished a fight, and the
                 # coordinator asks again every round after that.
+                backend.on_recovered_cast = \
+                    self._recovered_cast_hook(seat)
                 backend.damage_rate = seat.tel.damage_rate
                 seat.tel.resolver = backend.resolver
                 seat.backend = backend
@@ -1842,6 +1844,10 @@ class LiveWorker(QThread):
         """A retry notice. Status only -- the round is still in play."""
         return lambda message: self._say(seat, message)
 
+    def _recovered_cast_hook(self, seat):
+        return lambda card, target, first: self._on_recovered_cast(
+            card, target, first, seat)
+
     def _defeated_hook(self, seat):
         return lambda: self._say(
             seat,
@@ -2011,6 +2017,22 @@ class LiveWorker(QThread):
         seat = self.seats[0] if seat is None else seat
         self._say(seat, reason)
         rec = seat.tel.note_failed_cast(reason)
+        if rec is not None:
+            self.seat_round_done.emit(seat.index, rec)
+            if seat.index == 0:
+                self.round_done.emit(rec)
+
+    def _on_recovered_cast(self, card, target, first, seat=None):
+        """The runner-up went out; the round was not lost after all.
+
+        Re-emitted, not merely amended: `_on_failed_cast` has already
+        pushed this round to the Decisions table reading "passed", and a
+        panel that keeps showing a pass for a round that played a card
+        is worse than one that never mentioned the failure.
+        """
+        seat = self.seats[0] if seat is None else seat
+        self._say(seat, f"{first} would not go out — played {card} instead")
+        rec = seat.tel.note_recovered_cast(card, target, first)
         if rec is not None:
             self.seat_round_done.emit(seat.index, rec)
             if seat.index == 0:

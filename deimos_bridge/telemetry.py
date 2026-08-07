@@ -813,6 +813,42 @@ class Telemetry:
             self.fights[-1].passes += 1
         return rec
 
+    def note_recovered_cast(self, card, target, first_choice):
+        """The runner-up went out after the chosen card would not.
+
+        Undoes exactly what `note_failed_cast` did a moment earlier, and
+        no more. That call is right at the instant it runs -- the chosen
+        card really did not go out -- but it marks the round as a pass,
+        and a round in which the second-choice card was cast is not a
+        pass. Left alone, the next board's health drop would be
+        differenced against a round claiming nothing was played, and the
+        real cast's damage would be folded into the round after it.
+
+        The prediction is NOT restored. It was priced for a different
+        card, and this round's measurement belongs to a cast nobody
+        predicted; `damage_observations` excludes it rather than scoring
+        the damage model against a number it never produced.
+        """
+        rec = self._pending
+        if rec is None:
+            return None
+        rec.passing = False
+        rec.chosen = card
+        rec.target_index = target
+        rec.reason = (f"{first_choice} would not go out; played {card} "
+                      f"instead")
+        rec.clean = False
+        try:
+            rec.confounds.remove("the cast failed; nothing was played")
+        except ValueError:
+            pass
+        rec.confounds.append(
+            f"{first_choice} did not go out and {card} was played in its "
+            f"place -- there is no prediction for what was actually cast")
+        if self.fights and self.fights[-1].passes:
+            self.fights[-1].passes -= 1
+        return rec
+
     def _settle(self, read):
         """Fill in the previous round's actual damage from the new board."""
         prev = self._pending
