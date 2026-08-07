@@ -1114,8 +1114,8 @@ def test_the_rollout_scores_targets_apart():
 
     # One ply, so the first cast is the whole score and the trap is the
     # only thing separating the two lines.
-    _, dmg_untrapped = _rollout(sim, s, nuke, 1, 0)
-    _, dmg_trapped = _rollout(sim, s, nuke, 1, 1)
+    _, dmg_untrapped, _hp = _rollout(sim, s, nuke, 1, 0)
+    _, dmg_trapped, _hp = _rollout(sim, s, nuke, 1, 1)
     # `_rollout` returns damage negated, so lower is more damage.
     assert dmg_trapped < dmg_untrapped, (dmg_trapped, dmg_untrapped)
     assert dmg_trapped == pytest.approx(dmg_untrapped * 1.4)
@@ -1313,7 +1313,7 @@ def test_overkill_earns_no_credit():
 
     sim, s, _ = _two_mobs(["Snow Serpent"], boss_hp=9000, minion_hp=20)
     nuke = s.hand[0]
-    _, dealt = _rollout(sim, s, nuke, 1, 1)
+    _, dealt, _hp = _rollout(sim, s, nuke, 1, 1)
     assert -dealt == pytest.approx(20.0)      # the mob's health, not the hit's
 
 
