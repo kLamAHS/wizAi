@@ -2196,7 +2196,49 @@ def _pick_removable(actor, what):
 # ---------------------------------------------------------------- strategies
 
 def effective_pips(sim, s, card):
-    return s.norm_pips + s.pow_pips * (2 if card.school == sim.school else 1)
+    """What an X-pip cast of `card` would actually be paid out of.
+
+    Mirrors `Sim.spend`'s X-pip branch exactly, and it did not: it read
+    `2 if card.school == sim.school` where `spend` uses `_pip_value`,
+    which also doubles for the mastery-amulet school, and it left
+    `school_pips` out entirely -- so an archmastery wizard's locked pips
+    were invisible to every caller that asked what an X-pip spell was
+    worth.
+    """
+    a = s.player
+    eff = a.norm_pips + a.pow_pips * sim._pip_value(a, card)
+    if card.school == sim.school:
+        eff += 2 * a.school_pips
+    return eff
+
+
+def cast_price(sim, s, card):
+    """The pips this cast takes off the rack RIGHT NOW.
+
+    `card.pips` is the *printed* price, and for the 2,112 X-pip cards in
+    the table the printed price is 0 -- the game writes X, `load_cards`
+    stores 0, and `spend` then empties the whole rack. Anything ranking
+    moves by `card.pips` therefore prices Heck Hound at free and picks
+    it over a 1-pip Fire Cat every time the two tie, which is not a
+    tiebreak, it is a card that cannot lose one.
+    """
+    return effective_pips(sim, s, card) if card.x_pips else card.pips
+
+
+def cast_reach(sim, s, card):
+    """`card.damage` as a total, not as a rate.
+
+    The other half of the same lie: an X-pip card's `damage` is its
+    damage PER PIP (Heck Hound 130, Tempest 80, Judgement 100), because
+    that is the only number the spell has until a rack is behind it.
+    Comparing 130 against a Fire Cat's 100 as though they were the same
+    quantity is off by the size of the rack -- at seven pips Heck Hound
+    throws 910.
+    """
+    if not card.x_pips:
+        return card.damage or 0.0
+    return (card.damage or 0.0) * effective_pips(sim, s, card)
+
 
 def castable(sim, s, kind):
     return [c for c in s.hand if c.kind == kind and sim.can_cast(s, c)]

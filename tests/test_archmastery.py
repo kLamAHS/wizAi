@@ -96,6 +96,24 @@ def test_xpip_consumes_school_pips_for_own_school():
     assert s.school_pips == 0
 
 
+def test_asking_what_an_xpip_spell_is_worth_gives_what_spending_it_gives():
+    """`effective_pips` is the question `spend` answers, asked without
+    paying, and the two used to disagree on an archmastery wizard: it
+    counted `norm + power x 2` and left the locked school pips out
+    entirely, so every caller pricing an X-pip card under-read the rack
+    by twice the school pips."""
+    from w101_sim import cast_price, cast_reach, effective_pips
+
+    sim = _sim(ALWAYS, school="storm", deck=["Tempest"])
+    s = sim.new_state()
+    s.norm_pips, s.pow_pips, s.school_pips = 1, 1, 2
+    x = next(c for c in s.hand if c.name == "Tempest")
+    asked = effective_pips(sim, s, x)
+    assert asked == cast_price(sim, s, x)
+    assert cast_reach(sim, s, x) == x.damage * asked
+    assert asked == sim.spend(s, x)         # paying it agrees, and last
+
+
 def test_archmastery_off_is_bit_identical():
     deck = ["Sunbird", "Sunbird", "Sunbird", "Fireblade", "Fire Trap"]
     a = Sim(dict(CARDS), deck, "fire", _boss(500), player_hp=10**9,

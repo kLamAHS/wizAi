@@ -1441,44 +1441,113 @@ def test_the_ranking_is_total_enough_that_hand_order_does_not_decide():
         f"{keys}")
 
 
-def test_an_unpriceable_x_pip_card_is_never_chosen():
-    """Heck Hound and 2,111 others carry `x_pips`: they consume the whole
-    pip rack and scale with it. The card table records them as costing 0
-    pips, and `Sim` gives them 0 damage at every pip count -- so to the
-    policy they are free AND do nothing, which is indistinguishable from
-    passing, and they win the pip tiebreak because nothing is cheaper
-    than zero.
+# ---------------------------------------------------- pricing an X-pip card
+#
+# Heck Hound and 2,111 others carry `x_pips`: they spend the whole rack
+# and scale with it. The card table prints 0 pips and per-pip damage,
+# and the ranking key was reading both off the printed face -- so an
+# X-pip card was free (it won every thrift tie) and tiny (130 against a
+# Fire Cat's 100) at the same time.
+#
+# This used to be handled by refusing to offer the card at all, on my
+# reading that the engine "gives them 0 damage at every pip count". That
+# was wrong -- the fizzles in my measurement were a live RNG, not a
+# broken card -- and the cost of it is in the export at rev e523684f:
+# Heck Hound sat in the fire wizard's hand for 74 of 75 rounds, never
+# played, out of a median hand of four.
 
-    The second live party run: the fire wizard chose Heck Hound eight
-    times, every time holding one or two pips, and dealt 0.0 damage
-    across the fifteen rounds of its first two fights.
+def test_an_x_pip_card_costs_the_rack_and_scales_with_it():
+    from w101_sim import cast_price, cast_reach
+
+    sim, state = wizard(school="fire", hand=("Heck Hound", "Fire Cat"),
+                        pips=6, hp=1500, board=((800, "ice"),))
+    hound, cat = state.player.hand
+    assert hound.x_pips and hound.pips == 0 and hound.damage == 130, \
+        "premise moved"
+    assert cast_price(sim, state, hound) == 6      # not the printed 0
+    assert cast_reach(sim, state, hound) == 780    # 130 a pip, not 130
+    assert cast_price(sim, state, cat) == 1        # an ordinary card is itself
+    assert cast_reach(sim, state, cat) == 100
+
+
+def test_a_rack_is_not_spent_on_a_mob_a_cheap_nuke_already_kills():
+    """The tie the printed price inverts, and the reason this matters.
+
+    Seven pips against a 300hp mob: Heck Hound and Sunbird both clear it
+    on turn one banking the same 300. Priced at 0 the hound wins the
+    thrift key and the whole rack goes; priced at 7 against Sunbird's 3
+    it does not, and four pips stay banked.
     """
-    from deimos_bridge.policies import _is_inert, greedy_ttk
+    from deimos_bridge.policies import greedy_ttk
 
-    table = cards()
-    hound = table["Heck Hound"]
-    assert hound.x_pips and hound.pips == 0, "premise moved"
-    assert _is_inert(hound, None), "an X-pip card must not be offered"
+    sim, state = wizard(school="fire",
+                        hand=("Heck Hound", "Sunbird", "Fire Cat"),
+                        pips=7, hp=1500, board=((300, "ice"),))
+    policy = greedy_ttk()
+    chosen = policy(sim, state)
+    card, _t = chosen if isinstance(chosen, tuple) else (chosen, 0)
+    tied = {c.card for c in policy.last_candidates if (c.turns, c.damage)
+            == (1, 300.0)}
+    assert {"Heck Hound", "Sunbird"} <= tied, f"the tie is the premise: {tied}"
+    assert card.name == "Sunbird"
 
-    # ...and the policy really does stop picking it, on the board the
-    # live wizard was on: one pip, Heck Hound and a free trap in hand.
+
+def test_a_full_rack_does_go_into_the_x_pip_card_when_it_pays():
+    """The other direction, so the fix is not just "never play it".
+
+    Six pips against an 800hp mob, and 780 of damage is worth the rack:
+    the hound clears in five turns where Fire Cat and Sunbird need nine.
+    """
+    from deimos_bridge.policies import greedy_ttk
+
+    sim, state = wizard(school="fire",
+                        hand=("Heck Hound", "Sunbird", "Fire Cat"),
+                        pips=6, hp=1500, board=((800, "ice"),))
+    policy = greedy_ttk()
+    chosen = policy(sim, state)
+    card, _t = chosen if isinstance(chosen, tuple) else (chosen, 0)
+    assert card.name == "Heck Hound"
+    hound = next(c for c in policy.last_candidates if c.card == "Heck Hound")
+    assert hound.turns < min(c.turns for c in policy.last_candidates
+                             if c.card != "Heck Hound")
+
+
+def test_one_pip_is_not_enough_and_the_rollout_says_so():
+    """The live complaint -- eight Heck Hounds at one or two pips. The
+    rollout rejects it on its own once the card is offered at all: 130
+    of damage does not clear an 800hp board inside the horizon."""
+    from deimos_bridge.policies import greedy_ttk
+
     sim, state = wizard(school="fire",
                         hand=("Heck Hound", "Fire Trap", "Fireblade"),
                         pips=1, hp=1064, board=((800, "ice"), (525, "balance")))
     policy = greedy_ttk()
     chosen = policy(sim, state)
     card, _t = chosen if isinstance(chosen, tuple) else (chosen, 0)
-    assert card is None or card.name != "Heck Hound", (
-        "played the card the engine prices at 0 damage and 0 pips")
-    assert not any(c.card == "Heck Hound" for c in policy.last_candidates), \
-        "it was still offered as a candidate"
+    assert card is None or card.name != "Heck Hound"
+    assert any(c.card == "Heck Hound" for c in policy.last_candidates), \
+        "it must be weighed and lose, not be hidden"
+
+
+def test_the_recorded_price_is_the_one_that_was_paid():
+    """`Candidate.pips` feeds the decision panel and `rank_candidate`'s
+    runner-up ranking. Showing 0 beside a 1-pip Fire Cat reads as a free
+    card losing to a paid one."""
+    from deimos_bridge.policies import greedy_ttk
+
+    sim, state = wizard(school="fire", hand=("Heck Hound", "Fire Cat"),
+                        pips=5, hp=1500, board=((800, "ice"),))
+    policy = greedy_ttk()
+    policy(sim, state)
+    hound = next(c for c in policy.last_candidates if c.card == "Heck Hound")
+    assert hound.pips == 5
 
 
 def test_the_ordinary_cards_are_still_offered():
-    """The X-pip rule must not quietly swallow a normal hand."""
+    """The inert rule must not quietly swallow a normal hand."""
     from deimos_bridge.policies import _is_inert
 
     table = cards()
     for name in ("Fire Cat", "Sunbird", "Fireblade", "Fire Trap",
-                 "Snow Serpent", "Tower Shield"):
+                 "Snow Serpent", "Tower Shield", "Heck Hound"):
         assert not _is_inert(table[name], None), name

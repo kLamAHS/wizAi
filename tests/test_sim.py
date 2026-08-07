@@ -130,6 +130,39 @@ def test_x_pip_spends_everything_and_scales():
     assert s.player.pip_slots == 0
 
 
+def test_pricing_an_ordinary_card_returns_the_printed_face():
+    """The scope argument for `cast_price`/`cast_reach`, over the whole
+    table rather than a sample: for every card that is not X-pip they
+    are the identity, so a deck holding none of the 2,112 is bit
+    identical under the priced ranking key. Measured that way too -- a
+    live-shaped ice deck scores the same to three decimals on all three
+    boards, where the live-shaped fire deck gains 1.2/1.5/4.5 points.
+    """
+    from w101_sim import cast_price, cast_reach
+
+    sim, s = fresh()
+    normal = [c for c in CARDS.values() if not c.x_pips]
+    assert len(normal) > 100, "premise moved"
+    for card in normal:
+        assert cast_price(sim, s, card) == card.pips, card.name
+        assert cast_reach(sim, s, card) == (card.damage or 0.0), card.name
+
+
+def test_pricing_an_x_pip_card_reads_the_rack():
+    from w101_sim import cast_price, cast_reach
+
+    sim, s = fresh(school="balance")
+    judge = give(sim, s, "Judgement", pips=3)         # 6 effective
+    assert judge.pips == 0 and judge.damage == 100    # the printed face
+    assert cast_price(sim, s, judge) == 6
+    reach = cast_reach(sim, s, judge)
+    assert reach == 600                               # what the cast throws
+    hp0 = s.boss_hp
+    cast(sim, s, judge)
+    # what the estimate promised is what the engine then charged
+    assert s.boss_hp == pytest.approx(hp0 - reach)
+
+
 def test_empower_gains_pips_and_hurts():
     sim, s = fresh(school="death")
     emp = give(sim, s, "Empower", pips=1)

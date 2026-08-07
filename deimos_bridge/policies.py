@@ -83,34 +83,36 @@ def _is_inert(card, state) -> bool:
     health missing. So it does not fix that, and does not claim to; it
     only stops a round being spent on a heal that would restore zero.
 
-    The other case: **an X-pip card, which the engine cannot price at
-    all.** Heck Hound, Chromatic Blast, Dryad and 2,109 others carry
-    `x_pips`, meaning they consume the whole pip rack and scale with it.
-    The card table records them as costing 0 pips, and `Sim` gives them
-    0 damage at every pip count -- measured 1, 2, 3, 4 and 6 pips
-    against an 800hp mob, and it is 0 immediately and 0 after the DoT
-    would have ticked, with the pips not even spent.
+    X-pip cards used to be the other case, and that was my error, not
+    the engine's. The claim here was that `Sim` "gives them 0 damage at
+    every pip count, with the pips not even spent". It does not. The
+    engine resolves them correctly and always has: the ops carry
+    `per_pip`, `Sim.spend` returns the effective rack and `_resolve_ops`
+    multiplies by it. Re-measured against a 4000hp mob with the
+    rollout's own fixed RNG, Heck Hound ticks 43.3 / 86.7 / 130.0 /
+    173.3 / 216.7 / 260.0 / 303.3 per round at one through seven pips --
+    130 a pip, exactly as printed, and the rack goes to zero every time.
+    The original measurement had a live RNG in it and I read two fizzles
+    as a broken card.
 
-    So to the policy an X-pip card is free AND does nothing: exactly
-    indistinguishable from passing, and it wins the pip tiebreak because
-    nothing is cheaper than zero. In the game it is the opposite of
-    free. The second live party run shows what that costs -- the fire
-    wizard chose Heck Hound eight times, every time holding one or two
-    pips, and dealt 0.0 damage across the fifteen rounds of its first
-    two fights.
+    What was really broken was the PRICE, in the ranking key rather than
+    in the engine: `card.pips` reads 0 and `card.damage` reads per-pip,
+    so an X-pip card was both free and oversized in every tiebreak.
+    `cast_price` and `cast_reach` fix that where it belongs, and the
+    rollout then does what it always could -- it rejects Heck Hound at
+    one and two pips (13.0, a sentinel) and takes it at four (5 turns
+    against Fire Cat's 9) and at seven (3 against 6).
 
-    `cheapest_lethal` already skips X-pip cards for the same reason. The
-    day `Sim` prices them, this goes: the rule is about the model's
-    blindness, not about the cards, and Heck Hound on a full rack is a
-    genuinely strong play that the policy currently has no way to see.
+    Skipping the card instead cost a hand slot for a whole session: Heck
+    Hound sat in the fire wizard's hand for 74 of 75 rounds of the run
+    at rev e523684f and was never once played, out of a median hand of
+    four.
 
     Deliberately narrow otherwise. A blade on a wizard that already has
     three is not inert -- it stacks -- and a trap on a mob that is about
     to die is a judgement call the rollout is better placed to make than
     a rule here.
     """
-    if getattr(card, "x_pips", False):
-        return True
     if getattr(card, "kind", "") != "heal":
         return False
     me = getattr(state, "player", None)
@@ -1359,7 +1361,7 @@ def greedy_ttk(max_turns: int = None, continuation=None):
         strat.last_candidates = []
         strat.last_party_blind = False
         max_turns = fixed if fixed is not None else search_horizon()
-        from w101_sim import castable
+        from w101_sim import cast_price, cast_reach, castable
 
         foes = [i for i, e in enumerate(s.enemies) if e.alive]
         if not foes:
@@ -1440,6 +1442,36 @@ def greedy_ttk(max_turns: int = None, continuation=None):
         # decisions, none of which tie. A green suite is not evidence
         # about this line. See the forced-tie tests in
         # `tests/test_hivemind.py`, which exist so that stops being true.
+        # Priced once, off the rack as it stands before any of this is
+        # cast. Both halves of the key are printed values that an X-pip
+        # card does not honour -- it prints 0 pips and spends everything,
+        # and prints damage PER PIP -- so `card.pips` made Heck Hound
+        # unbeatable on the thrift key and `card.damage` compared its
+        # 130-a-pip against a Fire Cat's 100 flat. See `cast_price`.
+        #
+        # The shape of the fix, on seven pips against a 300hp mob: Heck
+        # Hound and Sunbird both clear on turn one banking the same 300,
+        # so the thrift key decides. At a printed 0 the hound wins and
+        # the whole rack goes into a mob a 3-pip card already kills; at
+        # its real 7 it loses and four pips stay banked.
+        #
+        # Measured paired, same seed stream, against the shipped
+        # behaviour (X-pip cards skipped outright by `_is_inert`):
+        #
+        #   live-shaped fire deck, 2 hounds of 18 cards
+        #     mob    98.8 -> 100.0   ttk 3.18 -> 3.06
+        #     elite  98.5 -> 100.0   ttk 4.51 -> 4.11
+        #     boss   94.5 ->  99.0   ttk 7.15 -> 6.14
+        #   live-shaped ice deck, no X-pip card
+        #     identical on all three cells, as it has to be
+        #
+        # On a deck BUILT around the card the shipped behaviour was
+        # removing the deck's only nuke: storm/Tempest, fire/Heck Hound
+        # and balance/Judgement all score 0.0% skipped against
+        # 87.5-100% priced.
+        price = {c.name: cast_price(sim, s, c) for c, _ in candidates}
+        reach = {c.name: cast_reach(sim, s, c) for c, _ in candidates}
+
         def score_all(allies):
             out = []
             for card, target in candidates:
@@ -1450,9 +1482,9 @@ def greedy_ttk(max_turns: int = None, continuation=None):
                 # element 0 is `turns`, and two candidates can only reach
                 # element 2 by tying on it -- which puts them on the same
                 # side of the horizon and so in the same form.
-                thrift = ((-(card.damage or 0), card.pips)
+                thrift = ((-reach[card.name], price[card.name])
                           if is_sentinel(turns, max_turns)
-                          else (card.pips, card.damage))
+                          else (price[card.name], reach[card.name]))
                 out.append(((turns, neg_damage) + thrift + (target,),
                             (card, target)))
             return out
@@ -1513,10 +1545,15 @@ def greedy_ttk(max_turns: int = None, continuation=None):
         # @0 AND "pass" both flagged chosen, because this list was
         # written before the pass was scored -- so the decision matrix
         # rendered two winners for one round.
+        # `price`, not `c.pips`: what the panel and `rank_candidate` want
+        # is what the cast costs, and for an X-pip card the printed 0 is
+        # the one number that is certainly wrong. A decision matrix
+        # showing "Heck Hound, 0 pips" beside a 1-pip Fire Cat reads as a
+        # free card losing to a paid one.
         def mark(scored, passing):
             return [
                 Candidate(card=c.name, target=t, turns=score[0],
-                          damage=-score[1], pips=c.pips,
+                          damage=-score[1], pips=price[c.name],
                           chosen=(not passing) and (c, t) == best_action,
                           horizon=max_turns)
                 for score, (c, t) in scored]
@@ -1578,7 +1615,18 @@ def cheapest_lethal(sim, s, target):
     Uses the engine's own cast path (`predict_damage`), so resist,
     shields, prisms and absorbs are all accounted for rather than
     estimated -- a shielded mob is correctly *not* lethal.
+
+    X-pip cards are priced rather than skipped. Skipping them was a
+    workaround for reading `card.pips` and `card.damage` off the printed
+    face, where an X-pip card is free and tiny; `cast_price` and
+    `cast_reach` give the rack-relative numbers, and Tempest or
+    Judgement on a full rack is a real finisher that this could not
+    previously see. A DoT like Heck Hound still drops out on its own --
+    `predict_damage` reports what lands NOW, and a burn lands nothing
+    now, which is the right answer to "does this kill it this turn?".
     """
+    from w101_sim import cast_price, cast_reach
+
     from .telemetry import predict_damage
 
     foe = s.enemies[target] if 0 <= target < len(s.enemies) else None
@@ -1591,16 +1639,16 @@ def cheapest_lethal(sim, s, target):
         if card.name in seen or card.kind not in ("damage", "drain"):
             continue
         seen.add(card.name)
-        if card.x_pips or not sim.can_cast(s, card, target):
+        if not sim.can_cast(s, card, target):
             continue
         # Cheap gate before the expensive one: `predict_damage` runs a
         # real cast on a deep copy, and a card that could not reach even
         # tripled is not worth that.
-        if card.damage * 3 < foe.hp:
+        if cast_reach(sim, s, card) * 3 < foe.hp:
             continue
         got = predict_damage(sim, s, card, target)
         if got is not None and got >= foe.hp:
-            rank = (card.pips, card.damage)
+            rank = (cast_price(sim, s, card), cast_reach(sim, s, card))
             if best is None or rank < best[0]:
                 best = (rank, card)
     return best[1] if best else None
