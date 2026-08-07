@@ -1161,6 +1161,13 @@ def test_the_rate_never_includes_the_seat_it_is_planning_for():
 # every test that asserts a specific card makes one or two decisions,
 # none of which tie. These force the tie so the later keys are covered
 # by something.
+#
+# Only ONE of the three is the guard: reapplying d3b7962 fails
+# `test_between_equal_outcomes_the_cheaper_card_wins` and passes the
+# other two, which are the premise it rests on and a separate property.
+# Checked, rather than assumed -- a test that would not have caught the
+# change is not coverage of it, and claiming three guards where there is
+# one is how a suite comes to be trusted for something it cannot do.
 def test_a_tie_at_turns_and_damage_is_the_common_case_not_the_edge():
     """The premise the two tests below rest on, asserted rather than
     assumed. If ties were rare, the ranking tail would not matter and
