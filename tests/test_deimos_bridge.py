@@ -1468,3 +1468,98 @@ def test_a_card_that_fails_both_ways_says_it_tried_twice():
     assert slow, "the retry was silent"
     assert failed and "twice" in failed[0], failed
     assert combat.passed == 1
+
+
+# ------------------------------------------------ passing has to earn the round
+def _seat_2_at_f5r2(pips=2, hp=285.0):
+    """The exact board seat 2 was looking at in the run at rev 3c8b8087.
+
+    Life wizard, 424/705, two pips, Imp + Leprechaun + Pixie Life in
+    hand, one Fire Elf Pathfinder on full health.
+    """
+    from data_full import load_spells_full
+    from w101_sim import Actor, Boss, Rules, Sim, State
+
+    table = load_spells_full()
+    deck = ["Imp"] * 4 + ["Leprechaun"] * 4 + ["Pixie Life"] * 2
+    hand = ["Imp", "Leprechaun", "Pixie Life"]
+    p = Actor(name="Sebastian", school="life", hp=424, max_hp=705, team=0,
+              norm_pips=pips)
+    p.hand = [table[n] for n in hand]
+    p.deck = [table[n] for n in deck]
+    foe = Actor(name="Fire Elf Pathfinder", school="fire", hp=hp,
+                max_hp=285.0, team=1, flat_hit=40)
+    sim = Sim(cards=table, decklist=list(deck), school="life",
+              boss=Boss(name="Fire Elf Pathfinder", hp=285.0, school="fire",
+                        dmg=40),
+              rules=Rules(), player_hp=705)
+    return sim, State(p, [foe])
+
+
+def test_a_one_turn_edge_for_doing_nothing_is_not_a_reason_to_do_nothing():
+    """Straight off the export: Leprechaun 4 turns, Imp 4 turns, pass 3,
+    so it passed. The rollout is a single draw sample and the pass line
+    only wins because it keeps a card the cast lines spent -- one round
+    later, with one more pip, the same board reads Leprechaun 2 against
+    pass 3. A two-turn swing from one pip is the noise floor."""
+    from deimos_bridge.policies import greedy_ttk
+
+    sim, state = _seat_2_at_f5r2()
+    pol = greedy_ttk()
+    got = pol(sim, state)
+    assert got is not None, "passed on a full-health mob with a nuke in hand"
+
+    turns = {c.card: c.turns for c in pol.last_candidates}
+    assert turns["pass"] == min(turns.values()), \
+        "the fixture stopped reproducing the inversion it was written for"
+
+
+def test_the_margin_is_what_changed_this_and_nothing_else():
+    """Pin the mechanism, not just the outcome: the old rule passed here
+    and the margin is the only reason it no longer does."""
+    from deimos_bridge import policies
+
+    sim, state = _seat_2_at_f5r2()
+    scored = {}
+    for margin in (0, 1):
+        policies._PASS_MARGIN = margin
+        scored[margin] = policies.greedy_ttk()(sim, state)
+    policies._PASS_MARGIN = 1
+    assert scored[0] is None          # a one-turn edge used to pass
+    assert scored[1] is not None
+
+
+def test_the_margin_lifts_when_the_extra_pip_buys_a_bigger_card():
+    """The play the margin must not throw away. On one pip against a
+    400hp mob holding a two-pip Snow Serpent, banking really is faster
+    -- 5.39 turns against 5.75 over 398 deck orderings, faster on 169
+    and slower on 51 -- and `banking_unlocks` is what tells the two
+    one-turn passes apart."""
+    import random
+
+    from data_full import load_spells_full
+    from deimos_bridge.policies import banking_unlocks, greedy_ttk
+    from w101_sim import Actor, Boss, Sim, State
+
+    cards = load_spells_full()
+    deck = ["Frost Beetle"] * 3 + ["Snow Serpent"] * 3
+    sim = Sim(cards, deck, "ice",
+              Boss(name="mob", hp=400, school="fire", dmg=40),
+              rng=random.Random(0), player_hp=800)
+    p = Actor(name="W", school="ice", hp=800, max_hp=800, team=0,
+              norm_pips=1)
+    p.hand = [cards[n] for n in ["Frost Beetle", "Snow Serpent"]]
+    p.deck = [cards[n] for n in deck]
+    s = State(p, [Actor(name="mob", school="fire", hp=400, max_hp=400,
+                        team=1)])
+    assert banking_unlocks(sim, s) is True
+    assert greedy_ttk()(sim, s) is None
+
+
+def test_a_pip_that_unlocks_nothing_is_not_worth_a_round():
+    """Seat 2's hand and deck top out at two pips, so a third buys
+    nothing -- and that is the whole difference from the case above."""
+    from deimos_bridge.policies import banking_unlocks
+
+    sim, state = _seat_2_at_f5r2()
+    assert banking_unlocks(sim, state) is False

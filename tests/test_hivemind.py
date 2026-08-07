@@ -2150,3 +2150,127 @@ def test_the_ordinary_cards_are_still_offered():
     for name in ("Fire Cat", "Sunbird", "Fireblade", "Fire Trap",
                  "Snow Serpent", "Tower Shield", "Heck Hound"):
         assert not _is_inert(table[name], None), name
+
+
+# ------------------------------------------------------- separate battle circles
+def _circled(names_by_seat, board=((285, "fire"),)):
+    """Seats whose reads name exactly the allies given, per seat.
+
+    `names_by_seat[i]` is who seat i can see on its own team. That is
+    what `LiveRead` builds from the duel's participant list, so it is
+    the only thing that distinguishes "we are in one circle" from "we
+    are each in our own".
+    """
+    from w101_sim import Actor
+
+    subs = []
+    for i, mates in enumerate(names_by_seat):
+        sim, state = wizard(board=board)
+        state.allies = [Actor(name=m, school="life", hp=500, max_hp=500,
+                              team=0) for m in mates]
+        read = type("Read", (), {"round_number": 1, "state": state})()
+        subs.append(_Submission(i, f"wizard {i + 1}", sim, state,
+                                greedy_ttk(), read))
+    return subs
+
+
+def test_wizards_in_different_duels_are_planned_apart():
+    """The failure the run at rev 3c8b8087 recorded: seat 2 fought two
+    Fire Elf Pathfinders alone while seats 1 and 3 were in another
+    circle, and was twice told to hold its card because "the party
+    already has this board dead". Both boards read `Fire Elf
+    Pathfinder`, so `align_enemies` matched them and the ledger paid
+    seat 2 for damage that could never reach its mob."""
+    from deimos_bridge.hivemind import _duel_groups
+
+    subs = _circled([["wizard 3"], [], ["wizard 1"]])
+    groups = _duel_groups(subs)
+    assert [sorted(s.seat for s in g) for g in groups] == [[0, 2], [1]]
+
+
+def test_a_split_party_still_gives_every_seat_a_move():
+    subs = _circled([["wizard 3"], [], ["wizard 1"]])
+    actions, party = Hivemind(passes=2).plan(subs)
+    assert set(actions) == {0, 1, 2}
+    assert party.circles == 2
+    assert len(party.moves) == 3
+    assert "split across 2 circles" in party.summary()
+
+
+def test_the_lone_wizard_is_never_told_the_party_has_its_board_dead():
+    """Seat 1's board is nearly dead and seats 0 and 2 are hitting it.
+    Seat 1 is somewhere else entirely, so nothing they do can be a
+    reason for it to hold."""
+    subs = _circled([["wizard 3"], [], ["wizard 1"]], board=((40, "fire"),))
+    _actions, party = Hivemind(passes=2).plan(subs)
+    alone = [m for m in party.moves if m.seat == 1][0]
+    assert alone.note != "held"
+
+
+def test_one_circle_is_still_one_plan():
+    subs = _circled([["wizard 2", "wizard 3"],
+                     ["wizard 1", "wizard 3"],
+                     ["wizard 1", "wizard 2"]])
+    _actions, party = Hivemind(passes=2).plan(subs)
+    assert party.circles == 1
+
+
+def test_seats_that_cannot_name_an_ally_are_kept_together():
+    """Every headless caller and every mock client is in this case. No
+    evidence is not evidence of a split, and behaving otherwise would
+    silently turn the coordinator off for all of them."""
+    from deimos_bridge.hivemind import _duel_groups
+
+    assert len(_duel_groups(party(3))) == 1
+
+
+def test_one_seat_naming_the_other_is_enough_to_group_them():
+    """The two reads are taken at different moments, so one can be a
+    round stale. Grouping on either wizard's word is the conservative
+    direction: wrongly grouping is what the code did before."""
+    from deimos_bridge.hivemind import _duel_groups
+
+    subs = _circled([["wizard 2"], []])
+    assert len(_duel_groups(subs)) == 1
+
+
+# ------------------------------------------------- holding on a broken promise
+def test_a_seat_does_not_hold_twice_against_a_board_that_never_moved():
+    """Konstantin's fight 1 at rev 3c8b8087. The Skeletal Warrior sat on
+    177/235 for two rounds while the party's promised kill did not land,
+    and he held both times -- two rounds out of five given away on the
+    same prediction, believed twice."""
+    hive = Hivemind(passes=2)
+    subs = party(2, board=((40, "ice"),))
+    _actions, first = hive.plan(subs)
+    held = [m.seat for m in first.moves if m.note == "held"]
+    assert held, "the guard has to fire once for the repeat to be testable"
+    seat = held[0]
+
+    # Next round, same board: nothing the party promised actually landed.
+    again = party(2, board=((40, "ice"),))
+    for sub, old in zip(again, subs):
+        sub.seat, sub.name = old.seat, old.name
+    _actions, second = hive.plan(again)
+    repeat = [m for m in second.moves if m.seat == seat][0]
+    assert repeat.note != "held"
+
+
+def test_a_hold_that_was_partly_paid_is_still_believed():
+    """A mob that is alive but hurt is evidence the party is doing its
+    job. Only a board that has not moved at all is evidence that it is
+    not -- so this must keep holding, not start firing into a corpse."""
+    hive = Hivemind(passes=2)
+    subs = party(2, board=((40, "ice"),))
+    _actions, first = hive.plan(subs)
+    held = [m.seat for m in first.moves if m.note == "held"]
+    assert held
+    seat = held[0]
+
+    again = party(2, board=((40, "ice"),))
+    for sub, old in zip(again, subs):
+        sub.seat, sub.name = old.seat, old.name
+        sub.state.enemies[0].hp = 25.0        # the party did land something
+    _actions, second = hive.plan(again)
+    repeat = [m for m in second.moves if m.seat == seat][0]
+    assert repeat.note == "held"

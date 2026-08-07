@@ -1370,6 +1370,103 @@ def _rollout(sim, state, first_action, max_turns=12, target=0,
     return stalled(max_turns) + (0.0,)
 
 
+def banking_unlocks(sim, s):
+    """Would one more pip make a card castable that is not castable now?
+
+    This is what separates the two one-turn passes, and they look
+    identical until you ask it.
+
+    Against a 400hp mob on one pip holding Frost Beetle (1 pip, 85) and
+    Snow Serpent (2 pips, 175), passing scores 5 turns and casting
+    scores 6 -- and passing is genuinely right: replayed over 398 deck
+    orderings it kills in 5.39 turns against 5.75, faster on 169 and
+    slower on 51. The pip buys the bigger card.
+
+    Seat 2 at f5r2 of the run at rev 3c8b8087 is the same shape and the
+    opposite answer. Two pips, Imp/Leprechaun/Pixie Life in hand and
+    nothing in the deck costing more than two, so a third pip unlocks
+    NOTHING -- and passing still scored 3 against Leprechaun's 4,
+    entirely on the draw ordering. There is no bigger card to wait for.
+
+    So the question is not "how big is the edge", it is "is there
+    anything to bank *for*". Asked through the engine's own
+    `can_cast` on a copy with one more pip, rather than by comparing pip
+    counts here -- power pips, school pips and X-pip cards all price
+    differently, and a second opinion about the pip economy would drift
+    from `Sim.spend` the first time either changed.
+    """
+    import copy
+
+    try:
+        pool = list(s.player.hand) + list(s.player.deck)
+    except AttributeError:
+        return True                 # cannot tell; leave the pass alone
+    if not pool:
+        return False
+    later = copy.copy(s.player)
+    later.norm_pips = float(getattr(s.player, "norm_pips", 0)) + 1
+    ahead = copy.copy(s)
+    ahead.player = later
+    asked = False
+    for card in pool:
+        try:
+            if sim.afford(s, card):
+                asked = True
+                continue            # already castable; banking adds nothing
+            if sim.afford(ahead, card):
+                return True         # castable next turn, not this one
+            asked = True
+        except Exception:
+            continue
+    # Nothing answered, so nothing is known. "No" would quietly tighten
+    # the rule for every engine that does not price pips this way, and a
+    # silent behaviour change is the one outcome not worth having.
+    return not asked
+
+
+#: How much sooner passing has to kill before it is worth a whole round.
+#:
+#: Zero was the shipped value and it is wrong, because it reads a
+#: one-turn difference as signal when the rollout cannot resolve one.
+#: `_rollout` is a SINGLE draw sample: two candidate lines consume
+#: different numbers of cards, so they see different draws from that
+#: point on, and a line that skips a turn keeps a card the other spent.
+#:
+#: The live case, from the run at rev 3c8b8087, seat 2 at f5r2 -- one
+#: 285hp mob, two pips, Imp/Leprechaun/Pixie Life in hand:
+#:
+#:     Leprechaun  4 turns      Imp  4 turns      pass  3 turns
+#:
+#: so it did nothing. Reproduced exactly offline, and the trace says
+#: why: the Leprechaun line plays Lep then Imp then *stalls a turn* on
+#: one pip holding only a two-pip card, while the pass line's pip curve
+#: is offset by one and draws a second Leprechaun into it. Both are
+#: honest lines of the same deck; the difference is one shuffle, not one
+#: decision. One round later on the same board with one more pip the
+#: same comparison reads Leprechaun 2, pass 3 -- a two-turn swing from a
+#: single pip, which is the noise floor measured directly.
+#:
+#: So a tie, or a one-turn edge, goes to the cast that removes health --
+#: but ONLY when there is nothing to bank for. `banking_unlocks` is the
+#: gate, and it is what keeps the play this would otherwise have thrown
+#: away: on one pip against a 400hp mob, waiting for a two-pip Snow
+#: Serpent really is faster (5.39 turns against 5.75 over 398 deck
+#: orderings), and there the margin drops back to zero.
+#:
+#: Measured over 1,500 decisions shaped like the exports -- the three
+#: live decks, one to three pips, one to three cards in hand, one to
+#: three mobs at full, 60% and 20% health. 327 of them passed under the
+#: old rule; 25 of those now cast, 1.7% of all rounds. Ungated it would
+#: have been 73 -- so 48 of them, two thirds, were real banking plays
+#: that a flat margin would have destroyed, which is the gate earning
+#: its keep rather than a detail of it. Invisible to the
+#: boss grid and to a `Sim.run` A/B (21 and 12 cells, bit-identical),
+#: because both deal a full seven-card opening hand and this only bites
+#: when the hand is nearly empty -- which is every round of a level-five
+#: wizard's fight.
+_PASS_MARGIN = 1
+
+
 #: The rollout horizon `greedy_ttk` uses when the caller does not say.
 #: Deck-scoped for the same reason the continuation is: measured on a
 #: 12-cell grid at n=400, horizon 6 is +10.3 points on a two-mob
@@ -1656,7 +1753,8 @@ def greedy_ttk(max_turns: int = None, continuation=None):
         # line that skips a turn accumulates pips and so does more total
         # damage later, which is not a reason to do nothing now.
         pass_turns, pass_damage, _pass_health = pass_score
-        passing = pass_turns < best_score[0]
+        margin = 0 if banking_unlocks(sim, s) else _PASS_MARGIN
+        passing = pass_turns < best_score[0] - margin
         strat.last_candidates = mark(scored, passing)
         strat.last_candidates.append(
             Candidate(card="pass", target=None, turns=pass_turns,
