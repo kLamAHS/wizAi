@@ -210,6 +210,30 @@ def on_waitfor_timeout(hook):
     return True, ""
 
 
+def on_teleport_result(hook):
+    """Report every `navmap_tp`. Returns (ok, reason).
+
+    Upstream that function's returns are all bare -- success, failure
+    and never-attempted are one answer -- which is why deimoslang wraps
+    `tp` in unbounded retry loops and why a teleport that silently did
+    not land is invisible to the script issuing the next instruction.
+    See `tests/test_deimos_patches.py`.
+    """
+    _ensure_path()
+    try:
+        from src import teleport_math
+    except Exception as exc:
+        return False, (f"Deimos's teleport_math did not import "
+                       f"({type(exc).__name__}: {exc})")
+    if not hasattr(teleport_math, "on_teleport_result"):
+        return False, ("this Deimos has no `on_teleport_result` hook, so a "
+                       "teleport that does not land will be invisible — the "
+                       "patch in teleport_math.py has probably been lost to "
+                       "an update (see tests/test_deimos_patches.py)")
+    teleport_math.on_teleport_result = hook
+    return True, ""
+
+
 class ScriptRunner:
     """One deimoslang program, run in time-boxed bursts."""
 

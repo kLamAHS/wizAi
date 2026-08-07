@@ -239,10 +239,45 @@ async def auto_adjusting_teleport(client: Client, quest_position: XYZ = None):
 async def fallback_spiral_tp(client: Client, xyz: XYZ):
     await auto_adjusting_teleport(client, xyz)
 
-async def navmap_tp(client: Client, xyz: XYZ = None, leader_client: Client = None):
+#: Called as (landed, how, zone) when `navmap_tp` finishes. wizAi sets
+#: this so a teleport that did not land reaches the run's log; left as
+#: None the patch changes nothing but the return value.
+on_teleport_result = None
+
+
+def _tp_result(landed: bool, how: str, zone: str = "") -> bool:
+    if on_teleport_result is not None:
+        try:
+            on_teleport_result(bool(landed), how, zone)
+        except Exception:
+            pass
+    return bool(landed)
+
+
+async def navmap_tp(client: Client, xyz: XYZ = None, leader_client: Client = None) -> bool:
+    """wizAi patch: this now RETURNS whether the teleport landed.
+
+    Upstream every `return` here is bare, including the `if not await
+    is_free(client): return` on the first line -- so success, failure
+    and never-even-attempted are the same answer, and nothing above can
+    tell them apart. That is why deimoslang scripts wrap `tp` in
+    unbounded retry loops (331 of them across the arc scripts wizAi was
+    tested against): the primitive gives them nothing to check, so they
+    poll the game's own windows and hope.
+
+    It is also the reported failure that started all of this -- "one
+    wizard might get through with a teleport, but the others might stop
+    teleporting or get stuck". A teleport that silently did not land
+    leaves the script issuing instructions for a place its wizard is not
+    in, and neither the script nor wizAi could see it happen.
+
+    Behaviour is unchanged: same teleports, same order, same fallbacks.
+    Only the answer is new, plus `on_teleport_result` for a caller that
+    wants to record it.
+    """
     # TODO: What is leader_client meant to be for?
     if not await is_free(client):
-        return
+        return _tp_result(False, "the client was not free to teleport")
 
     starting_zone = await client.zone_name() # for loading the correct wad and to walk to target as a last resort
     starting_xyz = await client.body.position()
@@ -261,11 +296,11 @@ async def navmap_tp(client: Client, xyz: XYZ = None, leader_client: Client = Non
         return await check_success() or not await is_free(client) or await client.zone_name() != starting_zone
 
     if check_sigma(starting_xyz, target_xyz):
-        return # save some work
+        return _tp_result(True, "already there", starting_zone)
 
     await client.teleport(target_xyz)
     if await finished_tp():
-        return # trivial tp, no point using a more complex method if this one works
+        return _tp_result(True, "direct", starting_zone)
 
     try:
         # attempt to use the nav data
@@ -275,7 +310,8 @@ async def navmap_tp(client: Client, xyz: XYZ = None, leader_client: Client = Non
     except:
         # Unable to load nav data. Fall back to primitive spiral pattern
         await fallback_spiral_tp(client, target_xyz)
-        return
+        return _tp_result(await check_success(), "spiral (no nav data)",
+                          starting_zone)
 
     # continuation of nav data tp, don't want to swallow potential exceptions in this section
     closest_vertex = vertices[0]
@@ -316,13 +352,15 @@ async def navmap_tp(client: Client, xyz: XYZ = None, leader_client: Client = Non
     if await check_success():
         if await is_free(client) and await client.zone_name() == starting_zone:
             await client.goto(target_xyz.x, target_xyz.y)
-        return
+        return _tp_result(True, "nav midpoint", starting_zone)
     await client.teleport(avg_xyz) # average point
     if await check_success():
         if await is_free(client) and await client.zone_name() == starting_zone:
             await client.goto(target_xyz.x, target_xyz.y)
-        return
+        return _tp_result(True, "nav average", starting_zone)
     await fallback_spiral_tp(client, target_xyz)
+    return _tp_result(await check_success(), "spiral (nav exhausted)",
+                      starting_zone)
 
 
 def calc_chunks(points: list[XYZ], entity_distance: float = 3147.0) -> list[XYZ]:

@@ -10991,6 +10991,8 @@ def test_a_waitfor_that_gives_up_is_reported_to_every_seat(monkeypatch):
     installed = []
     monkeypatch.setattr(scripts, "on_waitfor_timeout",
                         lambda hook: (installed.append(hook), (True, ""))[1])
+    monkeypatch.setattr(scripts, "on_teleport_result",
+                        lambda hook: (True, ""))
 
     worker._watch_waitfor(worker.seats[0])
     assert len(installed) == 1
@@ -11014,8 +11016,38 @@ def test_a_deimos_without_the_hook_is_reported_not_ignored(monkeypatch):
     worker.seats[0].runner = type("R", (), {"running": True, "steps": 1})()
     monkeypatch.setattr(scripts, "on_waitfor_timeout",
                         lambda hook: (False, "this Deimos has no hook"))
+    monkeypatch.setattr(scripts, "on_teleport_result",
+                        lambda hook: (True, ""))
 
     worker._watch_waitfor(worker.seats[0])           # must not raise
     note = [e for e in worker.seats[0].tel.questing
             if e["kind"] == "stage-failed"]
     assert note and "no hook" in note[0]["detail"]
+
+
+def test_a_teleport_that_did_not_land_is_reported_to_every_seat(monkeypatch):
+    """`navmap_tp` returns whether it landed now. A teleport that
+    silently did not is the failure that started all of this -- "one
+    wizard might get through, but the others get stuck" -- and the
+    script's next instruction is for wherever it meant to be."""
+    from deimos_bridge import scripts
+
+    worker, _read = _zoned_party(["Olde Town", "Olde Town"])
+    worker.seats[0].runner = type("R", (), {"running": True, "steps": 1})()
+    got = []
+    monkeypatch.setattr(scripts, "on_waitfor_timeout", lambda h: (True, ""))
+    monkeypatch.setattr(scripts, "on_teleport_result",
+                        lambda hook: (got.append(hook), (True, ""))[1])
+
+    worker._watch_waitfor(worker.seats[0])
+    got[0](True, "direct", "Olde Town")             # a teleport that worked
+    assert all(not s.tel.questing for s in worker.seats), \
+        "a run makes thousands of these; only the failures are worth a line"
+
+    got[0](False, "the client was not free to teleport", "Olde Town")
+    for seat in worker.seats:
+        note = [e for e in seat.tel.questing
+                if e["kind"] == "teleport-failed"]
+        assert len(note) == 1
+        assert "not free" in note[0]["detail"]
+        assert "Olde Town" in note[0]["detail"]

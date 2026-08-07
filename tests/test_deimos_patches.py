@@ -92,3 +92,34 @@ def test_the_friend_teleport_still_waits_long_enough_for_its_windows():
         "        ", " ").replace("   ", " ").replace("  ", " ") or \
         "retries=20" in src.split("wndCharacter", 1)[1][:200], \
         "the character-window wait is back to the default"
+
+
+# ------------------------------------------------------------ navmap_tp result
+TP = "Deimos/src/teleport_math.py"
+
+
+def test_navmap_tp_still_says_whether_it_landed():
+    """Upstream every `return` in `navmap_tp` is bare -- including the
+    `if not await is_free(client): return` on its first line -- so
+    success, failure and never-attempted are the same answer. That is
+    why deimoslang wraps `tp` in unbounded retry loops (331 of them
+    across the arc scripts), and why "one wizard gets through with a
+    teleport but the others get stuck" was invisible to everything."""
+    src = _source(TP)
+    assert "on_teleport_result" in src, \
+        "the navmap_tp result patch is gone -- a failed teleport is silent again"
+    body = src.split("async def navmap_tp", 1)[1].split("\ndef ", 1)[0]
+    bare = [line for line in body.splitlines()
+            if line.strip() == "return"]
+    assert not bare, f"navmap_tp still has bare returns: {bare}"
+    assert body.count("_tp_result(") >= 6, \
+        "not every exit from navmap_tp reports a result"
+
+
+def test_a_teleport_that_was_never_attempted_is_a_failure_not_a_success():
+    """The first line is `if not await is_free(client): return`. A
+    wizard that was not free never moved, and reporting that as success
+    is how the script marches on to the next instruction."""
+    src = _source(TP)
+    head = src.split("async def navmap_tp", 1)[1].split("starting_zone", 1)[0]
+    assert "_tp_result(False" in head
