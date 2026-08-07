@@ -558,8 +558,78 @@ class Hanging:
     def stack_key(self):
         return (self.name, self.source, self.sub)
 
+    @property
+    def shape_key(self):
+        """The effect itself, with the provenance taken off.
+
+        Only `_StackSeen` reads this, and only to close the live/deck
+        gap -- see there. Provenance stays in `stack_key`, because
+        provenance is what the repo owner's worked examples turn on: a
+        deck Fireblade and a treasure-card Fireblade compound
+        (`test_provenance_stacks`), and so do the three feints of
+        `1.7 x 1.8 x 1.8 = 5.508x`.
+        """
+        return (self.slot, self.kind, self.percent, self.convert_to,
+                None if self.schools is None else frozenset(self.schools))
+
     def matches(self, school):
         return self.schools is None or school in self.schools
+
+
+class _StackSeen:
+    """The stacking identities already spent on one strike.
+
+    `stack_key` alone answers this everywhere except across the live
+    boundary, and across that boundary it is always wrong. A hanging
+    read off a real client is named `live:<template id>` with source
+    "live" (`deimos_bridge.live_state.read_hangings`) because the reader
+    can see the effect but cannot recover which card placed it. A
+    `Fireblade` about to be cast out of the same wizard's hand is named
+    "Fireblade", source "deck". Same spell, read twice, two keys -- so
+    the engine applies both to one hit.
+
+    That is the comparison the live policy makes on every single
+    decision, because a rollout casts from hand onto a board read from
+    memory. Measured: a Fire Cat behind one live Fireblade plus one cast
+    Fireblade priced at 100 x 1.35 x 1.35 = 182 where the game gives
+    135. The rollout read that as a blade paying for itself twice and
+    spent round after round laying more -- two Feints and three Ice
+    Traps on one mob in the last fight of the party run at rev
+    e523684f, which is what the operator reported as buff spam.
+
+    So a live hanging matches ANY same-shaped hanging, and everything
+    else keeps comparing by provenance. That asymmetry is deliberate and
+    it is not a rounding of the rule: provenance is real, and the repo
+    owner's own worked examples turn on it -- a deck Fireblade and a
+    treasure-card Fireblade compound, and so do `1.7 x 1.8 x 1.8`
+    feints. What is not real is a wizard's own blade counting twice
+    because half of it came back through a memory read.
+
+    Offline this is provably inert: nothing but `read_hangings` ever
+    mints a hanging with source "live", so `live` stays empty, the
+    second and third tests never fire, and every pinned table is
+    untouched.
+    """
+
+    __slots__ = ("keys", "shapes", "live")
+
+    def __init__(self):
+        self.keys = set()
+        self.shapes = set()
+        self.live = set()
+
+    def saw(self, h):
+        if h.stack_key in self.keys:
+            return True
+        if h.shape_key in self.live:
+            return True
+        return h.source == "live" and h.shape_key in self.shapes
+
+    def add(self, h):
+        self.keys.add(h.stack_key)
+        self.shapes.add(h.shape_key)
+        if h.source == "live":
+            self.live.add(h.shape_key)
 
 
 @dataclass
@@ -1069,15 +1139,15 @@ class Sim:
         worth anything at all. Deimos does this by skipping any
         `spell_effect_stacking_id` it has already seen while resolving
         damage (`combat_math.py:161-167`); this is the same rule keyed on
-        wizAi's own `Hanging.stack_key`.
+        wizAi's own `Hanging.stack_key` -- see `_StackSeen` for the one
+        place that is not enough.
         """
         mult = 1.0
         keep = []
-        seen = set()
+        seen = _StackSeen()
         for h in caster.charms:
-            if h.kind == "damage" and h.matches(school) \
-                    and h.stack_key not in seen:
-                seen.add(h.stack_key)
+            if h.kind == "damage" and h.matches(school) and not seen.saw(h):
+                seen.add(h)
                 mult *= 1 + h.percent
                 self._ev(s, "charm_consumed", actor=caster.name,
                          effect=h.name, percent=h.percent)
@@ -1135,18 +1205,19 @@ class Sim:
         look worth spending the rounds on. Deimos does the dedupe at
         resolution by `spell_effect_stacking_id`
         (`combat_math.py:189-194`); this is the same rule on
-        `Hanging.stack_key`.
+        `Hanging.stack_key` -- see `_StackSeen` for the one place that is
+        not enough.
         """
         mult = 1.0
         keep = []
-        seen = set()
+        seen = _StackSeen()
         for h in target.wards:
-            if h.stack_key in seen:
+            if seen.saw(h):
                 keep.append(h)               # banked for the next hit
                 continue
             if h.kind == "prism":
                 if h.schools is None or school in h.schools:
-                    seen.add(h.stack_key)
+                    seen.add(h)
                     self._ev(s, "prism_converted", target=target.name,
                              effect=h.name, to=h.convert_to)
                     school = h.convert_to
@@ -1154,7 +1225,7 @@ class Sim:
                 keep.append(h)
             elif h.kind == "damage":
                 if h.matches(school):
-                    seen.add(h.stack_key)
+                    seen.add(h)
                     pct = h.percent
                     if pct < 0 and pierce > 0:
                         shaved = min(pierce, -pct)

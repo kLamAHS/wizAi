@@ -184,6 +184,79 @@ def test_provenance_stacks():
     assert s.boss_hp == pytest.approx(hp0 - 405 * 1.35 * 1.35)
 
 
+def test_a_blade_read_off_the_client_is_the_same_blade_as_the_one_in_hand():
+    """The live/deck gap, which provenance keying gets exactly wrong.
+
+    `read_hangings` cannot recover which card placed an effect it read
+    out of memory, so it names it `live:<template id>` with source
+    "live". A `Fireblade` in the same wizard's hand is named "Fireblade",
+    source "deck". One spell, read twice, two stacking keys -- and the
+    rollout casts from hand onto a board read from memory on every
+    single live decision, so this is the comparison that decides.
+    """
+    from w101_sim import Hanging
+
+    sim, s = fresh()
+    s.player.charms.append(
+        Hanging(name="live:2337", slot="charm", kind="damage", percent=0.35,
+                schools={"fire"}, source="live", sub="kBlade:2:35"))
+    cast(sim, s, give(sim, s, "Fireblade"))
+    shark = give(sim, s, "Fire Shark")
+    hp0 = s.boss_hp
+    cast(sim, s, shark)
+    assert s.boss_hp == pytest.approx(hp0 - 405 * 1.35), \
+        "1.35 x 1.35 = 182 on a 135 hit is what made the policy blade-spam"
+    assert len(s.player.charms) == 1        # the other banked, not eaten
+
+
+def test_a_read_blade_still_compounds_with_a_genuinely_different_one():
+    """The rule is same-shape, not same-slot: two blades that differ in
+    percent or school are two effects and both fire."""
+    from w101_sim import Hanging
+
+    sim, s = fresh()
+    s.player.charms.append(
+        Hanging(name="live:2337", slot="charm", kind="damage", percent=0.35,
+                schools={"fire"}, source="live", sub="kBlade:2:35"))
+    cast(sim, s, give(sim, s, "Balanceblade"))
+    shark = give(sim, s, "Fire Shark")
+    hp0 = s.boss_hp
+    cast(sim, s, shark)
+    assert s.boss_hp == pytest.approx(hp0 - 405 * 1.35 * 1.25)
+
+
+def test_a_read_trap_is_the_same_trap_as_the_one_in_hand():
+    """Wards too -- three Ice Traps on one mob is what the operator saw,
+    and two of the three had already been read back off the client."""
+    from w101_sim import Hanging
+
+    sim, s = fresh()
+    s.enemies[0].wards.append(
+        Hanging(name="live:2287", slot="ward", kind="damage", percent=0.25,
+                schools={"fire"}, source="live", sub="kTrap:2:25"))
+    cast(sim, s, give(sim, s, "Fire Trap"))
+    shark = give(sim, s, "Fire Shark")
+    hp0 = s.boss_hp
+    cast(sim, s, shark)
+    assert s.boss_hp == pytest.approx(hp0 - 405 * 1.25)
+
+
+def test_nothing_offline_can_reach_the_live_rule():
+    """The asymmetry is scoped by `source == "live"`, and only
+    `read_hangings` ever mints that. Stated as a test because the whole
+    safety argument for the pinned tables above is this one fact."""
+    from w101_sim import _StackSeen, Hanging
+
+    deck = Hanging(name="Fireblade", slot="charm", kind="damage",
+                   percent=0.35, schools={"fire"}, source="deck")
+    tc = Hanging(name="Fireblade@tc", slot="charm", kind="damage",
+                 percent=0.35, schools={"fire"}, source="tc")
+    seen = _StackSeen()
+    seen.add(deck)
+    assert seen.saw(deck)          # itself, obviously
+    assert not seen.saw(tc)        # provenance still stacks
+
+
 def test_sharpened_variant_stacks_and_is_stronger():
     sim, s = fresh()
     sharp = sharpened(sim.cards, "Fireblade")

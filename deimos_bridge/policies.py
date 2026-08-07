@@ -1357,6 +1357,7 @@ def greedy_ttk(max_turns: int = None, continuation=None):
         # "policy chose to pass" beside a candidate table claiming a
         # Pixie was chosen, copied verbatim from the round before.
         strat.last_candidates = []
+        strat.last_party_blind = False
         max_turns = fixed if fixed is not None else search_horizon()
         from w101_sim import castable
 
@@ -1439,20 +1440,66 @@ def greedy_ttk(max_turns: int = None, continuation=None):
         # decisions, none of which tie. A green suite is not evidence
         # about this line. See the forced-tie tests in
         # `tests/test_hivemind.py`, which exist so that stops being true.
-        scored = []
-        for card, target in candidates:
-            turns, neg_damage = _rollout(sim, s, card, max_turns, target,
-                                         continuation=fixed_continuation)
-            # Mixed semantics in one tuple is safe here and only here:
-            # element 0 is `turns`, and two candidates can only reach
-            # element 2 by tying on it -- which puts them on the same
-            # side of the horizon and so in the same form.
-            thrift = ((-(card.damage or 0), card.pips)
-                      if is_sentinel(turns, max_turns)
-                      else (card.pips, card.damage))
-            scored.append(((turns, neg_damage) + thrift + (target,),
-                           (card, target)))
+        def score_all(allies):
+            out = []
+            for card, target in candidates:
+                turns, neg_damage = _rollout(sim, s, card, max_turns, target,
+                                             continuation=fixed_continuation,
+                                             allies=allies)
+                # Mixed semantics in one tuple is safe here and only here:
+                # element 0 is `turns`, and two candidates can only reach
+                # element 2 by tying on it -- which puts them on the same
+                # side of the horizon and so in the same form.
+                thrift = ((-(card.damage or 0), card.pips)
+                          if is_sentinel(turns, max_turns)
+                          else (card.pips, card.damage))
+                out.append(((turns, neg_damage) + thrift + (target,),
+                            (card, target)))
+            return out
+
+        scored = score_all(None)
         best_score, best_action = min(scored, key=lambda sc: sc[0])
+        pass_score = _rollout(sim, s, None, max_turns,
+                              continuation=fixed_continuation)
+
+        # When the party makes the move irrelevant, decide as if alone.
+        #
+        # `_allies_hit` takes a flat rate off the board every round, so on
+        # a board the rest of the circle will clear anyway *every*
+        # candidate reaches the same turn with the same banked damage --
+        # and so does passing. The comparison has then said nothing at
+        # all, and the thrift key below decides it: cheapest pips wins,
+        # and the cheapest card in any hand is a trap, a blade or a
+        # shield. Every seat runs the same reasoning about every other
+        # seat, so nobody attacks and the traps pile up. That is the
+        # free-rider, and it is what the operator saw as buff spam.
+        #
+        # It is measurable in the two live exports (rev e523684f): 27 of
+        # the 79 in-horizon rounds chose a move that tied passing
+        # EXACTLY, and 24 of those 27 played a buff, a trap or a shield.
+        # The three that did not had no other candidate. Fight 13 is the
+        # shape end to end -- Willie Marks sat on 420 health for five
+        # rounds under seven traps while both wizards played 0-pip cards
+        # and waited for each other.
+        #
+        # The re-score drops the *extrapolated* ally damage and keeps the
+        # *committed* kind: `Ledger.apply` has already taken the other
+        # seats' actual casts off the board this policy was handed, and
+        # nothing here puts them back. So this trusts what the party has
+        # committed to and distrusts the average it was extrapolated
+        # from, which is the right way round -- the rate is a single
+        # number standing in for a whole wizard's next twelve rounds.
+        #
+        # Gated on there being a party at all, so no solo decision, test
+        # or tuning sweep can reach it, and it costs nothing when the
+        # rate is zero.
+        strat.last_party_blind = False
+        if _ALLY_RATE > 0 and (best_score[0], best_score[1]) == pass_score:
+            scored = score_all(0.0)
+            best_score, best_action = min(scored, key=lambda sc: sc[0])
+            pass_score = _rollout(sim, s, None, max_turns,
+                                  continuation=fixed_continuation, allies=0.0)
+            strat.last_party_blind = True
 
         # Keep the whole comparison, not just its winner. A decision log
         # that records only the chosen card cannot answer the question
@@ -1483,8 +1530,7 @@ def greedy_ttk(max_turns: int = None, continuation=None):
         # the damage tiebreak instead made it pass almost every turn: a
         # line that skips a turn accumulates pips and so does more total
         # damage later, which is not a reason to do nothing now.
-        pass_turns, pass_damage = _rollout(sim, s, None, max_turns,
-                                           continuation=fixed_continuation)
+        pass_turns, pass_damage = pass_score
         passing = pass_turns < best_score[0]
         strat.last_candidates = mark(scored, passing)
         strat.last_candidates.append(
@@ -1505,6 +1551,11 @@ def greedy_ttk(max_turns: int = None, continuation=None):
     #: `WizAiBackend` straight after the call, the same way `last_source`
     #: is -- a policy cannot reach the telemetry and should not try.
     strat.last_candidates = []
+    #: did the last decision fall back to a party-blind comparison? Set
+    #: whenever the ally rate made every candidate tie passing, so the
+    #: round record can say why the numbers on it are not the ones the
+    #: party plan was built from.
+    strat.last_party_blind = False
     return strat
 
 

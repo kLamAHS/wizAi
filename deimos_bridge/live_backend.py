@@ -335,6 +335,15 @@ class WizAiBackend:
         decision.policy = self._why(policy, label)
         decision.candidates = list(getattr(policy, "last_candidates", ()) or ())
         self._note_party(decision)
+        # After `_note_party`, which rewrites the reason outright when the
+        # seat was held. The numbers in `candidates` are the party-blind
+        # ones whenever this fired, and a reader comparing them against
+        # the plan's own arithmetic deserves to be told which comparison
+        # they are looking at.
+        if getattr(policy, "last_party_blind", False):
+            decision.reason += (" (every move tied doing nothing once the "
+                                "party's damage was counted, so this was "
+                                "decided as if alone)")
         self._record(decision, read)
         return decision
 
