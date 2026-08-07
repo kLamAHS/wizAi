@@ -1026,17 +1026,39 @@ def test_a_lone_wizard_cannot_clear_the_board_the_party_clears_easily():
     assert all(c.turns > horizon for c in alone.last_candidates), \
         "this board is supposed to be out of reach alone"
 
+    # Asserted on the rollout rather than on `last_candidates`, and the
+    # difference is the point. With a teammate hitting, this board IS
+    # reachable -- but every candidate reaches it on the same turn with
+    # the same banked damage, passing included, because the flat rate
+    # clears it whatever the wizard does. That total tie is the
+    # free-rider case below, so the recorded candidate list is the
+    # party-blind re-score and no longer shows these numbers. The claim
+    # this test exists for is about the rollout, and here it is.
+    from deimos_bridge import policies
+
+    sim, state = wizard(school="ice", hand=("Frost Beetle", "Snow Serpent",
+                                            "Ice Trap", "Tower Shield"),
+                        pips=2, hp=1270, board=board)
+    with policies.party_rate(120.0):
+        reached = [policies._rollout(sim, state, c, horizon, 0)
+                   for c in state.player.hand]
+    assert any(t <= horizon for t, _ in reached), \
+        "with a teammate hitting, something has to kill inside the horizon"
+
+    # And the move it settles on is still an attack, which is the only
+    # thing the fight cares about.
     sim, state = wizard(school="ice", hand=("Frost Beetle", "Snow Serpent",
                                             "Ice Trap", "Tower Shield"),
                         pips=2, hp=1270, board=board)
     together = greedy_ttk()
     try:
         set_ally_rate(120.0)
-        together(sim, state)
+        choice = together(sim, state)
     finally:
         set_ally_rate(0.0)
-    assert any(c.turns <= horizon for c in together.last_candidates), \
-        "with a teammate hitting, something has to kill inside the horizon"
+    card = choice[0] if isinstance(choice, tuple) else choice
+    assert getattr(card, "name", None) in ("Frost Beetle", "Snow Serpent"), \
+        f"a teammate is no reason to play a shield: {card}"
 
 
 def test_the_ally_rate_is_off_unless_somebody_turns_it_on():
@@ -1073,6 +1095,140 @@ def test_allies_finish_the_weakest_mob_rather_than_spreading_out():
     _allies_hit(_Board(), 120.0)
     assert not _Board.enemies[1].alive          # the 50 died first
     assert _Board.enemies[0].hp == 330.0        # the other 70 spilled over
+
+
+# ------------------------------------------------- the free-rider tie
+#
+# The failure these pin down, in the operator's words: "it spammed buffs
+# (many of which don't stack)". The two live exports at rev e523684f
+# show it exactly -- 27 of 79 in-horizon rounds chose a move that tied
+# passing to the last decimal, and 24 of those played a buff, a trap or
+# a shield. It is not a stacking rule the policy is missing. It is that
+# a board the rest of the circle will clear anyway scores every
+# candidate identically, INCLUDING doing nothing, and the thrift key
+# then picks whatever costs fewest pips -- which is always a trap.
+#
+# `_tied_board` is that board offline: one 420hp mob, an ally rate big
+# enough to clear it, and a hand holding both a 0-pip trap and real
+# attacks.
+def _tied_board():
+    return wizard(school="ice",
+                  hand=("Ice Trap", "Snow Serpent", "Frost Beetle",
+                        "Tower Shield"),
+                  pips=4, hp=1270, board=((420, "fire"),))
+
+
+def _decide(rate):
+    from deimos_bridge.policies import greedy_ttk, party_rate
+
+    sim, state = _tied_board()
+    policy = greedy_ttk()
+    with party_rate(rate):
+        choice = policy(sim, state)
+    card = choice[0] if isinstance(choice, tuple) else choice
+    return getattr(card, "name", card), policy
+
+
+def test_a_board_the_party_clears_anyway_ties_every_move_with_passing():
+    """The premise, asserted rather than assumed.
+
+    Without this the fix below could pass for the wrong reason -- the
+    re-score only fires on an exact tie with passing, so a test that
+    never produced one would be measuring nothing.
+    """
+    from deimos_bridge.policies import greedy_ttk, party_rate
+
+    sim, state = _tied_board()
+    policy = greedy_ttk()
+    with party_rate(900.0):
+        # scored with the ally rate on and the fallback disabled, which
+        # is what the shipped code did before this change
+        import deimos_bridge.policies as pol
+        scored = [pol._rollout(sim, state, c, 12, 0)
+                  for c in state.player.hand]
+        passing = pol._rollout(sim, state, None, 12)
+    assert all(sc == passing for sc in scored), \
+        f"the ally rate is supposed to flatten this board: {scored} vs {passing}"
+
+
+def test_a_move_that_ties_doing_nothing_is_decided_as_if_alone():
+    chosen, policy = _decide(900.0)
+    assert policy.last_party_blind is True
+    assert chosen == "Frost Beetle", \
+        "an attack, not the 0-pip trap the flattened comparison preferred"
+
+
+def test_the_same_board_alone_picks_the_same_move():
+    """The fallback is the solo answer, not a third thing."""
+    alone, policy = _decide(0.0)
+    assert policy.last_party_blind is False
+    together, _ = _decide(900.0)
+    assert together == alone == "Frost Beetle"
+
+
+def test_a_party_that_still_leaves_the_move_room_is_left_alone():
+    """Not every rate flattens the board, and where the rollout can still
+    tell the candidates apart the party's own arithmetic is the one that
+    decides -- that is what the ally rate is for."""
+    chosen, policy = _decide(200.0)
+    assert policy.last_party_blind is False
+    assert chosen == "Ice Trap", \
+        "at this rate the trap genuinely reaches the kill a turn sooner"
+
+
+def test_a_solo_decision_never_reaches_the_fallback():
+    """Every published solo number, tuning sweep and regression table was
+    measured without this, so it has to be unreachable at rate zero."""
+    from deimos_bridge.policies import greedy_ttk
+
+    sim, state = wizard(school="ice",
+                        hand=("Frost Beetle", "Snow Serpent", "Ice Trap",
+                              "Tower Shield"),
+                        pips=2, hp=1270,
+                        board=((435, "balance"), (435, "balance"),
+                               (435, "balance")))
+    policy = greedy_ttk()
+    policy(sim, state)          # a board where everything is a sentinel
+    assert policy.last_party_blind is False
+
+
+@pytest.mark.parametrize("blind, expected", [(True, True), (False, False)])
+def test_the_fallback_is_reported_on_the_round_it_decided(blind, expected):
+    """A round record showing party-blind numbers beside a party plan is
+    unreadable unless it says which comparison produced them.
+
+    Both directions, because a note that is always there says nothing.
+    """
+    from deimos_bridge.live_backend import WizAiBackend
+    from deimos_bridge.mock_client import MockCard, MockCombat, MockMember
+
+    real = greedy_ttk()
+
+    def policy(sim, state):
+        out = real(sim, state)
+        policy.last_candidates = real.last_candidates
+        policy.last_party_blind = blind
+        return out
+
+    policy.last_candidates = ()
+    policy.last_party_blind = blind
+
+    class _Hive:
+        async def decide(self, seat, sim, state, pol, read=None, rate=0.0):
+            return pol(sim, state)
+
+        def last_move(self, seat):
+            return None
+
+    backend = WizAiBackend.from_trained(
+        school="fire", deck=["Fire Cat"] * 4, cards=cards(),
+        policy=policy, policy_name="ttk-lookahead", coordinator=_Hive())
+    backend.attach_combat(MockCombat(
+        [MockMember("Wizard", 900, client=True, team_id=0, normal_pips=4),
+         MockMember("Lost Soul", 450, monster=True, team_id=1)],
+        [MockCard("Fire Cat")]))
+    decision = asyncio.run(backend.decide())
+    assert ("decided as if alone" in decision.reason) is expected
 
 
 def test_the_rollout_does_not_hit_twice_for_the_round_already_on_the_board():
