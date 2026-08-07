@@ -1024,6 +1024,28 @@ def _board_hp(state):
     return sum(max(float(e.hp), 0.0) for e in state.enemies if e.alive)
 
 
+def _own_name(sub):
+    """What the GAME calls this wizard, not what the GUI labels the seat.
+
+    `sub.name` comes from `Hivemind.join`, which the live worker calls
+    with the seat's configured label and only calls AGAIN once the
+    client's name has been read. So for the first round of the first
+    fight it is "wizard 2" while every other seat's ally list already
+    holds "Phönix" -- and matching one against the other says the party
+    is in three separate circles when it is plainly in one.
+
+    The run at rev 228d4f50 logged exactly that: "3 wizard(s) fighting
+    in 3 separate battle circles" at t=0.0, corrected 22 seconds later
+    when the names landed. One fight planned as three solos.
+
+    `state.player` is built by `live_state._mk_actor` from the duel
+    participant this client IS, so its name is the same string the other
+    seats see in their ally lists, from the very first read.
+    """
+    live = getattr(getattr(sub, "state", None), "player", None)
+    return getattr(live, "name", "") or sub.name
+
+
 def _ally_names(sub):
     """Who this seat can SEE on its own team, or None if it cannot say.
 
@@ -1081,6 +1103,7 @@ def _duel_groups(subs):
         if ra != rb:
             parent[max(ra, rb)] = min(ra, rb)
 
+    names = {sub.seat: _own_name(sub) for sub in subs}
     for i, one in enumerate(subs):
         for other in subs[i + 1:]:
             mine, theirs = seen[one.seat], seen[other.seat]
@@ -1088,7 +1111,7 @@ def _duel_groups(subs):
                 # An unplaceable seat is kept with the party rather than
                 # pushed out of it -- see the docstring.
                 union(one.seat, other.seat)
-            elif other.name in mine or one.name in theirs:
+            elif names[other.seat] in mine or names[one.seat] in theirs:
                 union(one.seat, other.seat)
 
     groups = {}

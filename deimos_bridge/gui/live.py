@@ -183,6 +183,15 @@ class _Seat:
         #: the zone this seat was last read in, so a message can name
         #: where the party actually is rather than "another zone"
         self.zone_seen = None
+        #: when `zone_seen` last CHANGED.
+        self.zone_since = 0.0
+        #: zones this seat has already been rejoined INTO, and when.
+        #: The backstop against dragging a wizard in a circle.
+        self.rejoin_history = []
+        #: zones this seat has LEFT, and when it left them. Somewhere a
+        #: wizard has just walked out of is not somewhere it was left
+        #: behind. See `LiveWorker._check_together`.
+        self.zone_left = []
         #: stage name -> how many times it has failed, so a broken stage
         #: is reported rather than retried silently twice a second
         self.stage_errors = {}
@@ -2120,6 +2129,9 @@ class LiveWorker(QThread):
     #: party before it counts as left behind. Zone changes are not
     #: simultaneous -- one client finishes loading seconds before
     #: another -- so a bare inequality would fire on every door.
+    #: a zone this wizard left less than this long ago is somewhere it
+    #: chose to leave, not somewhere it was separated from.
+    LEFT_ON_PURPOSE = 180.0
     STRANDED_AFTER = 25.0
     #: ...and how long between attempts to bring it back, so this and
     #: the script are not pulling at once every tick.
@@ -2155,10 +2167,18 @@ class LiveWorker(QThread):
         if len(live) < 2:
             return None, None
 
+        now = time.monotonic()
         zones = {}
         for seat in live:
             zones[seat] = await party.zone(seat.client)
             if zones[seat]:
+                if seat.zone_seen and zones[seat] != seat.zone_seen:
+                    # Where it has just come FROM, and when. See the
+                    # "left there on purpose" test below.
+                    seat.zone_left.append((seat.zone_seen, now))
+                    del seat.zone_left[:-8]
+                if zones[seat] != seat.zone_seen:
+                    seat.zone_since = now
                 seat.zone_seen = zones[seat]
         known = [z for z in zones.values() if z]
         if len(known) < len(live):
@@ -2178,7 +2198,45 @@ class LiveWorker(QThread):
                                          # of them could be the wrong way
         seat = odd[0]
 
-        now = time.monotonic()
+        # Did it LEAVE the majority's zone, or never get there? A wizard
+        # that fell behind and a wizard that walked on ahead are the
+        # same shape -- one seat somewhere the others are not -- and
+        # only this tells them apart.
+        #
+        # Rev 228d4f50 dragged the second kind backwards five times in
+        # four minutes. Sebastian went into WC_Firecat_T1, was pulled
+        # back out to WC_Firecat, walked in again, was pulled out again,
+        # on a fifty-second cycle for the rest of the run. Every pull
+        # threw away the step he had just finished and handed the script
+        # a wizard behind where it thought it was, which is precisely
+        # the failure this mechanism exists to prevent.
+        #
+        # So: somewhere it has just come from is not somewhere to send
+        # it back to. Konstantin at t=550 had never been in T1 and was
+        # rescued correctly; Sebastian at t=639 had been in WC_Firecat
+        # minutes earlier and left under his own steam. A wizard merely
+        # wandering -- through zones the party has not been in -- still
+        # falls through to the stranded clock and is still fetched.
+        if any(zone == best and now - at < self.LEFT_ON_PURPOSE
+               for zone, at in seat.zone_left):
+            seat.stranded_since = None
+            return None, None
+
+        # ...and a hard stop even if that reasoning is wrong. Two pulls
+        # into the same zone inside five minutes is a loop, not a
+        # rescue, and a loop must not be able to run for days.
+        recent = [z for z, at in seat.rejoin_history if now - at < 300.0]
+        if recent.count(best) >= 2:
+            self._say_once(
+                seat, "rejoin-loop",
+                f"{seat.name} has been pulled back to {best} twice already "
+                f"— leaving it to the script rather than dragging it in a "
+                f"circle")
+            seat.tel.note_questing(
+                "rejoin-looping",
+                f"declined to pull {seat.name} back to {best} a third time")
+            return None, None
+
         if seat.stranded_since is None or seat.stranded_where != zones[seat]:
             seat.stranded_since = now
             seat.stranded_where = zones[seat]
@@ -2225,6 +2283,9 @@ class LiveWorker(QThread):
                                         leader_name=target.wizard_name)
         if moved:
             seat.stranded_since = None
+            seat.rejoin_history.append(
+                (getattr(target, "zone_seen", "") or "", now))
+            del seat.rejoin_history[:-8]
             seat.tel.note_questing("rejoined", why or f"went to {target.name}")
             self._say(seat, f"was left behind in {adrift} — {why}")
         elif why:

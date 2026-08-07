@@ -10404,3 +10404,77 @@ def test_the_questing_log_does_not_grow_without_bound():
         tel.note_questing("tick", str(i))
     assert len(tel.questing) == tel.QUESTING_LOG
     assert tel.questing[-1]["detail"] == str(tel.QUESTING_LOG + 49)
+
+
+# ---------------------------------------------- ahead is not the same as behind
+def test_a_wizard_is_not_dragged_back_to_a_zone_it_just_left(monkeypatch):
+    """The run at rev 228d4f50, end to end. Sebastian went into
+    WC_Firecat_T1 while the other two were in WC_Firecat, was pulled
+    back out, walked in again, was pulled out again -- five times in
+    four minutes, each pull throwing away the step he had just
+    finished. The majority is not the same thing as the right answer."""
+    worker, read_zone = _zoned_party(
+        ["WC_Firecat", "WC_Firecat", "WC_Firecat"])
+    _look(worker, read_zone, monkeypatch)          # everyone together
+
+    worker.seats[2]._zone = "WC_Firecat_T1"        # he goes in
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+    assert worker.seats[2].zone_left[-1][0] == "WC_Firecat"
+
+    # ...and now he is the odd one out, adrift for long enough to be
+    # fetched. He must not be, because he left WC_Firecat on purpose.
+    worker.seats[2].stranded_since = 0.0
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+
+
+def test_the_wizard_that_never_got_there_is_still_fetched(monkeypatch):
+    """The case the mechanism is for, and the one the fix must not cost:
+    Konstantin at t=550 was in WC_Firecat while the party had moved into
+    WC_Firecat_T1, and he had never been in T1 at all."""
+    worker, read_zone = _zoned_party(
+        ["WC_Firecat", "WC_Firecat", "WC_Firecat"])
+    _look(worker, read_zone, monkeypatch)
+    for seat in worker.seats[:2]:
+        seat._zone = "WC_Firecat_T1"               # the party teleports
+    _look(worker, read_zone, monkeypatch)
+    worker.seats[2].stranded_since -= worker.STRANDED_AFTER + 1
+    seat, target = _look(worker, read_zone, monkeypatch)
+    assert seat is worker.seats[2]
+    assert target.zone_seen == "WC_Firecat_T1"
+
+
+def test_leaving_a_zone_long_ago_does_not_protect_a_wizard_forever(
+        monkeypatch):
+    """A wizard that passed through a zone half an hour ago and is now
+    genuinely stuck is stuck, not making progress."""
+    worker, read_zone = _zoned_party(["Olde Town", "Olde Town", "Olde Town"])
+    _look(worker, read_zone, monkeypatch)
+    worker.seats[2]._zone = "Unicorn Way"
+    _look(worker, read_zone, monkeypatch)
+    stale = worker.LEFT_ON_PURPOSE + 60.0
+    worker.seats[2].zone_left = [(z, at - stale)
+                                 for z, at in worker.seats[2].zone_left]
+    _look(worker, read_zone, monkeypatch)          # the clock starts
+    worker.seats[2].stranded_since -= worker.STRANDED_AFTER + 1
+    seat, _target = _look(worker, read_zone, monkeypatch)
+    assert seat is worker.seats[2]
+
+
+def test_three_pulls_into_one_zone_is_a_loop_and_stops(monkeypatch):
+    """Belt and braces. Even if the reasoning above is wrong about a
+    board it has not seen, a rescue that keeps repeating is a loop, and
+    a loop must not be able to run for days."""
+    import time
+
+    worker, read_zone = _zoned_party(["Olde Town", "Olde Town", "Olde Town"])
+    _look(worker, read_zone, monkeypatch)
+    worker.seats[2]._zone = "Unicorn Way"
+    _look(worker, read_zone, monkeypatch)
+    worker.seats[2].zone_left = []                 # not the other guard
+    _look(worker, read_zone, monkeypatch)          # the clock starts
+    worker.seats[2].stranded_since -= worker.STRANDED_AFTER + 1
+    seat, _t = _look(worker, read_zone, monkeypatch)
+    assert seat is worker.seats[2], "the fixture must reach a real rescue"
+
+    worker.seats[2].rejoin_history = [("Olde Town", time.monotonic())] * 2
+    assert _look(worker, read_zone, monkeypatch) == (None, None)

@@ -147,8 +147,15 @@ async def _teleport_to_friend(client, character_window):
     # wait for confirmation window
     await asyncio.sleep(1)
 
+    # Polled for ~8s rather than the default ~1.6s. The confirmation box
+    # is not always the plain "teleport to your friend?" one: a friend
+    # standing inside an instance raises the dungeon-reset warning
+    # instead, which the game takes noticeably longer to put up. wizAi's
+    # run at rev 228d4f50 lost three of five rejoins to
+    # "No child window named MessageBoxModalWindow", every one of them
+    # with the other wizard in WC_Firecat_T1 -- an interior.
     confirmation_window = await _maybe_get_named_window(
-        client.root_window, "MessageBoxModalWindow"
+        client.root_window, "MessageBoxModalWindow", retries=20
     )
     yes_button = await _maybe_get_named_window(confirmation_window, "centerButton")
 
