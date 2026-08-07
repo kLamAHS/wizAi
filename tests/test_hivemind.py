@@ -1283,3 +1283,46 @@ def test_the_ranking_is_total_enough_that_hand_order_does_not_decide():
     assert len(keys) == len(set(keys)), (
         f"two candidates are indistinguishable to the recorded ranking: "
         f"{keys}")
+
+
+def test_an_unpriceable_x_pip_card_is_never_chosen():
+    """Heck Hound and 2,111 others carry `x_pips`: they consume the whole
+    pip rack and scale with it. The card table records them as costing 0
+    pips, and `Sim` gives them 0 damage at every pip count -- so to the
+    policy they are free AND do nothing, which is indistinguishable from
+    passing, and they win the pip tiebreak because nothing is cheaper
+    than zero.
+
+    The second live party run: the fire wizard chose Heck Hound eight
+    times, every time holding one or two pips, and dealt 0.0 damage
+    across the fifteen rounds of its first two fights.
+    """
+    from deimos_bridge.policies import _is_inert, greedy_ttk
+
+    table = cards()
+    hound = table["Heck Hound"]
+    assert hound.x_pips and hound.pips == 0, "premise moved"
+    assert _is_inert(hound, None), "an X-pip card must not be offered"
+
+    # ...and the policy really does stop picking it, on the board the
+    # live wizard was on: one pip, Heck Hound and a free trap in hand.
+    sim, state = wizard(school="fire",
+                        hand=("Heck Hound", "Fire Trap", "Fireblade"),
+                        pips=1, hp=1064, board=((800, "ice"), (525, "balance")))
+    policy = greedy_ttk()
+    chosen = policy(sim, state)
+    card, _t = chosen if isinstance(chosen, tuple) else (chosen, 0)
+    assert card is None or card.name != "Heck Hound", (
+        "played the card the engine prices at 0 damage and 0 pips")
+    assert not any(c.card == "Heck Hound" for c in policy.last_candidates), \
+        "it was still offered as a candidate"
+
+
+def test_the_ordinary_cards_are_still_offered():
+    """The X-pip rule must not quietly swallow a normal hand."""
+    from deimos_bridge.policies import _is_inert
+
+    table = cards()
+    for name in ("Fire Cat", "Sunbird", "Fireblade", "Fire Trap",
+                 "Snow Serpent", "Tower Shield"):
+        assert not _is_inert(table[name], None), name
