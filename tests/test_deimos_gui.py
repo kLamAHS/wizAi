@@ -559,6 +559,101 @@ def test_advance_dialogue_stops_when_the_window_closes():
     assert len(client.mouse_handler.clicks) == 2
 
 
+def test_advance_dialogue_does_not_sleep_out_the_settle_on_every_click():
+    """It used to sleep a flat `settle` after every click. On a
+    five-window NPC that is two and a half seconds of a wizard standing
+    still, reported from a live run as auto-dialogue skipping "very
+    slow".
+
+    The click has landed when the page turns or the box closes, and both
+    are readable, so it polls for that instead. Timed rather than
+    asserted structurally: the claim is about wall clock.
+    """
+    import asyncio
+    import time
+
+    from deimos_bridge.questing import advance_dialogue
+
+    pages = ["page one", "page two", "page three"]
+
+    class _Text:
+        async def name(self):
+            return "txtMessage"
+
+        async def children(self):
+            return []
+
+        async def maybe_text(self):
+            return pages[min(len(clicked), len(pages) - 1)]
+
+        async def is_visible(self):
+            return True
+
+    clicked = []
+
+    class _Button:
+        async def name(self):
+            return "btnRight"
+
+        async def children(self):
+            return []
+
+        async def is_visible(self):
+            return len(clicked) < len(pages)
+
+    button, text = _Button(), _Text()
+
+    class _Mouse:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def click_window(self, win):
+            clicked.append(win)
+
+    class _Client:
+        mouse_handler = _Mouse()
+        root_window = _Win("root", [
+            _Win("WorldView", [
+                _Win("wndDialogMain", [button, _Win("txtArea", [text])])])])
+
+    started = time.monotonic()
+    clicks, why = asyncio.run(
+        advance_dialogue(_Client(), settle=0.5, poll=0.01))
+    took = time.monotonic() - started
+
+    assert clicks == 3 and why == ""
+    # Three clicks at the old flat rate is 1.5s. The page turns
+    # immediately here, so it should cost about three polls.
+    assert took < 0.5, f"three clicks took {took:.2f}s; the settle is 0.5 each"
+
+
+def test_a_dialogue_that_never_changes_still_waits_the_full_settle():
+    """The fall-through, which is what keeps the worst case exactly what
+    it was: if nothing observable changes -- including when the text
+    cannot be read at all -- it waits `settle` as before."""
+    import asyncio
+    import time
+
+    from deimos_bridge.questing import _dialogue_moved
+
+    class _Stuck:
+        root_window = _Win("root", [
+            _Win("WorldView", [
+                _Win("wndDialogMain", [_Win("btnRight"),
+                                       _Win("txtArea",
+                                            [_Win("txtMessage",
+                                                  text="same")])])])])
+
+    started = time.monotonic()
+    moved = asyncio.run(_dialogue_moved(_Stuck(), "same", 0.2, 0.02))
+    took = time.monotonic() - started
+    assert moved is False
+    assert took >= 0.2, f"gave up after {took:.2f}s of a 0.2s settle"
+
+
 def test_advance_dialogue_is_bounded():
     """A dialogue that reopens forever must not hang the run."""
     import asyncio
@@ -930,6 +1025,222 @@ def test_service_loop_leaves_the_mouse_alone_during_combat(qapp):
     asyncio.run(drive())
     assert client.teleported == []
     assert client.mouse_handler.clicks == []
+
+
+def _goal_client(goal):
+    """A client whose quest tracker reads `goal`."""
+    text = _Win("txtGoalName", text=goal)
+    root = _Win("root", [
+        _Win("WorldView", [
+            _Win("windowHUD", [
+                _Win("QuestHelperHud", [
+                    _Win("ElementWindow", [_Win("", [text])])])])])])
+    return _QuestClient(root)
+
+
+def test_the_quest_goal_reads_off_the_tracker():
+    import asyncio
+
+    from deimos_bridge.questing import read_quest_goal
+
+    assert asyncio.run(read_quest_goal(_goal_client("Defeat Krokopatra"))) \
+        == "Defeat Krokopatra"
+    # A tracker that is not there reads empty rather than raising -- this
+    # feeds a comparison, and "could not read" must never look like "on a
+    # different quest".
+    assert asyncio.run(read_quest_goal(_QuestClient(_Win("root", [])))) == ""
+
+
+def test_a_party_on_two_different_quests_is_reported(qapp):
+    """The reported failure: "it's not uncommon that one wizard will get
+    ahead a quest or 2 from the other because one misses a dialogue or
+    fails a teleport". With a script driving both clients from one
+    program, the program cannot notice -- its own instruction pointer is
+    fine. What diverged is the game's quest state."""
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1,
+                        seats=[SeatConfig(school="fire", deck=[],
+                                          policy_name="school-aware")])
+    said = []
+    worker.status = type("S", (), {"emit": staticmethod(said.append)})()
+    worker.DESYNC_GRACE = 0.0
+
+    a, b = worker.seats
+    a.goal, b.goal = "Talk to Zaltanna", "Defeat Krokopatra"
+    worker._check_in_step(a)          # first call only starts the clock
+    worker._check_in_step(a)
+    assert any("different quests" in m for m in said), said
+    # Named, not counted: which wizard is on what.
+    assert any("Talk to Zaltanna" in m and "Defeat Krokopatra" in m
+               for m in said), said
+
+
+def test_a_brief_disagreement_is_not_a_desync(qapp):
+    """Turning a step in is not simultaneous -- one wizard clicks the NPC
+    seconds before the other -- so a bare inequality would report a
+    desync on every normal handover."""
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1,
+                        seats=[SeatConfig(school="fire", deck=[],
+                                          policy_name="school-aware")])
+    said = []
+    worker.status = type("S", (), {"emit": staticmethod(said.append)})()
+
+    a, b = worker.seats
+    a.goal, b.goal = "Talk to Zaltanna", "Defeat Krokopatra"
+    for _ in range(5):
+        worker._check_in_step(a)      # well inside the default grace
+    assert said == [], said
+
+    # ...and once they line up again the clock resets, so the next
+    # handover gets the full grace of its own.
+    b.goal = "Talk to Zaltanna"
+    worker._check_in_step(a)
+    assert said == [], said
+
+
+def test_an_unreadable_tracker_is_never_a_desync(qapp):
+    """A run with the quest tracker hidden must not report a desync
+    every tick. Fewer than two readable goals is agreement."""
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1,
+                        seats=[SeatConfig(school="fire", deck=[],
+                                          policy_name="school-aware")])
+    said = []
+    worker.status = type("S", (), {"emit": staticmethod(said.append)})()
+    worker.DESYNC_GRACE = 0.0
+
+    a, b = worker.seats
+    a.goal, b.goal = "Talk to Zaltanna", ""
+    for _ in range(5):
+        worker._check_in_step(a)
+    assert said == [], said
+
+
+def test_a_single_wizard_is_never_out_of_step_with_itself(qapp):
+    from deimos_bridge.gui.live import LiveWorker
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    said = []
+    worker.status = type("S", (), {"emit": staticmethod(said.append)})()
+    worker.DESYNC_GRACE = 0.0
+    worker.seats[0].goal = "Talk to Zaltanna"
+    worker._check_in_step(worker.seats[0])
+    assert said == [], said
+
+
+def _hurt_client(fraction, heals_after=None):
+    """A client on `fraction` health, optionally recovering after N reads."""
+    class _Stats:
+        reads = 0
+
+        async def current_hitpoints(self):
+            _Stats.reads += 1
+            f = fraction
+            if heals_after is not None and _Stats.reads > heals_after:
+                f = 1.0
+            return 1000.0 * f
+
+        async def max_hitpoints(self):
+            return 1000.0
+
+    class _Client:
+        stats = _Stats()
+    return _Client()
+
+
+def test_a_wizard_on_almost_no_health_does_not_start_another_fight(qapp):
+    """The reported failure: "if they die on a dungeon they might try
+    again immediately even though their health is essentially 0".
+
+    `upkeep.after_fight` tops up, and when it cannot -- an empty potion
+    bottle, which it says out loud -- the run went into the next fight
+    anyway, which on a dungeon means dying, walking back, and dying
+    again.
+    """
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    said = []
+    worker.status = type("S", (), {"emit": staticmethod(said.append)})()
+    worker.LOW_HEALTH_POLL = 0.01
+    worker.LOW_HEALTH_WAIT = 0.05
+
+    seat = worker.seats[0]
+    seat.client = _hurt_client(0.04)
+
+    asyncio.run(worker._let_it_heal(seat))
+    assert any("4% health" in m for m in said), said
+    # ...and it does not block the run forever on a bottle it cannot fill
+    assert any("anyway" in m for m in said), said
+
+
+def test_it_stops_waiting_the_moment_the_health_is_back(qapp):
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    said = []
+    worker.status = type("S", (), {"emit": staticmethod(said.append)})()
+    worker.LOW_HEALTH_POLL = 0.01
+    worker.LOW_HEALTH_WAIT = 30.0          # would never expire in this test
+
+    seat = worker.seats[0]
+    seat.client = _hurt_client(0.10, heals_after=1)
+
+    asyncio.run(worker._let_it_heal(seat))
+    assert any("carrying on" in m for m in said), said
+    assert not any("anyway" in m for m in said), said
+
+
+def test_a_healthy_wizard_is_not_delayed_at_all(qapp):
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    said = []
+    worker.status = type("S", (), {"emit": staticmethod(said.append)})()
+    seat = worker.seats[0]
+    seat.client = _hurt_client(0.80)
+
+    asyncio.run(worker._let_it_heal(seat))
+    assert said == [], f"a wizard on 80% was made to wait: {said}"
+
+
+def test_an_unreadable_health_bar_never_strands_the_run(qapp):
+    """None rather than a guess. Refusing to fight because a stat read
+    raised would strand a healthy wizard, which is worse than the
+    failure this guards against."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    class _Broken:
+        class stats:
+            @staticmethod
+            async def current_hitpoints():
+                raise RuntimeError("the client went away")
+
+            @staticmethod
+            async def max_hitpoints():
+                raise RuntimeError("the client went away")
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    said = []
+    worker.status = type("S", (), {"emit": staticmethod(said.append)})()
+    seat = worker.seats[0]
+    seat.client = _Broken()
+
+    assert asyncio.run(worker._health_left(seat)) is None
+    asyncio.run(worker._let_it_heal(seat))
+    assert said == [], said
 
 
 def test_a_broken_stage_does_not_take_the_others_off_the_air(qapp):
@@ -8742,6 +9053,125 @@ def test_an_attack_still_goes_to_the_chosen_mob(qapp):
     read = _healer_read(my_hp=500, ally_hp=500)
     assert asyncio.run(handler._resolve_target(read, 0, _Nuke())) \
         == "member:Sokkwi Ripper"
+
+
+class _Shield:
+    """A card whose ops say `self`, as Tower Shield's do."""
+    kind = "shield"
+    ops = [{"op": "ward", "percent": -0.5, "schools": None, "tgt": "self"}]
+
+
+def test_a_shield_goes_on_whoever_is_nearest_to_dying(qapp):
+    """The second live party run: the ice wizard cast nineteen Tower
+    Shields, four of them twice in a row, and in every one of those
+    pairs it was at FULL health while the fire wizard beside it was not
+    -- 1270/1270 against 938/1042, 922/1042, 889/1064 -- and the fire
+    wizard was dealing more of the damage. Every shield went on the
+    caster because the ops say `tgt: 'self'`, which is the right default
+    and not the only legal target."""
+    import asyncio
+
+    from deimos_bridge.live_backend import WizAiCombatHandler
+
+    handler = WizAiCombatHandler.__new__(WizAiCombatHandler)
+
+    # fight 5 round 1: me 1270/1270, teammate 938/1042
+    read = _healer_read(my_hp=1270, my_max=1270, ally_hp=938, ally_max=1042)
+    assert asyncio.run(handler._resolve_target(read, None, _Shield())) \
+        == "member:Jeffrey"
+
+    # ...and it comes back to the caster the moment the caster is worse.
+    read = _healer_read(my_hp=300, my_max=1270, ally_hp=1000, ally_max=1042)
+    assert asyncio.run(handler._resolve_target(read, None, _Shield())) \
+        == "member:me"
+
+
+def test_a_shield_ranks_by_fraction_left_not_health_missing(qapp):
+    """The difference between a shield and a heal, and the reason they
+    do not share a rule. A heal restores what is gone, so most-missing
+    is right; a shield buys rounds against what is coming, so what
+    matters is who is nearest to dying."""
+    import asyncio
+
+    from deimos_bridge.live_backend import WizAiCombatHandler
+
+    handler = WizAiCombatHandler.__new__(WizAiCombatHandler)
+
+    # I am down 400 of 1270 (68% left); the teammate is down 300 of 600
+    # (50% left). Most-missing says me; nearest-to-dying says them, and
+    # they are the one two hits from the floor.
+    read = _healer_read(my_hp=870, my_max=1270, ally_hp=300, ally_max=600)
+    assert asyncio.run(handler._resolve_target(read, None, _Shield())) \
+        == "member:Jeffrey"
+
+
+def test_a_second_shield_does_not_pile_onto_the_already_shielded(qapp):
+    """"Two 50% Tower Shields on themselves" is the reported symptom.
+    They do stack in game, but a second one on a full-health caster
+    while a teammate has none is not a stack, it is a wasted card."""
+    import asyncio
+
+    from w101_sim import Hanging
+    from deimos_bridge.live_backend import WizAiCombatHandler
+
+    handler = WizAiCombatHandler.__new__(WizAiCombatHandler)
+
+    # I am healthier AND already shielded; the teammate is neither.
+    read = _healer_read(my_hp=1270, my_max=1270, ally_hp=1000, ally_max=1042)
+    read.state.player.wards.append(
+        Hanging(name="Tower Shield", slot="ward", kind="damage",
+                percent=-0.5))
+    assert asyncio.run(handler._resolve_target(read, None, _Shield())) \
+        == "member:Jeffrey"
+
+    # A trap is a ward too, so it must never read as "already
+    # shielded". Posed where only that can decide it: I am the one who
+    # wins on health, so the ONLY thing that could push the shield onto
+    # the teammate is the +40% trap being mistaken for protection.
+    read = _healer_read(my_hp=500, my_max=1000, ally_hp=900, ally_max=1000)
+    read.state.player.wards.append(
+        Hanging(name="Ice Trap", slot="ward", kind="damage", percent=0.40,
+                schools={"ice"}))
+    assert asyncio.run(handler._resolve_target(read, None, _Shield())) \
+        == "member:me", "a +40% trap was counted as a shield"
+
+
+def test_a_solo_wizard_still_shields_itself(qapp):
+    """No teammate to consider, and the caster wins ties, so nothing
+    about a wizard fighting alone changes."""
+    import asyncio
+
+    from deimos_bridge.live_backend import WizAiCombatHandler
+
+    handler = WizAiCombatHandler.__new__(WizAiCombatHandler)
+    read = _healer_read(my_hp=500, my_max=1270)          # no ally at all
+    assert asyncio.run(handler._resolve_target(read, None, _Shield())) \
+        == "member:me"
+
+    # level on both counts -> the caster, as before
+    read = _healer_read(my_hp=500, my_max=1000, ally_hp=500, ally_max=1000)
+    assert asyncio.run(handler._resolve_target(read, None, _Shield())) \
+        == "member:me"
+
+
+def test_a_blade_is_not_moved_to_a_teammate(qapp):
+    """Blades are `tgt: 'self'` too and CAN legally go on a teammate,
+    where they would buff that wizard's hit instead. That is a real
+    hivemind play and a much larger decision -- who is about to hit
+    hardest, not who is hurt -- so it is deliberately out of scope."""
+    import asyncio
+
+    from deimos_bridge.live_backend import WizAiCombatHandler
+
+    class _Blade:
+        kind = "blade"
+        ops = [{"op": "charm", "percent": 0.35, "schools": ["ice"],
+                "tgt": "self"}]
+
+    handler = WizAiCombatHandler.__new__(WizAiCombatHandler)
+    read = _healer_read(my_hp=1270, my_max=1270, ally_hp=100, ally_max=1042)
+    assert asyncio.run(handler._resolve_target(read, None, _Blade())) \
+        == "member:me"
 
 
 def test_a_failed_cast_reports_facts_not_a_theory(qapp):

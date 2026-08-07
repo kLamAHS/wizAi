@@ -1050,6 +1050,31 @@ def _allies_hit(state, rate):
         left -= bite
 
 
+def is_sentinel(turns, max_turns) -> bool:
+    """Did this rollout fail to clear the board, rather than take `turns`?
+
+    `turns > max_turns` is the obvious test and it is not correct.
+    `_lost_score` credits a losing line 0.4 per kill, so a `stalled`
+    rollout that killed three of four mobs scores `max_turns + 1 - 1.2`
+    -- BELOW the horizon, and indistinguishable from a real turn count
+    by size alone. (That the credit can also let a losing line outrank a
+    winning one is a separate, older problem; this only has to tell them
+    apart.)
+
+    So it tests the shape instead. A cleared board returns the loop
+    variable, always a whole number in 1..max_turns. Every sentinel is
+    either above the horizon or carries a fractional kill credit: with
+    `LOST_RANKING = "kills"` that is 0.4, 0.8 or 1.2, since a stalled or
+    dead rollout has at least one mob still standing and Wizard101 seats
+    at most four. "survive" is fractional too, and "none" is integral but
+    always above the horizon.
+
+    The one arrangement that would defeat it -- five kills, an exact 2.0
+    -- needs six enemies in a duel, which the game does not have.
+    """
+    return turns > max_turns or float(turns) != int(turns)
+
+
 def _lost_score(rank, dealt, kills, turn):
     """A 2-tuple, always: the caller unpacks (turns, neg_damage).
 
@@ -1335,24 +1360,75 @@ def greedy_ttk(max_turns: int = None, continuation=None):
         if not candidates:
             return None
 
-        # Third key: spend the least that still gets there. Damage is
-        # counted floored at each mob's health, so two lines that kill on
-        # the same turn and bank the same *effective* damage are
-        # genuinely equivalent in outcome -- and between equivalent
-        # outcomes the cheaper card is strictly better, because it leaves
-        # pips banked and the bigger card still in hand.
+        # Third key: spend the least that still gets there -- but only
+        # while the earlier keys mean something.
         #
-        # This key used to be `-card.damage`, i.e. deliberately take the
-        # biggest hit. Combined with uncapped damage that was two pushes
-        # toward overkill at once: a 300-damage nuke into a mob with 50
-        # left both scored 300 of "banked damage" and won the tiebreak
-        # for being large.
+        # Damage is counted floored at each mob's health, so two lines
+        # that kill on the same turn and bank the same *effective*
+        # damage are genuinely equivalent in outcome, and between
+        # equivalent outcomes the cheaper card is strictly better: it
+        # leaves pips banked and the bigger card still in hand. Two
+        # rounds from the second live party run are exactly that and the
+        # cheap card is right in both -- a 190hp board where Frost
+        # Beetle and Evil Snowman both clear on turn 1, and a 348hp
+        # board where both clear on turn 2. Spending three pips for a
+        # one-pip result is the mistake there, not the fix.
+        #
+        # Above the horizon it means nothing at all. `turns` is a
+        # sentinel, `neg_damage` is the whole rollout line's board delta,
+        # and a tie says only that the lookahead could not tell the
+        # candidates apart -- so "cheapest" is not thrift, it is a coin
+        # flip that always lands on the free card. Measured over that
+        # run's 197 scored rounds: 107 have no candidate killing inside
+        # the horizon, and in 38 of those the chosen move was a weaker
+        # card that tied a stronger one EXACTLY. Three consecutive rounds
+        # of its fight 14 are the shape the operator reported --
+        #
+        #     r5  Frost Beetle (85 dmg) over Evil Snowman (270), on 4 pips
+        #     r6  Frost Beetle (85 dmg) over Evil Snowman (270), on 5 pips
+        #     r7  Ice Trap     (0 dmg)  over Evil Snowman (270), on 4n+1p
+        #
+        # -- a nine-round fight that dealt 180 while the pips piled up.
+        #
+        # So the key is CONDITIONAL, and the condition is not a knob:
+        # it is whether the keys ahead of it carried information.
+        #
+        # Making it unconditional was tried, shipped and reverted
+        # (d3b7962, bd99c57), and that is worth knowing before reaching
+        # for it again. It measures WORSE solo and in horizon -- three of
+        # six myth cells lose five points of kill rate on the project's
+        # own decks (97.0 -> 91.5, 97.0 -> 92.5, 82.5 -> 77.5) and an
+        # independent 66-cell sweep at 13,200 seeds gives 572 shipped
+        # wins to 357 -- and BETTER in a party on live-shaped boards, 16
+        # shipped-only wins against 205. Both reproduce, because it is
+        # not a better tiebreak but a more aggressive one, and aggression
+        # wins a race and loses an attrition fight. Conditioning on the
+        # sentinel keeps the aggression where the alternative is a coin
+        # flip and keeps the thrift where the outcome is real: on those
+        # same six myth cells the conditional form is identical to this
+        # one, cell for cell.
+        #
+        # A warning for whoever measures it next: **the test suite
+        # cannot see this key at all.** 855 tests passed either way
+        # while roughly a third of their `greedy_ttk` decisions resolved
+        # differently, because 44% of decisions tie at (turns, damage)
+        # and every test that asserts a specific card makes one or two
+        # decisions, none of which tie. A green suite is not evidence
+        # about this line. See the forced-tie tests in
+        # `tests/test_hivemind.py`, which exist so that stops being true.
         scored = []
         for card, target in candidates:
             turns, neg_damage = _rollout(sim, s, card, max_turns, target,
                                          continuation=fixed_continuation)
-            scored.append(((turns, neg_damage, card.pips, card.damage,
-                            target), (card, target)))
+            # Mixed semantics in one tuple is safe here and only here:
+            # element 0 is `turns`, and two candidates can only reach
+            # element 2 by tying on it -- which puts them on the same
+            # side of the horizon and so in the same form.
+            thrift = ((-(card.damage or 0), card.pips)
+                      if is_sentinel(turns, max_turns)
+                      else (card.pips, card.damage))
+            scored.append(((turns, neg_damage) + thrift + (target,),
+                           (card, target)))
         best_score, best_action = min(scored, key=lambda sc: sc[0])
 
         # Keep the whole comparison, not just its winner. A decision log

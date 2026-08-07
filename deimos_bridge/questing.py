@@ -39,6 +39,12 @@ import asyncio
 ADVANCE_DIALOG_PATH = ["WorldView", "wndDialogMain", "btnRight"]
 DIALOG_TEXT_PATH = ["WorldView", "wndDialogMain", "txtArea", "txtMessage"]
 NPC_RANGE_PATH = ["WorldView", "NPCRangeWin"]
+#: `src/paths.py:35` -- the quest tracker's goal line, e.g. "Defeat
+#: Krokopatra". The empty string is a real unnamed window in the tree,
+#: not a wildcard; Deimos matches it exactly and so does
+#: `window_from_path`.
+QUEST_GOAL_PATH = ["WorldView", "windowHUD", "QuestHelperHud",
+                   "ElementWindow", "", "txtGoalName"]
 
 
 # --------------------------------------------------------------------------
@@ -104,6 +110,42 @@ async def dialogue_text(client) -> str:
         return ""
 
 
+async def read_quest_goal(client) -> str:
+    """The quest tracker's current goal line, or "" if it will not read.
+
+    What two wizards questing together have to agree on. The script
+    drives both from one program, so when one of them misses a dialogue
+    or loses a teleport its GAME quest state falls behind while the
+    program marches on -- and from then on every instruction aimed at
+    that wizard is aimed at the wrong step. Nothing was reading this, so
+    the divergence was invisible until a human noticed the two windows
+    doing different things.
+
+    Empty on any failure, deliberately: this feeds a comparison between
+    seats, and "could not read" must never masquerade as "on a different
+    quest". `goals_agree` treats an empty read as no evidence.
+    """
+    window = await window_from_path(client.root_window, QUEST_GOAL_PATH)
+    if window is None:
+        return ""
+    try:
+        return (await window.maybe_text() or "").strip()
+    except Exception:
+        return ""
+
+
+def goals_agree(goals) -> bool:
+    """Do the wizards that COULD be read agree on the quest goal?
+
+    Unreadable seats are dropped rather than counted as disagreeing, and
+    fewer than two readable goals is agreement by default -- a party of
+    one is never out of step with itself, and a run where the tracker is
+    hidden must not report a desync every tick.
+    """
+    known = {g for g in goals if g}
+    return len(known) < 2
+
+
 async def wait_until_ready(client, timeout: float = 30.0,
                            poll: float = 0.4) -> bool:
     """Block while the client is in a loading screen.
@@ -148,13 +190,42 @@ async def read_quest_position(client):
 # --------------------------------------------------------------------------
 # actions
 # --------------------------------------------------------------------------
+async def _dialogue_moved(client, before, settle, poll):
+    """Wait for a click to land, rather than assuming how long it needs.
+
+    The click has taken when the page turns or the box closes, and both
+    are readable, so there is no reason to sleep a fixed interval and
+    hope. This used to be a flat `sleep(settle)` after every click, and
+    on a five-window NPC that is two and a half seconds of a wizard
+    standing still -- reported from a live run as auto-dialogue skipping
+    "very slow".
+
+    Falls through to the full `settle` when nothing observable changes,
+    which is also what happens if `dialogue_text` cannot read the box at
+    all. So the worst case is exactly the old behaviour and the common
+    case is a poll interval.
+    """
+    waited = 0.0
+    while waited < settle:
+        await asyncio.sleep(poll)
+        waited += poll
+        if not await in_dialogue(client):
+            return True                      # the box closed
+        if await dialogue_text(client) != before:
+            return True                      # the page turned
+    return False
+
+
 async def advance_dialogue(client, max_clicks: int = 40,
-                           settle: float = 0.5):
+                           settle: float = 0.5, poll: float = 0.05):
     """(clicks, reason). Click through dialogue until it stops appearing.
 
     Bounded rather than looping until quiet: a dialogue that re-opens
     forever (a vendor, a mis-click into the wrong NPC) would otherwise
     hang the run with no way to tell from outside.
+
+    `settle` is now a CEILING on how long each click is given rather
+    than a fixed cost per click -- see `_dialogue_moved`.
 
     The reason exists because zero clicks had two causes and one story.
     A click that *failed* -- the window moved, another program is over
@@ -170,6 +241,7 @@ async def advance_dialogue(client, max_clicks: int = 40,
                                             ADVANCE_DIALOG_PATH)
             if button is None or not await _visible(button):
                 break
+            before = await dialogue_text(client)
             try:
                 await client.mouse_handler.click_window(button)
             except Exception as exc:
@@ -178,7 +250,7 @@ async def advance_dialogue(client, max_clicks: int = 40,
                           f"over the game?)")
                 break
             clicks += 1
-            await asyncio.sleep(settle)
+            await _dialogue_moved(client, before, settle, poll)
     return clicks, reason
 
 

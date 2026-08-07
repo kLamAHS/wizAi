@@ -1306,6 +1306,69 @@ class WizAiCombatHandler:
             deadline -= self.CAST_POLL
         return False
 
+    def _who_needs_the_shield(self, read):
+        """The wizard in most danger, which is not always the caster.
+
+        A shield's ops read `tgt: 'self'`, and that is the right default
+        -- cast without choosing, it lands on you -- but Wizard101 lets
+        it go on any wizard in the circle, and the card data has no way
+        to say so. So every shield went on the caster, and the second
+        live party run shows what that costs: the ice wizard cast
+        nineteen Tower Shields, four of them twice in a row, and in
+        every one of those pairs it was at FULL health while the fire
+        wizard beside it was not (1270/1270 against 938/1042, 922/1042,
+        889/1064). The fire wizard was also dealing more of the damage,
+        so the shields went on the wizard least likely to need them.
+
+        Ranked by health FRACTION rather than health missing, which is
+        the difference between the two and the right one here: a heal
+        restores what is gone, so `_resolve_target`'s ally branch asks
+        who has lost the most; a shield buys rounds against what is
+        coming, so what matters is who is nearest to dying. A 1270-health
+        wizard down 200 is in less trouble than a 900-health one down
+        200.
+
+        A wizard already carrying a damage ward drops behind everyone
+        who is not, because that is the "two Tower Shields on the same
+        wizard" case exactly -- they stack in game, but a second one on
+        a full-health caster while a teammate has none is not a stack,
+        it is a wasted card.
+
+        The caster wins ties, so a solo wizard and a party that is level
+        on both counts behave exactly as before.
+        """
+        me = read.state.player
+        mates = list(getattr(read, "ally_members", ()) or ())
+        allies = list(getattr(read.state, "allies", ()) or ())
+
+        def shielded(actor):
+            for ward in getattr(actor, "wards", ()) or ():
+                # A damage ward is the one a shield duplicates. Traps are
+                # wards too and sit on the enemy, so they cannot appear
+                # here, but a prism or an absorb is not a shield.
+                if getattr(ward, "kind", "") == "damage" and \
+                        float(getattr(ward, "percent", 0.0) or 0.0) < 0:
+                    return True
+            return False
+
+        def danger(actor):
+            try:
+                left = float(actor.hp) / float(actor.max_hp)
+            except (AttributeError, TypeError, ValueError, ZeroDivisionError):
+                left = 1.0
+            return (shielded(actor), left)
+
+        best, who = danger(me), read.client_member
+        for i, ally in enumerate(allies):
+            if i >= len(mates) or mates[i] is None:
+                continue
+            if not getattr(ally, "alive", True):
+                continue
+            score = danger(ally)
+            if score < best:
+                best, who = score, mates[i]
+        return who
+
     async def _why_not(self, read, decision, clicked):
         """Everything that could distinguish the causes, in one line.
 
@@ -1393,6 +1456,8 @@ class WizAiCombatHandler:
         tgt = _primary_target(card) or _target_from_kind(card)
 
         if tgt == "self":
+            if getattr(card, "kind", "") == "shield":
+                return self._who_needs_the_shield(read)
             return read.client_member
         if tgt in ("enemies", "allies", "global"):
             return None                      # no target click

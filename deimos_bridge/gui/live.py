@@ -138,6 +138,11 @@ class _Seat:
         self.in_upkeep = False
         #: said once, not every half-second, when the quest arrow is off
         self.warned_quest_arrow = False
+        #: this wizard's quest tracker goal line, as last read, and when.
+        #: Compared across seats to catch the party drifting apart -- see
+        #: `LiveWorker._check_in_step`.
+        self.goal = ""
+        self.goal_read = 0.0
         #: what `runner` was built from, so the service tick can notice
         #: the operator turning the script on, off, or replacing it
         self.script_source = None
@@ -476,6 +481,14 @@ class LiveWorker(QThread):
                 # so a press could wait out an auto-dialogue and a follow
                 # before its own turn. Released between them, a queued
                 # request gets the wizard at the next gap.
+                # Cheap and unconditional: whatever is steering this
+                # wizard -- a script, wizAi's questing, a follow -- the
+                # party can drift onto different quests, and a script in
+                # particular cannot notice because its own instruction
+                # pointer is fine. Reading is throttled internally.
+                await self._read_goal(seat)
+                self._check_in_step(seat)
+
                 driven = self._script_drives(seat)
                 if self.auto_dialogue and seat.quester is None and not driven:
                     # Deimos's questing does its own dialogue handling,
@@ -654,6 +667,26 @@ class LiveWorker(QThread):
     #: wheel. A full wisp sweep is twelve teleports with a settle after
     #: each; two minutes is several of those and still finite.
     AFTER_FIGHT_LIMIT = 120.0
+    #: health fraction below which another fight is not worth starting.
+    #: `upkeep.needs_potion` uses 0.55 as "should top up"; this is the
+    #: lower, separate question of "walking into the next duel is just
+    #: dying again", and it wants a floor that a full-health wizard can
+    #: never trip.
+    LOW_HEALTH = 0.35
+    #: how long to keep trying to fix that before going anyway. A run
+    #: that blocks forever on an empty potion bottle is as broken as one
+    #: that suicides, so this ends -- loudly.
+    LOW_HEALTH_WAIT = 150.0
+    #: between health reads while waiting
+    LOW_HEALTH_POLL = 10.0
+    #: how often to re-read a wizard's quest tracker. It only changes
+    #: when a step completes, so this is cheap to do rarely.
+    GOAL_POLL = 8.0
+    #: how long the party may be on different quest goals before it is
+    #: called a desync. Turning a step in is not simultaneous -- one
+    #: wizard clicks the NPC seconds before the other -- so a bare
+    #: inequality would cry wolf on every normal handover.
+    DESYNC_GRACE = 90.0
 
     async def _stage(self, seat, name, coro, limit=None, wheel=False):
         """Run one stage of the service tick, reporting its own failure.
@@ -1823,9 +1856,155 @@ class LiveWorker(QThread):
                               f"upkeep failed — {type(exc).__name__}: {exc}")
                 finally:
                     seat.in_upkeep = False
+            if not self._stop:
+                await self._let_it_heal(seat)
             self._say(seat,
                       f"fight {seat.fought} over — waiting for the next"
                       if not self._stop else "stopping…")
+
+    async def _read_goal(self, seat):
+        """Refresh this seat's quest goal, at most every `GOAL_POLL`."""
+        import time
+
+        from .. import questing
+
+        now = time.monotonic()
+        if now - seat.goal_read < self.GOAL_POLL:
+            return
+        seat.goal_read = now
+        try:
+            seat.goal = await questing.read_quest_goal(seat.client)
+        except Exception:
+            seat.goal = ""
+
+    def _check_in_step(self, seat):
+        """Say so when the party has drifted onto different quests.
+
+        The reported failure, and the one nothing could see: "it's not
+        uncommon that one wizard will get ahead a quest or 2 from the
+        other because one misses a dialogue or fails a teleport". With a
+        script, one program drives both clients, so the program cannot
+        notice -- its own instruction pointer is fine. What has diverged
+        is the GAME's quest state, and from the moment it does, every
+        instruction aimed at the wizard that fell behind is aimed at the
+        wrong step.
+
+        This does not try to fix it. Nothing here can: the wizard that
+        is behind has to actually complete the step it missed, and the
+        script is the only thing that knows how. What it can do is stop
+        the divergence being invisible, which is what it was -- the
+        operator found it by watching two windows do different things.
+
+        Held to a grace period because turning a step in is not
+        simultaneous. One wizard clicks the NPC seconds before the
+        other, so a bare inequality would report a desync on every
+        normal handover. Only a disagreement that PERSISTS is one.
+        """
+        import time
+
+        if len(self.seats) < 2:
+            return
+        from .. import questing
+
+        goals = [s.goal for s in self.seats]
+        now = time.monotonic()
+        if questing.goals_agree(goals):
+            self._in_step_since = now
+            self._said_desync = ""
+            return
+        since = getattr(self, "_in_step_since", None)
+        if since is None:
+            self._in_step_since = now
+            return
+        if now - since < self.DESYNC_GRACE:
+            return
+
+        # Named, not counted. "the party is out of sync" sends you to
+        # look at two windows; this says which wizard is on what.
+        where = " · ".join(f"{s.name}: {s.goal or 'unreadable'}"
+                           for s in self.seats)
+        if where != getattr(self, "_said_desync", ""):
+            self._said_desync = where
+            self._say(seat,
+                      f"the party has been on different quests for "
+                      f"{now - since:.0f}s — {where}. One of them missed a "
+                      f"step; the script cannot see this, because its own "
+                      f"instruction pointer is fine")
+
+    async def _let_it_heal(self, seat):
+        """Do not walk into the next duel on almost no health.
+
+        `upkeep.after_fight` tops up, and when it cannot -- an empty
+        potion bottle is the usual reason, and it says so -- the run went
+        straight into the next fight anyway. On a dungeon that means
+        dying, walking back and dying again, which is what the operator
+        reported: "if they die on a dungeon they might try again
+        immediately even though their health is essentially 0".
+
+        Nothing here can conjure health. What it can do is stop, say
+        why, and keep asking: Wizard101 regenerates out of combat, and a
+        potion charge can arrive from a drop or a wisp sweep in the
+        meantime, so `after_fight` is re-run each time round rather than
+        only the health being re-read.
+
+        It gives up after `LOW_HEALTH_WAIT` and goes anyway, loudly. A
+        run that blocks forever on an empty bottle is as broken as one
+        that suicides -- and unlike the suicide, it produces no
+        telemetry to diagnose from.
+        """
+        import time
+
+        from .. import upkeep
+
+        started = time.monotonic()
+        said = False
+        while not self._stop:
+            left = await self._health_left(seat)
+            if left is None or left >= self.LOW_HEALTH:
+                if said:
+                    self._say(seat, f"back to {left:.0%} — carrying on"
+                              if left is not None else "carrying on")
+                return
+            if time.monotonic() - started > self.LOW_HEALTH_WAIT:
+                self._say(seat,
+                          f"still on {left:.0%} health after "
+                          f"{self.LOW_HEALTH_WAIT:.0f}s and nothing is "
+                          f"fixing it — going into the next fight anyway, "
+                          f"because a run that stops here reports nothing "
+                          f"at all")
+                return
+            if not said:
+                said = True
+                self._say(seat,
+                          f"on {left:.0%} health — not starting another "
+                          f"fight yet")
+            try:
+                async with self._driving(seat, "waiting to heal up"):
+                    await asyncio.wait_for(
+                        upkeep.after_fight(
+                            seat.client, wisps=False,
+                            potions=self.use_potions,
+                            on_status=lambda m: self._say(seat, m)),
+                        self.LOW_HEALTH_POLL)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass                  # the health read below is the check
+            await asyncio.sleep(self.LOW_HEALTH_POLL)
+
+    async def _health_left(self, seat):
+        """This wizard's health as a fraction, or None if it will not read.
+
+        None rather than a guess: refusing to start a fight because a
+        stat read raised would strand a healthy wizard, and that is a
+        worse failure than the one this is guarding against.
+        """
+        try:
+            now = float(await seat.client.stats.current_hitpoints())
+            most = float(await seat.client.stats.max_hitpoints())
+        except Exception:
+            return None
+        return (now / most) if most else None
 
     # -- per-seat callbacks the backend fires ------------------------------
     def _decision_hook(self, seat):
