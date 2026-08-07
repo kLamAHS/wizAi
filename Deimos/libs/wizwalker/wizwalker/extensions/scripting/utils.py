@@ -247,7 +247,16 @@ async def teleport_to_friend_from_list(
 
     await _click_on_friend(client, friends_list_window, friend_index)
 
-    character_window = await _maybe_get_named_window(client.root_window, "wndCharacter")
+    # Same eight-second budget, and for the same reason as the
+    # confirmation box below: a click, a flat one-second sleep, then a
+    # lookup that gives up after 1.6s more. wizAi's run at rev 228d4f50
+    # lost a rejoin to "No child window named wndCharacter" while three
+    # game clients shared one machine. Neither of these waits is a cost
+    # when the window is already there -- `_maybe_get_named_window`
+    # returns on its first look.
+    character_window = await _maybe_get_named_window(
+        client.root_window, "wndCharacter", retries=20
+    )
     await _teleport_to_friend(client, character_window)
 
     # close friends window
