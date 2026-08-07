@@ -148,9 +148,24 @@ async def read_quest_goal(client) -> str:
     if window is None:
         return ""
     try:
-        return (await window.maybe_text() or "").strip()
+        return strip_markup(await window.maybe_text())
     except Exception:
         return ""
+
+
+def strip_markup(text) -> str:
+    """The goal line as a person would read it.
+
+    The game returns its own markup in the tracker text, so every goal
+    in the live logs reads
+    `<center>Talk To Mortis in Nightside</center>`. Harmless to the
+    comparison -- both sides carry the same tags -- but this string is
+    written into the questing log once a minute per wizard and read by a
+    human afterwards, and the tags are most of its width.
+    """
+    import re
+
+    return re.sub(r"<[^>]*>", "", text or "").strip()
 
 
 def goals_agree(goals) -> bool:

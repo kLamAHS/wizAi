@@ -157,6 +157,9 @@ class _Seat:
         #: when this seat last wrote a heartbeat to the questing log.
         #: See `LiveWorker._heartbeat`.
         self.beat_at = 0.0
+        #: when a wedged scripted wizard was last looked at. See
+        #: `LiveWorker._unstick`.
+        self.unstuck_at = 0.0
         #: what `runner` was built from, so the service tick can notice
         #: the operator turning the script on, off, or replacing it
         self.script_source = None
@@ -492,7 +495,18 @@ class LiveWorker(QThread):
         seat = self._seat_for(client) if seat is None else seat
         while not self._stop:
             try:
-                if await questing.in_battle(client) or seat.in_upkeep:
+                fighting = await questing.in_battle(client)
+                # BEFORE the guard below. Konstantin's log has one
+                # heartbeat at t=0 and the next at t=531.7 -- nine
+                # missed beats, because he spent them in a fourteen-round
+                # duel and every stage of this tick is skipped while a
+                # wizard is in combat. A wizard wedged inside a fight is
+                # exactly as stuck as one wedged outside it, and that
+                # nine-minute hole was the one place the timeline could
+                # not account for.
+                await self._heartbeat(seat, self._script_drives(seat),
+                                      fighting=fighting)
+                if fighting or seat.in_upkeep:
                     await asyncio.sleep(0.5)
                     continue
 
@@ -545,11 +559,17 @@ class LiveWorker(QThread):
                 await self._read_goal(seat)
                 self._check_in_step(seat)
                 self._check_progress(seat)
-                await self._heartbeat(seat, driven)
 
                 if seat.runner is not None:
                     await self._stage(seat, "script step",
                                       self._script_step(seat), wheel=True)
+
+                if driven:
+                    # Unconditional, ahead of the chain below: a wedged
+                    # script needs looking at whether or not this tick
+                    # also decided to catch up or regroup.
+                    await self._stage(seat, "unwedging a stuck script",
+                                      self._unstick(seat), wheel=True)
 
                 if driven and self._should_catch_up(seat):
                     # The one case where wizAi steers a wizard the script
@@ -2052,7 +2072,7 @@ class LiveWorker(QThread):
     #: hour of three wizards is 180 entries.
     HEARTBEAT_EVERY = 60.0
 
-    async def _heartbeat(self, seat, driven=False):
+    async def _heartbeat(self, seat, driven=False, fighting=None):
         """One line a minute saying where this wizard is and what it is on.
 
         Everything else in the questing log is an alarm, and alarms only
@@ -2096,8 +2116,9 @@ class LiveWorker(QThread):
             if left is not None:
                 bits.append(f"{left:.0%} health")
             try:
-                bits.append("in a duel" if await party.in_battle(seat.client)
-                            else "out of combat")
+                if fighting is None:
+                    fighting = await party.in_battle(seat.client)
+                bits.append("in a duel" if fighting else "out of combat")
             except Exception:
                 bits.append("combat state unread")
             bits.append(seat.goal or "no quest goal")
@@ -2115,6 +2136,78 @@ class LiveWorker(QThread):
             raise
         except Exception:
             pass
+
+    #: how often a wedged scripted wizard is looked at. The condition it
+    #: is waiting on changes on the scale of a conversation, not a tick.
+    UNSTICK_EVERY = 30.0
+
+    async def _unstick(self, seat):
+        """Say what a wedged script is actually looking at — and, if it is
+        a dialogue box, clear it.
+
+        The run at rev 07ef3fa7 is two of these end to end. All three
+        wizards sat in WC_NightSide on "Talk To Mortis in Nightside" for
+        ten minutes, then in WC_SchoolDeath on "Talk To Dworgyn in Death
+        School" for five more, with zone, position and quest goal all
+        frozen while the script's instruction counter climbed six
+        hundred a minute. That is the retry loop `_check_progress` was
+        written to name, and both steps it died on were `Talk To`.
+
+        wizAi will not touch the dialogue of a scripted wizard, and in
+        general that is right: deimoslang does its own `waitfordialog`
+        and `sendkey`, and two clickers on one button is how a
+        conversation skips the page somebody wanted. But "in general"
+        stops applying after five minutes of measured non-progress. By
+        then the script is demonstrably not handling it, and the box it
+        is not handling blocks movement, so nothing else can proceed
+        either.
+
+        Narrow in three ways. Only after `STUCK_AFTER`, so an ordinary
+        conversation is never raced. Only a box that is ALREADY open --
+        no press-X, because opening a conversation the script did not
+        ask for changes the quest state and this may not make one. And
+        every read is written down whether or not anything was done: the
+        log could not tell "the box is open and the script cannot
+        advance it" from "the box never opened at all", and those want
+        opposite fixes.
+        """
+        import time
+
+        from .. import questing
+
+        if seat.progress is None:
+            return
+        now = time.monotonic()
+        if now - seat.progress_at < self.STUCK_AFTER:
+            seat.unstuck_at = 0.0
+            return
+        if now - seat.unstuck_at < self.UNSTICK_EVERY:
+            return
+        seat.unstuck_at = now
+
+        open_box = await questing.in_dialogue(seat.client)
+        near = await questing.near_interactable(seat.client)
+        at_marker, why = await questing.at_quest_marker(seat.client)
+        seat.tel.note_questing(
+            "stuck-detail",
+            f"dialogue {'open' if open_box else 'closed'} · "
+            f"{'an interactable in range' if near else 'nothing in range'}"
+            f" · {'at the quest marker' if at_marker else (why or 'not at the marker')}")
+        if not open_box:
+            return
+
+        n, click_why = await questing.advance_dialogue(seat.client)
+        seat.tel.note_questing(
+            "unstuck-dialogue",
+            f"cleared {n} window(s) the script had left open"
+            if n else (click_why or "the box would not click"))
+        self._say(
+            seat,
+            f"the script has been stuck for "
+            f"{(now - seat.progress_at) / 60:.0f} min with a dialogue box "
+            f"open — cleared {n} window(s). wizAi normally leaves a scripted "
+            f"wizard's dialogue alone, but the script is measurably not "
+            f"handling this one and it blocks movement")
 
     def _check_progress(self, seat):
         """Say so when a running script is getting nowhere.
@@ -2149,6 +2242,12 @@ class LiveWorker(QThread):
         seat.said_stuck = note
         runner = self.seats[0].runner
         steps = f"{runner.steps:,} instructions in" if runner else "the script"
+        # Built separately rather than edited out of `steps`. The first
+        # version did `steps.replace(' in', '')` to drop the trailing
+        # "in", and " in" also occurs inside "instructions" -- so the
+        # live log said "while 12,620structions ran".
+        count = (f"{runner.steps:,} instructions" if runner
+                 else "the script")
         self._say(seat,
                   f"nothing has changed for {idle / 60:.0f} min — same zone, "
                   f"same spot, same quest goal ({note}) — while {steps}. "
@@ -2161,7 +2260,7 @@ class LiveWorker(QThread):
         seat.tel.note_questing(
             "no-progress",
             f"{idle / 60:.0f} min with no change — {note} — while "
-            f"{steps.replace(' in', '')} ran")
+            f"{count} ran")
 
     def _check_in_step(self, seat):
         """Say so when the party has drifted onto different quests.

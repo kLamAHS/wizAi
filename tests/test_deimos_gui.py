@@ -10795,3 +10795,125 @@ def test_every_zone_change_lands_in_the_log(monkeypatch):
     moved = [e for e in worker.seats[1].tel.questing if e["kind"] == "zone"]
     assert moved == [{"at": moved[0]["at"], "fight": 0, "kind": "zone",
                       "detail": "Olde Town -> Unicorn Way"}]
+
+
+# --------------------------------------------- unwedging a stuck scripted wizard
+def _wedged(dialogue=True, cleared=2, monkeypatch=None):
+    """A script-driven wizard that has changed nothing for a long time."""
+    import time
+
+    from deimos_bridge import questing
+
+    worker, _read = _zoned_party(["Olde Town", "Olde Town"])
+    seat = worker.seats[0]
+    seat.client = object()
+    seat.progress = ("WizardCity/WC_NightSide", (1, 2, 3),
+                     "Talk To Mortis in Nightside")
+    seat.progress_at = time.monotonic() - worker.STUCK_AFTER - 1
+
+    async def in_dialogue(_c):
+        return dialogue
+
+    async def near(_c):
+        return True
+
+    async def at_marker(_c):
+        return False, "the marker is 900 away"
+
+    async def advance(_c, **kw):
+        return cleared, ""
+
+    monkeypatch.setattr(questing, "in_dialogue", in_dialogue)
+    monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "at_quest_marker", at_marker)
+    monkeypatch.setattr(questing, "advance_dialogue", advance)
+    return worker, seat
+
+
+def test_a_script_wedged_on_a_dialogue_gets_the_box_cleared(monkeypatch):
+    """Rev 07ef3fa7, twice: all three wizards on "Talk To Mortis in
+    Nightside" for ten minutes and then "Talk To Dworgyn in Death
+    School" for five, zone and position and goal all frozen while the
+    script's counter climbed 600 a minute. Both steps it died on were
+    `Talk To`, and wizAi will not touch a scripted wizard's dialogue."""
+    import asyncio
+
+    worker, seat = _wedged(dialogue=True, monkeypatch=monkeypatch)
+    asyncio.run(worker._unstick(seat))
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert kinds == ["stuck-detail", "unstuck-dialogue"]
+    assert "dialogue open" in seat.tel.questing[0]["detail"]
+    assert "cleared 2 window(s)" in seat.tel.questing[1]["detail"]
+
+
+def test_a_wedged_script_with_no_box_open_is_only_reported(monkeypatch):
+    """The log could not tell "the box is open and the script cannot
+    advance it" from "the box never opened", and those need opposite
+    fixes. Nothing is clicked in the second case -- opening a
+    conversation the script did not ask for changes the quest state."""
+    import asyncio
+
+    worker, seat = _wedged(dialogue=False, monkeypatch=monkeypatch)
+    asyncio.run(worker._unstick(seat))
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert kinds == ["stuck-detail"]
+    assert "dialogue closed" in seat.tel.questing[0]["detail"]
+    assert "the marker is 900 away" in seat.tel.questing[0]["detail"]
+
+
+def test_a_script_that_is_making_progress_is_left_completely_alone(
+        monkeypatch):
+    """The whole reason wizAi keeps its hands off a scripted wizard.
+    Only measured non-progress lifts that."""
+    import asyncio
+    import time
+
+    worker, seat = _wedged(monkeypatch=monkeypatch)
+    seat.progress_at = time.monotonic()          # moving
+    asyncio.run(worker._unstick(seat))
+    assert seat.tel.questing == []
+
+
+def test_unwedging_is_throttled(monkeypatch):
+    import asyncio
+
+    worker, seat = _wedged(monkeypatch=monkeypatch)
+    asyncio.run(worker._unstick(seat))
+    asyncio.run(worker._unstick(seat))
+    assert len([e for e in seat.tel.questing
+                if e["kind"] == "stuck-detail"]) == 1
+
+
+def test_the_no_progress_line_does_not_mangle_the_word_instructions():
+    """The live log said "while 12,620structions ran": the first version
+    stripped a trailing " in" with `.replace(' in', '')`, and " in" also
+    occurs inside "instructions"."""
+    import time
+
+    worker, _read = _zoned_party(["Olde Town", "Olde Town"])
+    seat = worker.seats[0]
+    seat.progress = ("WC_NightSide", (1, 2, 3), "Talk To Mortis")
+    seat.progress_at = time.monotonic() - worker.STUCK_AFTER - 1
+    worker.seats[0].runner = type("R", (), {"running": True, "steps": 12620})()
+    worker._script_drives = lambda _s: True
+    worker._check_progress(seat)
+    note = [e for e in seat.tel.questing if e["kind"] == "no-progress"][0]
+    assert "12,620 instructions ran" in note["detail"], note["detail"]
+    assert "structions" not in note["detail"].replace("instructions", "")
+
+
+def test_the_heartbeat_beats_while_a_wizard_is_in_a_duel():
+    """Konstantin's log has one heartbeat at t=0 and the next at t=531.7
+    -- nine missed beats, spent in a fourteen-round duel. A wizard
+    wedged inside a fight is exactly as stuck as one wedged outside."""
+    import asyncio
+
+    worker, seat = _beating()
+
+    async def full(_seat):
+        return 1.0
+
+    worker._health_left = full
+    asyncio.run(worker._heartbeat(seat, driven=True, fighting=True))
+    beat = [e for e in seat.tel.questing if e["kind"] == "heartbeat"][0]
+    assert "in a duel" in beat["detail"]
