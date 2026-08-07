@@ -39,6 +39,14 @@ import asyncio
 ADVANCE_DIALOG_PATH = ["WorldView", "wndDialogMain", "btnRight"]
 DIALOG_TEXT_PATH = ["WorldView", "wndDialogMain", "txtArea", "txtMessage"]
 NPC_RANGE_PATH = ["WorldView", "NPCRangeWin"]
+#: `src/paths.py:70` -- the quest-picker an NPC with several things to
+#: say puts up INSTEAD of an ordinary dialogue. It has no `btnRight`, so
+#: `advance_dialogue` found nothing to click and reported no dialogue,
+#: while the window sat there blocking movement. wizwalker's own
+#: `Client.is_in_dialog` counts it (`client.py:367-372`) and wizAi did
+#: not. Closing it is the unblocking move: whatever wanted it open can
+#: open it again, and a run that cannot walk is over.
+SERVICES_EXIT_PATH = ["WorldView", "NPCServicesWin", "wndDialogMain", "Exit"]
 #: `src/paths.py:35` -- the quest tracker's goal line, e.g. "Defeat
 #: Krokopatra". The empty string is a real unnamed window in the tree,
 #: not a wildcard; Deimos matches it exactly and so does
@@ -95,9 +103,20 @@ async def _safe(coro_fn, default=False):
 # state
 # --------------------------------------------------------------------------
 async def in_dialogue(client) -> bool:
-    """Is a dialogue window up and waiting for a click?"""
+    """Is a window up that blocks the wizard until it is dismissed?
+
+    Both kinds, because both block. The ordinary conversation box has a
+    `btnRight` to page through; an NPC with several quests on offer puts
+    up `NPCServicesWin` instead, which has no such button. Only the
+    first was checked, so the second read as "no dialogue open" at a
+    wizard that could not move -- and that is the state a run dies in.
+    """
     button = await window_from_path(client.root_window, ADVANCE_DIALOG_PATH)
-    return button is not None and await _visible(button)
+    if button is not None and await _visible(button):
+        return True
+    exit_button = await window_from_path(client.root_window,
+                                         SERVICES_EXIT_PATH)
+    return exit_button is not None and await _visible(exit_button)
 
 
 async def dialogue_text(client) -> str:
@@ -190,30 +209,56 @@ async def read_quest_position(client):
 # --------------------------------------------------------------------------
 # actions
 # --------------------------------------------------------------------------
-async def _dialogue_moved(client, before, settle, poll):
-    """Wait for a click to land, rather than assuming how long it needs.
+#: `_dialogue_moved` outcomes. The third is the one that matters: a
+#: click that did nothing and a click whose effect could not be READ are
+#: different facts, and treating them alike is how auto-dialogue came to
+#: report forty cleared windows at a box it never touched.
+MOVED, STALLED, UNREADABLE = "moved", "stalled", "unreadable"
+
+
+async def _dialogue_moved(client, before, settle, poll, button=None):
+    """Did the click land? MOVED / STALLED / UNREADABLE.
 
     The click has taken when the page turns or the box closes, and both
     are readable, so there is no reason to sleep a fixed interval and
     hope. This used to be a flat `sleep(settle)` after every click, and
     on a five-window NPC that is two and a half seconds of a wizard
-    standing still -- reported from a live run as auto-dialogue skipping
-    "very slow".
+    standing still.
 
-    Falls through to the full `settle` when nothing observable changes,
-    which is also what happens if `dialogue_text` cannot read the box at
-    all. So the worst case is exactly the old behaviour and the common
-    case is a poll interval.
+    STALLED means the box is still up, its text READ, and the text is
+    the same as before the click -- so the click provably did not take.
+    UNREADABLE means the same wait expired without `dialogue_text`
+    giving anything to compare, which is not evidence of either. The
+    caller may act on the first and must not act on the second.
     """
+    # `button` is the advance button the caller just clicked. Checking
+    # whether THAT is still visible is one memory read; `in_dialogue`
+    # re-walks the whole window tree from the root, and this runs every
+    # `poll` for as long as the box is up. The caller has it already, so
+    # asking the tree for it again twenty times a second is pure cost.
+    async def still_open():
+        if button is not None:
+            return await _visible(button)
+        return await in_dialogue(client)
+
+    readable = bool(before)
     waited = 0.0
-    while waited < settle:
+    while True:
         await asyncio.sleep(poll)
         waited += poll
-        if not await in_dialogue(client):
-            return True                      # the box closed
-        if await dialogue_text(client) != before:
-            return True                      # the page turned
-    return False
+        if not await still_open():
+            return MOVED                     # the box closed
+        now = await dialogue_text(client)
+        if now:
+            readable = True
+        if now != before:
+            return MOVED                     # the page turned
+        if waited >= settle:
+            break
+    # STALLED is a claim that the game was given time to answer and did
+    # not. Without a settle window there was no such time, so the only
+    # honest verdict is "no evidence" however readable the box is.
+    return STALLED if (readable and settle > 0) else UNREADABLE
 
 
 async def dialogue_opened(client, settle: float = 0.6,
@@ -254,12 +299,20 @@ async def advance_dialogue(client, max_clicks: int = 40,
     at a wizard staring at an open dialogue box. Auto-dialogue then spun
     on it forever in silence, movement blocked, nothing on screen.
     """
-    clicks, reason = 0, ""
+    clicks, tries, stalls, reason = 0, 0, 0, ""
     async with client.mouse_handler:
-        while clicks < max_clicks:
+        while tries < max_clicks:
             button = await window_from_path(client.root_window,
                                             ADVANCE_DIALOG_PATH)
             if button is None or not await _visible(button):
+                # No page to turn. There may still be a quest-picker
+                # holding the wizard in place -- closing that IS the
+                # advance, and it is one click, not a conversation.
+                closed, why = await _close_services(client)
+                if closed:
+                    clicks += 1
+                elif why:
+                    reason = why
                 break
             before = await dialogue_text(client)
             try:
@@ -269,9 +322,49 @@ async def advance_dialogue(client, max_clicks: int = 40,
                           f"{type(exc).__name__}: {exc} (is another window "
                           f"over the game?)")
                 break
-            clicks += 1
-            await _dialogue_moved(client, before, settle, poll)
+            tries += 1
+            outcome = await _dialogue_moved(client, before, settle, poll,
+                                            button)
+            if outcome == MOVED:
+                clicks += 1
+                stalls = 0
+                continue
+            if outcome == UNREADABLE:
+                # No evidence either way, so this keeps going exactly as
+                # it did before there was a distinction to draw.
+                clicks += 1
+                continue
+            # STALLED. The box is still up and its text has not changed,
+            # so the click went nowhere -- `click_window` raises nothing
+            # when mouseless input is not hooked or another window is
+            # over the game, it simply has no effect. This used to be
+            # counted as a cleared window and repeated forty times, half
+            # a second each: twenty seconds of "clicking through
+            # dialogue…" at a box that never moved, then a report of
+            # forty windows advanced. Which is what the operator saw.
+            stalls += 1
+            if stalls >= 2:
+                reason = (f"the dialogue is open and the advance button "
+                          f"is there, but {stalls} clicks left the same "
+                          f"text on screen — the click is not reaching "
+                          f"the game (is another window over it, or is "
+                          f"mouseless input not hooked?)")
+                break
     return clicks, reason
+
+
+async def _close_services(client):
+    """(closed, reason). Dismiss the multi-quest picker, if one is up."""
+    button = await window_from_path(client.root_window, SERVICES_EXIT_PATH)
+    if button is None or not await _visible(button):
+        return False, ""
+    try:
+        await client.mouse_handler.click_window(button)
+    except Exception as exc:
+        return False, (f"a quest menu is open and blocking movement but "
+                       f"the click to close it failed — "
+                       f"{type(exc).__name__}: {exc}")
+    return True, ""
 
 
 async def teleport_to_quest(client):
@@ -444,9 +537,11 @@ async def hop_once(client, settle: float = 1.2, on_status=None) -> bool:
         await asyncio.sleep(settle)
     if await in_dialogue(client):
         say("clicking through dialogue…")
-        _, why = await advance_dialogue(client)
+        n, why = await advance_dialogue(client)
         if why:
             say(why)
+        elif not n:
+            say("the dialogue closed on its own")
         await wait_until_ready(client)
         if await in_battle(client):
             return True
@@ -525,7 +620,16 @@ async def hop_to_next_fight(client, max_hops: int = 25, settle: float = 1.2,
         # Dialogue blocks movement, so clear it before trying to move.
         if await in_dialogue(client):
             say("clicking through dialogue…")
-            await advance_dialogue(client)
+            n, why = await advance_dialogue(client)
+            # Said out loud. Both of these call sites threw the reason
+            # away, so a dialogue the click could not reach announced
+            # "clicking through dialogue…" and then reported nothing at
+            # all -- which is what "it says it is clearing it and it
+            # does not" looks like from the outside.
+            if why:
+                say(why)
+            elif not n:
+                say("the dialogue closed on its own")
             await wait_until_ready(client)
             if await in_battle(client):
                 say("fight started")
@@ -562,7 +666,11 @@ async def hop_to_next_fight(client, max_hops: int = 25, settle: float = 1.2,
 
         if await in_dialogue(client):
             say("clicking through dialogue…")
-            await advance_dialogue(client)
+            n, why = await advance_dialogue(client)
+            if why:
+                say(why)
+            elif not n:
+                say("the dialogue closed on its own")
             await wait_until_ready(client)
 
         if await in_battle(client):

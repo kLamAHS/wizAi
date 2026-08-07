@@ -647,10 +647,16 @@ def test_a_dialogue_that_never_changes_still_waits_the_full_settle():
                                             [_Win("txtMessage",
                                                   text="same")])])])])
 
+    from deimos_bridge.questing import STALLED
+
     started = time.monotonic()
     moved = asyncio.run(_dialogue_moved(_Stuck(), "same", 0.2, 0.02))
     took = time.monotonic() - started
-    assert moved is False
+    # STALLED, not merely falsy: the box is up, its text read, and the
+    # text did not change, so the click provably did not take. That is a
+    # different fact from "could not tell", and `advance_dialogue` acts
+    # on one and not the other.
+    assert moved == STALLED
     assert took >= 0.2, f"gave up after {took:.2f}s of a 0.2s settle"
 
 
@@ -10478,3 +10484,92 @@ def test_three_pulls_into_one_zone_is_a_loop_and_stops(monkeypatch):
 
     worker.seats[2].rejoin_history = [("Olde Town", time.monotonic())] * 2
     assert _look(worker, read_zone, monkeypatch) == (None, None)
+
+
+# ------------------------------------------ clicking through what is actually up
+def _services_root(visible=True):
+    """The quest-picker an NPC with several things to say puts up.
+
+    No `btnRight` anywhere -- that is the whole point of it.
+    """
+    exit_button = _Win("Exit", visible=visible)
+    return _Win("root", [
+        _Win("WorldView", [
+            _Win("NPCServicesWin", [_Win("wndDialogMain",
+                                         [exit_button])])])]), exit_button
+
+
+def test_a_quest_picker_is_a_dialogue_even_without_an_advance_button():
+    """Reported live as "it says it detected dialogue but does not clear
+    it". wizwalker's own `Client.is_in_dialog` counts `NPCServicesWin`;
+    wizAi only looked for `wndDialogMain/btnRight`, so an NPC offering
+    several quests read as "no dialogue open" at a wizard that could not
+    move."""
+    import asyncio
+
+    from deimos_bridge.questing import in_dialogue
+    root, _ = _services_root()
+    assert asyncio.run(in_dialogue(_QuestClient(root)))
+    root, _ = _services_root(visible=False)
+    assert not asyncio.run(in_dialogue(_QuestClient(root)))
+
+
+def test_the_quest_picker_is_closed_rather_than_left_blocking():
+    import asyncio
+
+    from deimos_bridge.questing import advance_dialogue
+    root, exit_button = _services_root()
+    client = _QuestClient(root)
+    clicks, why = asyncio.run(advance_dialogue(client, settle=0))
+    assert (clicks, why) == (1, "")
+    assert client.mouse_handler.clicks == [exit_button]
+
+
+def test_a_click_that_changes_nothing_is_not_a_window_advanced():
+    """The other half of the same report, and the reason it was slow.
+
+    `click_window` raises nothing when the click does not reach the game
+    -- it simply has no effect. The outcome of `_dialogue_moved` was
+    thrown away, so forty of those counted as forty cleared windows at
+    half a second each: twenty seconds of "clicking through dialogue…"
+    against a box that never moved, then a report of success.
+    """
+    import asyncio
+
+    from deimos_bridge.questing import advance_dialogue
+
+    class _Deaf(_Mouse):
+        async def click_window(self, window):
+            self.clicks.append(window)      # lands nowhere, raises nothing
+
+    root, _ = _dialogue_root()
+    client = _QuestClient(root)
+    client.mouse_handler = _Deaf()
+    clicks, why = asyncio.run(
+        advance_dialogue(client, max_clicks=40, settle=0.05, poll=0.01))
+    assert clicks == 0, "a click that moved nothing is not a window cleared"
+    assert "not reaching the game" in why
+    assert len(client.mouse_handler.clicks) == 2, \
+        "gave up after two dead clicks rather than forty"
+
+
+def test_an_unreadable_box_is_still_clicked_through():
+    """A stall verdict needs the text to have been READ. A dialogue whose
+    text will not read is no evidence either way, and must not be
+    mistaken for a dead click -- that would abandon a working
+    conversation after two pages."""
+    import asyncio
+
+    from deimos_bridge.questing import advance_dialogue
+
+    class _Sticky(_Mouse):
+        async def click_window(self, window):
+            self.clicks.append(window)
+
+    button = _Win("btnRight", visible=True)
+    root = _Win("root", [_Win("WorldView", [_Win("wndDialogMain", [button])])])
+    client = _QuestClient(root)
+    client.mouse_handler = _Sticky()
+    clicks, why = asyncio.run(
+        advance_dialogue(client, max_clicks=5, settle=0.02, poll=0.01))
+    assert (clicks, why) == (5, "")
