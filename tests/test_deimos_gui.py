@@ -1027,6 +1027,110 @@ def test_service_loop_leaves_the_mouse_alone_during_combat(qapp):
     assert client.mouse_handler.clicks == []
 
 
+def _party_worker(goals=("a", "b"), ahead_at=(10.0, 5.0)):
+    """A two-seat worker with each wizard's goal and when it last moved."""
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1,
+                        seats=[SeatConfig(school="fire", deck=[],
+                                          policy_name="school-aware")])
+    worker.status = type("S", (), {"emit": staticmethod(lambda *_: None)})()
+    worker.DESYNC_GRACE = 0.0
+    for seat, goal, at in zip(worker.seats, goals, ahead_at):
+        seat.goal, seat.goal_at = goal, at
+        seat.client = object()
+    return worker
+
+
+def test_the_wizard_that_got_ahead_goes_back_for_the_other(qapp):
+    """The reported failure: "sometimes one will get ahead of the other
+    and it'll keep going despite being on a different quest".
+
+    The script cannot see it. Every quest test in all three arc questers
+    is `p<N> tracking_goal "<literal>"` -- 1,700 of them -- and
+    deimoslang has no form that compares two clients to each other
+    (`vm.py:766-796` asserts the operand is a string). So a wizard that
+    falls behind lands in a state no branch covers, and the program
+    marches on.
+    """
+    worker = _party_worker(goals=("Talk to Zaltanna", "Defeat Krokopatra"),
+                           ahead_at=(50.0, 10.0))
+    a, b = worker.seats
+    worker._check_in_step(a)
+    worker._check_in_step(a)
+
+    # `a` advanced most recently, so `b` is the one still on the missed
+    # step -- quest names have no order, but "who moved last" does.
+    assert worker._behind is b
+    assert worker._should_catch_up(a), "the wizard ahead should go back"
+    assert not worker._should_catch_up(b), \
+        "the wizard that is BEHIND must keep the script; only it knows " \
+        "how to finish the step"
+
+
+def test_nobody_goes_anywhere_while_the_party_is_in_step(qapp):
+    worker = _party_worker(goals=("Talk to Zaltanna", "Talk to Zaltanna"))
+    a, b = worker.seats
+    worker._check_in_step(a)
+    worker._check_in_step(a)
+    assert worker._behind is None
+    assert not worker._should_catch_up(a)
+    assert not worker._should_catch_up(b)
+
+
+def test_a_party_that_lines_up_again_stops_chasing(qapp):
+    """The laggard has to be cleared, or the wizard ahead keeps being
+    dragged back to a wizard that caught up ten minutes ago."""
+    worker = _party_worker(goals=("Talk to Zaltanna", "Defeat Krokopatra"),
+                           ahead_at=(50.0, 10.0))
+    a, b = worker.seats
+    worker._check_in_step(a)
+    worker._check_in_step(a)
+    assert worker._should_catch_up(a)
+
+    b.goal = "Talk to Zaltanna"          # caught up
+    worker._check_in_step(a)
+    assert worker._behind is None
+    assert not worker._should_catch_up(a)
+
+
+def test_a_solo_wizard_never_goes_back_for_anyone(qapp):
+    from deimos_bridge.gui.live import LiveWorker
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    worker.status = type("S", (), {"emit": staticmethod(lambda *_: None)})()
+    assert not worker._should_catch_up(worker.seats[0])
+
+
+def test_the_catch_up_aims_at_the_laggard_not_the_configured_leader(qapp):
+    """`follow_leader` points at a fixed seat. The wizard to go back for
+    is whoever fell behind, which is usually not that one."""
+    import asyncio
+
+    from deimos_bridge import party as party_mod
+
+    worker = _party_worker(goals=("Talk to Zaltanna", "Defeat Krokopatra"),
+                           ahead_at=(50.0, 10.0))
+    a, b = worker.seats
+    worker.leader = 0                     # the CONFIGURED leader is `a`
+    worker._check_in_step(a)
+    worker._check_in_step(a)
+
+    went = []
+
+    async def _follow(client, leader, leader_name=""):
+        went.append(leader)
+        return True, "teleported"
+
+    real, party_mod.follow = party_mod.follow, _follow
+    try:
+        asyncio.run(worker._catch_up(a))
+    finally:
+        party_mod.follow = real
+
+    assert went == [b.client], "went to the configured leader, not the laggard"
+
+
 def test_a_script_hammering_a_loop_that_never_works_says_so(qapp):
     """Across KamarJ's three arc questers there are 2,438 bounded retry
     loops and 528 unbounded ones, and `tp` alone appears in 331 of the
