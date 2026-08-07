@@ -1119,6 +1119,34 @@ class Telemetry:
                 if getattr(r, "incoming", 0.0) > 0]
         return sum(seen) / len(seen) if seen else 0.0
 
+    def damage_rate(self):
+        """Enemy health this wizard actually removes per round of fight.
+
+        What a teammate's rollout needs to know about this seat, and the
+        one number nothing published. `policies.set_ally_rate` explains
+        why it matters; this explains why it is *this* denominator.
+
+        Total damage over total fight rounds -- zeros and all -- not a
+        mean over the rounds that happened to yield a measurement. Only
+        about half of rounds do (a confounded board, an unmatched read,
+        a round the settle could not attribute), and those are exactly
+        the rounds where nothing landed. Averaging over the measurable
+        half of the day's two-wizard run gives 99/round for the ice
+        wizard and 151 for the fire one; over every round of every fight
+        it gives 51 and 57, and 51 and 57 are what the boards actually
+        lost. Feeding a rollout the first pair would tell it a fight
+        ends in half the rounds it really takes.
+
+        0.0 until a fight has finished, which leaves the first duel of a
+        session modelled solo. That is the shipped behaviour, so the
+        cold start costs nothing it was not already costing; the caller
+        supplies its own estimate if it has a better one.
+        """
+        rounds = sum(f.rounds for f in self.fights)
+        if not rounds:
+            return 0.0
+        return sum(f.damage_dealt for f in self.fights) / rounds
+
     def observed_board(self):
         """(enemy count, biggest mob's max health) from the last fight.
 

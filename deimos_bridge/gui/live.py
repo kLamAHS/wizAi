@@ -1647,6 +1647,10 @@ class LiveWorker(QThread):
                 backend.on_school_mismatch = self._school_hook(seat)
                 backend.on_defeated = self._defeated_hook(seat)
                 backend.on_slow_cast = self._slow_cast_hook(seat)
+                # Bound late and read per round: the rate only becomes
+                # non-zero once this seat has finished a fight, and the
+                # coordinator asks again every round after that.
+                backend.damage_rate = seat.tel.damage_rate
                 seat.tel.resolver = backend.resolver
                 seat.backend = backend
                 if seat.policy_name != built_as:

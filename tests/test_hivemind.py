@@ -385,8 +385,9 @@ def test_the_backend_asks_the_coordinator_instead_of_the_policy():
     class _Hive:
         rounds = 0
 
-        async def decide(self, seat, sim, state, policy, read=None):
-            asked.append(seat)
+        async def decide(self, seat, sim, state, policy, read=None,
+                         rate=0.0):
+            asked.append((seat, rate))
             return policy(sim, state)
 
         def last_move(self, seat):
@@ -401,7 +402,10 @@ def test_the_backend_asks_the_coordinator_instead_of_the_policy():
          MockMember("Lost Soul", 450, monster=True, team_id=1)],
         [MockCard("Fire Cat")]))
     decision = asyncio.run(backend.decide())
-    assert asked == [2]
+    # Seat, and the damage rate the coordinator hands the other seats'
+    # rollouts. A backend with no `damage_rate` hook reports zero rather
+    # than guessing, which is what a headless one and a solo one want.
+    assert asked == [(2, 0.0)]
     assert not decision.passing, decision.reason
     assert "party" in decision.policy
 
@@ -414,7 +418,8 @@ def test_a_held_card_is_recorded_as_held_rather_than_as_a_bare_pass():
     from deimos_bridge.mock_client import MockCard, MockCombat, MockMember
 
     class _Hive:
-        async def decide(self, seat, sim, state, policy, read=None):
+        async def decide(self, seat, sim, state, policy, read=None,
+                         rate=0.0):
             return None
 
         def last_move(self, seat):
@@ -996,3 +1001,153 @@ def test_a_fizzle_is_not_a_measurement_of_the_damage_model():
     tel2.observe(_Decision(), read(200))
     assert landed.actual_damage == 49.0
     assert landed.clean is True
+
+
+# ------------------------------------------------- the party through the horizon
+def test_a_lone_wizard_cannot_clear_the_board_the_party_clears_easily():
+    """The defect, stated as the arithmetic that produces it.
+
+    Three 435hp Sand Stalkers is 1305 health. A level-six wizard removes
+    about 87 a round, so alone it needs fifteen turns and the rollout's
+    horizon is twelve -- every candidate comes back a sentinel, `turns`
+    ties for all of them, and the decision falls through to a tiebreak
+    that cannot tell a Tower Shield from passing. Two wizards clear the
+    same board in nine.
+    """
+    from deimos_bridge.policies import greedy_ttk, set_ally_rate
+
+    board = ((435, "balance"), (435, "balance"), (435, "balance"))
+    sim, state = wizard(school="ice", hand=("Frost Beetle", "Snow Serpent",
+                                            "Ice Trap", "Tower Shield"),
+                        pips=2, hp=1270, board=board)
+    alone = greedy_ttk()
+    alone(sim, state)
+    horizon = alone.last_candidates[0].horizon
+    assert all(c.turns > horizon for c in alone.last_candidates), \
+        "this board is supposed to be out of reach alone"
+
+    sim, state = wizard(school="ice", hand=("Frost Beetle", "Snow Serpent",
+                                            "Ice Trap", "Tower Shield"),
+                        pips=2, hp=1270, board=board)
+    together = greedy_ttk()
+    try:
+        set_ally_rate(120.0)
+        together(sim, state)
+    finally:
+        set_ally_rate(0.0)
+    assert any(c.turns <= horizon for c in together.last_candidates), \
+        "with a teammate hitting, something has to kill inside the horizon"
+
+
+def test_the_ally_rate_is_off_unless_somebody_turns_it_on():
+    """Every solo path, test and tuning sweep has to be untouched."""
+    from deimos_bridge import policies
+
+    assert policies.ally_rate() == 0.0
+    with policies.party_rate(90.0):
+        assert policies.ally_rate() == 90.0
+    assert policies.ally_rate() == 0.0
+
+
+def test_a_seat_that_raises_does_not_leave_its_rate_on_the_next_one():
+    from deimos_bridge import policies
+
+    with pytest.raises(ValueError):
+        with policies.party_rate(90.0):
+            raise ValueError("a policy blew up mid-decision")
+    assert policies.ally_rate() == 0.0
+
+
+def test_allies_finish_the_weakest_mob_rather_than_spreading_out():
+    """What the circle demonstrably does -- the ledger writes a mob the
+    committed casts kill down to zero and the overkill guard stops the
+    next wizard firing into it. Spreading the rate evenly would model a
+    party that never kills anything, which is the failure being fixed."""
+    from w101_sim import Actor
+    from deimos_bridge.policies import _allies_hit
+
+    class _Board:
+        enemies = [Actor(name="big", school="ice", hp=400, max_hp=400, team=1),
+                   Actor(name="small", school="ice", hp=50, max_hp=50, team=1)]
+
+    _allies_hit(_Board(), 120.0)
+    assert not _Board.enemies[1].alive          # the 50 died first
+    assert _Board.enemies[0].hp == 330.0        # the other 70 spilled over
+
+
+def test_the_rollout_does_not_hit_twice_for_the_round_already_on_the_board():
+    """`Ledger.apply` has already taken this round's party damage off the
+    state the policy is handed. Applying the rate on rollout turn 1 as
+    well would count the same casts twice."""
+    from deimos_bridge.policies import _rollout
+
+    sim, state = wizard(school="fire", hand=("Fire Cat",), pips=7,
+                        board=((10_000, "ice"),))
+    # Nothing in hand and nothing to draw, so every point of the banked
+    # damage is the ally's and the count is unambiguous.
+    state.player.hand[:] = []
+    state.player.deck[:] = []
+    _turns, banked = _rollout(sim, state, None, max_turns=3, allies=100.0)
+    # Three turns, ally pressure on two of them: 200, not 300.
+    assert -banked == pytest.approx(200.0)
+
+    _turns, solo = _rollout(sim, state, None, max_turns=3, allies=0.0)
+    assert solo == 0.0
+
+
+def test_a_seat_with_no_measured_rate_reports_its_own_rollout_instead():
+    """The cold start, and it is the case that matters: the first duel of
+    a session is where the party-blind rollout hurt most -- both wizards
+    of the first live two-wizard run died in fight 1, before either had a
+    measurement to report."""
+    from deimos_bridge.policies import Candidate, rollout_throughput
+
+    assert rollout_throughput(()) == 0.0
+    assert rollout_throughput([
+        Candidate(card="pass", target=None, turns=13, damage=1045,
+                  pips=0, chosen=False, horizon=12),
+        Candidate(card="Frost Beetle", target=0, turns=13, damage=600,
+                  pips=1, chosen=False, horizon=12),
+        Candidate(card="Snow Serpent", target=0, turns=13, damage=1044,
+                  pips=2, chosen=True, horizon=12),
+    ]) == pytest.approx(87.0)
+
+
+def test_a_seats_measured_rate_reaches_the_other_seats_rollouts():
+    seen = []
+
+    class _Watching(Hivemind):
+        def _decide_one(self, sub, board, ledger, step, pressure=0.0):
+            seen.append((sub.seat, step, pressure))
+            return super()._decide_one(sub, board, ledger, step, pressure)
+
+    subs = party(2)
+    subs[0].rate = 40.0
+    subs[1].rate = 70.0
+    _Watching(passes=1).plan(subs)
+
+    # Pass 0 is the solo baseline and must stay solo, or "alone it would
+    # have played X" is not what it says it is.
+    assert [p for s, step, p in seen if step == 0] == [0.0, 0.0]
+    # After that each seat sees what the OTHERS deal, never its own.
+    later = {s: p for s, step, p in seen if step == 1}
+    assert later == {0: 70.0, 1: 40.0}
+
+
+def test_the_rate_never_includes_the_seat_it_is_planning_for():
+    """A wizard that models itself as its own teammate deals double, and
+    would stop buying setup on exactly the boards that need it."""
+    seen = []
+
+    class _Watching(Hivemind):
+        def _decide_one(self, sub, board, ledger, step, pressure=0.0):
+            seen.append((sub.seat, step, pressure))
+            return super()._decide_one(sub, board, ledger, step, pressure)
+
+    subs = party(3)
+    for i, sub in enumerate(subs):
+        sub.rate = 100.0 * (i + 1)
+    _Watching(passes=1).plan(subs)
+
+    later = {s: p for s, step, p in seen if step == 1}
+    assert later == {0: 500.0, 1: 400.0, 2: 300.0}

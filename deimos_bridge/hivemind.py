@@ -57,24 +57,51 @@ doing its job: a cast believed at 75% still leaves a sliver, and three
 wizards can each add a legitimate share to a mob that then dies to the
 first of them.
 
-**What it deliberately does not do.** This coordinates the first move of
-each round. It does not tell a wizard's *rollout* that its party keeps
-hitting for the rest of the horizon -- and the pieces for that are all
-present, which is exactly why the omission needs writing down.
-`read_state` already puts the other party members into `State.allies`,
-and `Sim.end_round` already acts them out through `_minion_turn`; their
-`minion_power` is simply 0.0, so they stand there doing nothing.
+  **Pressure through the horizon.** The ledger tells a seat what the
+  party is doing *this* round. `_decide_one` also tells its rollout how
+  fast the rest of the circle keeps clearing the board for the other
+  eleven, via `policies.set_ally_rate`.
 
-Filling that field in was measured and rejected. Over 18 cells (3 decks
-x {2,4} wizards x 3 party-scaled boards, n=60 paired seeds, both arms a
-real party fight and differing only in what the policy is *shown*): kill
-rate +0.74 points for a party of two with a range of -11.7 to +20.0, and
-+0.00 for a party of four because every cell saturates at 100%; turns
-saved +0.147 and +0.294 per fight, on fights averaging seven turns, with
-3 of the 9 four-wizard cells going the wrong way. Inside the noise, with
-two contested storm cells losing 6.7 and 11.7 points. So the zero stays,
-and `party_pressure_probe.py` is the reason -- it is a measured decision
-rather than an oversight waiting to be tidied up.
+The last of those was measured and rejected once, and shipping it now is
+a correction rather than a change of mind. `party_pressure_probe.py`
+scored 18 cells on kill rate and turns-to-kill and found +0.74 points
+for a party of two and +0.00 for a party of four -- but its boards were
+"scaled for a party" and every four-wizard cell saturated at 100%, so
+the only thing ally-awareness could move there was how *fast* an already
+won fight was won. It never recorded the quantity that actually breaks:
+whether `turns` carries any signal at all.
+
+The first real two-wizard run against three 435hp Sand Stalkers made
+that regime unmissable. Re-scoring all 58 of its scored rounds offline
+with the shipped code:
+
+    modelled ally damage    no candidate kills   every candidate tied
+    per round               inside the horizon   on `turns`
+    0 (as shipped before)   48 of 58             36 of 58
+    100                      0 of 58              9 of 58
+    172                      0 of 58             12 of 58
+    200                      0 of 58              9 of 58
+    300                      0 of 58             25 of 58
+
+Alone, a level-six wizard cannot clear 1305 HP inside twelve turns
+whatever it plays, so every candidate came back a sentinel and the whole
+decision fell through to the damage tiebreak -- which cannot tell a
+Tower Shield from passing, and chose one six times in 36 rounds. Two
+wizards clear that board in about nine. Raising the horizon does not
+help: reconstructed at 40 seeded decks a cell, the sentinel rate goes
+82.6% at horizon 12 to 36.7% at 16 and stays at 36.7% at 20, 24, 32 and
+40, because the wizard genuinely cannot out-damage the board alone
+however long it looks.
+
+The rate has to be honest in both directions -- 300 a round puts the
+ties straight back, because a party modelled as overwhelming wins every
+line in the same number of turns. So it is measured
+(`Telemetry.damage_rate`, 51 and 57 a round for those two wizards) and
+not taken from the coordinator's own priced plan, which reads 172 and
+201. `minion_power` is still 0.0 and the allies still stand there doing
+nothing: `_minion_turn` funnels every ally's damage into `enemies[0]`
+whatever the ledger assigned, so the pressure is applied by
+`policies._allies_hit` instead, weakest mob first.
 
 Everything here is plain Python: no Qt, no wizwalker, no game. The
 coordinator is driven by `WizAiBackend.coordinator`, and the policies it
@@ -88,6 +115,8 @@ import threading
 import time
 
 from dataclasses import dataclass, field
+
+from . import policies
 
 
 # --------------------------------------------------------------------------
@@ -408,6 +437,10 @@ class _Submission:
     policy: object
     read: object = None
     mapping: list = None
+    #: enemy health a round this seat removes, measured. What every
+    #: OTHER seat's rollout needs in order to model a party fight rather
+    #: than a solo one -- see `policies.set_ally_rate`.
+    rate: float = 0.0
 
 
 class _Gather:
@@ -534,14 +567,21 @@ class Hivemind:
                 pass
 
     # -- the barrier ------------------------------------------------------
-    async def decide(self, seat, sim, state, policy, read=None):
+    async def decide(self, seat, sim, state, policy, read=None, rate=0.0):
         """This seat's move for this round, agreed with the rest of the party.
 
         Returns whatever a policy returns — a `(card, target)` pair, a
         card, or None for a pass — so the caller cannot tell a
         coordinated decision from a solo one and needs no new branch.
+
+        `rate` is enemy health this seat removes per round, measured.
+        It is not used for this seat's own decision at all; it is what
+        the OTHER seats' rollouts are told about this one. Zero -- the
+        default, and what a caller with nothing to report should send --
+        leaves the party modelled exactly as it was before there was a
+        rate at all.
         """
-        gather, wait = self._submit(seat, sim, state, policy, read)
+        gather, wait = self._submit(seat, sim, state, policy, read, rate)
         if wait is not None:
             _loop, event = wait
             deadline = time.monotonic() + self.timeout
@@ -579,7 +619,7 @@ class Hivemind:
                       f"round never came back")
         return gather.plan.get(seat)
 
-    def _submit(self, seat, sim, state, policy, read):
+    def _submit(self, seat, sim, state, policy, read, rate=0.0):
         """Put this seat in the open gather. Returns (gather, wait-or-None)."""
         stale = None
         with self._lock:
@@ -598,7 +638,7 @@ class Hivemind:
             gather.expected.add(seat)
             gather.subs[seat] = _Submission(
                 seat, self._seats.get(seat, f"wizard {seat + 1}"),
-                sim, state, policy, read)
+                sim, state, policy, read, rate=max(0.0, float(rate or 0.0)))
             if gather.full():
                 gather.closing = True
                 close_now = True
@@ -718,6 +758,11 @@ class Hivemind:
                            else align_enemies(sub.state.enemies, ref_enemies))
 
         actions, effects, solo = {}, {}, {}
+        #: enemy health a round, per seat: what everyone ELSE's rollout
+        #: is told about that seat. Measured where the seat could report
+        #: one, and its own pass-0 rollout's throughput where it could
+        #: not -- see `policies.rollout_throughput`.
+        rates = {}
         notes = {}
         saved = 0
         passes_run = 0
@@ -732,9 +777,19 @@ class Hivemind:
                             ledger.add(effects.get(other.seat),
                                        other.mapping)
                 board = ledger.apply(sub.state, sub.mapping, self.margin)
-                action, note = self._decide_one(sub, board, ledger, step)
+                # Pass 0 is left genuinely solo: it is the baseline the
+                # readout reports as "alone it would have played X", and
+                # a baseline that already knows about the party is not a
+                # baseline. It is also where each seat's cold-start
+                # throughput estimate comes from.
+                pressure = 0.0 if step == 0 else sum(
+                    rates.get(o.seat, 0.0) for o in subs if o.seat != sub.seat)
+                action, note = self._decide_one(sub, board, ledger, step,
+                                                pressure)
                 if step == 0:
                     solo[sub.seat] = action
+                    rates[sub.seat] = sub.rate or policies.rollout_throughput(
+                        getattr(sub.policy, "last_candidates", ()))
                 if step and _move_id(action) != _move_id(actions.get(sub.seat)):
                     # `or`, not `=`: seat 3 settling must not erase the
                     # fact that seat 1 moved, or the descent stops one
@@ -788,8 +843,37 @@ class Hivemind:
             saved=saved, retargets=retargets)
         return actions, party
 
-    def _decide_one(self, sub, board, ledger, step):
-        """One seat's move against the board the party has left it."""
+    def _decide_one(self, sub, board, ledger, step, pressure=0.0):
+        """One seat's move against the board the party has left it.
+
+        Two different questions get answered here, and only the first
+        used to be. `Ledger.apply` has already settled "what is left for
+        me *this* round"; `pressure` settles "and how fast is the rest
+        of the circle clearing it", which is what the rollout needs in
+        order to see past the next twelve turns.
+
+        Without the second a seat plans every fight as though it were
+        alone in it. Against the three 435hp Sand Stalkers of the day's
+        two-wizard run that meant no candidate could kill inside the
+        horizon in 48 of 58 scored rounds -- the sentinel for every one
+        of them, `turns` tied, and the whole decision handed to a
+        tiebreak that rates a Tower Shield exactly as highly as doing
+        nothing. It played one six times.
+
+        `pressure` is deliberately NOT the total of `ledger.damage`,
+        which is sitting right here and is the obvious thing to reach
+        for. The ledger prices one cast this round; a rate has to hold
+        for twelve.
+        Over the day's run the ledger's number averages 172 and 201 a
+        round against realised rates of 51 and 57 -- 3.2x high, which
+        would tell the rollout the 1305hp board dies in five turns when
+        it really takes twelve, and stop it buying either setup or
+        survival on precisely the boards where both wizards died.
+        """
+        with policies.party_rate(pressure):
+            return self._decide_alone(sub, board, ledger, step)
+
+    def _decide_alone(self, sub, board, ledger, step):
         if step and self.overkill_guard and ledger.casts:
             alive_now = any(e.alive for e in board.enemies)
             alive_before = any(e.alive for e in sub.state.enemies)

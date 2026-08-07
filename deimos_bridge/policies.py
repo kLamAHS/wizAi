@@ -26,6 +26,7 @@ default without invalidating any published table.
 """
 
 
+import contextlib
 import re
 
 from dataclasses import dataclass
@@ -909,6 +910,127 @@ def ev_card(card):
     return priced
 
 
+#: Enemy health the REST of the circle takes off the board each round.
+#: Zero is a wizard fighting alone, and is the shipped behaviour bit for
+#: bit -- every solo path, every test and every tuning sweep leaves this
+#: at zero and gets the same numbers it always got.
+_ALLY_RATE = 0.0
+
+
+def set_ally_rate(dps):
+    """Tell the rollout how hard the rest of the party is hitting.
+
+    A rollout that models only its own caster is not merely pessimistic,
+    it is *blind in a way that destroys the ranking*, and both exports
+    from the day's two-wizard run show it. Re-scoring all 58 of their
+    scored rounds offline:
+
+      ==============  ================  ===============
+      modelled ally   rounds where NO   rounds where
+      damage a round  candidate kills   every candidate
+                      inside the        tied on `turns`
+                      horizon
+      ==============  ================  ===============
+      0 (shipped)     48 of 58          36 of 58
+      100             0 of 58            9 of 58
+      200             0 of 58            9 of 58
+      300             0 of 58           25 of 58
+      ==============  ================  ===============
+
+    Alone against three 435hp Sand Stalkers a level-six wizard cannot
+    clear the board inside twelve turns no matter what it plays, so
+    every candidate came back with the `stalled` sentinel, `turns` tied
+    for all of them, and the entire decision fell through to the damage
+    tiebreak. Two wizards clear that board comfortably -- and once the
+    rollout knows it, `turns` starts discriminating again, which is the
+    key the policy was designed around.
+
+    The measured rates from that run are 99 damage a round for the ice
+    wizard and 151 for the fire one, so the honest number sits in the
+    band where this helps most. It is not knife-edge -- 100 and 200 score
+    the same -- but 300 puts it back where it started for the opposite
+    reason: model the party as overwhelming and every line wins in the
+    same number of turns, so the ties come back. Feed this what the
+    party is actually measured to do, never a hopeful number.
+    """
+    global _ALLY_RATE
+    _ALLY_RATE = max(0.0, float(dps or 0.0))
+    return _ALLY_RATE
+
+
+def ally_rate():
+    return _ALLY_RATE
+
+
+@contextlib.contextmanager
+def party_rate(dps):
+    """`set_ally_rate` for the duration of one decision, then back.
+
+    The hivemind plans seats one at a time and each seat faces a
+    different set of teammates, so the rate is per *call*, not per run.
+    Restoring on the way out is what keeps a seat that raises from
+    leaving its neighbours' rate installed on the next round's solo
+    fallback.
+    """
+    before = _ALLY_RATE
+    set_ally_rate(dps)
+    try:
+        yield
+    finally:
+        set_ally_rate(before)
+
+
+def rollout_throughput(candidates):
+    """Damage a round the best line in `candidates` expects to deal.
+
+    The cold start for `set_ally_rate`: before a seat has finished a
+    fight it has no measured rate to report, and the first duel of a
+    session is exactly where the party-blind rollout hurt most -- both
+    wizards of the day's run died in fight 1.
+
+    The rollout's own answer is free and already computed. Checked
+    against what the two wizards went on to deal per round (51 and 57),
+    their best fight-1 lines banked 1045 and 679 over a horizon of 12,
+    i.e. 87 and 57 a round: one exact and one high by 1.7x. That beats
+    the other number lying around -- the coordinator's priced plan for
+    the round, 172 and 201 a round, high by 3.2x -- because a plan
+    prices a single cast and a wizard cannot cast its best card every
+    round.
+
+    Returns 0.0 when there is nothing to read, which models no ally.
+    """
+    best = None
+    for cand in candidates or ():
+        if cand.card == "pass" or not cand.horizon:
+            continue
+        rate = float(cand.damage) / float(cand.horizon)
+        if best is None or rate > best:
+            best = rate
+    return best or 0.0
+
+
+def _allies_hit(state, rate):
+    """Take `rate` health off the board, weakest mob first.
+
+    Weakest first because that is what the party demonstrably does: the
+    ledger writes a mob the committed casts kill down to zero and the
+    overkill guard stops a second wizard firing into it, so the circle
+    finishes what is nearly dead before it starts something new.
+    Spreading the rate evenly instead would model a party that never
+    kills anything, which is the failure this exists to fix.
+    """
+    left = float(rate)
+    if left <= 0:
+        return
+    for enemy in sorted((e for e in state.enemies if e.alive),
+                        key=lambda e: e.hp):
+        if left <= 0:
+            break
+        bite = min(left, float(enemy.hp))
+        enemy.hp -= bite
+        left -= bite
+
+
 def _lost_score(rank, dealt, kills, turn):
     """A 2-tuple, always: the caller unpacks (turns, neg_damage).
 
@@ -926,7 +1048,7 @@ def _lost_score(rank, dealt, kills, turn):
 
 
 def _rollout(sim, state, first_action, max_turns=12, target=0,
-             continuation=None):
+             continuation=None, allies=None):
     """Score playing `first_action` now: (turns_to_kill, -damage_dealt).
 
     Lower is better on both, so `min` ranks them.
@@ -947,6 +1069,14 @@ def _rollout(sim, state, first_action, max_turns=12, target=0,
     decks get systematically undervalued. Measured on the project's own
     decks, that alone was worth 21 points of kill rate on ice/stack and
     11 on balance/oneshot.
+
+    `allies` is enemy health the rest of the circle removes each round
+    (`set_ally_rate` for why, and for the numbers). It lands AFTER the
+    caster's own cast, so a card that kills a mob outright is still
+    credited with the kill rather than having it stolen by a teammate
+    the engine happened to resolve first -- the real turn order is
+    unknowable, and this is the reading that keeps each candidate's own
+    contribution visible.
     """
     import copy
 
@@ -955,6 +1085,7 @@ def _rollout(sim, state, first_action, max_turns=12, target=0,
     # installed each candidate globally had the live rollout playing
     # whatever the probe happened to be measuring.
     continuation = continuation or _continuation()
+    allies = _ALLY_RATE if allies is None else max(0.0, float(allies))
     probe = copy.copy(sim)
     probe.rng = _Fixed()
     s = copy.deepcopy(state)
@@ -1058,6 +1189,15 @@ def _rollout(sim, state, first_action, max_turns=12, target=0,
                 probe.cast(s, action, target)
             except Exception:
                 return unplayable
+        if turn > 1:
+            # Turn 1 is already on the board. `Hivemind.plan` hands the
+            # policy a state `Ledger.apply` has *already* taken this
+            # round's committed party damage off, so hitting again here
+            # would count the same casts twice -- and the only producer
+            # of a non-zero rate is that same coordinator. Under-counts
+            # by one round out of the horizon when a teammate is held or
+            # casts nothing, which is the conservative direction.
+            _allies_hit(s, allies)
         if not enemy_alive():
             return turn, -dealt_now()
         try:

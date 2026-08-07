@@ -183,6 +183,13 @@ class WizAiBackend:
         #: optional callback() the first time this wizard is found at 0
         #: health in a duel it is still nominally in. See `_check_defeated`.
         self.on_defeated = None
+        #: optional callback() -> enemy health this wizard removes per
+        #: round, for the coordinator to hand the OTHER seats' rollouts.
+        #: A hook rather than a `Telemetry` reference because the backend
+        #: does not own one -- the GUI does, and it wires this to
+        #: `Telemetry.damage_rate`. Absent means "nothing measured",
+        #: which is what a headless backend and a solo wizard both want.
+        self.damage_rate = None
         #: whether the last read found it down, so the message is said
         #: once per knockdown rather than once per round
         self._down = False
@@ -299,8 +306,14 @@ class WizAiBackend:
                 # which already carries the other wizards' commitments.
                 # It also blocks until they have all arrived, which is
                 # why `decide` is async and this branch is awaited.
+                rate = 0.0
+                if self.damage_rate is not None:
+                    try:
+                        rate = float(self.damage_rate() or 0.0)
+                    except Exception:
+                        rate = 0.0   # a broken hook must not cost a round
                 choice = await self.coordinator.decide(
-                    self.seat, sim, read.state, policy, read)
+                    self.seat, sim, read.state, policy, read, rate=rate)
             else:
                 choice = policy(sim, read.state)
         except Exception as exc:                      # a policy must never

@@ -8936,3 +8936,48 @@ def test_an_impossible_arrival_is_not_preferred_to_a_death():
     m = match_enemies([mob(400), mob(300)], [mob(120)])
     assert m[0] is None
     assert m[1] is not None and m[1].hp == 120
+
+
+def test_the_damage_rate_counts_every_round_not_just_the_measured_ones():
+    """A teammate's rollout needs damage per round *of fight*, and only
+    about half of rounds yield a measurement -- the ones where something
+    landed. Averaging the measurable half of the day's two-wizard run
+    gives 99 and 151 a round; over every round it gives 51 and 57, and
+    51 and 57 are what the boards actually lost."""
+    from deimos_bridge.telemetry import Telemetry
+
+    tel = Telemetry()
+    assert tel.damage_rate() == 0.0, "nothing fought yet is not a rate"
+
+    tel.start_fight()
+    tel.fights[-1].rounds = 11
+    tel.fights[-1].damage_dealt = 468.0
+    tel.start_fight()
+    tel.fights[-1].rounds = 11
+    tel.fights[-1].damage_dealt = 789.0
+    tel.start_fight()
+    tel.fights[-1].rounds = 8
+    tel.fights[-1].damage_dealt = 328.0
+    tel.start_fight()
+    tel.fights[-1].rounds = 7
+    tel.fights[-1].damage_dealt = 293.0
+
+    # Jeffrey's run: 1878 damage over 37 rounds of fight.
+    assert tel.damage_rate() == pytest.approx(1878 / 37, abs=0.05)
+
+
+def test_a_fight_that_dealt_nothing_still_counts_as_rounds():
+    """The round that drags the rate down is the round the rate exists to
+    describe. Konstantin's fight 1 was five rounds and zero damage, and a
+    rate that skipped it would tell the other wizard's rollout that the
+    board dies faster than it does."""
+    from deimos_bridge.telemetry import Telemetry
+
+    tel = Telemetry()
+    tel.start_fight()
+    tel.fights[-1].rounds = 5
+    tel.fights[-1].damage_dealt = 0.0
+    tel.start_fight()
+    tel.fights[-1].rounds = 5
+    tel.fights[-1].damage_dealt = 313.0
+    assert tel.damage_rate() == pytest.approx(31.3)
