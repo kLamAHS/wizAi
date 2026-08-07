@@ -10112,3 +10112,81 @@ def test_a_fight_that_dealt_nothing_still_counts_as_rounds():
     tel.fights[-1].rounds = 5
     tel.fights[-1].damage_dealt = 313.0
     assert tel.damage_rate() == pytest.approx(31.3)
+
+
+def test_the_press_x_wait_ends_when_the_box_appears():
+    """A flat `sleep(0.6)` after every press-X is 0.6s of standing still
+    whether the box took 30ms or never came. The game answers in its own
+    time and the answer is readable, which is the same argument
+    `_dialogue_moved` already makes on the other side of the
+    conversation."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    calls = {"n": 0}
+
+    class _Client:
+        pass
+
+    async def in_dialogue(client):
+        calls["n"] += 1
+        return calls["n"] >= 3          # the box shows up on the 3rd look
+
+    orig = questing.in_dialogue
+    questing.in_dialogue = in_dialogue
+    try:
+        opened = asyncio.run(questing.dialogue_opened(_Client(), settle=0.6,
+                                                      poll=0.001))
+    finally:
+        questing.in_dialogue = orig
+    assert opened is True
+    assert calls["n"] == 3              # it stopped looking, not slept on
+
+    # and a box that never comes falls through to the full settle, which
+    # is exactly the old behaviour
+    calls["n"] = 0
+
+    async def never(client):
+        calls["n"] += 1
+        return False
+
+    questing.in_dialogue = never
+    try:
+        assert asyncio.run(questing.dialogue_opened(_Client(), settle=0.05,
+                                                    poll=0.01)) is False
+    finally:
+        questing.in_dialogue = orig
+
+
+def test_being_too_far_from_the_marker_says_how_far():
+    """"not at the quest marker" was the same sentence for a wizard
+    standing on the NPC's toes with an odd marker read and one across
+    the zone -- and the first of those is auto-dialogue looking dead
+    while working exactly as written."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    class _P:
+        def __init__(self, x, y, z=0.0):
+            self.x, self.y, self.z = x, y, z
+
+    class _Body:
+        async def position(self):
+            return _P(4000.0, 0.0)
+
+    class _Client:
+        body = _Body()
+
+    async def quest_position(client):
+        return _P(0.0, 0.0), ""
+
+    orig = questing.read_quest_position
+    questing.read_quest_position = quest_position
+    try:
+        near, why = asyncio.run(questing.at_quest_marker(_Client()))
+    finally:
+        questing.read_quest_position = orig
+    assert near is False
+    assert "4,000" in why and "750" in why

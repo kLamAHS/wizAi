@@ -1205,6 +1205,331 @@ def test_allies_finish_the_weakest_mob_rather_than_spreading_out():
     assert _Board.enemies[0].hp == 330.0        # the other 70 spilled over
 
 
+# ------------------------------------------------- healing when hurt
+#
+# The observation is real: over the run at rev 8666bda7 the ice wizard
+# held a Pixie for 44 rounds and cast it never, five of those below half
+# health, and the fire wizard walked into his eighth fight on 53% and
+# the client read him at zero when it ended.
+#
+# The obvious fix was tried and MEASURED AS HARMFUL, which is why there
+# is a test here and no feature. `died()` ranks a losing line by kills
+# and banked damage, so crediting it for dying later looks like exactly
+# the missing health term -- and it does produce healing: at 60/40/17%
+# health on a 900hp board the wizard cannot clear, the same decision
+# goes Ice Trap -> Pixie. But paired against the shipped behaviour on a
+# brutal fire board it loses 8.7, 10.0 and 12.3 points of kill rate on
+# three independent seed streams at n=600. Scaling the credit by how
+# hurt the wizard already is does not rescue it, because on those boards
+# the wizard IS hurt.
+#
+# The reason is in the ranking that is already there. `stalled` outranks
+# `died` by a whole point, so a heal that genuinely SAVES the wizard
+# already wins on its own -- and the credit only ever fires on the
+# remaining case, a heal that delays a death it cannot prevent. There,
+# racing is better, and the arithmetic says so three times over.
+#
+# What did happen to the fire wizard is upstream of the fight: he
+# started it on 53%. That is `_health_needed` below.
+
+def test_a_heal_at_full_health_is_not_even_offered():
+    """`_is_inert` has the first word and keeps it: a Pixie at full
+    health restores exactly nothing and must not win anything."""
+    from deimos_bridge.policies import greedy_ttk
+
+    sim, state = wizard(school="ice", hand=("Pixie", "Ice Trap",
+                                            "Frost Beetle"),
+                        pips=4, hp=1500, board=((900, "balance"),))
+    policy = greedy_ttk()
+    policy(sim, state)
+    assert not any(c.card == "Pixie" for c in policy.last_candidates)
+
+
+def test_a_heal_that_actually_saves_the_wizard_already_wins():
+    """The case the credit was reaching for is covered without it: a
+    Pixie that carries the wizard past the horizon moves the line from
+    `died` to `stalled`, which is a whole rank better."""
+    from deimos_bridge import policies
+
+    sim, state = wizard(school="ice", hand=("Pixie", "Ice Trap",
+                                            "Frost Beetle"),
+                        pips=4, hp=1500, board=((150, "balance"),))
+    state.player.hp = 250.0
+    for e in state.enemies:
+        e.flat_hit = 40
+    scores = {c.name: policies._rollout(sim, state, c, 12, 0)
+              for c in state.player.hand}
+    assert scores["Pixie"][0] < scores["Ice Trap"][0], scores
+    choice = policies.greedy_ttk()(sim, state)
+    card, _t = choice if isinstance(choice, tuple) else (choice, None)
+    assert card.name == "Pixie"
+
+
+def test_the_floor_for_the_next_fight_is_what_the_fights_have_cost():
+    """0.35 was chosen against "essentially 0". A fight costs far more:
+    the fire wizard's took 191 to 630 out of 1,196, so he started his
+    eighth on 53% and did not finish it."""
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from deimos_bridge.gui.live import LiveWorker
+    from deimos_bridge.telemetry import FightRecord, Telemetry
+
+    worker = LiveWorker(Telemetry(), "fire", [], "ttk-lookahead", 1)
+    seat = worker.seats[0]
+    seat.max_hp = 1196
+
+    # nothing fought yet: the old constant, unchanged
+    assert worker._health_needed(seat) == worker.LOW_HEALTH
+
+    # a fight that cost 630 of 1196 -- 53%
+    seat.tel.fights.append(FightRecord(index=1, rounds=12,
+                                       damage_taken=630.0))
+    assert worker._health_needed(seat) == pytest.approx(630 / 1196)
+
+    # a cheap fight after it does not lower the floor while the hard one
+    # is still in the window
+    seat.tel.fights.append(FightRecord(index=2, rounds=4,
+                                       damage_taken=191.0))
+    assert worker._health_needed(seat) == pytest.approx(630 / 1196)
+
+    # ...and one catastrophic pull cannot wedge the run forever
+    seat.tel.fights.append(FightRecord(index=3, rounds=20,
+                                       damage_taken=1190.0))
+    assert worker._health_needed(seat) == worker.LOW_HEALTH_CAP
+
+
+def test_the_floor_is_never_lower_than_what_shipped():
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from deimos_bridge.gui.live import LiveWorker
+    from deimos_bridge.telemetry import FightRecord, Telemetry
+
+    worker = LiveWorker(Telemetry(), "fire", [], "ttk-lookahead", 1)
+    seat = worker.seats[0]
+    seat.max_hp = 1196
+    seat.tel.fights.append(FightRecord(index=1, rounds=2, damage_taken=10.0))
+    assert worker._health_needed(seat) == worker.LOW_HEALTH
+    # an unreadable max health is no evidence either way
+    seat.max_hp = 0
+    assert worker._health_needed(seat) == worker.LOW_HEALTH
+
+
+# ------------------------------------------- blading the other wizard
+#
+# The party's seats are not interchangeable: a level-10 ice wizard
+# removes about 85 a round and the fire wizard beside it removes 200
+# with one Meteor Strike. A +35% blade is worth 30 on the first and 70
+# on the second -- and until now every seat could only ever put one on
+# itself, so the small hitter spent rounds buffing the small hit.
+#
+# Priced on `rate`, the measured health-a-round each seat removes,
+# rather than on this round's cast: Wizard101 resolves a round in pip
+# order and the coordinator does not know that order, so a blade laid
+# now may or may not be up before the teammate swings -- but it is
+# certainly up for the swing after.
+
+def _blade_party(hands, schools, rates, names=("Jeffrey", "Konstantin"),
+                 pips=4):
+    from w101_sim import Actor, Boss, Rules, Sim, State
+
+    table = cards()
+    subs = []
+    for i, (hand, school, rate) in enumerate(zip(hands, schools, rates)):
+        p = Actor(name=names[i], school=school, hp=1500, max_hp=1500, team=0,
+                  norm_pips=pips)
+        p.hand = [table[n] for n in hand]
+        foes = [Actor(name="Mob", school="balance", hp=1200, max_hp=1200,
+                      team=1, flat_hit=45)]
+        sim = Sim(cards=table, decklist=list(hand), school=school,
+                  boss=Boss("Mob", 1200, "balance", 45), rules=Rules(),
+                  player_hp=1500)
+        sub = _Submission(i, names[i], sim, State(p, foes), greedy_ttk())
+        sub.rate = rate
+        subs.append(sub)
+    return subs
+
+
+def test_an_off_school_blade_goes_to_the_wizard_who_can_use_it():
+    """The headline, and the shape a real starter hand keeps producing:
+    the ice wizard is holding a Fireblade. On itself it multiplies
+    nothing at all -- `_consume_damage_charms` only applies a charm
+    where `matches(school)` -- and on the fire wizard beside it, it
+    multiplies every hit that wizard makes."""
+    subs = _blade_party(hands=[("Fireblade", "Tower Shield"),
+                               ("Fire Cat", "Fire Cat")],
+                        schools=["ice", "fire"], rates=[40.0, 200.0])
+    _actions, plan_out = Hivemind(passes=2).plan(subs)
+    ice = next(m for m in plan_out.moves if m.seat == 0)
+    assert ice.card == "Fireblade"
+    assert ice.buff_ally == "Konstantin"
+    assert plan_out.redirected == 1
+    assert "buffing a teammate" in plan_out.summary()
+
+
+def test_the_big_hitter_keeps_its_own_blade():
+    """Nothing to redirect when the caster is already the right wizard.
+    The rule ranks every seat INCLUDING itself, so this is not a special
+    case -- it is the same comparison coming out the other way."""
+    subs = _blade_party(hands=[("Fireblade", "Tower Shield"),
+                               ("Fire Cat", "Fire Cat")],
+                        schools=["fire", "fire"], rates=[200.0, 40.0])
+    _actions, plan_out = Hivemind(passes=2).plan(subs)
+    assert plan_out.redirected == 0
+    assert not any(m.buff_ally for m in plan_out.moves)
+
+
+def test_a_blade_no_teammate_can_use_is_not_moved():
+    """`buff_applies` is the engine's own question. An ice wizard's ice
+    blade beside a lone fire wizard has nowhere to go."""
+    subs = _blade_party(hands=[("Frost Beetle", "Tower Shield"),
+                               ("Fire Cat", "Fire Cat")],
+                        schools=["ice", "fire"], rates=[40.0, 200.0])
+    _actions, plan_out = Hivemind(passes=2).plan(subs)
+    assert plan_out.redirected == 0
+
+
+def test_a_party_of_one_never_redirects():
+    subs = _blade_party(hands=[("Fireblade", "Tower Shield")],
+                        schools=["ice"], rates=[40.0], names=("Jeffrey",))
+    _actions, plan_out = Hivemind(passes=2).plan(subs)
+    assert plan_out.redirected == 0
+
+
+def test_a_seat_that_is_attacking_is_left_alone():
+    """Trading a hit for a buff is the rollout's call, not this rule's.
+    Asserted on `_redirect_blades` directly so the guard is tested
+    rather than whatever the policy happened to choose."""
+    from deimos_bridge.hivemind import CastEffect, _redirect_blades
+
+    subs = _blade_party(hands=[("Fireblade", "Fire Cat"),
+                               ("Fire Cat", "Fire Cat")],
+                        schools=["fire", "fire"], rates=[40.0, 200.0])
+    table = cards()
+    actions = {0: (table["Fire Cat"], 0), 1: (table["Fire Cat"], 0)}
+    effects = {0: CastEffect(card="Fire Cat", damage={0: 100.0}),
+               1: CastEffect(card="Fire Cat", damage={0: 100.0})}
+    notes = {0: "party", 1: "party"}
+    moved = _redirect_blades(subs, actions, effects,
+                             {0: 40.0, 1: 200.0}, notes)
+    assert moved == 0
+    assert notes[0] == "party"
+
+
+def test_a_held_seat_is_not_given_a_move_by_the_redirect():
+    """The overkill guard held it because the board is already dead.
+    Handing it a blade puts a cast back into a round that was
+    deliberately skipped."""
+    from deimos_bridge.hivemind import CastEffect, _redirect_blades
+
+    subs = _blade_party(hands=[("Fireblade", "Tower Shield"),
+                               ("Fire Cat", "Fire Cat")],
+                        schools=["ice", "fire"], rates=[40.0, 200.0])
+    actions = {0: None, 1: (cards()["Fire Cat"], 0)}
+    effects = {0: CastEffect(), 1: CastEffect(card="Fire Cat",
+                                              damage={0: 100.0})}
+    notes = {0: "held", 1: "party"}
+    assert _redirect_blades(subs, actions, effects,
+                            {0: 40.0, 1: 200.0}, notes) == 0
+    assert actions[0] is None
+
+
+def test_a_teammate_with_no_measured_rate_is_not_a_buff_target():
+    """`rate` is zero before a seat has finished a fight. Buffing a
+    wizard the coordinator knows nothing about is a guess, and the
+    caster's own move is at least a decision."""
+    from deimos_bridge.hivemind import CastEffect, _redirect_blades
+
+    subs = _blade_party(hands=[("Fireblade", "Tower Shield"),
+                               ("Fire Cat", "Fire Cat")],
+                        schools=["ice", "fire"], rates=[0.0, 0.0])
+    actions = {0: (cards()["Fireblade"], None), 1: (cards()["Fire Cat"], 0)}
+    effects = {0: CastEffect(card="Fireblade"), 1: CastEffect(card="Fire Cat")}
+    notes = {0: "party", 1: "party"}
+    assert _redirect_blades(subs, actions, effects, {0: 0.0, 1: 0.0},
+                            notes) == 0
+
+
+def test_the_click_lands_on_the_named_teammate():
+    """By name, because the coordinator speaks in wizard names and this
+    client's participant list is its own -- seat 2 is not index 2 in
+    anybody else's read."""
+    from deimos_bridge.live_backend import WizAiCombatHandler
+
+    class _Ally:
+        def __init__(self, name):
+            self.name = name
+
+    class _Read:
+        state = type("S", (), {"allies": [_Ally("Konstantin"),
+                                          _Ally("Somebody Else")]})()
+        ally_members = ["konstantin-member", "other-member"]
+        client_member = "me"
+
+    handler = WizAiCombatHandler.__new__(WizAiCombatHandler)
+    assert handler._named_ally(_Read(), "Konstantin") == "konstantin-member"
+    assert handler._named_ally(_Read(), "Somebody Else") == "other-member"
+    # not in this duel's list at all -- a client that read a round late
+    assert handler._named_ally(_Read(), "Nobody") is None
+    assert handler._named_ally(_Read(), "") is None
+
+
+def test_a_blade_for_a_teammate_is_not_clicked_on_the_caster():
+    """A Fireblade reads `tgt: 'self'`, so without the override it goes
+    on the wizard casting it -- which is the entire thing being
+    changed."""
+    from deimos_bridge.live_backend import WizAiCombatHandler
+
+    class _Ally:
+        name = "Konstantin"
+
+    class _Read:
+        state = type("S", (), {"allies": [_Ally()]})()
+        ally_members = ["konstantin-member"]
+        client_member = "me"
+        enemy_members = ["mob"]
+
+    handler = WizAiCombatHandler.__new__(WizAiCombatHandler)
+    blade = cards()["Fireblade"]
+    got = asyncio.run(handler._resolve_target(_Read(), None, blade,
+                                              ally="Konstantin"))
+    assert got == "konstantin-member"
+    # no ally named: the card's own target, the caster
+    got = asyncio.run(handler._resolve_target(_Read(), None, blade))
+    assert got == "me"
+    # named but absent: fall back rather than click something arbitrary
+    got = asyncio.run(handler._resolve_target(_Read(), None, blade,
+                                              ally="Nobody"))
+    assert got == "me"
+
+
+def test_the_round_record_says_who_the_blade_went_on():
+    from deimos_bridge.hivemind import SeatMove
+    from deimos_bridge.live_backend import WizAiBackend
+    from deimos_bridge.mock_client import MockCard, MockCombat, MockMember
+
+    class _Hive:
+        async def decide(self, seat, sim, state, pol, read=None, rate=0.0):
+            return pol(sim, state)
+
+        def last_move(self, seat):
+            return SeatMove(seat=0, name="wizard 1", card="Fireblade",
+                            buff_ally="Konstantin", note="buff:Konstantin")
+
+    backend = WizAiBackend.from_trained(
+        school="fire", deck=["Fireblade"] * 4, cards=cards(),
+        policy=greedy_ttk(), policy_name="ttk-lookahead", coordinator=_Hive())
+    backend.attach_combat(MockCombat(
+        [MockMember("Wizard", 900, client=True, team_id=0, normal_pips=4),
+         MockMember("Lost Soul", 450, monster=True, team_id=1)],
+        [MockCard("Fireblade")]))
+    decision = asyncio.run(backend.decide())
+    assert decision.ally_name == "Konstantin"
+    assert decision.target_kind == "ally"
+    assert "put on Konstantin" in decision.reason
+
+
 # ------------------------------- a trap is worth what the party cashes
 #
 # Wards are the party's shared currency and this rate was landing as raw
