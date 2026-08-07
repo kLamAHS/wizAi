@@ -397,6 +397,17 @@ class SeatMove:
     solo_card: str = ""
     solo_target: int = None
     damage: float = 0.0
+    #: {enemy name: expected damage} — every mob this cast takes health
+    #: off, not just the one it was aimed at. `target_name` cannot
+    #: answer that: an AoE aims at nothing in particular, so
+    #: `_aims_at_an_enemy` gives it no index and no name, and the
+    #: telemetry that keys off the name then cannot see it at all. The
+    #: run at rev 8666bda7 is what that costs -- every one of the five
+    #: rounds where the fire wizard cast Meteor Strike reported an
+    #: empty `party_hits` on the ice wizard's side, so his residual
+    #: silently absorbed the whole AoE. One round recorded 987 damage
+    #: against a 115 prediction and was filed as clean.
+    hit: dict = field(default_factory=dict)
     note: str = ""
 
     @property
@@ -787,8 +798,16 @@ class Hivemind:
                 # throughput estimate comes from.
                 pressure = 0.0 if step == 0 else sum(
                     rates.get(o.seat, 0.0) for o in subs if o.seat != sub.seat)
+                # ...and what they deal it IN. A trap only fires for a
+                # hit of a school it matches, so "the party removes 90 a
+                # round" and "the party removes 90 a round OF FIRE" are
+                # different facts about whether this seat's Feint is
+                # worth a turn. See `policies._allies_hit`.
+                pressure_schools = () if step == 0 else tuple(
+                    s for s in (_seat_school(o) for o in subs
+                                if o.seat != sub.seat) if s)
                 action, note = self._decide_one(sub, board, ledger, step,
-                                                pressure)
+                                                pressure, pressure_schools)
                 if step == 0:
                     solo[sub.seat] = action
                     rates[sub.seat] = sub.rate or policies.rollout_throughput(
@@ -822,6 +841,19 @@ class Hivemind:
             # this every self-cast was labelled with `enemies[0]`.
             aims = card is not None and _aims_at_an_enemy(card)
             base_aims = base_card is not None and _aims_at_an_enemy(base_card)
+            # By name rather than by index, because the readers are other
+            # seats and an index only means anything on the board it was
+            # read from. Summed per name, which conflates same-named mobs
+            # -- three O'Leary Nappers on one board are one key -- but
+            # that is what `_party_hits` and `_party_expected` already do
+            # with `target_name`, so this changes nothing about it.
+            hit = {}
+            for i, dmg in (effect.damage or {}).items():
+                if not dmg:
+                    continue
+                nm = _enemy_name(sub.state, i)
+                if nm:
+                    hit[nm] = hit.get(nm, 0.0) + float(dmg)
             move = SeatMove(
                 seat=sub.seat, name=sub.name,
                 card=getattr(card, "name", "") or "",
@@ -829,7 +861,7 @@ class Hivemind:
                 target_name=_enemy_name(sub.state, target if aims else None),
                 solo_card=getattr(base_card, "name", "") or "",
                 solo_target=(base_target if base_aims else None),
-                damage=effect.total, note=notes.get(sub.seat, ""))
+                damage=effect.total, hit=hit, note=notes.get(sub.seat, ""))
             if move.retargeted:
                 retargets += 1
             if notes.get(sub.seat) == "held":
@@ -846,7 +878,8 @@ class Hivemind:
             saved=saved, retargets=retargets)
         return actions, party
 
-    def _decide_one(self, sub, board, ledger, step, pressure=0.0):
+    def _decide_one(self, sub, board, ledger, step, pressure=0.0,
+                    pressure_schools=()):
         """One seat's move against the board the party has left it.
 
         Two different questions get answered here, and only the first
@@ -873,7 +906,7 @@ class Hivemind:
         it really takes twelve, and stop it buying either setup or
         survival on precisely the boards where both wizards died.
         """
-        with policies.party_rate(pressure):
+        with policies.party_rate(pressure, pressure_schools):
             return self._decide_alone(sub, board, ledger, step)
 
     def _decide_alone(self, sub, board, ledger, step):
@@ -893,6 +926,19 @@ class Hivemind:
             return sub.policy(sub.sim, board), ("party" if step else "solo")
         except Exception as exc:
             return None, f"policy raised {type(exc).__name__}: {exc}"
+
+
+def _seat_school(sub):
+    """The damage school a seat deals in, or "" if it cannot be read.
+
+    Off the seat's own `Sim`, which is built from the configured school
+    and is the same value `_full_pip` and `buff_applies` already use.
+    Empty is the honest answer for a seat with no sim, and
+    `_allies_hit` treats it as "unknown" rather than guessing -- a wrong
+    school here would credit a teammate with cashing a trap it cannot
+    touch.
+    """
+    return getattr(getattr(sub, "sim", None), "school", "") or ""
 
 
 def _move_id(action):

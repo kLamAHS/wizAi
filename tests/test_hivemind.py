@@ -180,6 +180,63 @@ def test_a_ward_one_wizard_lays_lands_on_the_next_wizards_board():
     assert ledger.apply(other, [0]).enemies[0].wards
 
 
+def test_a_second_copy_of_the_partys_trap_adds_nothing_to_the_same_hit():
+    """Casting for others, which is where the operator saw it worst.
+
+    Traps are the party's shared currency -- one wizard lays it, every
+    wizard cashes it -- so "is this trap already up?" is a question the
+    coordinator asks about somebody ELSE's cast, on a board it was
+    handed rather than one it read. The ice wizard's hand carries both
+    `Ice Trap` and `Ice Trap - Amulet@item`, and under the old
+    `(name, source)` identity those were two spells: laying the second
+    on a mob the party had already trapped looked like 1.4 x 1.4.
+
+    One spell, one template id (`spell_effect_stacking_id`), one trap
+    per strike. The second is still worth carrying -- it fires on the
+    NEXT hit -- but it does not double this one.
+    """
+    import copy
+    import dataclasses
+
+    from deimos_bridge.telemetry import predict_damage
+    from w101_sim import Actor, Boss, Rules, Sim, State
+
+    table = dict(cards())
+    table["Ice Trap - Amulet@item"] = dataclasses.replace(
+        table["Ice Trap"], name="Ice Trap - Amulet@item", source="item")
+
+    def seat(hand):
+        p = Actor(name="W", school="ice", hp=1500, max_hp=1500, team=0,
+                  norm_pips=7)
+        p.hand = [table[n] for n in hand]
+        foes = [Actor(name="Mob", school="fire", hp=900, max_hp=900, team=1,
+                      flat_hit=40)]
+        sim = Sim(cards=table, decklist=list(hand), school="ice",
+                  boss=Boss("Mob", 900, "fire", 40), rules=Rules(),
+                  player_hp=1500)
+        return sim, State(p, foes)
+
+    sim_a, a = seat(["Ice Trap", "Frost Beetle"])
+    ledger = Ledger()
+    ledger.add(measure_cast(sim_a, a, (table["Ice Trap"], 0)), [0])
+
+    sim_b, b = seat(["Ice Trap - Amulet@item", "Frost Beetle"])
+    board = ledger.apply(b, [0])
+    assert board.enemies[0].wards, "the ally's trap has to be on this board"
+
+    def hit(state):
+        beetle = next(c for c in state.player.hand if c.name == "Frost Beetle")
+        return predict_damage(sim_b, state, beetle, 0)
+
+    one_trap = hit(board)
+    doubled = copy.deepcopy(board)
+    sim_b.cast(doubled, next(c for c in doubled.player.hand
+                             if c.name == "Ice Trap - Amulet@item"), 0)
+    assert hit(doubled) == pytest.approx(one_trap), \
+        "an amulet Ice Trap is an Ice Trap"
+    assert len(doubled.enemies[0].wards) == 2, "and it does go up"
+
+
 def test_a_shared_ward_is_copied_not_handed_round():
     """A `Hanging` carries charges and is consumed in place; one object
     shared by four rollouts lets one wizard's hit spend a trap the other
@@ -845,6 +902,57 @@ def test_collateral_damage_names_the_wizard_that_caused_it():
     assert _party_hits(trapped, 0) == {}
 
 
+def test_a_teammates_aoe_is_a_hit_on_every_mob_it_touched():
+    """The one the name-keying could not see at all.
+
+    An AoE aims at nothing in particular, so `_aims_at_an_enemy` gives
+    it no index and `target_name` is empty -- and a lookup keyed on the
+    name then reports that nobody hit anything. Every Meteor Strike
+    round of the run at rev 8666bda7 did exactly that, and on one of
+    them the ice wizard's Snow Serpent banked 987 damage against a 115
+    prediction as a clean solo observation.
+    """
+    from deimos_bridge.hivemind import PartyPlan, SeatMove
+    from deimos_bridge.telemetry import _party_expected, _party_hits
+
+    plan = PartyPlan(moves=[
+        SeatMove(seat=0, name="wizard 1", card="Snow Serpent", target=0,
+                 target_name="Pops", damage=115.0, hit={"Pops": 115.0}),
+        # no target, no target_name -- exactly what `plan` builds for one
+        SeatMove(seat=1, name="wizard 2", card="Meteor Strike",
+                 damage=877.0, hit={"Pops": 500.0, "Napper": 377.0})])
+    assert _party_hits(plan, 0) == {"Pops": "wizard 2", "Napper": "wizard 2"}
+    assert _party_expected(plan, "Pops") == 615.0     # 115 + 500, not 115
+    assert _party_expected(plan, "Napper") == 377.0
+
+
+def test_a_plan_without_the_per_mob_breakdown_still_reads():
+    """`hit` is newer than `SeatMove`, and a plan built without it --
+    an older export, a hand-made stub -- must still attribute by name
+    rather than silently reporting nothing."""
+    from deimos_bridge.hivemind import PartyPlan, SeatMove
+    from deimos_bridge.telemetry import _party_expected, _party_hits
+
+    plan = PartyPlan(moves=[
+        SeatMove(seat=1, name="wizard 2", card="Fire Elf", target=0,
+                 target_name="Pops", damage=104.0)])
+    assert _party_hits(plan, 0) == {"Pops": "wizard 2"}
+    assert _party_expected(plan, "Pops") == 104.0
+
+
+def test_the_coordinator_fills_in_what_each_cast_touched():
+    """End to end, off a real plan rather than a stub: an AoE's entry
+    has to name every living mob."""
+    subs = party(2, hand=("Meteor Strike", "Fire Cat"),
+                 board=((400, "ice"), (400, "ice")))
+    _actions, plan_out = Hivemind(passes=1).plan(subs)
+    aoe = [m for m in plan_out.moves if m.card == "Meteor Strike"]
+    if not aoe:
+        pytest.skip("neither seat chose the AoE on this board")
+    assert len(aoe[0].hit) == 2, aoe[0].hit
+    assert all(v > 0 for v in aoe[0].hit.values())
+
+
 # --------------------------------- what the first NAMED party run said
 def test_a_record_never_holds_two_wizards():
     """The window keeps one record per SEAT and reuses it across Play
@@ -1097,6 +1205,100 @@ def test_allies_finish_the_weakest_mob_rather_than_spreading_out():
     assert _Board.enemies[0].hp == 330.0        # the other 70 spilled over
 
 
+# ------------------------------- a trap is worth what the party cashes
+#
+# Wards are the party's shared currency and this rate was landing as raw
+# health, straight past them -- so a Feint on the mob the fire wizard is
+# about to nuke was worth exactly zero to the ice wizard laying it. The
+# run at rev 8666bda7 shows the price: 17 traps laid on mobs the caster
+# never went on to hit (13 by the ice wizard), 7 mobs trapped by both
+# wizards, and the coordinator itself moving a setup cast onto the other
+# mob 7 times -- twice the two of them simply traded targets in a round.
+
+def _lone_mob(ward=None, hp=900):
+    from w101_sim import Actor, Boss, Rules, Sim, State
+
+    mob = Actor(name="Mob", school="balance", hp=hp, max_hp=hp, team=1)
+    if ward is not None:
+        mob.wards.append(ward)
+    me = Actor(name="W", school="ice", hp=1500, max_hp=1500, team=0)
+    sim = Sim(cards=cards(), decklist=["Ice Trap"], school="ice",
+              boss=Boss("Mob", hp, "balance", 40), rules=Rules(),
+              player_hp=1500)
+    return sim, State(me, [mob])
+
+
+@pytest.mark.parametrize("label, percent, schools, left, standing", [
+    ("nothing",              None, None,      100.0, 0),
+    ("Feint, +70% universal", 0.70, None,      170.0, 0),
+    ("Fire Trap, +40% fire",  0.40, {"fire"},  140.0, 0),
+    # the one the operator described: the ice wizard's trap is not the
+    # fire wizard's to spend, so it neither helps him nor is lost
+    ("Ice Trap, +40% ice",    0.40, {"ice"},   100.0, 1),
+])
+def test_a_fire_teammate_cashes_only_the_wards_its_school_matches(
+        label, percent, schools, left, standing):
+    from w101_sim import Hanging
+    from deimos_bridge.policies import _allies_hit
+
+    ward = None if percent is None else Hanging(
+        "w", "ward", "damage", percent=percent, schools=schools)
+    sim, state = _lone_mob(ward)
+    _allies_hit(state, 100.0, ("fire",), sim)
+    assert 900.0 - state.enemies[0].hp == pytest.approx(left), label
+    assert len(state.enemies[0].wards) == standing, label
+
+
+def test_the_rate_is_split_between_the_teammates_not_given_to_each():
+    """Two teammates removing 100 between them is 100, not 200 -- and
+    with two schools the Feint is cashed by whichever gets there."""
+    from deimos_bridge.policies import _allies_hit
+
+    sim, state = _lone_mob()
+    _allies_hit(state, 100.0, ("fire", "storm"), sim)
+    assert 900.0 - state.enemies[0].hp == pytest.approx(100.0)
+
+
+def test_without_a_school_the_rate_still_lands_as_raw_health():
+    """Every solo path and every caller that predates this passes no
+    school, and has to get the number it always got."""
+    from w101_sim import Hanging
+    from deimos_bridge.policies import _allies_hit
+
+    ward = Hanging("w", "ward", "damage", percent=0.70, schools=None)
+    sim, state = _lone_mob(ward)
+    _allies_hit(state, 100.0)
+    assert 900.0 - state.enemies[0].hp == pytest.approx(100.0)
+    assert len(state.enemies[0].wards) == 1     # nothing was spent
+
+
+def test_setup_moves_off_the_mob_the_teammate_is_about_to_kill():
+    """The operator's report, as a decision.
+
+    A 200hp mob and a 900hp mob, and a fire teammate removing 60 a round
+    -- so the small one is gone in three turns whatever the ice wizard
+    does. Blind to the teammate's school, the rollout cannot tell that
+    an Ice Trap there will never be cashed, and lays it. Told the
+    teammate deals fire, the same rollout puts a universal Feint on the
+    mob that is still going to be standing.
+    """
+    from deimos_bridge.policies import greedy_ttk, party_rate
+
+    def decide(schools):
+        sim, state = wizard(school="ice",
+                            hand=("Ice Trap", "Feint", "Frost Beetle"),
+                            pips=2, hp=1500,
+                            board=((200, "balance"), (900, "balance")))
+        policy = greedy_ttk()
+        with party_rate(60.0, schools):
+            choice = policy(sim, state)
+        card, target = choice if isinstance(choice, tuple) else (choice, None)
+        return getattr(card, "name", card), target
+
+    assert decide(()) == ("Ice Trap", 0)
+    assert decide(("fire",)) == ("Feint", 1)
+
+
 # ------------------------------------------------- the free-rider tie
 #
 # The failure these pin down, in the operator's words: "it spammed buffs
@@ -1273,9 +1475,11 @@ def test_a_seats_measured_rate_reaches_the_other_seats_rollouts():
     seen = []
 
     class _Watching(Hivemind):
-        def _decide_one(self, sub, board, ledger, step, pressure=0.0):
-            seen.append((sub.seat, step, pressure))
-            return super()._decide_one(sub, board, ledger, step, pressure)
+        def _decide_one(self, sub, board, ledger, step, pressure=0.0,
+                        pressure_schools=()):
+            seen.append((sub.seat, step, pressure, pressure_schools))
+            return super()._decide_one(sub, board, ledger, step, pressure,
+                                       pressure_schools)
 
     subs = party(2)
     subs[0].rate = 40.0
@@ -1284,10 +1488,14 @@ def test_a_seats_measured_rate_reaches_the_other_seats_rollouts():
 
     # Pass 0 is the solo baseline and must stay solo, or "alone it would
     # have played X" is not what it says it is.
-    assert [p for s, step, p in seen if step == 0] == [0.0, 0.0]
+    assert [p for s, step, p, _sc in seen if step == 0] == [0.0, 0.0]
     # After that each seat sees what the OTHERS deal, never its own.
-    later = {s: p for s, step, p in seen if step == 1}
+    later = {s: p for s, step, p, _sc in seen if step == 1}
     assert later == {0: 70.0, 1: 40.0}
+    # ...and what they deal it in, so a trap can be priced against the
+    # hit that would cash it.
+    schools = {s: sc for s, step, _p, sc in seen if step == 1}
+    assert schools == {0: ("fire",), 1: ("fire",)}
 
 
 def test_the_rate_never_includes_the_seat_it_is_planning_for():
@@ -1296,16 +1504,18 @@ def test_the_rate_never_includes_the_seat_it_is_planning_for():
     seen = []
 
     class _Watching(Hivemind):
-        def _decide_one(self, sub, board, ledger, step, pressure=0.0):
-            seen.append((sub.seat, step, pressure))
-            return super()._decide_one(sub, board, ledger, step, pressure)
+        def _decide_one(self, sub, board, ledger, step, pressure=0.0,
+                        pressure_schools=()):
+            seen.append((sub.seat, step, pressure, pressure_schools))
+            return super()._decide_one(sub, board, ledger, step, pressure,
+                                       pressure_schools)
 
     subs = party(3)
     for i, sub in enumerate(subs):
         sub.rate = 100.0 * (i + 1)
     _Watching(passes=1).plan(subs)
 
-    later = {s: p for s, step, p in seen if step == 1}
+    later = {s: p for s, step, p, _sc in seen if step == 1}
     assert later == {0: 500.0, 1: 400.0, 2: 300.0}
 
 
@@ -1441,44 +1651,113 @@ def test_the_ranking_is_total_enough_that_hand_order_does_not_decide():
         f"{keys}")
 
 
-def test_an_unpriceable_x_pip_card_is_never_chosen():
-    """Heck Hound and 2,111 others carry `x_pips`: they consume the whole
-    pip rack and scale with it. The card table records them as costing 0
-    pips, and `Sim` gives them 0 damage at every pip count -- so to the
-    policy they are free AND do nothing, which is indistinguishable from
-    passing, and they win the pip tiebreak because nothing is cheaper
-    than zero.
+# ---------------------------------------------------- pricing an X-pip card
+#
+# Heck Hound and 2,111 others carry `x_pips`: they spend the whole rack
+# and scale with it. The card table prints 0 pips and per-pip damage,
+# and the ranking key was reading both off the printed face -- so an
+# X-pip card was free (it won every thrift tie) and tiny (130 against a
+# Fire Cat's 100) at the same time.
+#
+# This used to be handled by refusing to offer the card at all, on my
+# reading that the engine "gives them 0 damage at every pip count". That
+# was wrong -- the fizzles in my measurement were a live RNG, not a
+# broken card -- and the cost of it is in the export at rev e523684f:
+# Heck Hound sat in the fire wizard's hand for 74 of 75 rounds, never
+# played, out of a median hand of four.
 
-    The second live party run: the fire wizard chose Heck Hound eight
-    times, every time holding one or two pips, and dealt 0.0 damage
-    across the fifteen rounds of its first two fights.
+def test_an_x_pip_card_costs_the_rack_and_scales_with_it():
+    from w101_sim import cast_price, cast_reach
+
+    sim, state = wizard(school="fire", hand=("Heck Hound", "Fire Cat"),
+                        pips=6, hp=1500, board=((800, "ice"),))
+    hound, cat = state.player.hand
+    assert hound.x_pips and hound.pips == 0 and hound.damage == 130, \
+        "premise moved"
+    assert cast_price(sim, state, hound) == 6      # not the printed 0
+    assert cast_reach(sim, state, hound) == 780    # 130 a pip, not 130
+    assert cast_price(sim, state, cat) == 1        # an ordinary card is itself
+    assert cast_reach(sim, state, cat) == 100
+
+
+def test_a_rack_is_not_spent_on_a_mob_a_cheap_nuke_already_kills():
+    """The tie the printed price inverts, and the reason this matters.
+
+    Seven pips against a 300hp mob: Heck Hound and Sunbird both clear it
+    on turn one banking the same 300. Priced at 0 the hound wins the
+    thrift key and the whole rack goes; priced at 7 against Sunbird's 3
+    it does not, and four pips stay banked.
     """
-    from deimos_bridge.policies import _is_inert, greedy_ttk
+    from deimos_bridge.policies import greedy_ttk
 
-    table = cards()
-    hound = table["Heck Hound"]
-    assert hound.x_pips and hound.pips == 0, "premise moved"
-    assert _is_inert(hound, None), "an X-pip card must not be offered"
+    sim, state = wizard(school="fire",
+                        hand=("Heck Hound", "Sunbird", "Fire Cat"),
+                        pips=7, hp=1500, board=((300, "ice"),))
+    policy = greedy_ttk()
+    chosen = policy(sim, state)
+    card, _t = chosen if isinstance(chosen, tuple) else (chosen, 0)
+    tied = {c.card for c in policy.last_candidates if (c.turns, c.damage)
+            == (1, 300.0)}
+    assert {"Heck Hound", "Sunbird"} <= tied, f"the tie is the premise: {tied}"
+    assert card.name == "Sunbird"
 
-    # ...and the policy really does stop picking it, on the board the
-    # live wizard was on: one pip, Heck Hound and a free trap in hand.
+
+def test_a_full_rack_does_go_into_the_x_pip_card_when_it_pays():
+    """The other direction, so the fix is not just "never play it".
+
+    Six pips against an 800hp mob, and 780 of damage is worth the rack:
+    the hound clears in five turns where Fire Cat and Sunbird need nine.
+    """
+    from deimos_bridge.policies import greedy_ttk
+
+    sim, state = wizard(school="fire",
+                        hand=("Heck Hound", "Sunbird", "Fire Cat"),
+                        pips=6, hp=1500, board=((800, "ice"),))
+    policy = greedy_ttk()
+    chosen = policy(sim, state)
+    card, _t = chosen if isinstance(chosen, tuple) else (chosen, 0)
+    assert card.name == "Heck Hound"
+    hound = next(c for c in policy.last_candidates if c.card == "Heck Hound")
+    assert hound.turns < min(c.turns for c in policy.last_candidates
+                             if c.card != "Heck Hound")
+
+
+def test_one_pip_is_not_enough_and_the_rollout_says_so():
+    """The live complaint -- eight Heck Hounds at one or two pips. The
+    rollout rejects it on its own once the card is offered at all: 130
+    of damage does not clear an 800hp board inside the horizon."""
+    from deimos_bridge.policies import greedy_ttk
+
     sim, state = wizard(school="fire",
                         hand=("Heck Hound", "Fire Trap", "Fireblade"),
                         pips=1, hp=1064, board=((800, "ice"), (525, "balance")))
     policy = greedy_ttk()
     chosen = policy(sim, state)
     card, _t = chosen if isinstance(chosen, tuple) else (chosen, 0)
-    assert card is None or card.name != "Heck Hound", (
-        "played the card the engine prices at 0 damage and 0 pips")
-    assert not any(c.card == "Heck Hound" for c in policy.last_candidates), \
-        "it was still offered as a candidate"
+    assert card is None or card.name != "Heck Hound"
+    assert any(c.card == "Heck Hound" for c in policy.last_candidates), \
+        "it must be weighed and lose, not be hidden"
+
+
+def test_the_recorded_price_is_the_one_that_was_paid():
+    """`Candidate.pips` feeds the decision panel and `rank_candidate`'s
+    runner-up ranking. Showing 0 beside a 1-pip Fire Cat reads as a free
+    card losing to a paid one."""
+    from deimos_bridge.policies import greedy_ttk
+
+    sim, state = wizard(school="fire", hand=("Heck Hound", "Fire Cat"),
+                        pips=5, hp=1500, board=((800, "ice"),))
+    policy = greedy_ttk()
+    policy(sim, state)
+    hound = next(c for c in policy.last_candidates if c.card == "Heck Hound")
+    assert hound.pips == 5
 
 
 def test_the_ordinary_cards_are_still_offered():
-    """The X-pip rule must not quietly swallow a normal hand."""
+    """The inert rule must not quietly swallow a normal hand."""
     from deimos_bridge.policies import _is_inert
 
     table = cards()
     for name in ("Fire Cat", "Sunbird", "Fireblade", "Fire Trap",
-                 "Snow Serpent", "Tower Shield"):
+                 "Snow Serpent", "Tower Shield", "Heck Hound"):
         assert not _is_inert(table[name], None), name
