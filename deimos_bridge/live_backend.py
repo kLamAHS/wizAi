@@ -1212,13 +1212,7 @@ class WizAiCombatHandler:
         # by. `rank_candidate` is that key, and lives over there so it
         # has one home.
         from .policies import rank_candidate
-
-        def damage_of(name):
-            spec = self.backend.cards.get(name)
-            return getattr(spec, "damage", 0) or 0
-
-        pick = min(alternatives,
-                   key=lambda c: rank_candidate(c, damage_of))
+        pick = min(alternatives, key=rank_candidate)
 
         card = self._pick_card(read, pick.card)
         if card is None:
