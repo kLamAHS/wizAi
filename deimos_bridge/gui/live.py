@@ -242,7 +242,8 @@ class LiveWorker(QThread):
 
     def __init__(self, telemetry, school, deck, policy_name, fights,
                  agent=None, auto_quest=False, auto_dialogue=True,
-                 collect_wisps=True, use_potions=True, script="",
+                 collect_wisps=True, use_potions=True,
+                 buy_potions=False, script="",
                  hotkeys=None, continuation="", seats=None,
                  coordinate=True, passes=2, barrier=None,
                  follow_leader=True, leader=0, label_windows=True):
@@ -269,6 +270,14 @@ class LiveWorker(QThread):
         #: 12% health has told you nothing about the policy.
         self.collect_wisps = collect_wisps
         self.use_potions = use_potions
+        #: refill an empty bottle at a vendor. OFF by default, and that
+        #: is not timidity: it spends real gold and takes a navigation
+        #: detour across two zone changes that can leave the wizard
+        #: somewhere the quest is not. Worth it when a run would
+        #: otherwise grind to a halt on an empty bottle, which is the
+        #: case the operator asked for; not worth doing behind anyone's
+        #: back.
+        self.buy_potions = bool(buy_potions)
         #: a deimoslang program, stepped between fights like the quester
         self.script = script or ""
         #: {action: key name}. Global hotkeys, so the same actions the
@@ -1858,6 +1867,7 @@ class LiveWorker(QThread):
                         await asyncio.wait_for(upkeep.after_fight(
                             seat.client, wisps=self.collect_wisps,
                             potions=self.use_potions,
+                            buy=self.buy_potions,
                             on_status=lambda m: self._say(seat, m)),
                             self.AFTER_FIGHT_LIMIT)
                 except asyncio.CancelledError:
@@ -2147,8 +2157,10 @@ class LiveWorker(QThread):
                         upkeep.after_fight(
                             seat.client, wisps=False,
                             potions=self.use_potions,
+                            buy=self.buy_potions,
                             on_status=lambda m: self._say(seat, m)),
-                        self.LOW_HEALTH_POLL)
+                        self.LOW_HEALTH_POLL + upkeep.BUY_POTIONS_TIMEOUT
+                        if self.buy_potions else self.LOW_HEALTH_POLL)
             except asyncio.CancelledError:
                 raise
             except Exception:

@@ -1401,9 +1401,19 @@ class MainWindow(QMainWindow):
         self.use_potions.setChecked(True)
         self.use_potions.setToolTip(
             "Drink one when low on health or mana, using Deimos's threshold "
-            "(under 55% health, or low mana). Never buys — refilling means "
-            "a vendor trip that can strand the run.")
+            "(under 55% health, or low mana). Buying a refill is separate — "
+            "see Buy refills.")
         quest_row.addWidget(self.use_potions)
+
+        self.buy_potions = QCheckBox("Buy refills")
+        self.buy_potions.setChecked(False)
+        self.buy_potions.setToolTip(
+            "When the bottle is empty, go to Hilda Brewer in the Commons "
+            "and refill it, then recall. Off by default because it spends "
+            "real gold and crosses two zone changes, either of which can "
+            "leave the wizard somewhere the quest is not — but an empty "
+            "bottle stops a run just as surely. Needs level 6.")
+        quest_row.addWidget(self.buy_potions)
 
         self.tp_btn = QPushButton("Teleport to quest")
         self.tp_btn.clicked.connect(self.on_teleport)
@@ -1502,6 +1512,7 @@ class MainWindow(QMainWindow):
                     "auto_dialogue": "auto_dialogue",
                     "collect_wisps": "collect_wisps",
                     "use_potions": "use_potions",
+                    "buy_potions": "buy_potions",
                     "follow_leader": "follow_leader"}
 
     def _wire_live_toggles(self):
@@ -2342,6 +2353,7 @@ class MainWindow(QMainWindow):
                                auto_dialogue=self.auto_dialogue.isChecked(),
                                collect_wisps=self.collect_wisps.isChecked(),
                                use_potions=self.use_potions.isChecked(),
+                               buy_potions=self.buy_potions.isChecked(),
                                script=(self.script_source
                                        if self.use_script.isChecked() else ""),
                                hotkeys=self.hotkey_bindings(),

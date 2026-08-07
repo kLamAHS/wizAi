@@ -35,6 +35,12 @@ HUD_POTION_PATH = ["WorldView", "windowHUD", "btnPotions"]
 #: to separate "landed on it" from "snapped back to the duel circle".
 ARRIVAL_RADIUS = 120.0
 
+#: how long a trip to the potion vendor may take. It crosses zones twice
+#: -- out to Hilda Brewer in the Commons and back to a teleport mark --
+#: and either leg can hang on a loading screen. A wizard stranded in the
+#: Commons forever is worse than one with no potions.
+BUY_POTIONS_TIMEOUT = 180.0
+
 
 async def _read(obj, path, default=None):
     """Read `obj.a.b()`, or give up quietly.
@@ -350,8 +356,132 @@ async def drink_potion(client) -> bool:
         return False
 
 
+async def _refill(client, **kw):
+    """Deimos's own vendor trip, behind one seam.
+
+    A function rather than an inline import so a test can replace it:
+    `src.utils` pulls in wizwalker and does not import at all off
+    Windows, and a `buy_potions` that reached for it inline could only
+    ever be tested down its "could not load" path -- which is exactly
+    how the first version of its KeyboardInterrupt test passed without
+    testing anything.
+    """
+    from .deimos_path import ensure_path
+    ensure_path()
+    from src.utils import refill_potions_if_needed
+    return await refill_potions_if_needed(client, **kw)
+
+
+async def _refill_guarded(client, **kw):
+    """`_refill`, with Deimos's KeyboardInterrupt turned into an ordinary
+    error INSIDE the task.
+
+    It has to happen here rather than around the `wait_for` outside,
+    and the difference is not stylistic. `asyncio.wait_for` runs the
+    coroutine as a Task, and a Task raising a BaseException that is not
+    an Exception -- which KeyboardInterrupt is -- propagates it past the
+    awaiting frame and out of the event loop entirely. Measured:
+    `except (Exception, KeyboardInterrupt)` around a `wait_for` never
+    fires, while the same handler around a bare `await` catches it.
+
+    So a failed purchase would have killed the run despite being caught
+    for, which is worse than not catching it, because the code says it
+    is handled.
+    """
+    import asyncio
+
+    try:
+        return await _refill(client, **kw)
+    except asyncio.CancelledError:
+        raise
+    except KeyboardInterrupt as exc:
+        raise RuntimeError(
+            "Deimos's buy_potions raises KeyboardInterrupt on any internal "
+            "failure (src/utils.py:487-489)") from exc
+
+
+async def buy_potions(client, on_status=None) -> bool:
+    """Refill the potion bottle at a vendor. Returns whether it went.
+
+    `drink_potion` deliberately never bought, and the reason it gave was
+    real: refilling means a trip to Hilda Brewer in the Commons, real
+    gold, and a navigation detour that can strand the run somewhere the
+    quest is not. That is a cost, not an argument -- an empty bottle
+    strands the run too, just more slowly, and the operator asked for
+    this. So it is here, and it is OFF unless switched on.
+
+    Deimos's own `refill_potions` does the work: it gates on level 6
+    (potions are not sold below it), places a teleport mark, waits out
+    the recall timer if one is running, teleports to the vendor, buys,
+    and recalls to the mark. Reimplementing that would be reimplementing
+    a navigation detour, which is exactly the part most likely to go
+    wrong.
+
+    Three things wrap it, and each is a real hazard rather than
+    defensive habit:
+
+      * `buy_potions` ends `except: raise KeyboardInterrupt`
+        (`src/utils.py:487-489`). That is a BaseException, so an
+        ordinary `except Exception` does not catch it and a failed
+        purchase would tear down the whole run. It is caught by name.
+      * `CancelledError` is a BaseException too and must NOT be caught,
+        or stopping the run stops meaning anything.
+      * The trip crosses zones and can hang on a loading screen, so it
+        is bounded. A wizard stuck in the Commons forever is worse than
+        one with no potions.
+    """
+    import asyncio
+
+    def say(message):
+        if on_status:
+            on_status(message)
+
+    buy_potions.last_error = ""
+    try:
+        zone = await client.zone_name()
+    except Exception:
+        zone = None
+
+    say("bottle empty — going to buy potions")
+    try:
+        await asyncio.wait_for(
+            _refill_guarded(client, mark=True, recall=True,
+                            original_zone=zone),
+            BUY_POTIONS_TIMEOUT)
+    except asyncio.CancelledError:
+        raise
+    except asyncio.TimeoutError:
+        buy_potions.last_error = (
+            f"the potion trip ran past {BUY_POTIONS_TIMEOUT:.0f}s and was "
+            f"cut off — the wizard may be somewhere the quest is not")
+        say(buy_potions.last_error)
+        return False
+    except (Exception, KeyboardInterrupt) as exc:
+        # KeyboardInterrupt by name: `buy_potions` raises it on ANY
+        # internal failure, and it is a BaseException.
+        buy_potions.last_error = (f"the potion trip failed "
+                                  f"({type(exc).__name__}: {exc})")
+        say(buy_potions.last_error)
+        return False
+
+    try:
+        left = await client.stats.potion_charge()
+    except Exception:
+        left = None
+    if left is None:
+        say("bought potions; could not read the bottle afterwards")
+        return True
+    if left < 1.0:
+        buy_potions.last_error = ("came back from the vendor with an empty "
+                                  "bottle — out of gold, or under level 6")
+        say(buy_potions.last_error)
+        return False
+    say(f"bought potions — {left:.0f} charge(s)")
+    return True
+
+
 async def after_fight(client, wisps: bool = True, potions: bool = True,
-                      on_status=None, wait: bool = True):
+                      on_status=None, wait: bool = True, buy: bool = False):
     """The between-fights chores, in the order that wastes least.
 
     Wisps first: they are free, and topping up from them can put the
@@ -391,7 +521,15 @@ async def after_fight(client, wisps: bool = True, potions: bool = True,
 
     if await drink_potion(client):
         say("drank a potion")
-    else:
-        why = getattr(drink_potion, "last_error", "")
-        say("low on health or mana, but no potion was drunk"
-            + (f" — {why}" if why else ""))
+        return
+
+    why = getattr(drink_potion, "last_error", "")
+    say("low on health or mana, but no potion was drunk"
+        + (f" — {why}" if why else ""))
+    # An empty bottle is the one failure a vendor trip can fix, and the
+    # only one worth the detour: a click that failed or a read that
+    # raised will not be any better after crossing two zones.
+    if buy and "empty" in why:
+        if await buy_potions(client, on_status=on_status):
+            if await drink_potion(client):
+                say("drank a potion")
