@@ -143,6 +143,10 @@ class _Seat:
         #: `LiveWorker._check_in_step`.
         self.goal = ""
         self.goal_read = 0.0
+        #: when the goal last CHANGED. The wizard whose goal moved most
+        #: recently is the one that got ahead -- quest names have no
+        #: order, but "who advanced last" does.
+        self.goal_at = 0.0
         #: (zone, rounded position, goal) as last seen, and when it last
         #: CHANGED. A script that is stepping while none of these move is
         #: a script hammering something that is not working -- see
@@ -510,7 +514,12 @@ class LiveWorker(QThread):
                     await self._stage(seat, "script step",
                                       self._script_step(seat), wheel=True)
 
-                if driven:
+                if driven and self._should_catch_up(seat):
+                    # The one case where wizAi steers a wizard the script
+                    # is also steering. See `_should_catch_up`.
+                    await self._stage(seat, "going back for the others",
+                                      self._catch_up(seat), wheel=True)
+                elif driven:
                     # The script walks this wizard. wizAi's own questing
                     # or follow would walk it somewhere else between two
                     # of the script's instructions, which is how a
@@ -1892,9 +1901,12 @@ class LiveWorker(QThread):
             return
         seat.goal_read = now
         try:
-            seat.goal = await questing.read_quest_goal(seat.client)
+            goal = await questing.read_quest_goal(seat.client)
         except Exception:
-            seat.goal = ""
+            goal = ""
+        if goal and goal != seat.goal:
+            seat.goal_at = now
+        seat.goal = goal
 
         zone = position = None
         try:
@@ -1989,6 +2001,7 @@ class LiveWorker(QThread):
         if questing.goals_agree(goals):
             self._in_step_since = now
             self._said_desync = ""
+            self._behind = None
             return
         since = getattr(self, "_in_step_since", None)
         if since is None:
@@ -1997,17 +2010,89 @@ class LiveWorker(QThread):
         if now - since < self.DESYNC_GRACE:
             return
 
+        # WHO is behind, not just that somebody is. Quest names have no
+        # order, so "ahead" is read off the clock: the wizard whose goal
+        # changed most recently is the one that advanced, and the other
+        # is the one still on the step it missed.
+        readable = [s for s in self.seats if s.goal]
+        if len(readable) >= 2:
+            self._behind = min(readable, key=lambda s: s.goal_at)
+
         # Named, not counted. "the party is out of sync" sends you to
         # look at two windows; this says which wizard is on what.
         where = " · ".join(f"{s.name}: {s.goal or 'unreadable'}"
                            for s in self.seats)
         if where != getattr(self, "_said_desync", ""):
             self._said_desync = where
+            behind = getattr(self, "_behind", None)
             self._say(seat,
                       f"the party has been on different quests for "
-                      f"{now - since:.0f}s — {where}. One of them missed a "
-                      f"step; the script cannot see this, because its own "
-                      f"instruction pointer is fine")
+                      f"{now - since:.0f}s — {where}"
+                      + (f". {behind.name} is the one behind; the others "
+                         f"will go back and help" if behind else "")
+                      + ". The script cannot see this: its own instruction "
+                        "pointer is fine, and deimoslang can only ask "
+                        "whether a wizard is on a NAMED quest, never "
+                        "whether two wizards are on the same one")
+
+    def _should_catch_up(self, seat):
+        """Should this wizard abandon its own errand and go help?
+
+        True only for a wizard that is AHEAD while the party is
+        confirmed out of step. That is a deliberate exception to the
+        rule that a script owns every wizard it drives, and it is worth
+        being explicit about why it is safe to break here.
+
+        The rule exists because two things walking one wizard put it in
+        a doorway. But a wizard that has moved on to its next quest is
+        already being walked somewhere useless: the script's instructions
+        are for the step the party is on, and this wizard is past it, so
+        every `tp quest` sends it to a marker the rest of the party is
+        nowhere near. The choice is not between "the script drives it"
+        and "we do" -- it is between it wandering off alone and it
+        standing where the fight is.
+
+        The wizard that is BEHIND is never taken over. It is the one the
+        script's instructions are actually correct for, and it is the
+        one that has to finish the step; only the script knows how.
+        """
+        behind = getattr(self, "_behind", None)
+        return (behind is not None and behind is not seat
+                and len(self.seats) > 1 and behind.client is not None)
+
+    async def _catch_up(self, seat):
+        """Put this wizard back with the one that fell behind.
+
+        `party.follow` rather than anything new: the same teleport that
+        keeps a follower on its leader, aimed at the laggard instead. In
+        a fight it joins the circle, which is the help that matters --
+        the laggard is behind because a step went wrong, and steps go
+        wrong slowest when a duel is two against four.
+
+        Throttled by `FOLLOW_EVERY` like an ordinary follow, because the
+        script is still issuing this wizard's teleports and the two will
+        pull against each other. Losing that tug occasionally is fine;
+        the wizard ends up near the laggard either way, which is the
+        whole point.
+        """
+        import time
+
+        from .. import party
+
+        behind = getattr(self, "_behind", None)
+        if behind is None or behind.client is None:
+            return
+        now = time.monotonic()
+        if now - seat.followed_at < self.FOLLOW_EVERY:
+            return
+        seat.followed_at = now
+        moved, why = await party.follow(seat.client, behind.client,
+                                        leader_name=behind.wizard_name)
+        if moved and why:
+            self._say(seat, f"went back for {behind.name} — {why}")
+        elif why:
+            self._say_once(seat, "catch-up",
+                           f"trying to get back to {behind.name} — {why}")
 
     async def _let_it_heal(self, seat):
         """Do not walk into the next duel on almost no health.
