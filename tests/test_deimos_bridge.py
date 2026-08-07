@@ -1343,7 +1343,18 @@ def test_incoming_damage_is_measured_rather_than_assumed_zero():
     board.rnd = 2
     be.attach_combat(board(400))           # lost 200 across two mobs
     run(be.decide())
-    assert be.last_read.state.enemies[0].flat_hit == pytest.approx(100.0)
+    measured = be.last_read.state.enemies[0].flat_hit
+
+    # It MOVES toward the reading -- 100 per enemy -- rather than staying
+    # on the prior...
+    assert prior < measured < 100.0
+    # ...but does not become it outright. The prior is weighed in for
+    # `INCOMING_PRIOR_WEIGHT` rounds, because as a bare fallback the
+    # first reading replaced it and a first reading of ZERO therefore
+    # set the whole threat model to zero. See
+    # `test_one_quiet_round_does_not_make_the_board_harmless`.
+    weight = be.INCOMING_PRIOR_WEIGHT
+    assert measured == pytest.approx((100.0 + prior * weight) / (1 + weight))
 
 
 def test_a_cast_that_does_not_take_is_reported_and_the_round_passed():

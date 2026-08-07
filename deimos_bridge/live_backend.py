@@ -521,6 +521,13 @@ class WizAiBackend:
     #: the pip tiebreak.
     INCOMING_PRIOR_DIVISOR = 12.0
 
+    #: how many rounds of observation the prior is worth. Three, so a
+    #: single quiet round cannot collapse the threat model and three
+    #: real ones already outweigh it. Zero reproduces the old behaviour
+    #: -- the prior as a bare fallback -- and is what the exports were
+    #: recorded under.
+    INCOMING_PRIOR_WEIGHT = 3.0
+
     def _estimate_incoming(self, read):
         """How hard this board actually hits, measured round to round.
 
@@ -556,12 +563,34 @@ class WizAiBackend:
         self._round_seen = read.round_number
         self._enemies_seen = max(1, len(living))
 
-        if self._incoming:
-            per_enemy = sum(self._incoming) / len(self._incoming)
-        else:
-            per_enemy = max(30.0,
-                            player.max_hp / (self.INCOMING_PRIOR_DIVISOR
-                                             * self.party_size))
+        prior = max(30.0, player.max_hp / (self.INCOMING_PRIOR_DIVISOR
+                                           * self.party_size))
+        # The prior is WEIGHED IN, not merely a fallback for round one.
+        # As a fallback the first real observation replaced it outright,
+        # and a first observation of zero therefore set the whole threat
+        # model to exactly zero -- which is what happened in the first
+        # live party run and is visible in both exports. Jeffrey's
+        # `incoming` reads 52.92 at fight 1 round 2 (the prior itself,
+        # 1270/(12*2)), then 0.0 at rounds 3 and 4, because the rounds
+        # between those reads happened to be quiet. Konstantin's does
+        # the same at fight 1 round 2.
+        #
+        # Zero incoming is not a small error, it is a different game:
+        # `_enemy_turn` deals nothing, `_rollout`'s `player.alive` check
+        # can never fire, `died()` becomes unreachable, and mitigation is
+        # worth literally nothing -- so setting up costs only turns and a
+        # shield scores exactly like passing. The two rounds Jeffrey
+        # spent on Tower Shield at full health were both planned against
+        # a board the model believed was harmless, in the fight that
+        # then killed him.
+        #
+        # A pseudo-count fixes it without slowing the estimate down
+        # much: three rounds of real observation already outweigh the
+        # prior, and with nothing measured this is still exactly the
+        # prior, so round one is unchanged.
+        weight = self.INCOMING_PRIOR_WEIGHT
+        per_enemy = ((sum(self._incoming) + prior * weight)
+                     / (len(self._incoming) + weight))
         for enemy in read.state.enemies:
             enemy.flat_hit = per_enemy
         return per_enemy

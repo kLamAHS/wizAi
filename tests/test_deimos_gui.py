@@ -5734,12 +5734,75 @@ def test_the_incoming_mean_counts_the_quiet_rounds():
     be._estimate_incoming(read_at(589, 2))     # quiet round: 0 lost
     be._estimate_incoming(read_at(475, 3))     # 114 lost
     per = be._estimate_incoming(read_at(121, 4))   # 354 lost
-    assert abs(per - (0 + 57 + 177) / 3) < 1e-6    # the zero counts
+    assert be._incoming == [0.0, 57.0, 177.0]      # the zero is IN there
+
+    # ...and the estimate is those three weighed against the prior, which
+    # is worth `INCOMING_PRIOR_WEIGHT` rounds of its own rather than
+    # being discarded by the first real reading. See
+    # `test_one_quiet_round_does_not_make_the_board_harmless`.
+    prior = max(30.0, 589 / be.INCOMING_PRIOR_DIVISOR)
+    w = be.INCOMING_PRIOR_WEIGHT
+    assert per == pytest.approx((0 + 57 + 177 + prior * w) / (3 + w))
 
     # A healing round (hp went UP) stays out: that is the heal's
     # number, not the board's.
     be._estimate_incoming(read_at(500, 5))
     assert len(be._incoming) == 3
+
+
+def test_one_quiet_round_does_not_make_the_board_harmless():
+    """The prior was a fallback, so the FIRST real reading replaced it
+    outright -- and a first reading of zero set the whole threat model to
+    exactly zero.
+
+    Both exports from the first live party run show it. Jeffrey's
+    `incoming` reads 52.92 at fight 1 round 2, which is the prior itself
+    (1270/(12*2)), then 0.0 at rounds 3 and 4 because the rounds between
+    those reads happened to be quiet. Konstantin's does the same at
+    fight 1 round 2.
+
+    Zero incoming is not a small error, it is a different game: the mobs
+    deal nothing, `_rollout`'s `player.alive` check can never fire,
+    `died()` is unreachable and mitigation is worth literally nothing --
+    so setting up costs only turns and a shield scores exactly like
+    passing. The two rounds Jeffrey spent on Tower Shield at full health
+    were both planned against a board the model believed was harmless,
+    in the fight that then killed him.
+    """
+    from deimos_bridge.live_backend import WizAiBackend
+    from w101_sim import Actor, State
+
+    be = WizAiBackend(policy=lambda sim, s: None, cards={}, school="ice")
+    me = Actor(name="Jeffrey", school="ice", hp=1270, max_hp=1270, team=0)
+    foes = [Actor(name=f"Sand Stalker {i}", school="balance", hp=435,
+                  max_hp=435, team=1) for i in range(3)]
+
+    def read_at(hp, rnd):
+        class _R:
+            state = State(me, foes)
+            round_number = rnd
+        me.hp = hp
+        return _R()
+
+    first = be._estimate_incoming(read_at(1270, 2))
+    assert first == pytest.approx(1270 / 12), "round one is still the prior"
+
+    # Two quiet rounds in a row -- exactly Jeffrey's fight 1.
+    quiet = be._estimate_incoming(read_at(1270, 3))
+    quieter = be._estimate_incoming(read_at(1270, 4))
+    assert be._incoming == [0.0, 0.0], "the quiet rounds are still counted"
+    assert quiet > 30.0 and quieter > 30.0, (quiet, quieter)
+
+    # It does still move -- this is a slower estimate, not a frozen one.
+    assert quieter < quiet < first
+
+    # And it converges on what the board is really doing rather than
+    # sitting on the prior: 190 lost across three mobs is 63.3 each.
+    for hp in (1080, 890, 700, 510, 320):
+        be._estimate_incoming(read_at(hp, 5))
+    assert be._estimate_incoming(read_at(130, 10)) == pytest.approx(
+        (sum(be._incoming) + (1270 / 12) * be.INCOMING_PRIOR_WEIGHT)
+        / (len(be._incoming) + be.INCOMING_PRIOR_WEIGHT))
 
 
 def test_a_casters_damage_is_not_billed_to_the_minion():
