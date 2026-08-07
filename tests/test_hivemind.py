@@ -1205,6 +1205,100 @@ def test_allies_finish_the_weakest_mob_rather_than_spreading_out():
     assert _Board.enemies[0].hp == 330.0        # the other 70 spilled over
 
 
+# ------------------------------- a trap is worth what the party cashes
+#
+# Wards are the party's shared currency and this rate was landing as raw
+# health, straight past them -- so a Feint on the mob the fire wizard is
+# about to nuke was worth exactly zero to the ice wizard laying it. The
+# run at rev 8666bda7 shows the price: 17 traps laid on mobs the caster
+# never went on to hit (13 by the ice wizard), 7 mobs trapped by both
+# wizards, and the coordinator itself moving a setup cast onto the other
+# mob 7 times -- twice the two of them simply traded targets in a round.
+
+def _lone_mob(ward=None, hp=900):
+    from w101_sim import Actor, Boss, Rules, Sim, State
+
+    mob = Actor(name="Mob", school="balance", hp=hp, max_hp=hp, team=1)
+    if ward is not None:
+        mob.wards.append(ward)
+    me = Actor(name="W", school="ice", hp=1500, max_hp=1500, team=0)
+    sim = Sim(cards=cards(), decklist=["Ice Trap"], school="ice",
+              boss=Boss("Mob", hp, "balance", 40), rules=Rules(),
+              player_hp=1500)
+    return sim, State(me, [mob])
+
+
+@pytest.mark.parametrize("label, percent, schools, left, standing", [
+    ("nothing",              None, None,      100.0, 0),
+    ("Feint, +70% universal", 0.70, None,      170.0, 0),
+    ("Fire Trap, +40% fire",  0.40, {"fire"},  140.0, 0),
+    # the one the operator described: the ice wizard's trap is not the
+    # fire wizard's to spend, so it neither helps him nor is lost
+    ("Ice Trap, +40% ice",    0.40, {"ice"},   100.0, 1),
+])
+def test_a_fire_teammate_cashes_only_the_wards_its_school_matches(
+        label, percent, schools, left, standing):
+    from w101_sim import Hanging
+    from deimos_bridge.policies import _allies_hit
+
+    ward = None if percent is None else Hanging(
+        "w", "ward", "damage", percent=percent, schools=schools)
+    sim, state = _lone_mob(ward)
+    _allies_hit(state, 100.0, ("fire",), sim)
+    assert 900.0 - state.enemies[0].hp == pytest.approx(left), label
+    assert len(state.enemies[0].wards) == standing, label
+
+
+def test_the_rate_is_split_between_the_teammates_not_given_to_each():
+    """Two teammates removing 100 between them is 100, not 200 -- and
+    with two schools the Feint is cashed by whichever gets there."""
+    from deimos_bridge.policies import _allies_hit
+
+    sim, state = _lone_mob()
+    _allies_hit(state, 100.0, ("fire", "storm"), sim)
+    assert 900.0 - state.enemies[0].hp == pytest.approx(100.0)
+
+
+def test_without_a_school_the_rate_still_lands_as_raw_health():
+    """Every solo path and every caller that predates this passes no
+    school, and has to get the number it always got."""
+    from w101_sim import Hanging
+    from deimos_bridge.policies import _allies_hit
+
+    ward = Hanging("w", "ward", "damage", percent=0.70, schools=None)
+    sim, state = _lone_mob(ward)
+    _allies_hit(state, 100.0)
+    assert 900.0 - state.enemies[0].hp == pytest.approx(100.0)
+    assert len(state.enemies[0].wards) == 1     # nothing was spent
+
+
+def test_setup_moves_off_the_mob_the_teammate_is_about_to_kill():
+    """The operator's report, as a decision.
+
+    A 200hp mob and a 900hp mob, and a fire teammate removing 60 a round
+    -- so the small one is gone in three turns whatever the ice wizard
+    does. Blind to the teammate's school, the rollout cannot tell that
+    an Ice Trap there will never be cashed, and lays it. Told the
+    teammate deals fire, the same rollout puts a universal Feint on the
+    mob that is still going to be standing.
+    """
+    from deimos_bridge.policies import greedy_ttk, party_rate
+
+    def decide(schools):
+        sim, state = wizard(school="ice",
+                            hand=("Ice Trap", "Feint", "Frost Beetle"),
+                            pips=2, hp=1500,
+                            board=((200, "balance"), (900, "balance")))
+        policy = greedy_ttk()
+        with party_rate(60.0, schools):
+            choice = policy(sim, state)
+        card, target = choice if isinstance(choice, tuple) else (choice, None)
+        return getattr(card, "name", card), target
+
+    assert decide(()) == ("Ice Trap", 0)
+    assert decide(("fire",)) == ("Feint", 1)
+
+
 # ------------------------------------------------- the free-rider tie
 #
 # The failure these pin down, in the operator's words: "it spammed buffs
@@ -1381,9 +1475,11 @@ def test_a_seats_measured_rate_reaches_the_other_seats_rollouts():
     seen = []
 
     class _Watching(Hivemind):
-        def _decide_one(self, sub, board, ledger, step, pressure=0.0):
-            seen.append((sub.seat, step, pressure))
-            return super()._decide_one(sub, board, ledger, step, pressure)
+        def _decide_one(self, sub, board, ledger, step, pressure=0.0,
+                        pressure_schools=()):
+            seen.append((sub.seat, step, pressure, pressure_schools))
+            return super()._decide_one(sub, board, ledger, step, pressure,
+                                       pressure_schools)
 
     subs = party(2)
     subs[0].rate = 40.0
@@ -1392,10 +1488,14 @@ def test_a_seats_measured_rate_reaches_the_other_seats_rollouts():
 
     # Pass 0 is the solo baseline and must stay solo, or "alone it would
     # have played X" is not what it says it is.
-    assert [p for s, step, p in seen if step == 0] == [0.0, 0.0]
+    assert [p for s, step, p, _sc in seen if step == 0] == [0.0, 0.0]
     # After that each seat sees what the OTHERS deal, never its own.
-    later = {s: p for s, step, p in seen if step == 1}
+    later = {s: p for s, step, p, _sc in seen if step == 1}
     assert later == {0: 70.0, 1: 40.0}
+    # ...and what they deal it in, so a trap can be priced against the
+    # hit that would cash it.
+    schools = {s: sc for s, step, _p, sc in seen if step == 1}
+    assert schools == {0: ("fire",), 1: ("fire",)}
 
 
 def test_the_rate_never_includes_the_seat_it_is_planning_for():
@@ -1404,16 +1504,18 @@ def test_the_rate_never_includes_the_seat_it_is_planning_for():
     seen = []
 
     class _Watching(Hivemind):
-        def _decide_one(self, sub, board, ledger, step, pressure=0.0):
-            seen.append((sub.seat, step, pressure))
-            return super()._decide_one(sub, board, ledger, step, pressure)
+        def _decide_one(self, sub, board, ledger, step, pressure=0.0,
+                        pressure_schools=()):
+            seen.append((sub.seat, step, pressure, pressure_schools))
+            return super()._decide_one(sub, board, ledger, step, pressure,
+                                       pressure_schools)
 
     subs = party(3)
     for i, sub in enumerate(subs):
         sub.rate = 100.0 * (i + 1)
     _Watching(passes=1).plan(subs)
 
-    later = {s: p for s, step, p in seen if step == 1}
+    later = {s: p for s, step, p, _sc in seen if step == 1}
     assert later == {0: 500.0, 1: 400.0, 2: 300.0}
 
 

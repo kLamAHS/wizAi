@@ -798,8 +798,16 @@ class Hivemind:
                 # throughput estimate comes from.
                 pressure = 0.0 if step == 0 else sum(
                     rates.get(o.seat, 0.0) for o in subs if o.seat != sub.seat)
+                # ...and what they deal it IN. A trap only fires for a
+                # hit of a school it matches, so "the party removes 90 a
+                # round" and "the party removes 90 a round OF FIRE" are
+                # different facts about whether this seat's Feint is
+                # worth a turn. See `policies._allies_hit`.
+                pressure_schools = () if step == 0 else tuple(
+                    s for s in (_seat_school(o) for o in subs
+                                if o.seat != sub.seat) if s)
                 action, note = self._decide_one(sub, board, ledger, step,
-                                                pressure)
+                                                pressure, pressure_schools)
                 if step == 0:
                     solo[sub.seat] = action
                     rates[sub.seat] = sub.rate or policies.rollout_throughput(
@@ -870,7 +878,8 @@ class Hivemind:
             saved=saved, retargets=retargets)
         return actions, party
 
-    def _decide_one(self, sub, board, ledger, step, pressure=0.0):
+    def _decide_one(self, sub, board, ledger, step, pressure=0.0,
+                    pressure_schools=()):
         """One seat's move against the board the party has left it.
 
         Two different questions get answered here, and only the first
@@ -897,7 +906,7 @@ class Hivemind:
         it really takes twelve, and stop it buying either setup or
         survival on precisely the boards where both wizards died.
         """
-        with policies.party_rate(pressure):
+        with policies.party_rate(pressure, pressure_schools):
             return self._decide_alone(sub, board, ledger, step)
 
     def _decide_alone(self, sub, board, ledger, step):
@@ -917,6 +926,19 @@ class Hivemind:
             return sub.policy(sub.sim, board), ("party" if step else "solo")
         except Exception as exc:
             return None, f"policy raised {type(exc).__name__}: {exc}"
+
+
+def _seat_school(sub):
+    """The damage school a seat deals in, or "" if it cannot be read.
+
+    Off the seat's own `Sim`, which is built from the configured school
+    and is the same value `_full_pip` and `buff_applies` already use.
+    Empty is the honest answer for a seat with no sim, and
+    `_allies_hit` treats it as "unknown" rather than guessing -- a wrong
+    school here would credit a teammate with cashing a trap it cannot
+    touch.
+    """
+    return getattr(getattr(sub, "sim", None), "school", "") or ""
 
 
 def _move_id(action):

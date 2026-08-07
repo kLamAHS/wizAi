@@ -941,8 +941,13 @@ def ev_card(card):
 #: at zero and gets the same numbers it always got.
 _ALLY_RATE = 0.0
 
+#: the damage schools that rate is dealt in, one per teammate. Empty
+#: means "unknown", which is the pre-party behaviour: the rate lands as
+#: raw health off the board, through nothing.
+_ALLY_SCHOOLS = ()
 
-def set_ally_rate(dps):
+
+def set_ally_rate(dps, schools=()):
     """Tell the rollout how hard the rest of the party is hitting.
 
     A rollout that models only its own caster is not merely pessimistic,
@@ -973,9 +978,14 @@ def set_ally_rate(dps):
     coordinator's priced plan for the round -- that reads 172 and 201,
     because it prices a single cast and no wizard casts its best card
     every round.
+
+    `schools` is what the teammates deal that damage IN, and it is the
+    difference between a trap being worth something and being worth
+    nothing. See `_allies_hit`.
     """
-    global _ALLY_RATE
+    global _ALLY_RATE, _ALLY_SCHOOLS
     _ALLY_RATE = max(0.0, float(dps or 0.0))
+    _ALLY_SCHOOLS = tuple(s for s in (schools or ()) if s)
     return _ALLY_RATE
 
 
@@ -983,8 +993,12 @@ def ally_rate():
     return _ALLY_RATE
 
 
+def ally_schools():
+    return _ALLY_SCHOOLS
+
+
 @contextlib.contextmanager
-def party_rate(dps):
+def party_rate(dps, schools=()):
     """`set_ally_rate` for the duration of one decision, then back.
 
     The hivemind plans seats one at a time and each seat faces a
@@ -993,12 +1007,12 @@ def party_rate(dps):
     leaving its neighbours' rate installed on the next round's solo
     fallback.
     """
-    before = _ALLY_RATE
-    set_ally_rate(dps)
+    before = (_ALLY_RATE, _ALLY_SCHOOLS)
+    set_ally_rate(dps, schools)
     try:
         yield
     finally:
-        set_ally_rate(before)
+        set_ally_rate(*before)
 
 
 def rank_candidate(cand):
@@ -1053,8 +1067,9 @@ def rollout_throughput(candidates):
     return best or 0.0
 
 
-def _allies_hit(state, rate):
-    """Take `rate` health off the board, weakest mob first.
+def _allies_hit(state, rate, schools=(), sim=None):
+    """Take `rate` health off the board, weakest mob first, THROUGH the
+    wards a teammate's hit would actually cash.
 
     Weakest first because that is what the party demonstrably does: the
     ledger writes a mob the committed casts kill down to zero and the
@@ -1062,17 +1077,64 @@ def _allies_hit(state, rate):
     finishes what is nearly dead before it starts something new.
     Spreading the rate evenly instead would model a party that never
     kills anything, which is the failure this exists to fix.
+
+    Through the wards because otherwise **a trap laid for a teammate is
+    worth exactly nothing to the seat laying it.** Wards are the party's
+    shared currency -- one wizard lays the trap, whoever hits next
+    cashes it -- and this rate was landing as raw health off the board,
+    so the rollout priced a Feint on the mob the fire wizard is about to
+    nuke at zero. Two things follow from that, and the operator reported
+    both:
+
+      * the seat has no reason to put its setup where the party's damage
+        is going, so the coordinator scatters it -- seven times across
+        the run at rev 8666bda7 it moved a trap onto the OTHER mob, and
+        twice the two wizards simply traded targets in the same round;
+      * seventeen traps were laid on mobs the caster never went on to
+        hit, thirteen of them by the ice wizard. Three consecutive
+        rounds of fight 5 are Ice Trap, Ice Trap - Amulet and Feint on a
+        Scrounger he never hit once.
+
+    The school is what makes it a real distinction rather than a blanket
+    bonus. `_ward_pass` only consumes a ward matching the damage school
+    running through it, so a fire teammate cashes a Feint (+70% to
+    everything) and walks straight past an Ice Trap. That is exactly the
+    case in the report -- "both the fire and ice wizard will trap one
+    enemy, and then either wizard will kill it" -- and it now shows up
+    in the arithmetic as a universal trap on the party's target beating
+    a school-locked one.
+
+    `schools` empty or `sim` missing falls back to raw health, which is
+    every solo path and every caller that predates this.
     """
-    left = float(rate)
-    if left <= 0:
+    if float(rate) <= 0:
         return
+    # One share per teammate, so a two-wizard party splits its rate
+    # between the two schools rather than putting the whole of it
+    # through both. Each share spills to the next mob on its own, in
+    # RAW pips of rate: a share that overkills a 50hp mob through a
+    # doubled trap has only spent 25 of itself.
+    shares = ([[float(rate) / len(schools), s] for s in schools]
+              if schools and sim is not None else [[float(rate), None]])
     for enemy in sorted((e for e in state.enemies if e.alive),
                         key=lambda e: e.hp):
-        if left <= 0:
+        if all(share[0] <= 0 for share in shares):
             break
-        bite = min(left, float(enemy.hp))
-        enemy.hp -= bite
-        left -= bite
+        for share in shares:
+            raw, school = share
+            if raw <= 0 or enemy.hp <= 0:
+                continue
+            mult = 1.0
+            if school is not None:
+                try:
+                    mult = sim._ward_pass(state, enemy, school, 0.0)[0]
+                except Exception:
+                    mult = 1.0     # a ward we cannot resolve is not a
+                                   # reason to model no ally at all
+            dealt = raw * mult
+            bite = min(dealt, float(enemy.hp))
+            enemy.hp -= bite
+            share[0] = 0.0 if bite >= dealt else raw * (1.0 - bite / dealt)
 
 
 def is_sentinel(turns, max_turns) -> bool:
@@ -1266,7 +1328,7 @@ def _rollout(sim, state, first_action, max_turns=12, target=0,
             # of a non-zero rate is that same coordinator. Under-counts
             # by one round out of the horizon when a teammate is held or
             # casts nothing, which is the conservative direction.
-            _allies_hit(s, allies)
+            _allies_hit(s, allies, _ALLY_SCHOOLS, probe)
         if not enemy_alive():
             return turn, -dealt_now()
         try:
