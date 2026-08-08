@@ -312,7 +312,8 @@ class LiveWorker(QThread):
                  buy_potions=False, script="",
                  hotkeys=None, continuation="", seats=None,
                  coordinate=True, passes=2, barrier=None,
-                 follow_leader=True, leader=0, label_windows=True):
+                 follow_leader=True, leader=0, label_windows=True,
+                 solo_script=False):
         super().__init__()
         # Seat 0 is always the arguments this was called with, so the
         # single-wizard signature is untouched; `seats` adds the rest.
@@ -367,6 +368,16 @@ class LiveWorker(QThread):
         #: see `deimos_bridge/party.py`.
         self.leader = max(0, min(int(leader), len(self.seats) - 1))
         self.follow_leader = bool(follow_leader)
+        #: solo-pilot mode: the script drives ONLY the leader, and the
+        #: rest of the party follows it and joins its fights. The whole
+        #: class of failure this run has been fighting -- friend
+        #: teleports that miss, one instruction pointer for four
+        #: wizards, desync, catch-ups -- is the script COORDINATING a
+        #: party, and the presets are documented to run solo when their
+        #: account settings stay at placeholders. So: coordinate with
+        #: wizAi's follow + hivemind instead, and let the script do the
+        #: one thing it is good at, which is the route.
+        self.solo_script = bool(solo_script)
         #: write which seat a client is onto its own title bar. Four
         #: identical "Wizard101" windows cannot be told apart, and the
         #: seat numbering only exists inside this program.
@@ -1054,9 +1065,22 @@ class LiveWorker(QThread):
         `p1`..`p4`, so while it is running none of them should also be
         taking their own quest or chasing the leader. Two things walking
         one wizard is how a scripted run ends up in a doorway.
+
+        Except in solo-pilot mode, where the VM was built over the
+        leader's client alone -- the others are not `p2`..`p4` at all,
+        so nothing scripted ever moves them and they are free to follow.
         """
         runner = self.seats[0].runner
-        return runner is not None and runner.running
+        if runner is None or not runner.running:
+            return False
+        if self.solo_script:
+            return seat.index == self.leader
+        return True
+
+    def _solo_pilot(self):
+        """Is this run a solo-pilot script run with followers?"""
+        return (self.solo_script and bool(self.script)
+                and len(self.seats) > 1)
 
     def _scripted(self, seat):
         """Does this seat run the party's script?
@@ -1624,6 +1648,27 @@ class LiveWorker(QThread):
         seat.script_said = False
         party = [s.client for s in self.seats if s.client is not None]
         try:
+            if self._solo_pilot():
+                # The pilot's client and nobody else's. `solo_source`
+                # puts the account settings back to their placeholders
+                # -- the dialog may have filled real names in -- so the
+                # script takes its own documented solo path and every
+                # p2..p4 branch is skipped by its own guards. The rest
+                # of the party is wizAi's to move: `_follows` says they
+                # chase the pilot, and the hivemind has them the moment
+                # they step into its duels.
+                pilot = self.seats[self.leader]
+                source, reset = scripts.solo_source(self.script)
+                seat.runner = scripts.make_runner(
+                    [pilot.client or client], source, solo=True)
+                self._say(seat,
+                          f"script loaded — solo pilot: it drives "
+                          f"{pilot.name} alone"
+                          + (f" ({len(reset)} account setting(s) reset to "
+                             f"placeholders so it quests solo)"
+                             if reset else "")
+                          + "; the others follow and fight")
+                return
             seat.runner = scripts.make_runner(party or [client], self.script)
             self._say(seat, "script loaded"
                       + (f" — driving {len(party)} wizard(s)"
@@ -1672,7 +1717,15 @@ class LiveWorker(QThread):
             self._say(seat, f"script not loaded: {exc}")
 
     def _follows(self, seat):
-        """Is this seat a follower rather than the one setting the pace?"""
+        """Is this seat a follower rather than the one setting the pace?
+
+        In solo-pilot mode every non-leader follows, whatever the
+        follow checkbox says -- following IS the mode. A follower that
+        stood still would just watch the pilot walk away, and one that
+        took its own quest would coordinate beautifully with nobody.
+        """
+        if self._solo_pilot():
+            return seat.index != self.leader
         return (self.follow_leader and len(self.seats) > 1
                 and seat.index != self.leader)
 
@@ -2905,6 +2958,13 @@ class LiveWorker(QThread):
         for seat, place in zip(self.seats, places):
             if seat.client is None:
                 continue
+            if self._solo_pilot() and seat.index != self.leader:
+                # A follower's tracker drifting is expected -- nothing
+                # is questing it. The PILOT is still checked: it is the
+                # one wizard whose lost questline stalls the run, and
+                # the preset's own Auto_Find_Quest only kicks in after
+                # several full loops.
+                continue
             if place.on_main or not place.known:
                 # `known` False is a read that failed or a quest the
                 # list has never heard of -- not evidence of anything.
@@ -3120,10 +3180,16 @@ class LiveWorker(QThread):
         in step, whatever the goal lines say. Goal text is the fallback
         for a party the list cannot place, where it is the only evidence
         there is.
+
+        Not in solo-pilot mode. There, only the pilot's quest state
+        matters and the followers are behind BY DESIGN -- they are
+        combat support, kept together by the follow rather than by the
+        questline. Reporting that as desync and starting catch-ups for
+        it would re-create the exact churn the mode exists to remove.
         """
         import time
 
-        if len(self.seats) < 2:
+        if len(self.seats) < 2 or self._solo_pilot():
             return
         from .. import questing, questlist
 

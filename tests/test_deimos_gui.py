@@ -13309,3 +13309,202 @@ def test_the_zone_change_that_clears_it_is_noticed_by_the_poll():
     assert "self._forget_write_off(seat)" in src
     assert "seat.marker_away" in src, \
         "the marker distance has to be read where the position already is"
+
+
+# ----------------------------------------------- the solo pilot
+#
+# The operator's proposal, after five runs of group-coordination
+# failures: "could we code a variant that runs a version of the scripts
+# for only one character and then have the others help with combat?"
+# Every catastrophic stall so far has been the script COORDINATING a
+# party — friend teleports that miss, one instruction pointer for four
+# wizards, desync, catch-ups. The presets are documented to quest solo
+# when their account settings stay at placeholders ("If you're solo
+# questing, you do not have to change any of the account information
+# below" — TTS Arc 1, line 23). So: script one wizard, and keep the
+# rest with it using the follow and the hivemind wizAi already has.
+
+def test_solo_source_restores_a_configured_preset_to_placeholders():
+    """The dialog fills real names in; the run needs them back OUT, or
+    the script's own guards enable every multi-account branch. The
+    placeholder is recovered from the guard comparisons — the
+    assigned-AND-compared rule read backwards."""
+    import os
+
+    from deimos_bridge import scripts
+
+    path = os.path.join(scripts.PRESET_DIR, "TTS Arc 1.txt")
+    if not os.path.exists(path):
+        pytest.skip("the TTS presets are not checked in")
+    src = open(path, encoding="utf-8").read()
+    filled, _ = scripts.configure(
+        src, [("Konstantin", "Fire"), ("Sebastian", "Life")])
+    assert "Konstantin" in filled, "the fixture never configured anything"
+
+    back, reset = scripts.solo_source(filled)
+    assert "Konstantin" not in back and "Sebastian" not in back
+    assert "Main_Account" in reset and "Questee2" in reset
+    # ...and the result reads as unconfigured again, which is the
+    # script's own solo mode.
+    assert [n for n, _v in scripts.unconfigured(back)]
+
+
+def test_solo_source_leaves_a_fresh_script_alone():
+    from deimos_bridge import scripts
+
+    src = ('###deimos_expertmode\n'
+           'var Questee2 = "QuestingAccountName"\n'
+           'if NOT Questee2 = "QuestingAccountName" { }\n')
+    back, reset = scripts.solo_source(src)
+    assert back == src and reset == []
+
+
+def test_make_runner_waives_the_client_requirement_only_for_solo():
+    """`@clients: > 1` protects a party script from running over fewer
+    wizards than it names. Solo mode runs it over ONE on purpose — the
+    account guards make the p2..p4 sections unreachable — so the gate
+    has to step aside there and nowhere else."""
+    import inspect
+
+    from deimos_bridge import scripts
+
+    src = inspect.getsource(scripts.make_runner)
+    assert "not solo and need > len(party)" in src
+
+
+def test_in_solo_mode_the_script_drives_only_the_leader():
+    worker = _behind_party()
+    worker.solo_script = True
+    worker.seats[0].runner = type("R", (), {"running": True})()
+    assert worker._script_drives(worker.seats[0])
+    assert not worker._script_drives(worker.seats[1])
+    assert not worker._script_drives(worker.seats[2])
+
+    # and in party mode the same runner drives everybody, as before
+    worker.solo_script = False
+    assert all(worker._script_drives(s) for s in worker.seats)
+
+
+def test_in_solo_mode_every_other_wizard_follows_whatever_the_box_says():
+    """Following IS the mode. A follower that stood still would watch
+    the pilot walk away; one questing on its own would coordinate
+    beautifully with nobody."""
+    worker = _behind_party()
+    worker.solo_script = True
+    worker.follow_leader = False                    # box unticked
+    assert not worker._follows(worker.seats[0])     # the pilot leads
+    assert worker._follows(worker.seats[1])
+    assert worker._follows(worker.seats[2])
+
+
+def test_solo_mode_reports_no_desync_and_starts_no_catch_up():
+    """The followers are behind BY DESIGN — they are combat support.
+    Desync reports and catch-ups for them would re-create the exact
+    churn the mode exists to remove."""
+    import time
+
+    worker = _behind_party()                        # one wizard 1 behind
+    worker.solo_script = True
+    worker._in_step_since = time.monotonic() - worker.DESYNC_GRACE - 1
+    worker._check_in_step(worker.seats[0])
+    assert worker._catch_up_state is None
+    assert not [e for s in worker.seats for e in s.tel.questing
+                if e["kind"] in ("quest-desync", "catch-up-started")]
+
+
+def test_solo_mode_still_notices_the_pilot_losing_the_questline():
+    """The one wizard whose lost questline stalls the run is the pilot.
+    A follower's tracker drifting is expected — nothing is questing it."""
+    import time
+
+    from deimos_bridge import questlist
+
+    worker = _party_on_quests(["Gather the Troops"] * 3)
+    worker.solo_script = True
+    side = questlist.Position(world="Krokotopia", name="Krokotopian Bundle",
+                              how="by quest name", questline=None)
+    on_main = questlist.position_of("Gather the Troops")
+
+    # a FOLLOWER off the line: silence
+    worker._places = lambda: [on_main, side, on_main]
+    worker.seats[1].off_line_since = time.monotonic() - 300
+    worker._check_on_questline()
+    assert not [e for e in worker.seats[0].tel.questing
+                if e["kind"] == "off-questline"]
+
+    # the PILOT off the line: said
+    worker._places = lambda: [side, on_main, on_main]
+    worker.seats[0].off_line_since = time.monotonic() - 300
+    worker._check_on_questline()
+    assert [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "off-questline"]
+
+
+def test_solo_setup_builds_the_vm_over_the_pilot_alone(monkeypatch):
+    """One client, the solo-ized source, and the waiver — the three
+    things that make it the script's own documented solo mode."""
+    import asyncio
+
+    from deimos_bridge import scripts
+
+    worker = _behind_party()
+    worker.solo_script = True
+    worker.script = ('###deimos_expertmode\n'
+                     '# @clients: > 1\n'
+                     'var Questee2 = "PlaceholderName"\n'
+                     'if NOT Questee2 = "PlaceholderName" { }\n')
+    # the dialog configured it, as it would live
+    worker.script = worker.script.replace(
+        'var Questee2 = "PlaceholderName"', 'var Questee2 = "Sebastian"')
+    for i, seat in enumerate(worker.seats):
+        seat.client = object()
+
+    built = {}
+
+    def fake_runner(clients, source, solo=False):
+        built.update(clients=clients, source=source, solo=solo)
+        return type("R", (), {"running": True})()
+
+    monkeypatch.setattr(scripts, "make_runner", fake_runner)
+    asyncio.run(worker._setup_script(worker.seats[0].client, worker.seats[0]))
+
+    assert built["solo"] is True
+    assert built["clients"] == [worker.seats[worker.leader].client], \
+        "the VM has to see the pilot's client and nobody else's"
+    assert '"Sebastian"' not in built["source"], \
+        "the configured name reached the VM — the multi-account branches are live"
+    assert 'var Questee2 = "PlaceholderName"' in built["source"]
+
+
+def test_party_mode_is_untouched_by_the_solo_plumbing(monkeypatch):
+    import asyncio
+
+    from deimos_bridge import scripts
+
+    worker = _behind_party()
+    worker.solo_script = False
+    worker.script = "###deimos_expertmode\n"
+    for seat in worker.seats:
+        seat.client = object()
+    built = {}
+
+    def fake_runner(clients, source, solo=False):
+        built.update(clients=clients, solo=solo)
+        return type("R", (), {"running": True})()
+
+    monkeypatch.setattr(scripts, "make_runner", fake_runner)
+    asyncio.run(worker._setup_script(worker.seats[0].client, worker.seats[0]))
+    assert built["solo"] is False
+    assert len(built["clients"]) == 3
+
+
+def test_the_window_offers_the_solo_pilot_and_passes_it_through(qapp):
+    import inspect
+
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    assert hasattr(win, "solo_script")
+    assert not win.solo_script.isChecked(), "party scripting stays the default"
+    src = inspect.getsource(MainWindow.on_start_live)
+    assert "solo_script=self.solo_script.isChecked()" in src

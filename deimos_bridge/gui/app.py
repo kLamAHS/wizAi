@@ -1488,6 +1488,17 @@ class MainWindow(QMainWindow):
         self.script_btn = QPushButton("Paste script…")
         self.script_btn.clicked.connect(self.on_edit_script)
         script_row.addWidget(self.script_btn)
+        self.solo_script = QCheckBox("Solo pilot")
+        self.solo_script.setToolTip(
+            "Run the script for the leader ONLY; the other wizards follow "
+            "it and join its fights instead of being driven by the script. "
+            "The multi-wizard failures — friend teleports that miss, "
+            "desync, catch-ups — are all in the script coordinating a "
+            "party, and these scripts are built to quest solo when their "
+            "account settings stay at placeholders. Followers stay by "
+            "teleporting to the leader, so they lag on Talk/Collect steps "
+            "by design: they are combat support. Read at Play live.")
+        script_row.addWidget(self.solo_script)
         self.script_lab = _label("no script", PALETTE["muted"])
         script_row.addWidget(self.script_lab)
         script_row.addStretch()
@@ -2389,7 +2400,8 @@ class MainWindow(QMainWindow):
                                hotkeys=self.hotkey_bindings(),
                                continuation=self.continuations[0],
                                seats=rest,
-                               follow_leader=self.follow_leader.isChecked())
+                               follow_leader=self.follow_leader.isChecked(),
+                               solo_script=self.solo_script.isChecked())
         self.live.status.connect(self.on_live_status)
         # Per wizard as well as into the one-line status bar: with four
         # of them talking the bar holds whichever spoke last, and a
