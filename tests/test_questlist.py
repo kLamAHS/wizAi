@@ -84,54 +84,69 @@ def _at(world, order):
 
 
 def test_the_wizard_further_back_in_the_line_is_the_one_behind():
-    index, gap, why = questlist.furthest_behind(
+    behind, gap, why = questlist.furthest_behind(
         [_at("Krokotopia", 9), _at("Krokotopia", 4), _at("Krokotopia", 9)])
-    assert index == 1
+    assert behind == [1]
     assert gap == 5
     assert "#4 against #9" in why
 
 
-def test_a_party_a_step_apart_is_not_a_desync():
-    """One step is normal -- a party rarely turns a quest in on the same
-    tick -- and calling it a desync would have wizAi regrouping
-    constantly."""
-    index, gap, why = questlist.furthest_behind(
-        [_at("Krokotopia", 9), _at("Krokotopia", 8)])
-    assert index is None
-    assert "normal" in why
+def test_one_quest_apart_and_staying_there_is_a_desync():
+    """This is rev 8e5a9c75. Sebastian sat one quest ahead of the other
+    two for eight unbroken minutes and then wandered off the line, and
+    every check said the party was together -- because the threshold was
+    2, on the reasoning that a gap of one is a handover.
+
+    A handover is a gap of one that lasts seconds. A desync is a gap of
+    one that lasts twenty minutes. Duration tells them apart; magnitude
+    does not."""
+    behind, gap, why = questlist.furthest_behind(
+        [_at("Krokotopia", 12), _at("Krokotopia", 12), _at("Krokotopia", 13)])
+    assert behind == [0, 1], why
+    assert gap == 1
+    assert "2 wizards are 1 quest(s) behind" in why
 
 
-def test_two_wizards_equally_far_back_names_neither():
-    """Moving one of them is not obviously right, and the caller can
-    still regroup without naming anybody."""
-    index, gap, why = questlist.furthest_behind(
+def test_a_party_all_on_one_quest_is_in_step():
+    behind, _gap, why = questlist.furthest_behind(
+        [_at("Krokotopia", 9), _at("Krokotopia", 9)])
+    assert behind == []
+    assert "same quest" in why
+
+
+def test_two_wizards_equally_far_back_are_both_named():
+    """This used to refuse -- "there is no one to catch up" -- and in a
+    party of three that is the ordinary case, not an edge case. Two
+    wizards equally behind does not mean nobody is behind; it means two
+    of them have a step to finish."""
+    behind, gap, why = questlist.furthest_behind(
         [_at("Krokotopia", 9), _at("Krokotopia", 4), _at("Krokotopia", 4)])
-    assert index is None
+    assert behind == [1, 2]
     assert gap == 5
-    assert "equally far back" in why
+    assert "2 wizards are 5 quest(s) behind" in why
 
 
 def test_a_party_split_across_worlds_is_not_a_gap_in_one_line():
     """Krokotopia #9 and Wizard City #40 are not 31 steps apart; they are
     not on the same line at all."""
-    index, _gap, why = questlist.furthest_behind(
+    behind, _gap, why = questlist.furthest_behind(
         [_at("Krokotopia", 9), _at("Wizard City", 40)])
-    assert index is None
+    assert behind == []
     assert "worlds" in why
 
 
 def test_a_side_quest_has_no_place_and_does_not_get_invented_one():
     """Most of Wizard City's optional line carries no order. A wizard on
     one is not comparable, and saying so is the point."""
-    index, _gap, why = questlist.furthest_behind(
+    behind, _gap, why = questlist.furthest_behind(
         [_at("Krokotopia", 9), questlist.Position(world="Krokotopia")])
-    assert index is None
+    assert behind == []
     assert "fewer than two" in why
 
 
 def test_one_wizard_alone_is_never_behind():
-    index, _gap, _why = questlist.furthest_behind([_at("Krokotopia", 9)])
-    assert index is None
+    behind, _gap, _why = questlist.furthest_behind([_at("Krokotopia", 9)])
+    assert behind == []
 
 
 def test_the_krokotopia_main_line_is_complete():

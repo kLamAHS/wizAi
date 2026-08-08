@@ -11451,12 +11451,36 @@ def _party_on_quests(names, goals=None):
 
 
 def test_one_quest_with_five_npcs_is_not_a_desync():
-    """Rev 8e5a9c75 is twenty minutes of getting this wrong: 22
-    `quest-desync` entries, every one of them three wizards inside one
-    quest. Krokotopia #12 is "Gather the Troops" -- Primwell,
-    Archibald, Livingston, Farnsworth, Standish -- so a party working
-    through it correctly shows three different goal lines at all times,
-    and comparing goal TEXT calls that a desync on every tick."""
+    """Krokotopia #12 is "Gather the Troops" -- Primwell, Archibald,
+    Livingston, Farnsworth, Standish -- so a party working through it
+    correctly shows three different goal lines at all times. Comparing
+    goal TEXT calls that a desync on every tick."""
+    import time
+
+    worker = _party_on_quests(
+        ["Gather the Troops", "Gather the Troops", "Gather the Troops"],
+        ["Talk To Private Farnsworth in Palace of Fire",
+         "Talk To Private Livingston in Palace of Fire",
+         "Talk To Private Archibald in Palace of Fire"])
+    together, why = worker._quests_agree()
+    assert together is True, why
+    assert "same quest" in why
+
+    worker._check_in_step(worker.seats[0])
+    worker._in_step_since = time.monotonic() - 600
+    worker._check_in_step(worker.seats[0])
+    assert not [e for e in worker.seats[0].tel.questing
+                if e["kind"] == "quest-desync"], "still crying desync"
+    assert worker._behind is None
+
+
+def test_one_quest_apart_and_staying_there_is_a_desync():
+    """Rev 8e5a9c75, and the correction to the correction. Sebastian sat
+    on Krokotopia #13 while the other two sat on #12 for eight unbroken
+    minutes, and `BEHIND_BY = 2` called the party together for the whole
+    run. A handover is a gap of one that lasts seconds; a desync is a
+    gap of one that lasts twenty minutes. `DESYNC_GRACE` tells them
+    apart, and it was sitting behind a floor that never let it run."""
     import time
 
     worker = _party_on_quests(
@@ -11465,15 +11489,20 @@ def test_one_quest_with_five_npcs_is_not_a_desync():
          "Talk To Private Livingston in Palace of Fire",
          "Defeat Flame Guardian in Palace of Fire (0 of 3)"])
     together, why = worker._quests_agree()
-    assert together is True, why
-    assert "within 1 quest" in why
+    assert together is False, why
+    assert "1 quests apart" in why or "#12" in why
 
     worker._check_in_step(worker.seats[0])
+    assert not [e for e in worker.seats[0].tel.questing
+                if e["kind"] == "quest-desync"], "fired inside the grace period"
     worker._in_step_since = time.monotonic() - 600
     worker._check_in_step(worker.seats[0])
-    assert not [e for e in worker.seats[0].tel.questing
-                if e["kind"] == "quest-desync"], "still crying desync"
-    assert worker._behind is None
+    said = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "quest-desync"]
+    assert said, "the whole-run desync is invisible again"
+    # ...and BOTH wizards on #12 are named, not neither.
+    assert "2 wizards are 1 quest(s) behind" in said[0]["detail"], \
+        said[0]["detail"]
 
 
 def test_a_real_gap_is_still_a_desync():
@@ -11633,7 +11662,7 @@ def test_starting_and_stopping_a_catch_up_agree_on_where_everyone_is():
     worker._start_catching_up(behind, worker._behind_gap,
                               worker._behind_basis)
     worker._check_caught_up()
-    assert worker._catching_up() is worker.seats[1], \
+    assert worker._catching_up() == [worker.seats[1]], \
         "the stop rule disagreed with the start rule about who is where"
 
 
@@ -11687,7 +11716,7 @@ def test_a_wizard_that_is_behind_is_driven_through_its_own_step():
     assert behind is worker.seats[1]
     worker._start_catching_up(behind, worker._behind_gap,
                               worker._behind_basis)
-    assert worker._catching_up() is worker.seats[1]
+    assert worker._catching_up() == [worker.seats[1]]
     said = [e for e in worker.seats[0].tel.questing
             if e["kind"] == "catch-up-started"]
     assert said and "pausing the script" in said[0]["detail"]
@@ -11701,7 +11730,7 @@ def test_the_catch_up_ends_when_the_party_is_level_again():
     worker._start_catching_up(worker.seats[1], 7, "the questline says so")
     worker.seats[1].quest_name = "Assault on the Palace"   # caught up
     worker._check_caught_up()
-    assert worker._catching_up() is None
+    assert worker._catching_up() == []
     done = [e for e in worker.seats[0].tel.questing
             if e["kind"] == "catch-up-done"]
     assert done and "has its wizards back" in done[0]["detail"]
@@ -11718,7 +11747,7 @@ def test_a_catch_up_that_is_getting_nowhere_gives_the_script_its_wizards_back():
     state = worker._catch_up_state
     state["started"] = time.monotonic() - worker.CATCH_UP_LIMIT - 1
     worker._check_caught_up()
-    assert worker._catching_up() is None
+    assert worker._catching_up() == []
     gave = [e for e in worker.seats[0].tel.questing
             if e["kind"] == "catch-up-gave-up"]
     assert gave and "still 7 quest(s) behind" in gave[0]["detail"]
@@ -11734,7 +11763,7 @@ def test_a_catch_up_that_stops_advancing_is_written_off_sooner():
     worker._start_catching_up(worker.seats[1], 7, "the questline says so")
     worker._catch_up_state["moved"] = time.monotonic() - worker.CATCH_UP_STALL - 1
     worker._check_caught_up()
-    assert worker._catching_up() is None
+    assert worker._catching_up() == []
     gave = [e for e in worker.seats[0].tel.questing
             if e["kind"] == "catch-up-gave-up"]
     assert gave and "nothing has moved" in gave[0]["detail"]
@@ -11751,7 +11780,8 @@ def test_progress_towards_catching_up_restarts_the_stall_clock():
     worker._catch_up_state["moved"] = time.monotonic() - worker.CATCH_UP_STALL - 1
     worker.seats[1].quest_name = "Find My Colleague"       # #2 -> #7
     worker._check_caught_up()
-    assert worker._catching_up() is worker.seats[1], "gave up despite progress"
+    assert worker._catching_up() == [worker.seats[1]], \
+        "gave up despite progress"
     assert worker._catch_up_state["gap"] == 4
 
 
@@ -11761,7 +11791,7 @@ def test_a_new_laggard_gets_its_own_catch_up_not_this_ones_clock():
     worker.seats[1].quest_name = "Quarter Master"          # now level with s2
     worker.seats[2].quest_name = "Digging in the Dirt"     # s2 fell back
     worker._check_caught_up()
-    assert worker._catching_up() is None, \
+    assert worker._catching_up() == [], \
         "the old catch-up must end before a new one starts"
 
 
@@ -11821,15 +11851,35 @@ def test_a_questline_that_cannot_place_a_wizard_falls_back(monkeypatch):
     assert worker._behind_basis == "another wizard has finished that step"
 
 
-def test_a_party_one_step_apart_is_not_dragged_together():
-    """`BEHIND_BY` exists because turning a quest in is not simultaneous.
-    Reporting every handover as a desync would have the party regrouping
-    on itself constantly."""
+def test_a_handover_is_filtered_by_TIME_not_by_size_of_gap():
+    """This asserted the opposite, and the opposite was wrong.
+
+    Turning a quest in is not simultaneous, so a party is briefly one
+    quest apart on every handover -- and the first fix for that was a
+    floor of two, which also swallowed a gap of one that lasted a whole
+    run. A handover is a gap of one that lasts seconds; a desync is a
+    gap of one that lasts twenty minutes. Only the clock separates
+    them.
+
+    So the gap IS seen immediately, and `DESYNC_GRACE` decides whether
+    it is worth saying."""
+    import time
+
     worker = _party_on([["Quarter Master"], ["Back to the Archeologist"]])
     worker.seats[0].quest_name = "Quarter Master"              # main #9
     worker.seats[1].quest_name = "Back to the Archeologist"    # main #10
-    assert worker._behind_by_questline() is None
-    assert "within 1 step" in worker._behind_why
+    assert worker._behind_by_questline() is worker.seats[0], \
+        "a one-quest gap is invisible again"
+    assert worker._behind_gap == 1
+
+    worker._check_in_step(worker.seats[0])       # starts the grace clock
+    assert not [e for e in worker.seats[0].tel.questing
+                if e["kind"] == "quest-desync"], "reported a handover"
+    worker._in_step_since = time.monotonic() - worker.DESYNC_GRACE - 1
+    worker._check_in_step(worker.seats[0])
+    assert [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "quest-desync"], \
+        "a gap that outlived the grace period is a desync"
 
 
 def test_the_wizard_still_on_a_finished_step_is_the_one_behind():
