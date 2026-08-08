@@ -239,6 +239,50 @@ async def auto_adjusting_teleport(client: Client, quest_position: XYZ = None):
 async def fallback_spiral_tp(client: Client, xyz: XYZ):
     await auto_adjusting_teleport(client, xyz)
 
+#: How long `navmap_tp` waits for a wizard that is not free to become
+#: free, in seconds. Zero restores the upstream behaviour of discarding
+#: the teleport immediately.
+#:
+#: `is_free` is three conditions -- loading, in a duel, dialogue box up
+#: -- and upstream a `tp` issued while any of them holds is silently
+#: dropped on the first line of `navmap_tp`. wizAi's run at rev
+#: 1d28f745 is that happening eight times to each of three wizards,
+#: within milliseconds of each other and ten seconds apart: the script
+#: telling the party to teleport while the game says no, and the party
+#: drifting apart as some of the attempts land and others do not.
+#:
+#: Two of the three conditions are transient. A loading screen ends in
+#: seconds and a dialogue box is dismissed in seconds, so waiting a
+#: little turns a dropped instruction into a slightly late one. The
+#: third is not: a duel lasts minutes and cannot be teleported out of at
+#: all, so that one still returns immediately and says so.
+TP_FREE_WAIT = 8.0
+
+
+async def wait_until_free(client, timeout: float = None,
+                          interval: float = 0.25) -> bool:
+    """(became free). False for a duel, or if the wait runs out.
+
+    Bounded, and the bound is the point -- see `WAITFOR_TIMEOUTS` in
+    `deimoslang/vm.py` for what an unbounded poll on a game condition
+    costs.
+    """
+    limit = TP_FREE_WAIT if timeout is None else timeout
+    waited = 0.0
+    while True:
+        try:
+            if await client.in_battle():
+                return False        # not transient, and not teleportable
+            if await is_free(client):
+                return True
+        except Exception:
+            return False
+        if waited >= limit:
+            return False
+        await asyncio.sleep(interval)
+        waited += interval
+
+
 #: Called as (landed, how, zone) when `navmap_tp` finishes. wizAi sets
 #: this so a teleport that did not land reaches the run's log; left as
 #: None the patch changes nothing but the return value.
@@ -277,7 +321,19 @@ async def navmap_tp(client: Client, xyz: XYZ = None, leader_client: Client = Non
     """
     # TODO: What is leader_client meant to be for?
     if not await is_free(client):
-        return _tp_result(False, "the client was not free to teleport")
+        # Upstream this is where the instruction is dropped. Wait for a
+        # loading screen or a dialogue box to clear rather than throwing
+        # the teleport away; a duel is not waited out.
+        if not await wait_until_free(client):
+            in_duel = False
+            try:
+                in_duel = await client.in_battle()
+            except Exception:
+                pass
+            return _tp_result(
+                False,
+                "the wizard was in a duel" if in_duel else
+                f"still loading or in dialogue after {TP_FREE_WAIT:.0f}s")
 
     starting_zone = await client.zone_name() # for loading the correct wad and to walk to target as a last resort
     starting_xyz = await client.body.position()

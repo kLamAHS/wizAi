@@ -143,6 +143,10 @@ class _Seat:
         #: `LiveWorker._check_in_step`.
         self.goal = ""
         self.goal_read = 0.0
+        #: every goal this wizard has held, in order. A wizard still on
+        #: a step another has already left is the one behind -- see
+        #: `LiveWorker._who_is_behind`.
+        self.goals_seen = []
         #: when the goal last CHANGED. The wizard whose goal moved most
         #: recently is the one that got ahead -- quest names have no
         #: order, but "who advanced last" does.
@@ -2053,6 +2057,11 @@ class LiveWorker(QThread):
             goal = ""
         if goal and goal != seat.goal:
             seat.goal_at = now
+            # In order, and bounded. `_who_is_behind` needs to know that
+            # a step was HELD and left, which a single current value
+            # cannot say.
+            seat.goals_seen.append(goal)
+            del seat.goals_seen[:-12]
         seat.goal = goal
 
         zone = position = None
@@ -2120,6 +2129,17 @@ class LiveWorker(QThread):
         # one. A heartbeat that occasionally says less is fine; a
         # heartbeat that can stop the tick is not.
         try:
+            # Read here when nothing else has. `zone_seen` is filled by
+            # the stranded poll, and that only runs for a party whose
+            # script is driving -- so every log at rev 1d28f745 says
+            # "zone unread" for its first eight minutes, across the two
+            # quest desyncs and four fights. The zone is the first thing
+            # anybody reads on one of these lines.
+            if not seat.zone_seen:
+                try:
+                    seat.zone_seen = await party.zone(seat.client)
+                except Exception:
+                    pass
             bits = [seat.zone_seen or "zone unread"]
             left = await self._health_left(seat)
             if left is not None:
@@ -2375,6 +2395,54 @@ class LiveWorker(QThread):
             f"{idle / 60:.0f} min with no change — {note} — while "
             f"{count} ran")
 
+    def _who_is_behind(self):
+        """Which wizard is on a step the others have finished, or None.
+
+        The clock does not answer this, and the run at rev 1d28f745 says
+        so outright. Two desyncs, sixteen seconds apart::
+
+            t=90    w1 Talk To Danforth · w2 Talk To Danforth · w3 Find Key Stone
+            t=106   w1 Find Key Stone   · w2 Talk To Danforth · w3 Find Key Stone
+
+        Both were reported as "wizard 3 is behind" by the old rule --
+        whichever seat's goal changed least recently -- and at t=106 that
+        is exactly backwards. w1 moved ONTO w3's goal, so w3 had been
+        ahead all along and w2 is the one that missed the step. w3 looked
+        stale only because it had been sitting on the later quest longer.
+
+        This is not just a wrong line in the log. `_behind` is what
+        `_should_catch_up` sends the other wizards back to, so naming the
+        wrong one walks the party to a wizard that is ahead of them.
+
+        Quest names have no order, but the party demonstrates one: if
+        another wizard has HELD this wizard's current goal and has since
+        moved off it, that step is finished and this wizard is still on
+        it. Nothing else is inferred. Two wizards behind, or none
+        identifiable, returns None -- an honest "cannot tell" beats
+        confidently walking the party to the wrong wizard.
+        """
+        readable = [s for s in self.seats if s.goal]
+        if len(readable) < 2:
+            return None
+        behind = [s for s in readable
+                  if any(o is not s and s.goal in o.goals_seen
+                         and o.goal != s.goal for o in readable)]
+        if len(behind) == 1:
+            self._behind_basis = "another wizard has finished that step"
+            return behind[0]
+        if behind:
+            # Two on a finished step is a party that split twice. Naming
+            # one of them would walk the third to an arbitrary choice.
+            self._behind_basis = "more than one wizard is on a finished step"
+            return None
+        # Nothing has been observed to precede anything, so fall back to
+        # the clock -- the wizard whose goal moved least recently. It is
+        # a guess, and it is the guess that shipped before this; the
+        # basis is recorded so the next export shows when it was used
+        # and whether it was right.
+        self._behind_basis = "guessed from which goal moved least recently"
+        return min(readable, key=lambda s: s.goal_at)
+
     def _check_in_step(self, seat):
         """Say so when the party has drifted onto different quests.
 
@@ -2418,13 +2486,7 @@ class LiveWorker(QThread):
         if now - since < self.DESYNC_GRACE:
             return
 
-        # WHO is behind, not just that somebody is. Quest names have no
-        # order, so "ahead" is read off the clock: the wizard whose goal
-        # changed most recently is the one that advanced, and the other
-        # is the one still on the step it missed.
-        readable = [s for s in self.seats if s.goal]
-        if len(readable) >= 2:
-            self._behind = min(readable, key=lambda s: s.goal_at)
+        self._behind = self._who_is_behind()
 
         # Named, not counted. "the party is out of sync" sends you to
         # look at two windows; this says which wizard is on what.
@@ -2441,7 +2503,11 @@ class LiveWorker(QThread):
                     other.tel.note_questing(
                         "quest-desync",
                         f"{now - since:.0f}s on different quests — {where}"
-                        + (f" — {behind.name} is behind" if behind else ""))
+                        + (f" — {behind.name} is behind "
+                           f"({getattr(self, '_behind_basis', '')})"
+                           if behind else
+                           f" — which one is behind cannot be told: "
+                           f"{getattr(self, '_behind_basis', 'no evidence')}"))
                 except Exception:
                     pass
             self._say(seat,

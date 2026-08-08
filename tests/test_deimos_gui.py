@@ -11051,3 +11051,94 @@ def test_a_teleport_that_did_not_land_is_reported_to_every_seat(monkeypatch):
         assert len(note) == 1
         assert "not free" in note[0]["detail"]
         assert "Olde Town" in note[0]["detail"]
+
+
+# ------------------------------------------------------------- who is behind
+def _party_on(goals_history):
+    """Seats whose goal histories are the lists given, current = last."""
+    worker, _read = _zoned_party(["Olde Town"] * len(goals_history))
+    for seat, seen in zip(worker.seats, goals_history):
+        seat.goals_seen = list(seen)
+        seat.goal = seen[-1]
+    return worker
+
+
+def test_the_wizard_still_on_a_finished_step_is_the_one_behind():
+    """Rev 1d28f745, the second of two desyncs sixteen seconds apart::
+
+        w1 Find Key Stone · w2 Talk To Danforth · w3 Find Key Stone
+
+    w1 moved ONTO w3's goal, so w3 was ahead all along and w2 missed the
+    step. The old rule -- whichever goal changed least recently -- named
+    w3, exactly backwards."""
+    worker = _party_on([["Talk To Danforth", "Find Key Stone"],
+                        ["Talk To Danforth"],
+                        ["Find Key Stone"]])
+    assert worker._who_is_behind() is worker.seats[1]
+
+
+def test_history_beats_the_clock_when_they_disagree():
+    """The clock says w3 (its goal moved least recently); the history
+    says w2 (w1 finished w2's step). The history is evidence and the
+    clock is a guess, so evidence wins."""
+    worker = _party_on([["Talk To Danforth", "Find Key Stone"],
+                        ["Talk To Danforth"],
+                        ["Find Key Stone"]])
+    worker.seats[0].goal_at = 100.0
+    worker.seats[1].goal_at = 50.0
+    worker.seats[2].goal_at = 10.0        # oldest -- the clock's answer
+    assert worker._who_is_behind() is worker.seats[1]
+    assert "finished that step" in worker._behind_basis
+
+
+def test_two_wizards_behind_is_not_a_wizard_to_walk_the_party_to():
+    """`_behind` is what `_should_catch_up` sends the others back to, so
+    an honest "cannot tell" beats confidently picking one of two."""
+    worker = _party_on([["A", "B"], ["A"], ["A"]])
+    assert worker._who_is_behind() is None
+    assert "more than one" in worker._behind_basis
+
+
+def test_with_no_observed_order_the_clock_is_used_and_said_to_be_a_guess():
+    """A party that has not yet been seen to advance demonstrates no
+    order at all. The clock is what shipped before this; the basis is
+    recorded so the export shows when a guess was made."""
+    worker = _party_on([["Talk To Danforth"], ["Find Key Stone"]])
+    worker.seats[0].goal_at, worker.seats[1].goal_at = 50.0, 10.0
+    assert worker._who_is_behind() is worker.seats[1]
+    assert "guessed" in worker._behind_basis
+
+
+def test_a_party_in_step_never_reaches_the_question():
+    """`_who_is_behind` is only consulted once `goals_agree` has already
+    said the party has drifted, so "everyone on the same step" is the
+    caller's guard rather than this one's."""
+    from deimos_bridge import questing
+
+    worker = _party_on([["A", "B"], ["A", "B"], ["A", "B"]])
+    assert questing.goals_agree([s.goal for s in worker.seats])
+
+
+def test_the_heartbeat_reads_the_zone_when_nothing_else_has(monkeypatch):
+    """Every log at rev 1d28f745 says "zone unread" for its first eight
+    minutes: `zone_seen` is filled by the stranded poll, which only runs
+    once a script is driving. The zone is the first thing anybody reads
+    on one of these lines."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    worker, seat = _beating()
+    seat.zone_seen = None
+
+    async def read(_client):
+        return "Krokotopia/KT_Pyramid/KT_Chamber"
+
+    async def full(_seat):
+        return 1.0
+
+    monkeypatch.setattr(party, "zone", read)
+    worker._health_left = full
+    asyncio.run(worker._heartbeat(seat))
+    beat = [e for e in seat.tel.questing if e["kind"] == "heartbeat"][0]
+    assert "KT_Chamber" in beat["detail"]
