@@ -2029,11 +2029,94 @@ class LiveWorker(QThread):
                     await servicer
                 except BaseException:
                     pass
+            await self._unhook(handler)
+
+    async def _unhook(self, handler):
+        """Release every client's hooks, one at a time, and say so.
+
+        `ClientHandler.close` is a bare loop over `client.close()` with
+        no guard around each one (`client_handler.py:122`), so the first
+        client that throws leaves every client after it still hooked --
+        and a hooked client that wizAi is no longer driving is exactly
+        the state that forces Wizard101 to be restarted.
+
+        So each is closed on its own, and the outcome is said out loud
+        per wizard. "disconnected" was the only thing this used to
+        report and it is the one fact that was never in doubt; what the
+        operator needs to know before pulling a new build is whether
+        the game can be left running.
+        """
+        clients = list(getattr(handler, "clients", None) or ())
+        freed, stuck = [], []
+        for seat, client in zip(self.seats, clients):
+            name = seat.name if seat is not None else "a wizard"
             try:
-                await handler.close()
-            except Exception:
-                pass
-            self.status.emit("disconnected")
+                await client.close()
+                freed.append(name)
+            except Exception as exc:
+                stuck.append(f"{name} ({type(exc).__name__}: {exc})")
+        # Anything the seats did not cover -- a client that connected
+        # but never got a seat. Still hooked, still has to be released.
+        for client in clients[len(self.seats):]:
+            try:
+                await client.close()
+                freed.append("an extra client")
+            except Exception as exc:
+                stuck.append(f"an extra client ({type(exc).__name__})")
+        if stuck:
+            self.status.emit(
+                f"unhooked {len(freed)} of {len(freed) + len(stuck)} — "
+                + "; ".join(stuck)
+                + ". Those clients have to be closed and reopened before "
+                  "wizAi can attach to them again")
+        elif freed:
+            self.status.emit(
+                f"unhooked {len(freed)} client(s) — Wizard101 can stay "
+                f"open. Pull and relaunch wizAi when ready")
+        else:
+            self.status.emit("disconnected — nothing was hooked")
+
+    #: how often a fight loop parked between duels looks up to see
+    #: whether the run has been asked to stop. Half a second is the
+    #: service tick's own cadence and is imperceptible against a duel.
+    STOP_POLL = 0.5
+
+    async def _wait_for_combat(self, seat):
+        """Wait for a duel. False if the run was stopped while waiting.
+
+        `CombatHandler.wait_for_combat` polls `in_combat` forever
+        (`wizwalker/combat/handler.py:64`) and `stop()` only sets a
+        flag, so a loop parked here never looked at it. Between fights
+        -- which is most of a questing run -- pressing Stop therefore
+        did nothing at all until the next duel started AND finished,
+        and if the party was wedged that was never.
+
+        That is why hooks were being stranded. The run could not be
+        ended, so the window was closed instead; the worker thread died
+        where it stood; and `_go`'s teardown, which is the only thing
+        that unhooks, never ran. Wizard101 then had to be restarted
+        before wizAi could attach to it again -- which is a workflow
+        cost paid on every single code change.
+        """
+        waiting = asyncio.ensure_future(seat.combat.wait_for_combat())
+        try:
+            while not self._stop:
+                done, _pending = await asyncio.wait(
+                    {waiting}, timeout=self.STOP_POLL)
+                if done:
+                    await waiting                  # re-raise what it hit
+                    return True
+        finally:
+            if not waiting.done():
+                # Cancelled part-way through `handle_combat`, which is
+                # exactly what a stop is: the duel carries on without
+                # us and the next launch picks it up.
+                waiting.cancel()
+                try:
+                    await waiting
+                except BaseException:
+                    pass
+        return False
 
     async def _fight_loop(self, seat):
         """One wizard's duels, start to finish.
@@ -2050,8 +2133,11 @@ class LiveWorker(QThread):
             # wait_for_combat below.
             seat.tel.start_fight()
             try:
-                # blocks until a duel starts, then plays it out
-                await seat.combat.wait_for_combat()
+                # blocks until a duel starts, then plays it out -- but
+                # looks up while it waits, so Stop is answered between
+                # fights and not only during one. See `_wait_for_combat`.
+                if not await self._wait_for_combat(seat):
+                    break
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
