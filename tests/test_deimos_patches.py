@@ -122,4 +122,43 @@ def test_a_teleport_that_was_never_attempted_is_a_failure_not_a_success():
     is how the script marches on to the next instruction."""
     src = _source(TP)
     head = src.split("async def navmap_tp", 1)[1].split("starting_zone", 1)[0]
-    assert "_tp_result(False" in head
+    # Whitespace-insensitive: the call is multi-line now that it names
+    # which of the three `is_free` conditions refused it.
+    flat = " ".join(head.split())
+    assert "_tp_result( False" in flat or "_tp_result(False" in flat, \
+        "the never-attempted case is no longer reported as a failure"
+
+
+def test_a_teleport_waits_for_a_transient_block_instead_of_dropping_it():
+    """`is_free` is three conditions -- loading, in a duel, dialogue box
+    up -- and upstream a `tp` issued while any holds is discarded on the
+    first line of `navmap_tp`. Rev 1d28f745 caught that happening eight
+    times to each of three wizards, within milliseconds of each other:
+    the script telling the party to teleport while the game says no."""
+    src = _source(TP)
+    assert "wait_until_free" in src, \
+        "a tp issued during a loading screen is being dropped again"
+    head = src.split("async def navmap_tp", 1)[1].split("starting_zone", 1)[0]
+    assert "await wait_until_free(client)" in head, \
+        "navmap_tp no longer waits before giving up"
+
+
+def test_the_wait_refuses_a_duel_rather_than_sitting_through_one():
+    """Two of the three conditions clear in seconds. A duel lasts
+    minutes and cannot be teleported out of at all, so waiting one out
+    would park the script for the length of a fight."""
+    src = _source(TP)
+    block = src.split("async def wait_until_free", 1)[1].split("\n\n\n", 1)[0]
+    assert "in_battle()" in block and "return False" in block
+    i = block.index("in_battle()")
+    assert "return False" in block[i:i + 120], \
+        "being in a duel must end the wait, not extend it"
+
+
+def test_the_wait_is_bounded():
+    src = _source(TP)
+    ns = {}
+    exec("TP_FREE_WAIT" + src.split("TP_FREE_WAIT", 1)[1].split("\n\n\n", 1)[0],
+         ns)
+    assert 0 < ns["TP_FREE_WAIT"] <= 30, \
+        "long enough for a loading screen, short enough not to be a hang"
