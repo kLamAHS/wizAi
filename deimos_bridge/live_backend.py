@@ -1117,6 +1117,9 @@ class WizAiCombatHandler:
         #: how long `decide()` took this round, filled in mid-round so
         #: the report at the end can name it separately from the cast.
         self._planned = None
+        #: the round number last handled, to tell a new duel from the
+        #: next round of this one. See `_same_duel`.
+        self._last_round_number = None
         backend.attach_combat(self)
 
     # `CombatHandler` supplies get_members/get_cards/round_number/
@@ -1134,6 +1137,14 @@ class WizAiCombatHandler:
         import time
 
         entered = time.monotonic()
+        if not await self._same_duel():
+            # A new duel, so there is no previous round to have waited
+            # after. Without this, round 1 of every fight reports the
+            # gap since the LAST fight ended -- rev 3822cc6c has
+            # `waited: 114.82` on a 35-second round, which is the zone
+            # change and the walk to the sigil, not the game taking two
+            # minutes over a planning phase.
+            self._left_round_at = None
         waited = (None if self._left_round_at is None
                   else entered - self._left_round_at)
         self._planned = None
@@ -1145,6 +1156,24 @@ class WizAiCombatHandler:
             acted = (None if self._planned is None
                      else left - entered - self._planned)
             self.backend.report_round_timing(waited, self._planned, acted)
+
+    async def _same_duel(self) -> bool:
+        """Is this round a continuation of the one handled before it?
+
+        Round numbers climb inside a duel and start again at the next,
+        so a number that did not increase is a new fight. Only the
+        pacing clock consumes this, and only to decide whether there
+        was a previous round to have waited after -- so a read that
+        fails answers True and leaves the timing to `handle_round`,
+        rather than throwing inside a wrapper the round depends on.
+        """
+        try:
+            number = int(await self.round_number())
+        except Exception:
+            return True
+        last = self._last_round_number
+        self._last_round_number = number
+        return last is not None and number > last
 
     async def _handle_round(self):
         # Announced before anything is read: the coordinator only waits

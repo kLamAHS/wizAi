@@ -165,6 +165,15 @@ class _Seat:
         #: that is not the prompt the rest of the party is standing at.
         #: See `LiveWorker._check_same_sigil`.
         self.apart_since = None
+        #: whether this wizard was in a duel on its last service tick.
+        #: Read from the OTHER seats' ticks -- see `CATCH_UP_IDLE`.
+        self.in_duel = False
+        #: {world: the furthest place in that world's line this wizard
+        #: has reached}. Quests are finished in order, so a later read
+        #: that is EARLIER is a tracker on a side quest or an ambiguous
+        #: goal line -- never the wizard going backwards. See
+        #: `LiveWorker._no_further_back`.
+        self.furthest = {}
         #: (zone, rounded position, goal) as last seen, and when it last
         #: CHANGED. A script that is stepping while none of these move is
         #: a script hammering something that is not working -- see
@@ -522,6 +531,11 @@ class LiveWorker(QThread):
         while not self._stop:
             try:
                 fighting = await questing.in_battle(client)
+                # Kept on the seat, because the question "is anybody in
+                # this catch-up actually fighting" is asked from ANOTHER
+                # seat's tick -- a wizard in a duel never reaches
+                # `_check_caught_up` on its own loop. See `CATCH_UP_IDLE`.
+                seat.in_duel = bool(fighting)
                 # BEFORE the guard below. Konstantin's log has one
                 # heartbeat at t=0 and the next at t=531.7 -- nine
                 # missed beats, because he spent them in a fourteen-round
@@ -2615,7 +2629,47 @@ class LiveWorker(QThread):
                     places[i] = found
             if not moved:
                 break
-        return places
+        return [self._no_further_back(seat, place)
+                for seat, place in zip(self.seats, places)]
+
+    def _no_further_back(self, seat, place):
+        """A wizard cannot un-finish a quest. Clamp a backwards read.
+
+        The questline is completed in order, so a wizard that has been
+        placed at Krokotopia #15 is at #15 or later forever. A read that
+        says #7 is not the wizard moving backwards -- it is the tracker
+        having switched to a side quest, or a goal line that eight
+        quests happen to share. Both are common and neither is a lag.
+
+        Rev 3822cc6c is what this costs. Sebastian, in step with the
+        party all run, read `Talk To Robert Lancaster in Chamber of
+        Fire` for one tick -- a real goal, belonging to Krokotopia #7 --
+        and the party declared an EIGHT quest gap and paused the script
+        to catch him up. Fifteen seconds later he read #15 again, which
+        is where he had been the whole time.
+
+        Per world, because the order restarts at every world boundary
+        and Marleybone #1 is not behind Krokotopia #15.
+        """
+        if not place.comparable:
+            return place
+        best = seat.furthest.get(place.world)
+        if best is None or place.order > best:
+            seat.furthest[place.world] = place.order
+            return place
+        if place.order == best:
+            return place
+        # Backwards. Keep the wizard where it has actually got to, and
+        # say in `how` that the read disagreed -- a silent clamp would
+        # hide a genuine questline reset behind a number that never
+        # moves.
+        from .. import questlist
+
+        return questlist.Position(
+            world=place.world, order=best, name=place.name,
+            area=place.area, questline=place.questline,
+            how=f"{place.how}, clamped — it read #{place.order}, "
+                f"which is behind #{best} it has already done")
 
     def _how_placed(self):
         """One short line saying how each wizard was located, for the log.
@@ -3369,6 +3423,22 @@ class LiveWorker(QThread):
     #: and how long without the laggard's quest advancing before it is
     #: written off as something wizAi's questing cannot finish.
     CATCH_UP_STALL = 300.0
+    #: ...and a much shorter bound on the case where the laggard is not
+    #: even MOVING. `CATCH_UP_STALL` is generous because a dungeon boss
+    #: takes minutes and the goal line does not change while it is
+    #: fought -- but a wizard that is standing still, out of combat,
+    #: with the same zone, the same spot and the same goal is not
+    #: fighting anything. `hop_once` teleports it to a marker it is
+    #: already standing on and presses X at nothing.
+    #:
+    #: Rev 3822cc6c: Phönix one quest behind on `Defeat Edo Nirini in
+    #: Palace of Fire`, whose marker is a dungeon sigil. The catch-up
+    #: began at t=768 and the export ends at t=926 with all three
+    #: wizards frozen and the script pinned at 8,083 instructions --
+    #: with another 140s to run before `CATCH_UP_STALL` would have let
+    #: go. Five minutes of a frozen party for a step nothing was
+    #: attempting is worse than the desync it was answering.
+    CATCH_UP_IDLE = 90.0
 
     def _catching_up(self):
         """The seats being caught up, as a list. Empty when none are.
@@ -3525,7 +3595,17 @@ class LiveWorker(QThread):
             state["moved"] = now
         waited = now - state["started"]
         stalled = now - state["moved"]
-        if waited >= self.CATCH_UP_LIMIT or stalled >= self.CATCH_UP_STALL:
+        # Not one wizard of the group has moved -- see `CATCH_UP_IDLE`.
+        # `seat.progress_at` is when (zone, spot, goal) last changed, so
+        # this is exactly "standing still with nothing happening", and
+        # it deliberately does NOT fire while anybody is in a duel: a
+        # fight is the catch-up working.
+        idle = min((now - s.progress_at for s in seats
+                    if s.progress is not None), default=0.0)
+        going_nowhere = (idle >= self.CATCH_UP_IDLE
+                         and not any(s.in_duel for s in seats))
+        if (waited >= self.CATCH_UP_LIMIT or stalled >= self.CATCH_UP_STALL
+                or going_nowhere):
             self._stop_catching_up(
                 "catch-up-gave-up",
                 f"{waited / 60:.0f} min trying to finish "
@@ -3533,6 +3613,9 @@ class LiveWorker(QThread):
                 f"and still {gap} quest(s) behind"
                 + (f" — nothing has moved for {stalled / 60:.0f} min"
                    if stalled >= self.CATCH_UP_STALL else "")
+                + (f" — {' and '.join(s.name for s in seats)} has not moved "
+                   f"or fought for {idle:.0f}s, so nothing is attempting "
+                   f"this step" if going_nowhere else "")
                 + ". Giving the script its wizards back rather than holding "
                   "the whole party here")
 
