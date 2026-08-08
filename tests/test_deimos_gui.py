@@ -13226,3 +13226,86 @@ def test_the_window_has_an_unhook_button_that_waits_for_the_release(qapp):
     assert "UNHOOK_GRACE_MS" in src, \
         "closing the window is the path that stranded hooks most often"
     assert MainWindow.UNHOOK_GRACE_MS >= 10000
+
+
+# ------------------------- a hop cannot cross a zone; the script can
+#
+# Rev 1843e387. Phönix two quests behind on `Defeat Edo Nirini in Palace
+# of Fire`, standing in KT_Hub. The catch-up paused the whole party and
+# spent 116 seconds hopping Phönix nowhere, gave up, and wrote the step
+# off permanently — and then the SCRIPT moved all three into
+# KT_PalaceOfFire eight seconds later, which is the one place the
+# catch-up would have worked.
+
+def test_a_catch_up_is_not_started_for_an_objective_in_another_zone():
+    """A quest teleport is a within-zone move. Across a boundary the
+    marker reads in the other zone's coordinate space and comes back as
+    six figures — 98,813 and 110,890 and 115,018 in that run."""
+    import time
+
+    worker = _behind_party()
+    laggard = worker.seats[0]
+    laggard.marker_away = 110890.0
+
+    worker._in_step_since = time.monotonic() - worker.DESYNC_GRACE - 1
+    worker._check_in_step(worker.seats[0])
+
+    assert worker._catch_up_state is None, \
+        "it paused the party for a hop that cannot reach the objective"
+    kinds = [e["kind"] for e in laggard.tel.questing]
+    assert "catch-up-out-of-zone" in kinds
+    said = [e for e in laggard.tel.questing
+            if e["kind"] == "catch-up-out-of-zone"][0]
+    assert "110,890" in said["detail"]
+
+
+def test_an_objective_in_this_zone_still_gets_its_catch_up():
+    import time
+
+    worker = _behind_party()
+    worker.seats[0].marker_away = 640.0
+
+    worker._in_step_since = time.monotonic() - worker.DESYNC_GRACE - 1
+    worker._check_in_step(worker.seats[0])
+    assert worker._catch_up_state is not None, \
+        "a step the hop can actually reach was refused"
+
+
+def test_an_unread_marker_does_not_block_the_catch_up():
+    """No evidence is not evidence of another zone, and refusing on a
+    failed read would turn one bad poll into a run with no catch-up."""
+    import time
+
+    worker = _behind_party()
+    worker.seats[0].marker_away = None
+
+    worker._in_step_since = time.monotonic() - worker.DESYNC_GRACE - 1
+    worker._check_in_step(worker.seats[0])
+    assert worker._catch_up_state is not None
+
+
+def test_arriving_somewhere_new_earns_the_step_another_attempt():
+    """The verdict was about a situation, not about the step. The party
+    moving into the objective's zone IS the situation changing."""
+    worker = _behind_party()
+    laggard = _make_it_give_up(worker)
+    assert worker._written_off([laggard])
+
+    worker._forget_write_off(laggard)
+    assert not worker._written_off([laggard]), \
+        "a zone change did not clear a verdict that no longer applies"
+    assert id(laggard) not in worker._wrote_off
+
+
+def test_the_zone_change_that_clears_it_is_noticed_by_the_poll():
+    """A guard: the clearing has to happen on the per-seat poll, not in
+    `_check_together`, which needs two wizards and runs every six
+    seconds. A solo laggard changing zone must still clear it."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._read_goal)
+    assert "self._forget_write_off(seat)" in src
+    assert "seat.marker_away" in src, \
+        "the marker distance has to be read where the position already is"
