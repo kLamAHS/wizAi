@@ -11438,6 +11438,93 @@ def test_a_wizard_that_fell_out_of_a_mass_instruction_is_named(monkeypatch):
         assert "the others finished it" in note[0]["detail"]
 
 
+def test_a_stall_that_keeps_going_is_said_more_than_once():
+    """Keyed on the situation alone this fired exactly once in a
+    forty-minute stall, at the five-minute mark, while `stuck-detail`
+    said the same sentence 69 times."""
+    import time
+
+    worker, _read = _zoned_party(["Krokotopia/KT_Hub"])
+    worker.script = "###deimos_expertmode"
+    seat = worker.seats[0]
+    seat.runner = type("R", (), {"running": True, "steps": 10_000})()
+    seat.progress = ("Krokotopia/KT_Hub", (0, 0, 0), "Talk To Standish")
+    worker._script_drives = lambda _s: True
+
+    said = []
+    for minutes in (6, 8, 11, 21, 41, 42):
+        seat.progress_at = time.monotonic() - minutes * 60
+        worker._check_progress(seat)
+        said.append(len([e for e in seat.tel.questing
+                         if e["kind"] == "no-progress"]))
+    # 6 min says it; 8 is the same band; 11, 21 and 41 each double.
+    assert said == [1, 1, 2, 3, 4, 4], said
+
+
+# --------------------------------------------------- an unconfigured script
+def test_a_script_still_on_its_placeholders_is_named():
+    """Rev 8e5a9c75 is 110 minutes long and the last 40 are three wizards
+    standing in Krokotopia's hub while the script ran 106,000
+    instructions and moved nobody. The cause is in the file's first
+    thirty lines::
+
+        var Main_Account = "QuestingAccountName"
+
+    The quester guards its friend-teleports with `if NOT Main_Account =
+    "QuestingAccountName"`, so an unconfigured script does not fail --
+    it silently skips the one mechanism it has for putting a party back
+    together."""
+    from deimos_bridge.scripts import unconfigured
+
+    source = (
+        '###deimos_expertmode\n'
+        'var Main_Account = "QuestingAccountName"\n'
+        'var Questee2 = "QuestingAccountName"\n'
+        'var Main_Account_School = "SchoolGoesHere"\n'
+        'var SpeedDelay = 1\n'
+        'block Go {\n'
+        '  if NOT Main_Account = "QuestingAccountName" {\n'
+        '    p1 friendtp Main_Account\n'
+        '  }\n'
+        '  if NOT Questee2 = "QuestingAccountName" { p2 friendtp Questee2 }\n'
+        '  if NOT Main_Account_School = "SchoolGoesHere" { p1 sendkey X }\n'
+        '}\n')
+    got = dict(unconfigured(source))
+    assert got == {"Main_Account": "QuestingAccountName",
+                   "Questee2": "QuestingAccountName",
+                   "Main_Account_School": "SchoolGoesHere"}, got
+
+
+def test_a_filled_in_setting_is_not_called_a_placeholder():
+    """No hardcoded list of placeholder strings. What marks one is that
+    the script COMPARES the variable against the same literal it was
+    assigned -- the author's own way of saying "this means unset"."""
+    from deimos_bridge.scripts import unconfigured
+
+    source = (
+        '###deimos_expertmode\n'
+        'var Main_Account = "Phoenix Deathblade"\n'
+        'var Questee2 = "QuestingAccountName"\n'
+        'block Go {\n'
+        '  if NOT Main_Account = "QuestingAccountName" { p1 sendkey X }\n'
+        '  if NOT Questee2 = "QuestingAccountName" { p2 sendkey X }\n'
+        '}\n')
+    got = dict(unconfigured(source))
+    assert "Main_Account" not in got, "flagged a name that was filled in"
+    assert got == {"Questee2": "QuestingAccountName"}
+
+
+def test_a_value_that_is_never_compared_is_not_a_placeholder():
+    """`var SpeedDelay = "1"` is just a value. Without a guard against
+    the same literal there is nothing to say it means unset."""
+    from deimos_bridge.scripts import unconfigured
+
+    source = ('###deimos_expertmode\n'
+              'var Zone = "Krokotopia/KT_Hub"\n'
+              'block Go { p1 tozone Zone }\n')
+    assert unconfigured(source) == []
+
+
 # ------------------------------------------------- in step, and on the line
 def _party_on_quests(names, goals=None):
     worker, _read = _zoned_party(["Krokotopia/KT_Pyramid/KT_PalaceOfFire"]

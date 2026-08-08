@@ -1602,6 +1602,29 @@ class LiveWorker(QThread):
                           f"wizard(s) are hooked. Anything it does with the "
                           f"others runs against nothing — check its own "
                           f"account settings match your party.")
+            # Into the RUN LOG, not just the status line. Rev 8e5a9c75
+            # spent its last forty minutes with three wizards standing
+            # still because the script's account names were never filled
+            # in, so its own friend-teleports -- the only thing it has
+            # for putting a party back together -- were skipped by its
+            # own guards. That is checkable in the first thirty lines of
+            # the file, and it belongs where somebody reads it after the
+            # run as well as before.
+            blanks = scripts.unconfigured(self.script)
+            if blanks and len(party) > 1:
+                said = (f"the script has {len(blanks)} setting(s) still at "
+                        f"its placeholder value ("
+                        + ", ".join(n for n, _v in blanks[:6])
+                        + (" …" if len(blanks) > 6 else "")
+                        + "). While the account names are unset the script "
+                          "skips its own friend-teleports, so a wizard that "
+                          "falls behind cannot be pulled back by it")
+                for other in self.seats:
+                    try:
+                        other.tel.note_questing("script-unconfigured", said)
+                    except Exception:
+                        pass
+                self._say(seat, said)
         except Exception as exc:
             seat.runner = None
             self._say(seat, f"script not loaded: {exc}")
@@ -2489,10 +2512,23 @@ class LiveWorker(QThread):
         if idle < self.STUCK_AFTER:
             return
         zone, _where, goal = seat.progress
+        # Keyed on the SITUATION and on how long it has lasted, not on
+        # the situation alone. Keyed on the situation alone it is said
+        # once and never again: rev 8e5a9c75 stood still for forty
+        # minutes and this fired exactly once, at the five-minute mark,
+        # while `stuck-detail` said the same sentence 69 times. A stall
+        # that is still going after half an hour is a different fact
+        # from one that has just started.
         note = f"{zone or 'an unreadable zone'} · {goal or 'no quest goal'}"
-        if note == seat.said_stuck:
+        # 5, 10, 20, 40, 80 minutes -- rare enough not to bury the log,
+        # often enough that the export shows the stall growing.
+        band = 1
+        while band * 2 * self.STUCK_AFTER <= idle:
+            band *= 2
+        stamp = f"{note} @{band}"
+        if stamp == seat.said_stuck:
             return
-        seat.said_stuck = note
+        seat.said_stuck = stamp
         runner = self.seats[0].runner
         steps = f"{runner.steps:,} instructions in" if runner else "the script"
         # Built separately rather than edited out of `steps`. The first

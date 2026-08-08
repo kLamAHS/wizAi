@@ -130,6 +130,50 @@ def mentions_clients(source: str) -> int:
     return max(found) if found else 0
 
 
+def unconfigured(source: str):
+    """[(name, value)] for variables still at the script's own placeholder.
+
+    Rev 8e5a9c75 is 110 minutes long and the last 40 of them are three
+    wizards standing in Krokotopia's hub, out of combat, full health,
+    while the script executed 106,000 instructions and moved nobody.
+    The cause is in the file's first thirty lines::
+
+        var Main_Account = "QuestingAccountName"
+        var Questee2     = "QuestingAccountName"
+        var Main_Account_School = "SchoolGoesHere"
+
+    Never filled in. The quester guards most of its friend-teleports
+    with `if NOT Main_Account = "QuestingAccountName"`, so an
+    unconfigured script does not fail -- it silently skips the one
+    mechanism it has for putting a party back together. Three of them
+    got through the guards anyway and threw `Could not find friend with
+    ... name QuestingAccountName`, which is how this became visible at
+    all, and only because `PartyTaskGroup` now reports what it catches.
+
+    So: a wizard falls behind, and the script's own regroup is disabled.
+    That is the whole failure, and it is checkable before the run starts.
+
+    How a placeholder is recognised, without a hardcoded list of them:
+    the script COMPARES the variable against the same literal it was
+    assigned. `var X = "Y"` alone is just a value; `var X = "Y"` plus
+    `if NOT X = "Y"` elsewhere is the author saying "Y means unset".
+    That generalises to any script written the same way, which is all of
+    the ones built from this template.
+    """
+    import re
+
+    found = []
+    for name, value in re.findall(r'^\s*var\s+(\w+)\s*=\s*"([^"]*)"',
+                                  source or "", re.MULTILINE):
+        if not value:
+            continue
+        pattern = rf'{re.escape(name)}\s*=\s*"{re.escape(value)}"'
+        # More than one is the `var` line plus at least one guard.
+        if len(re.findall(pattern, source)) > 1:
+            found.append((name, value))
+    return found
+
+
 def check(source: str):
     """(ok, reason) — does this script compile?
 
@@ -163,6 +207,19 @@ def check(source: str):
     need = wants_clients(source)
     if need > 1:
         note += f", and it says it needs {need} wizards"
+    # A warning, not a refusal: a solo run does not need the account
+    # names, and it is the operator's script to run. But an unconfigured
+    # party script cannot regroup itself, and that is worth knowing
+    # before rather than after -- see `unconfigured`.
+    blanks = unconfigured(source)
+    if blanks:
+        note += ("\n\n⚠ " + f"{len(blanks)} setting(s) are still at the "
+                 f"script's placeholder value: "
+                 + ", ".join(f"{n} = \"{v}\"" for n, v in blanks[:6])
+                 + (" …" if len(blanks) > 6 else "")
+                 + ". The script skips its own friend-teleports while "
+                   "these are unset, so a wizard that falls behind cannot "
+                   "be pulled back — fill them in before a party run.")
     return True, note
 
 
