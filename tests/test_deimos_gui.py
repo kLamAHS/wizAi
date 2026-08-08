@@ -11269,6 +11269,129 @@ def test_a_wizard_that_fell_out_of_a_mass_instruction_is_named(monkeypatch):
         assert "the others finished it" in note[0]["detail"]
 
 
+# ---------------------------------------------------- finishing a missed step
+def _desynced(orders):
+    """A scripted party whose wizards are on the given Krokotopia steps."""
+    names = {2: "Digging in the Dirt", 4: "Fragments of a Key",
+             7: "Find My Colleague", 9: "Quarter Master",
+             11: "Assault on the Palace"}
+    worker, _read = _zoned_party(["Krokotopia/KT_Hub"] * len(orders))
+    worker.script = "###deimos_expertmode"
+    for seat, order in zip(worker.seats, orders):
+        seat.quest_name = names[order]
+        seat.goal = f"step {order}"
+        seat.goals_seen = [seat.goal]
+    return worker
+
+
+def test_a_wizard_that_is_behind_is_driven_through_its_own_step():
+    """The operator's correction: "just teleporting back to a wizard you
+    believe is behind doesn't work because I think the script then just
+    continues on the same way. They need to actually quest with the
+    other wizard until they catch up."
+
+    One instruction pointer drives the whole party, so a teleport moves
+    the laggard's BODY while its quest state stays put -- and the next
+    `tp quest` sends it straight back."""
+    worker = _desynced([11, 4])
+    behind = worker._who_is_behind()
+    assert behind is worker.seats[1]
+    worker._start_catching_up(behind, worker._behind_gap,
+                              worker._behind_basis)
+    assert worker._catching_up() is worker.seats[1]
+    said = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "catch-up-started"]
+    assert said and "pausing the script" in said[0]["detail"]
+    # ...and every seat's export carries it, not just the laggard's.
+    assert all(any(e["kind"] == "catch-up-started" for e in s.tel.questing)
+               for s in worker.seats)
+
+
+def test_the_catch_up_ends_when_the_party_is_level_again():
+    worker = _desynced([11, 4])
+    worker._start_catching_up(worker.seats[1], 7, "the questline says so")
+    worker.seats[1].quest_name = "Assault on the Palace"   # caught up
+    worker._check_caught_up()
+    assert worker._catching_up() is None
+    done = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "catch-up-done"]
+    assert done and "has its wizards back" in done[0]["detail"]
+
+
+def test_a_catch_up_that_is_getting_nowhere_gives_the_script_its_wizards_back():
+    """A paused script that is never resumed is the stall this replaces.
+    Every exit puts the wizards back on the program, including this
+    one."""
+    import time
+
+    worker = _desynced([11, 4])
+    worker._start_catching_up(worker.seats[1], 7, "the questline says so")
+    state = worker._catch_up_state
+    state["started"] = time.monotonic() - worker.CATCH_UP_LIMIT - 1
+    worker._check_caught_up()
+    assert worker._catching_up() is None
+    gave = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "catch-up-gave-up"]
+    assert gave and "still 7 quest(s) behind" in gave[0]["detail"]
+
+
+def test_a_catch_up_that_stops_advancing_is_written_off_sooner():
+    """The overall limit is generous because a missed step can be a
+    dungeon boss. A step that has not moved at all is a different
+    thing."""
+    import time
+
+    worker = _desynced([11, 4])
+    worker._start_catching_up(worker.seats[1], 7, "the questline says so")
+    worker._catch_up_state["moved"] = time.monotonic() - worker.CATCH_UP_STALL - 1
+    worker._check_caught_up()
+    assert worker._catching_up() is None
+    gave = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "catch-up-gave-up"]
+    assert gave and "nothing has moved" in gave[0]["detail"]
+
+
+def test_progress_towards_catching_up_restarts_the_stall_clock():
+    """Closing the gap counts as movement even when the goal LINE
+    happens not to change -- a multi-part step reads the same string
+    throughout."""
+    import time
+
+    worker = _desynced([11, 2])
+    worker._start_catching_up(worker.seats[1], 9, "the questline says so")
+    worker._catch_up_state["moved"] = time.monotonic() - worker.CATCH_UP_STALL - 1
+    worker.seats[1].quest_name = "Find My Colleague"       # #2 -> #7
+    worker._check_caught_up()
+    assert worker._catching_up() is worker.seats[1], "gave up despite progress"
+    assert worker._catch_up_state["gap"] == 4
+
+
+def test_a_new_laggard_gets_its_own_catch_up_not_this_ones_clock():
+    worker = _desynced([11, 4, 9])
+    worker._start_catching_up(worker.seats[1], 7, "the questline says so")
+    worker.seats[1].quest_name = "Quarter Master"          # now level with s2
+    worker.seats[2].quest_name = "Digging in the Dirt"     # s2 fell back
+    worker._check_caught_up()
+    assert worker._catching_up() is None, \
+        "the old catch-up must end before a new one starts"
+
+
+def test_a_desync_the_questline_cannot_measure_does_not_pause_the_script():
+    """The older rules say WHO is behind, not how far -- and without a
+    distance there is no way to tell when to stop. Pausing the script on
+    one of those would be a pause with no exit condition."""
+    worker, _read = _zoned_party(["Olde Town", "Olde Town"])
+    worker.script = "###deimos_expertmode"
+    for seat, seen in zip(worker.seats, [["Talk To Danforth", "Find Key Stone"],
+                                         ["Talk To Danforth"]]):
+        seat.goals_seen, seat.goal = list(seen), seen[-1]
+        seat.quest_name = "A Quest Nobody Wrote Down"
+    behind = worker._who_is_behind()
+    assert behind is worker.seats[1]
+    assert worker._behind_basis == "another wizard has finished that step"
+    assert worker._behind_gap == 0, "a rule with no distance must not arm one"
+
+
 # ------------------------------------------------------------- who is behind
 def _party_on(goals_history):
     """Seats whose goal histories are the lists given, current = last."""
