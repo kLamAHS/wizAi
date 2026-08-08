@@ -11453,6 +11453,95 @@ def _desynced(orders):
     return worker
 
 
+def test_the_desync_check_survives_a_tick_where_nothing_changed():
+    """Live at rev 7888c35a, on all three wizards::
+
+        stage-failed: the service loop: UnboundLocalError: cannot
+        access local variable 'behind' where it is not associated with
+        a value
+
+    `behind` was assigned inside `if where != self._said_desync` and
+    read after it, so every tick where the desync line had not CHANGED
+    -- which is most of them -- took the whole service loop stage
+    down."""
+    import time
+
+    worker = _desynced([11, 4])
+    worker._check_in_step(worker.seats[0])          # starts the grace clock
+    worker._in_step_since = time.monotonic() - 600  # ...which has now run out
+    worker._check_in_step(worker.seats[0])          # first tick: says it
+    worker._check_in_step(worker.seats[0])          # second: unchanged
+    worker._check_in_step(worker.seats[0])          # and again
+    said = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "quest-desync"]
+    assert len(said) == 1, "the desync line should be said once, not thrice"
+
+
+def test_starting_and_stopping_a_catch_up_agree_on_where_everyone_is():
+    """The start rule placed a wizard by quest name and fell back to its
+    goal; the stop rule placed by quest name only. Live, the names did
+    not read at all -- so the first found a five-quest gap from the
+    goals and the second found nothing to compare, and
+    `catch-up-started` and `catch-up-done` share a timestamp in all
+    three exports."""
+    worker, _read = _zoned_party(["Krokotopia/KT_Hub"] * 2)
+    worker.script = "###deimos_expertmode"
+    # Exactly the live case: wizard 2's quest NAME read and the other's
+    # did not, so wizard 1 could only be placed from its goal -- and
+    # that goal is ambiguous between #12 and #13 until a neighbour
+    # narrows it.
+    worker.seats[0].quest_name = ""
+    worker.seats[1].quest_name = "Find My Colleague"          # #7
+    worker.seats[0].goal = "Talk To Lieutenant Standish in Palace of Fire"
+    worker.seats[1].goal = "Talk To Robert Lancaster in Chamber of Fire"
+    for seat in worker.seats:
+        seat.goals_seen = [seat.goal]
+
+    behind = worker._who_is_behind()
+    assert behind is worker.seats[1], "the goal fallback stopped working"
+    worker._start_catching_up(behind, worker._behind_gap,
+                              worker._behind_basis)
+    worker._check_caught_up()
+    assert worker._catching_up() is worker.seats[1], \
+        "the stop rule disagreed with the start rule about who is where"
+
+
+def test_the_desync_line_says_how_each_wizard_was_located():
+    """All three wizards in the first live run were placed by goal text,
+    which means the quest NAME read returned nothing for any of them --
+    and nothing in the export said so."""
+    import time
+
+    worker = _desynced([11, 4])
+    worker._check_in_step(worker.seats[0])
+    worker._in_step_since = time.monotonic() - 600
+    worker._check_in_step(worker.seats[0])
+    said = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "quest-desync"][0]["detail"]
+    assert "placed:" in said
+    assert "by quest name" in said, said
+    assert "#11" in said and "#4" in said, said
+
+
+def test_placement_does_not_depend_on_which_seat_reads_its_name():
+    """One pass over the seats made the answer depend on their order: a
+    wizard placed from its goal becomes a hint for the next one, so in a
+    single pass only the wizards AFTER it get the benefit. Rev 7888c35a
+    placed wizard 1 at #12 purely because wizard 2's name happened to
+    read first."""
+    ambiguous = "Talk To Lieutenant Standish in Palace of Fire"  # #12 or #13
+    anchor = "Talk To Robert Lancaster in Chamber of Fire"       # #7
+
+    for order in ((ambiguous, anchor), (anchor, ambiguous)):
+        worker, _read = _zoned_party(["Krokotopia/KT_Hub"] * 2)
+        for seat, goal in zip(worker.seats, order):
+            seat.quest_name = ""
+            seat.goal = goal
+        places = worker._places()
+        got = sorted(p.order for p in places if p.comparable)
+        assert got == [7, 12], f"{order[0][:22]}… first gave {got}"
+
+
 def test_a_wizard_that_is_behind_is_driven_through_its_own_step():
     """The operator's correction: "just teleporting back to a wizard you
     believe is behind doesn't work because I think the script then just
