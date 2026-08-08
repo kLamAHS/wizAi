@@ -1858,6 +1858,8 @@ class LiveWorker(QThread):
                 # coordinator asks again every round after that.
                 backend.on_recovered_cast = \
                     self._recovered_cast_hook(seat)
+                backend.on_recovery_failed = \
+                    self._recovery_failed_hook(seat)
                 backend.damage_rate = seat.tel.damage_rate
                 seat.tel.resolver = backend.resolver
                 seat.backend = backend
@@ -2147,7 +2149,18 @@ class LiveWorker(QThread):
             try:
                 if fighting is None:
                     fighting = await party.in_battle(seat.client)
-                bits.append("in a duel" if fighting else "out of combat")
+                if fighting and left is not None and left <= 0:
+                    # A wizard on 0% is not fighting, whatever the duel
+                    # phase says. Rev bb8f2b3c has four consecutive
+                    # minutes of "0% health · in a duel" after the
+                    # `defeated` entry, which reads as a wizard grinding
+                    # a long fight when it is a corpse waiting for the
+                    # allies to finish -- the one state where the script
+                    # legitimately sits still, and the one the log made
+                    # look like the bug.
+                    bits.append("defeated, waiting for the duel to end")
+                else:
+                    bits.append("in a duel" if fighting else "out of combat")
             except Exception:
                 bits.append("combat state unread")
             bits.append(seat.goal or "no quest goal")
@@ -2200,28 +2213,58 @@ class LiveWorker(QThread):
                       f"that wait has no timeout at all and would have "
                       f"blocked the script for good")
 
-        def teleported(landed, how, zone):
+        def whose(client):
+            """The name of the wizard a hook is talking about.
+
+            The hooks are module-level, so they fire for whichever
+            wizard the script was driving -- and without this every
+            entry read "a scripted teleport did not land" with no way
+            to tell which of four wizards it was. Nineteen of those in
+            one run's log named nobody at all.
+            """
+            if client is None:
+                return ""
+            for other in self.seats:
+                if other.client is client:
+                    return other.name
+            return ""
+
+        def teleported(landed, how, zone, client=None):
             # Only the failures. A run makes thousands of these and the
             # ones that worked are what the `zone` entries already show.
             if landed:
                 return
+            name = whose(client)
+            said = (f"{name}'s scripted teleport did not land" if name
+                    else "a scripted teleport did not land")
             for other in self.seats:
                 try:
                     other.tel.note_questing(
                         "teleport-failed",
-                        f"a scripted teleport did not land — {how}"
-                        + (f" (in {zone})" if zone else ""))
+                        f"{said} — {how}" + (f" (in {zone})" if zone else ""))
                 except Exception:
                     pass
             self._say_once(
                 self.seats[0], "tp-failed",
-                f"a scripted teleport did not land — {how}. Upstream this "
-                f"returns nothing at all, so the script cannot tell and its "
-                f"next instruction is for wherever it meant to be")
+                f"{said} — {how}. Upstream this returns nothing at all, so "
+                f"the script cannot tell and its next instruction is for "
+                f"wherever it meant to be")
 
-        for install, key in ((scripts.on_waitfor_timeout, "waitfor-hook"),
-                             (scripts.on_teleport_result, "teleport-hook")):
-            ok, why = install(gave_up if key == "waitfor-hook" else teleported)
+        def tp_noted(message, client=None):
+            name = whose(client)
+            said = f"{name}: {message}" if name else message
+            for other in self.seats:
+                try:
+                    other.tel.note_questing("teleport-forced", said)
+                except Exception:
+                    pass
+            self._say_once(self.seats[0], "tp-forced", said)
+
+        installs = ((scripts.on_waitfor_timeout, "waitfor-hook", gave_up),
+                    (scripts.on_teleport_result, "teleport-hook", teleported),
+                    (scripts.on_teleport_note, "teleport-note", tp_noted))
+        for install, key, hook in installs:
+            ok, why = install(hook)
             if not ok:
                 self._say_once(self.seats[0], key, why,
                                kind="stage-failed", detail=why)
@@ -3155,6 +3198,22 @@ class LiveWorker(QThread):
             self.seat_round_done.emit(seat.index, rec)
             if seat.index == 0:
                 self.round_done.emit(rec)
+
+    def _recovery_failed_hook(self, seat):
+        return lambda why: self._on_recovery_failed(why, seat)
+
+    def _on_recovery_failed(self, why, seat=None):
+        """The runner-up did not go out either. Say so, and say why.
+
+        Re-emitted like `_on_recovered_cast` for the same reason: the
+        Decisions table already has this round reading "passed", and the
+        row is only useful with the reason on it.
+        """
+        seat = self.seats[0] if seat is None else seat
+        self._say(seat, why)
+        rec = seat.tel.note_recovery_failed(why)
+        if rec is not None:
+            self.seat_round_done.emit(seat.index, rec)
 
     def _on_recovered_cast(self, card, target, first, seat=None):
         """The runner-up went out; the round was not lost after all.

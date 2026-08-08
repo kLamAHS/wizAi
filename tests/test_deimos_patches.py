@@ -149,10 +149,43 @@ def test_the_wait_refuses_a_duel_rather_than_sitting_through_one():
     would park the script for the length of a fight."""
     src = _source(TP)
     block = src.split("async def wait_until_free", 1)[1].split("\n\n\n", 1)[0]
-    assert "in_battle()" in block and "return False" in block
-    i = block.index("in_battle()")
-    assert "return False" in block[i:i + 120], \
+    assert "BLOCK_DUEL" in block, \
+        "the wait no longer singles a duel out from the other blocks"
+    i = block.index("BLOCK_DUEL")
+    assert "return BLOCK_DUEL" in block[i:i + 120], \
         "being in a duel must end the wait, not extend it"
+
+
+def test_a_stuck_loading_flag_is_told_apart_from_a_real_zone_load():
+    """`client.is_loading()` is true for `TransitionWindow` -- a real
+    transition, seconds -- and for `PageFlip`, which is a book and can
+    sit there forever. `is_free` folds both into one bool, so rev
+    bb8f2b3c dropped nineteen teleports over five minutes all saying
+    "still loading or in dialogue", while the same wizard was standing
+    still, out of combat, with no dialogue box and an NPC popup up."""
+    src = _source(TP)
+    block = src.split("async def blocked_by", 1)[1].split("\n\n\n", 1)[0]
+    assert "TransitionWindow" in block and "PageFlip" in block, \
+        "the two halves of is_loading() are folded together again"
+    assert "BLOCK_DUEL" in block and "BLOCK_DIALOGUE" in block, \
+        "blocked_by no longer names the non-loading blocks"
+
+
+def test_a_loading_flag_that_never_clears_is_pushed_through():
+    """A teleport dropped because the client claims to be loading, when
+    it has claimed that for longer than any zone load takes, is a run
+    that has stopped. Attempting it costs a write the load would
+    overwrite; not attempting it costs the run."""
+    src = _source(TP)
+    head = src.split("async def navmap_tp", 1)[1].split("starting_zone", 1)[0]
+    assert "LOADING_BLOCKS" in head, \
+        "navmap_tp treats every block the same again"
+    assert "_tp_note(" in head, \
+        "overriding the loading gate has to be visible to a human"
+    flat = " ".join(head.split())
+    assert "return _tp_result( False" not in flat.split("LOADING_BLOCKS", 1)[1] \
+        .split("elif", 1)[0], \
+        "a stale loading flag is being reported as a dropped teleport again"
 
 
 def test_the_wait_is_bounded():

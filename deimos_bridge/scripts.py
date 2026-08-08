@@ -234,6 +234,32 @@ def on_teleport_result(hook):
     return True, ""
 
 
+def on_teleport_note(hook):
+    """Report a teleport that overrode the loading gate. Returns (ok, reason).
+
+    Its own channel rather than a third kind of result, because it is
+    neither: the teleport was attempted, and whether it landed comes
+    through `on_teleport_result` as usual. What this says is that
+    `navmap_tp` decided the client's "loading" flag was stale and went
+    ahead anyway -- a judgement call, and one a human watching a run
+    should be able to see us make.
+    """
+    _ensure_path()
+    try:
+        from src import teleport_math
+    except Exception as exc:
+        return False, (f"Deimos's teleport_math did not import "
+                       f"({type(exc).__name__}: {exc})")
+    if not hasattr(teleport_math, "on_teleport_note"):
+        return False, ("this Deimos has no `on_teleport_note` hook, so a "
+                       "teleport that pushed through a stale loading flag "
+                       "will not be visible — the patch in teleport_math.py "
+                       "has probably been lost to an update (see "
+                       "tests/test_deimos_patches.py)")
+    teleport_math.on_teleport_note = hook
+    return True, ""
+
+
 class ScriptRunner:
     """One deimoslang program, run in time-boxed bursts."""
 
