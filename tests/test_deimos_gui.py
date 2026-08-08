@@ -3955,8 +3955,9 @@ def test_every_tab_scrolls(qapp):
     from deimos_bridge.gui.app import MainWindow
 
     win = MainWindow(Telemetry())
-    # Board, Decisions, Damage model, Learning, Naming, Runs, Party.
-    assert win.tabs.count() == 7
+    # Board, Decisions, Damage model, Learning, Naming, Runs,
+    # Questing, Party.
+    assert win.tabs.count() == 8
     for i in range(win.tabs.count()):
         assert isinstance(win.tabs.widget(i), QScrollArea), i
         assert win.tabs.widget(i).widgetResizable()
@@ -13508,3 +13509,170 @@ def test_the_window_offers_the_solo_pilot_and_passes_it_through(qapp):
     assert not win.solo_script.isChecked(), "party scripting stays the default"
     src = inspect.getsource(MainWindow.on_start_live)
     assert "solo_script=self.solo_script.isChecked()" in src
+
+
+# ------------------- followers on the SAME questline, not behind it
+#
+# The operator's correction to the first cut of the solo pilot: "that
+# wont work for leveling 3 accounts at the same time ... they should
+# all be on the same questline or else you're doing 3x the questing
+# having to switch back and forth who's the leader." They can be:
+# defeat credit is shared in the duel circle, and every other step is
+# turned in at the exact spot the pilot has just walked the party to.
+
+def _syncing_follower(monkeypatch, goal="Talk To Hetch Al'Dim",
+                      marker=640.0, dialogue=False, battle=False):
+    from deimos_bridge import questing
+
+    worker = _behind_party()
+    worker.solo_script = True
+    seat = worker.seats[1]
+    seat.goal = goal
+    seat.marker_away = marker
+    calls = {"hop": 0, "advance": 0, "follow": 0}
+
+    async def in_battle(_c):
+        return battle
+
+    async def in_dialogue(_c):
+        return dialogue
+
+    async def advance(_c, **kw):
+        calls["advance"] += 1
+        return 2, ""
+
+    async def hop(_c, **kw):
+        calls["hop"] += 1
+        return False
+
+    async def follow(*_a, **_kw):
+        calls["follow"] += 1
+
+    monkeypatch.setattr(questing, "in_battle", in_battle)
+    monkeypatch.setattr(questing, "in_dialogue", in_dialogue)
+    monkeypatch.setattr(questing, "advance_dialogue", advance)
+    monkeypatch.setattr(questing, "hop_once", hop)
+    monkeypatch.setattr(worker, "_follow_step", follow)
+    return worker, seat, calls
+
+
+def test_a_follower_at_its_own_objective_takes_the_step(monkeypatch):
+    import asyncio
+
+    worker, seat, calls = _syncing_follower(monkeypatch)
+    asyncio.run(worker._sync_follower(object(), seat))
+    assert calls["hop"] == 1
+    assert calls["follow"] == 0, \
+        "the follow teleported it away mid-turn-in"
+
+
+def test_a_follower_never_hops_to_its_own_defeat_marker(monkeypatch):
+    """Defeat credit comes from the PILOT's circle. A follower hopping
+    to its own defeat marker starts a fight alone, which is how Phönix
+    died at rev 3d026ada."""
+    import asyncio
+
+    worker, seat, calls = _syncing_follower(
+        monkeypatch, goal="Defeat Edo Nirini in Palace of Fire")
+    asyncio.run(worker._sync_follower(object(), seat))
+    assert calls["hop"] == 0
+    assert calls["follow"] == 1
+
+
+def test_a_follower_with_its_objective_elsewhere_just_follows(monkeypatch):
+    import asyncio
+
+    worker, seat, calls = _syncing_follower(monkeypatch, marker=110890.0)
+    asyncio.run(worker._sync_follower(object(), seat))
+    assert calls["hop"] == 0 and calls["follow"] == 1
+
+
+def test_an_open_dialogue_is_finished_before_anything_else(monkeypatch):
+    import asyncio
+
+    worker, seat, calls = _syncing_follower(monkeypatch, dialogue=True)
+    asyncio.run(worker._sync_follower(object(), seat))
+    assert calls["advance"] == 1
+    assert calls["hop"] == 0 and calls["follow"] == 0
+
+
+def test_a_fighting_follower_is_left_to_the_policy(monkeypatch):
+    import asyncio
+
+    worker, seat, calls = _syncing_follower(monkeypatch, battle=True)
+    asyncio.run(worker._sync_follower(object(), seat))
+    assert calls == {"hop": 0, "advance": 0, "follow": 0}
+
+
+def test_working_a_step_does_not_fall_through_to_the_follow(monkeypatch):
+    """Between hop attempts the follower WAITS at its objective. Falling
+    through to the follow teleports it back to the pilot with the step
+    half-done, and the sync never finishes anything."""
+    import asyncio
+
+    worker, seat, calls = _syncing_follower(monkeypatch)
+    asyncio.run(worker._sync_follower(object(), seat))    # hops, stamps gate
+    asyncio.run(worker._sync_follower(object(), seat))    # gate closed
+    assert calls["hop"] == 1
+    assert calls["follow"] == 0
+
+
+def test_a_step_that_will_not_turn_in_has_a_bounded_budget(monkeypatch):
+    """A follower lost to one impossible step is worse than one step
+    skipped — it stops fighting too."""
+    import asyncio
+    import time
+
+    worker, seat, calls = _syncing_follower(monkeypatch)
+    asyncio.run(worker._sync_follower(object(), seat))
+    seat.sync_began = time.monotonic() - worker.SYNC_GIVE_UP - 1
+    asyncio.run(worker._sync_follower(object(), seat))
+    assert calls["follow"] == 1, "it stayed on a step it cannot finish"
+
+
+def test_the_quest_row_says_what_each_wizard_is_doing():
+    worker = _behind_party()
+    worker.solo_script = True
+    worker.seats[0].runner = type("R", (), {"running": True})()
+    worker.seats[1].in_duel = True
+    import time
+
+    now = time.monotonic()
+    pilot = worker._quest_row(worker.seats[0], "KT_Hub", now)
+    fighter = worker._quest_row(worker.seats[1], "KT_Hub", now)
+    third = worker._quest_row(worker.seats[2], "KT_Hub", now)
+    assert pilot["doing"] == "pilot (script)"
+    assert fighter["doing"] == "fighting"
+    assert third["doing"] == "following + own steps"
+    assert pilot["quest"] and pilot["line"].startswith("#")
+
+
+def test_the_questing_tab_mode_and_checkboxes_agree_both_ways(qapp):
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    assert hasattr(win, "quest_mode") and hasattr(win, "quest_table")
+
+    # dropdown -> checkboxes
+    win.quest_mode.setCurrentIndex(3)
+    assert win.use_script.isChecked() and win.solo_script.isChecked()
+    assert not win.auto_quest.isChecked()
+    # checkboxes -> dropdown
+    win.solo_script.setChecked(False)
+    assert win.quest_mode.currentIndex() == 2
+    win.use_script.setChecked(False)
+    win.auto_quest.setChecked(True)
+    assert win.quest_mode.currentIndex() == 1
+
+    # the live feed renders a row
+    win.on_seat_quest(0, {"name": "Konstantin", "doing": "pilot (script)",
+                          "zone": "Krokotopia/KT_Hub", "quest": "Payback",
+                          "goal": "Talk To X", "line": "#13 (Krokotopia)",
+                          "marker": 98813.0, "idle": 400.0})
+    assert win.quest_table.item(0, 0).text() == "Konstantin"
+    assert win.quest_table.item(0, 6).text() == "other zone"
+    assert "min" in win.quest_table.item(0, 7).text()
+
+    import inspect
+    src = inspect.getsource(MainWindow.on_start_live)
+    assert "leader=self.leader_pick.currentIndex()" in src
