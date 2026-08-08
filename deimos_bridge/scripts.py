@@ -210,6 +210,32 @@ def on_waitfor_timeout(hook):
     return True, ""
 
 
+def on_party_task_failed(hook):
+    """Report a wizard that dropped out of a mass instruction. (ok, reason).
+
+    Upstream every mass instruction fans out inside an
+    `asyncio.TaskGroup`, which cancels every sibling the moment one task
+    raises -- so one wizard's transient memory-read failure cancels the
+    other three mid-instruction and the whole VM step dies with an
+    ExceptionGroup. `PartyTaskGroup` in `Deimos/src/deimoslang/vm.py`
+    lets them all finish and collects the failures instead; this is
+    where they surface. See `tests/test_deimos_patches.py`.
+    """
+    _ensure_path()
+    try:
+        from src.deimoslang import vm
+    except Exception as exc:
+        return False, f"deimoslang did not import ({type(exc).__name__}: {exc})"
+    if not hasattr(vm, "on_party_task_failed"):
+        return False, ("this Deimos has no `on_party_task_failed` hook, so a "
+                       "wizard that drops out of a mass instruction will do "
+                       "it silently — and it may be taking the rest of the "
+                       "party's instruction down with it (see "
+                       "tests/test_deimos_patches.py)")
+    vm.on_party_task_failed = hook
+    return True, ""
+
+
 def on_teleport_result(hook):
     """Report every `navmap_tp`. Returns (ok, reason).
 
@@ -231,6 +257,32 @@ def on_teleport_result(hook):
                        "patch in teleport_math.py has probably been lost to "
                        "an update (see tests/test_deimos_patches.py)")
     teleport_math.on_teleport_result = hook
+    return True, ""
+
+
+def on_teleport_note(hook):
+    """Report a teleport that overrode the loading gate. Returns (ok, reason).
+
+    Its own channel rather than a third kind of result, because it is
+    neither: the teleport was attempted, and whether it landed comes
+    through `on_teleport_result` as usual. What this says is that
+    `navmap_tp` decided the client's "loading" flag was stale and went
+    ahead anyway -- a judgement call, and one a human watching a run
+    should be able to see us make.
+    """
+    _ensure_path()
+    try:
+        from src import teleport_math
+    except Exception as exc:
+        return False, (f"Deimos's teleport_math did not import "
+                       f"({type(exc).__name__}: {exc})")
+    if not hasattr(teleport_math, "on_teleport_note"):
+        return False, ("this Deimos has no `on_teleport_note` hook, so a "
+                       "teleport that pushed through a stale loading flag "
+                       "will not be visible — the patch in teleport_math.py "
+                       "has probably been lost to an update (see "
+                       "tests/test_deimos_patches.py)")
+    teleport_math.on_teleport_note = hook
     return True, ""
 
 

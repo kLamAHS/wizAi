@@ -895,6 +895,26 @@ class Telemetry:
             self.fights[-1].passes += 1
         return rec
 
+    def note_recovery_failed(self, why):
+        """Why the runner-up did not go out either.
+
+        `note_failed_cast` has already marked the round a pass and that
+        is right; what was missing is the second half of the sentence.
+        `_try_the_next_best` gives up for four different reasons -- no
+        alternatives, the card is not in hand, the cast threw, the card
+        stayed in hand -- and all four returned `False` silently, so a
+        passed round read as though nothing had been attempted. Rev
+        bb8f2b3c has exactly one failed cast in it, with two castable
+        alternatives sitting in the same hand, and no way to tell which
+        of the four happened.
+        """
+        rec = self._pending
+        if rec is None:
+            return None
+        rec.reason = f"{rec.reason} — {why}" if rec.reason else why
+        rec.clean = False
+        return rec
+
     def note_recovered_cast(self, card, target, first_choice):
         """The runner-up went out after the chosen card would not.
 

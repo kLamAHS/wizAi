@@ -185,6 +185,11 @@ class WizAiBackend:
         #: NOT `on_failed_cast` -- that one has already run and recorded
         #: the round as a pass, which this has to undo.
         self.on_recovered_cast = None
+        #: optional callback(why) when the runner-up did not go out
+        #: either. The round stays the pass `on_failed_cast` recorded;
+        #: this says which of `_try_the_next_best`'s four ways out it
+        #: took, all of which used to be silent.
+        self.on_recovery_failed = None
         #: optional callback(actual school) for a wizard whose client
         #: disagrees with the school it was configured with. See
         #: `_check_school`.
@@ -934,6 +939,19 @@ class WizAiBackend:
         if self.on_recovered_cast:
             self.on_recovered_cast(pick.card, pick.target, first_choice)
 
+    def report_recovery_failed(self, why):
+        """The runner-up did not go out either, and why.
+
+        The round is already recorded as a pass by `report_failed_cast`
+        and stays one -- this only finishes the sentence. Worth its own
+        call because "the best card would not cast and neither would the
+        second" and "the best card would not cast and nothing else was
+        in hand" are different problems with different fixes, and both
+        used to print the same thing: nothing.
+        """
+        if self.on_recovery_failed:
+            self.on_recovery_failed(why)
+
     def report_slow_cast(self, card_name):
         """The fast cast did not take; trying again slowly.
 
@@ -1227,6 +1245,8 @@ class WizAiCombatHandler:
                         if c.card and c.card != decision.card_name
                         and c.card != "pass"]
         if not alternatives:
+            self.backend.report_recovery_failed(
+                "nothing else in hand was castable, so the round was passed")
             return False
         # The candidate list is not stored in rank order -- it is in the
         # order the rollout scored the hand -- so the runner-up has to be
@@ -1236,17 +1256,32 @@ class WizAiCombatHandler:
         from .policies import rank_candidate
         pick = min(alternatives, key=rank_candidate)
 
+        others = ", ".join(c.card for c in alternatives)
         card = self._pick_card(read, pick.card)
         if card is None:
+            self.backend.report_recovery_failed(
+                f"the runner-up {pick.card} was no longer in hand either "
+                f"(weighed this round: {others})")
             return False
         spec = self.backend.cards.get(pick.card)
         try:
             target = await self._resolve_target(read, pick.target, spec)
             held = await self._cards_in_hand()
             await card.cast(target, sleep_time=self.RETRY_CAST_TIME)
-            if not await self._card_left_the_hand(held):
-                return False
-        except Exception:
+            went = await self._card_left_the_hand(held)
+        except Exception as exc:
+            self.backend.report_recovery_failed(
+                f"the runner-up {pick.card} threw as well "
+                f"({type(exc).__name__}: {exc})")
+            return False
+        # Outside the `try` on purpose: reporting a failure from inside
+        # the handler for that same failure reports it twice, and the
+        # second one escapes.
+        if not went:
+            self.backend.report_recovery_failed(
+                f"the runner-up {pick.card} stayed in hand too — two "
+                f"different cards refused to cast, so this is the board "
+                f"and not the card (also weighed: {others})")
             return False
 
         self.backend.report_recovered_cast(pick, decision.card_name)

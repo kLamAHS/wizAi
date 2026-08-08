@@ -4065,12 +4065,16 @@ def _stub_handler(decide, read, card=None):
         last_read = read
         failed = []
         lost = []
+        gave_up = []
 
         async def decide(self):
             return await decide()
 
         def report_failed_cast(self, name, exc):
             self.failed.append((name, type(exc).__name__))
+
+        def report_recovery_failed(self, why):
+            self.gave_up.append(why)
 
         def report_lost_round(self, number, reason):
             self.lost.append((number, reason))
@@ -4113,6 +4117,9 @@ def test_the_handler_reports_a_failed_cast_rather_than_swallowing_it():
 
     assert handler.backend.failed == [("Sunbird", "RuntimeError")]
     assert passes, "it must still pass the round rather than hang"
+    assert handler.backend.gave_up and \
+        "nothing else in hand" in handler.backend.gave_up[0], \
+        "a passed round has to say whether anything else was tried"
 
 
 def test_a_round_lost_to_a_failed_read_goes_through_the_record():
@@ -9762,12 +9769,17 @@ def test_the_fallback_gives_up_after_one_try(qapp):
             Candidate(card="Fire Cat", target=0, turns=6, damage=197, pips=1),
         ]
 
+    said = []
+
     class _Backend:
         school = "fire"
         cards = {}
 
         def report_recovered_cast(self, pick, first):
             raise AssertionError("nothing went out; nothing to report")
+
+        def report_recovery_failed(self, why):
+            said.append(why)
 
     handler = WizAiCombatHandler.__new__(WizAiCombatHandler)
     handler.backend = _Backend()
@@ -9778,6 +9790,90 @@ def test_the_fallback_gives_up_after_one_try(qapp):
     assert not asyncio.run(
         handler._try_the_next_best(_healer_read(), _Decision()))
     assert tried == ["Sunbird"], f"tried {tried}"
+    # ...and says so. Rev bb8f2b3c passed a round with two castable
+    # cards still in hand and left no record of having tried either.
+    assert len(said) == 1, f"said {said}"
+    assert "Sunbird" in said[0] and "stayed in hand" in said[0], said[0]
+
+
+def test_giving_up_on_the_runner_up_says_which_way_it_gave_up(qapp):
+    """Four exits, all of them `return False`, none of them a word in
+    the log. The one failed cast in rev bb8f2b3c had `alternatives:
+    ["Lightning Bats", "Thunder Snake"]` recorded on the round and no
+    way to tell whether either was reached."""
+    import asyncio
+
+    from deimos_bridge.live_backend import WizAiCombatHandler
+    from deimos_bridge.policies import Candidate
+
+    said = []
+
+    class _Backend:
+        school = "storm"
+        cards = {}
+
+        def report_recovery_failed(self, why):
+            said.append(why)
+
+    class _NoOthers:
+        card_name = "Pixie"
+        target_index = None
+        candidates = [
+            Candidate(card="Pixie", target=None, turns=5, damage=0, pips=2),
+            Candidate(card="pass", target=None, turns=9, damage=0, pips=0),
+        ]
+
+    handler = WizAiCombatHandler.__new__(WizAiCombatHandler)
+    handler.backend = _Backend()
+    assert not asyncio.run(
+        handler._try_the_next_best(_healer_read(), _NoOthers()))
+    assert said and "nothing else in hand" in said[0], said
+
+    class _Two:
+        card_name = "Pixie"
+        target_index = None
+        candidates = [
+            Candidate(card="Pixie", target=None, turns=5, damage=0, pips=2),
+            Candidate(card="Thunder Snake", target=0, turns=6, damage=190,
+                      pips=1),
+        ]
+
+    said.clear()
+    handler._pick_card = lambda read, name: None      # no longer in hand
+    assert not asyncio.run(
+        handler._try_the_next_best(_healer_read(), _Two()))
+    assert said and "no longer in hand" in said[0], said
+    assert "Thunder Snake" in said[0], said
+
+
+def test_a_round_that_could_not_recover_says_why_on_the_row(qapp):
+    """The round stays the pass `note_failed_cast` recorded -- that part
+    is right -- but the row read "the cast of Pixie did not go through
+    ... passed instead" with two castable cards in the same hand and
+    nothing about whether either was reached."""
+    from deimos_bridge.telemetry import Telemetry
+
+    tel = Telemetry()
+    tel.start_fight()
+
+    class _Decision:
+        card_name = "Pixie"
+        target_index = None
+        target_kind = "self"
+        passing = False
+        reason = "policy choice"
+        policy = "ttk"
+        candidates = ()
+
+    rec = tel.observe(_Decision(), _healer_read(my_hp=526, my_max=897))
+    tel.note_failed_cast("Pixie did not go through — passed instead")
+    tel.note_recovery_failed("the runner-up Thunder Snake stayed in hand too")
+
+    assert rec.passing is True, "the round really was a pass; keep it one"
+    assert tel.fights[-1].passes == 1
+    assert "did not go through" in rec.reason
+    assert "Thunder Snake stayed in hand" in rec.reason
+    assert rec.clean is False
 
 
 def test_a_recovered_round_stops_claiming_it_passed(qapp):
@@ -10980,6 +11076,26 @@ def test_the_heartbeat_beats_while_a_wizard_is_in_a_duel():
     assert "in a duel" in beat["detail"]
 
 
+def test_a_wizard_on_zero_health_is_not_described_as_fighting():
+    """Rev bb8f2b3c: four consecutive minutes of `0% health · in a duel`
+    after the `defeated` entry, with the script's instruction counter
+    frozen the whole time. That is a corpse waiting for its allies to
+    finish the fight -- the one state where a still script is correct --
+    and the log made it the most alarming thing on the page."""
+    import asyncio
+
+    worker, seat = _beating()
+
+    async def dead(_seat):
+        return 0.0
+
+    worker._health_left = dead
+    asyncio.run(worker._heartbeat(seat, driven=True, fighting=True))
+    beat = [e for e in seat.tel.questing if e["kind"] == "heartbeat"][0]
+    assert "defeated, waiting for the duel to end" in beat["detail"]
+    assert "· in a duel" not in beat["detail"], beat["detail"]
+
+
 def test_a_waitfor_that_gives_up_is_reported_to_every_seat(monkeypatch):
     """A bounded wait that gives up silently is only half a fix: the
     script falls through into a retry loop and the run looks normal
@@ -10992,6 +11108,9 @@ def test_a_waitfor_that_gives_up_is_reported_to_every_seat(monkeypatch):
     monkeypatch.setattr(scripts, "on_waitfor_timeout",
                         lambda hook: (installed.append(hook), (True, ""))[1])
     monkeypatch.setattr(scripts, "on_teleport_result",
+                        lambda hook: (True, ""))
+    monkeypatch.setattr(scripts, "on_teleport_note", lambda hook: (True, ""))
+    monkeypatch.setattr(scripts, "on_party_task_failed",
                         lambda hook: (True, ""))
 
     worker._watch_waitfor(worker.seats[0])
@@ -11018,6 +11137,9 @@ def test_a_deimos_without_the_hook_is_reported_not_ignored(monkeypatch):
                         lambda hook: (False, "this Deimos has no hook"))
     monkeypatch.setattr(scripts, "on_teleport_result",
                         lambda hook: (True, ""))
+    monkeypatch.setattr(scripts, "on_teleport_note", lambda hook: (True, ""))
+    monkeypatch.setattr(scripts, "on_party_task_failed",
+                        lambda hook: (True, ""))
 
     worker._watch_waitfor(worker.seats[0])           # must not raise
     note = [e for e in worker.seats[0].tel.questing
@@ -11038,6 +11160,9 @@ def test_a_teleport_that_did_not_land_is_reported_to_every_seat(monkeypatch):
     monkeypatch.setattr(scripts, "on_waitfor_timeout", lambda h: (True, ""))
     monkeypatch.setattr(scripts, "on_teleport_result",
                         lambda hook: (got.append(hook), (True, ""))[1])
+    monkeypatch.setattr(scripts, "on_teleport_note", lambda hook: (True, ""))
+    monkeypatch.setattr(scripts, "on_party_task_failed",
+                        lambda hook: (True, ""))
 
     worker._watch_waitfor(worker.seats[0])
     got[0](True, "direct", "Olde Town")             # a teleport that worked
@@ -11053,6 +11178,220 @@ def test_a_teleport_that_did_not_land_is_reported_to_every_seat(monkeypatch):
         assert "Olde Town" in note[0]["detail"]
 
 
+def test_a_failed_teleport_names_the_wizard_it_happened_to(monkeypatch):
+    """The hook is module-level, so it fires for whichever wizard the
+    script was driving. Rev bb8f2b3c has nineteen `teleport-failed`
+    entries and not one of them says whose teleport it was."""
+    from deimos_bridge import scripts
+
+    worker, _read = _zoned_party(["Olde Town", "Olde Town"])
+    worker.seats[0].runner = type("R", (), {"running": True, "steps": 1})()
+    worker.seats[0].name = "Phönix"
+    worker.seats[1].name = "Sebastian"
+    got = []
+    monkeypatch.setattr(scripts, "on_waitfor_timeout", lambda h: (True, ""))
+    monkeypatch.setattr(scripts, "on_teleport_result",
+                        lambda hook: (got.append(hook), (True, ""))[1])
+    monkeypatch.setattr(scripts, "on_teleport_note", lambda hook: (True, ""))
+    monkeypatch.setattr(scripts, "on_party_task_failed",
+                        lambda hook: (True, ""))
+
+    worker._watch_waitfor(worker.seats[0])
+    got[0](False, "a dialogue box was open after 8s", "Olde Town",
+           worker.seats[1].client)
+    for seat in worker.seats:
+        note = [e for e in seat.tel.questing
+                if e["kind"] == "teleport-failed"]
+        assert len(note) == 1
+        assert note[0]["detail"].startswith("Sebastian's scripted teleport"), \
+            note[0]["detail"]
+
+    # An unrecognised client still gets a line -- naming nobody beats
+    # saying nothing.
+    for seat in worker.seats:
+        seat.tel.questing.clear()
+    got[0](False, "the wizard was in a duel", "", object())
+    assert worker.seats[0].tel.questing[0]["detail"].startswith(
+        "a scripted teleport did not land")
+
+
+def test_a_teleport_that_pushed_through_a_stale_load_is_visible(monkeypatch):
+    """`navmap_tp` deciding the client's loading flag is stale and going
+    ahead anyway is a judgement call, and one a human watching a run
+    should be able to see us make."""
+    from deimos_bridge import scripts
+
+    worker, _read = _zoned_party(["Olde Town", "Olde Town"])
+    worker.seats[0].runner = type("R", (), {"running": True, "steps": 1})()
+    worker.seats[0].name = "Phönix"
+    got = []
+    monkeypatch.setattr(scripts, "on_waitfor_timeout", lambda h: (True, ""))
+    monkeypatch.setattr(scripts, "on_teleport_result", lambda h: (True, ""))
+    monkeypatch.setattr(scripts, "on_teleport_note",
+                        lambda hook: (got.append(hook), (True, ""))[1])
+
+    worker._watch_waitfor(worker.seats[0])
+    got[0]("the book (PageFlip) was open — teleporting anyway",
+           worker.seats[0].client)
+    for seat in worker.seats:
+        note = [e for e in seat.tel.questing
+                if e["kind"] == "teleport-forced"]
+        assert len(note) == 1
+        assert note[0]["detail"].startswith("Phönix: "), note[0]["detail"]
+        assert "PageFlip" in note[0]["detail"]
+
+
+def test_a_wizard_that_fell_out_of_a_mass_instruction_is_named(monkeypatch):
+    """Upstream a mass instruction runs inside `asyncio.TaskGroup`, which
+    cancels every sibling when one task raises -- so one wizard's
+    transient failure took the other three down with it, and nothing
+    said so. `PartyTaskGroup` lets them all finish; this is where the
+    one that did not surfaces."""
+    from deimos_bridge import scripts
+
+    worker, _read = _zoned_party(["Olde Town", "Olde Town"])
+    worker.seats[0].runner = type("R", (), {"running": True, "steps": 1})()
+    got = []
+    monkeypatch.setattr(scripts, "on_waitfor_timeout", lambda h: (True, ""))
+    monkeypatch.setattr(scripts, "on_teleport_result", lambda h: (True, ""))
+    monkeypatch.setattr(scripts, "on_teleport_note", lambda h: (True, ""))
+    monkeypatch.setattr(scripts, "on_party_task_failed",
+                        lambda hook: (got.append(hook), (True, ""))[1])
+
+    worker._watch_waitfor(worker.seats[0])
+    got[0]("teleport", [("tp_to_quest", RuntimeError("MemoryReadError"))])
+    for seat in worker.seats:
+        note = [e for e in seat.tel.questing
+                if e["kind"] == "party-task-failed"]
+        assert len(note) == 1
+        assert "`teleport` failed for one wizard" in note[0]["detail"]
+        assert "MemoryReadError" in note[0]["detail"]
+        assert "the others finished it" in note[0]["detail"]
+
+
+# ---------------------------------------------------- finishing a missed step
+def _desynced(orders):
+    """A scripted party whose wizards are on the given Krokotopia steps."""
+    names = {2: "Digging in the Dirt", 4: "Fragments of a Key",
+             7: "Find My Colleague", 9: "Quarter Master",
+             11: "Assault on the Palace"}
+    worker, _read = _zoned_party(["Krokotopia/KT_Hub"] * len(orders))
+    worker.script = "###deimos_expertmode"
+    for seat, order in zip(worker.seats, orders):
+        seat.quest_name = names[order]
+        seat.goal = f"step {order}"
+        seat.goals_seen = [seat.goal]
+    return worker
+
+
+def test_a_wizard_that_is_behind_is_driven_through_its_own_step():
+    """The operator's correction: "just teleporting back to a wizard you
+    believe is behind doesn't work because I think the script then just
+    continues on the same way. They need to actually quest with the
+    other wizard until they catch up."
+
+    One instruction pointer drives the whole party, so a teleport moves
+    the laggard's BODY while its quest state stays put -- and the next
+    `tp quest` sends it straight back."""
+    worker = _desynced([11, 4])
+    behind = worker._who_is_behind()
+    assert behind is worker.seats[1]
+    worker._start_catching_up(behind, worker._behind_gap,
+                              worker._behind_basis)
+    assert worker._catching_up() is worker.seats[1]
+    said = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "catch-up-started"]
+    assert said and "pausing the script" in said[0]["detail"]
+    # ...and every seat's export carries it, not just the laggard's.
+    assert all(any(e["kind"] == "catch-up-started" for e in s.tel.questing)
+               for s in worker.seats)
+
+
+def test_the_catch_up_ends_when_the_party_is_level_again():
+    worker = _desynced([11, 4])
+    worker._start_catching_up(worker.seats[1], 7, "the questline says so")
+    worker.seats[1].quest_name = "Assault on the Palace"   # caught up
+    worker._check_caught_up()
+    assert worker._catching_up() is None
+    done = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "catch-up-done"]
+    assert done and "has its wizards back" in done[0]["detail"]
+
+
+def test_a_catch_up_that_is_getting_nowhere_gives_the_script_its_wizards_back():
+    """A paused script that is never resumed is the stall this replaces.
+    Every exit puts the wizards back on the program, including this
+    one."""
+    import time
+
+    worker = _desynced([11, 4])
+    worker._start_catching_up(worker.seats[1], 7, "the questline says so")
+    state = worker._catch_up_state
+    state["started"] = time.monotonic() - worker.CATCH_UP_LIMIT - 1
+    worker._check_caught_up()
+    assert worker._catching_up() is None
+    gave = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "catch-up-gave-up"]
+    assert gave and "still 7 quest(s) behind" in gave[0]["detail"]
+
+
+def test_a_catch_up_that_stops_advancing_is_written_off_sooner():
+    """The overall limit is generous because a missed step can be a
+    dungeon boss. A step that has not moved at all is a different
+    thing."""
+    import time
+
+    worker = _desynced([11, 4])
+    worker._start_catching_up(worker.seats[1], 7, "the questline says so")
+    worker._catch_up_state["moved"] = time.monotonic() - worker.CATCH_UP_STALL - 1
+    worker._check_caught_up()
+    assert worker._catching_up() is None
+    gave = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "catch-up-gave-up"]
+    assert gave and "nothing has moved" in gave[0]["detail"]
+
+
+def test_progress_towards_catching_up_restarts_the_stall_clock():
+    """Closing the gap counts as movement even when the goal LINE
+    happens not to change -- a multi-part step reads the same string
+    throughout."""
+    import time
+
+    worker = _desynced([11, 2])
+    worker._start_catching_up(worker.seats[1], 9, "the questline says so")
+    worker._catch_up_state["moved"] = time.monotonic() - worker.CATCH_UP_STALL - 1
+    worker.seats[1].quest_name = "Find My Colleague"       # #2 -> #7
+    worker._check_caught_up()
+    assert worker._catching_up() is worker.seats[1], "gave up despite progress"
+    assert worker._catch_up_state["gap"] == 4
+
+
+def test_a_new_laggard_gets_its_own_catch_up_not_this_ones_clock():
+    worker = _desynced([11, 4, 9])
+    worker._start_catching_up(worker.seats[1], 7, "the questline says so")
+    worker.seats[1].quest_name = "Quarter Master"          # now level with s2
+    worker.seats[2].quest_name = "Digging in the Dirt"     # s2 fell back
+    worker._check_caught_up()
+    assert worker._catching_up() is None, \
+        "the old catch-up must end before a new one starts"
+
+
+def test_a_desync_the_questline_cannot_measure_does_not_pause_the_script():
+    """The older rules say WHO is behind, not how far -- and without a
+    distance there is no way to tell when to stop. Pausing the script on
+    one of those would be a pause with no exit condition."""
+    worker, _read = _zoned_party(["Olde Town", "Olde Town"])
+    worker.script = "###deimos_expertmode"
+    for seat, seen in zip(worker.seats, [["Talk To Danforth", "Find Key Stone"],
+                                         ["Talk To Danforth"]]):
+        seat.goals_seen, seat.goal = list(seen), seen[-1]
+        seat.quest_name = "A Quest Nobody Wrote Down"
+    behind = worker._who_is_behind()
+    assert behind is worker.seats[1]
+    assert worker._behind_basis == "another wizard has finished that step"
+    assert worker._behind_gap == 0, "a rule with no distance must not arm one"
+
+
 # ------------------------------------------------------------- who is behind
 def _party_on(goals_history):
     """Seats whose goal histories are the lists given, current = last."""
@@ -11061,6 +11400,47 @@ def _party_on(goals_history):
         seat.goals_seen = list(seen)
         seat.goal = seen[-1]
     return worker
+
+
+def test_the_questline_outranks_the_older_guesses():
+    """The party never overlapped -- no wizard has held another's goal --
+    so the history rule has nothing and the old code fell through to the
+    clock, which is a guess. The quest list knows: Krokotopia main #4 is
+    behind main #9, as a fact."""
+    worker = _party_on([["Assault on the Palace"], ["Fragments of a Key"]])
+    worker.seats[0].quest_name = "Assault on the Palace"      # main #11
+    worker.seats[1].quest_name = "Fragments of a Key"         # main #4
+    behind = worker._who_is_behind()
+    assert behind is worker.seats[1], "the questline was ignored"
+    assert "the questline says so" in worker._behind_basis
+    assert "#4 against #11" in worker._behind_basis
+    assert worker._behind_gap == 7
+
+
+def test_a_questline_that_cannot_place_a_wizard_falls_back(monkeypatch):
+    """A side quest carries no order, so the questline rule must decline
+    and the party's own demonstration must still be reachable. A rule
+    that answers only when it knows is worth more than one that always
+    answers -- but it must not block the ones underneath it."""
+    worker = _party_on([["Talk To Danforth", "Find Key Stone"],
+                        ["Talk To Danforth"]])
+    # Neither name is in the list at all.
+    worker.seats[0].quest_name = "A Quest Nobody Wrote Down"
+    worker.seats[1].quest_name = "Another One"
+    behind = worker._who_is_behind()
+    assert behind is worker.seats[1]
+    assert worker._behind_basis == "another wizard has finished that step"
+
+
+def test_a_party_one_step_apart_is_not_dragged_together():
+    """`BEHIND_BY` exists because turning a quest in is not simultaneous.
+    Reporting every handover as a desync would have the party regrouping
+    on itself constantly."""
+    worker = _party_on([["Quarter Master"], ["Back to the Archeologist"]])
+    worker.seats[0].quest_name = "Quarter Master"              # main #9
+    worker.seats[1].quest_name = "Back to the Archeologist"    # main #10
+    assert worker._behind_by_questline() is None
+    assert "within 1 step" in worker._behind_why
 
 
 def test_the_wizard_still_on_a_finished_step_is_the_one_behind():

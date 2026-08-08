@@ -5,7 +5,8 @@ import math
 import struct
 from io import BytesIO
 from typing import Tuple, Union
-from src.utils import is_free
+from src.utils import is_free, is_visible_by_path
+from src.paths import advance_dialog_path
 from copy import copy
 
 type_format_dict = {
@@ -258,27 +259,117 @@ async def fallback_spiral_tp(client: Client, xyz: XYZ):
 #: all, so that one still returns immediately and says so.
 TP_FREE_WAIT = 8.0
 
+#: What a zone load is actually allowed to take. `is_loading()` is true
+#: for a real transition AND for `PageFlip`, a window that is not a
+#: transition at all, so a flag that has not cleared in this long is
+#: evidence about the flag rather than about the game.
+TP_LOADING_WAIT = 25.0
+
+#: `is_free` folds four different states into one boolean, and the four
+#: want four different answers: a duel cannot be waited out, a dialogue
+#: box has to be dismissed by somebody, a zone transition clears itself,
+#: and a stuck `PageFlip` clears never. Told apart, each can be handled;
+#: folded together, all four look like "not now" and the instruction is
+#: dropped -- which is the loop that ate five minutes of a real run,
+#: nineteen dropped teleports all reporting the same useless sentence.
+BLOCK_NONE = ""
+BLOCK_DUEL = "duel"
+BLOCK_DIALOGUE = "dialogue"
+BLOCK_TRANSITION = "transition"
+BLOCK_PAGEFLIP = "pageflip"
+BLOCK_LOADING = "loading"       # is_loading(), sub-kind unreadable
+BLOCK_UNREADABLE = "unreadable"
+
+#: The kinds that mean "the client says it is loading". Only these are
+#: ever pushed through, and only after `TP_LOADING_WAIT`.
+LOADING_BLOCKS = (BLOCK_TRANSITION, BLOCK_PAGEFLIP, BLOCK_LOADING)
+
+_BLOCK_WORDS = {
+    BLOCK_DUEL: "the wizard was in a duel",
+    BLOCK_DIALOGUE: "a dialogue box was open",
+    BLOCK_TRANSITION: "a zone transition was on screen",
+    BLOCK_PAGEFLIP: "the book (PageFlip) was open, which the client "
+                    "reports as loading",
+    BLOCK_LOADING: "the client reported a loading screen",
+    BLOCK_UNREADABLE: "the client would not answer",
+}
+
+
+def describe_block(kind: str) -> str:
+    return _BLOCK_WORDS.get(kind, kind or "nothing")
+
+
+async def _has_child(window, name: str) -> bool:
+    try:
+        await window.get_child_by_name(name)
+    except ValueError:
+        return False
+    except Exception:
+        return False
+    return True
+
+
+async def blocked_by(client) -> str:
+    """Which of `is_free`'s conditions is holding, most specific first.
+
+    Deliberately re-derived here rather than read off `is_free`, whose
+    answer is a single bool: `is_loading()` in particular is true for
+    `TransitionWindow` (a real zone load, seconds) and for `PageFlip` (a
+    book, potentially forever), and a caller that cannot tell those two
+    apart has to treat both as fatal or both as transient. Neither is
+    right.
+    """
+    try:
+        if await client.in_battle():
+            return BLOCK_DUEL
+    except Exception:
+        return BLOCK_UNREADABLE
+    try:
+        if await is_visible_by_path(client, advance_dialog_path):
+            return BLOCK_DIALOGUE
+    except Exception:
+        pass
+    try:
+        if not await client.is_loading():
+            return BLOCK_NONE
+    except Exception:
+        return BLOCK_UNREADABLE
+    # Loading, and now the interesting half: which kind.
+    try:
+        view = await client.get_world_view_window()
+        if await _has_child(view, "TransitionWindow"):
+            return BLOCK_TRANSITION
+        if await _has_child(client.root_window, "PageFlip"):
+            return BLOCK_PAGEFLIP
+    except Exception:
+        pass
+    return BLOCK_LOADING
+
+
+def _wait_budget(kind: str) -> float:
+    return TP_LOADING_WAIT if kind in LOADING_BLOCKS else TP_FREE_WAIT
+
 
 async def wait_until_free(client, timeout: float = None,
-                          interval: float = 0.25) -> bool:
-    """(became free). False for a duel, or if the wait runs out.
+                          interval: float = 0.25) -> str:
+    """The kind still blocking, or `BLOCK_NONE` once the wizard is free.
 
     Bounded, and the bound is the point -- see `WAITFOR_TIMEOUTS` in
     `deimoslang/vm.py` for what an unbounded poll on a game condition
-    costs.
+    costs. The bound depends on what is blocking: a duel is not waited
+    on at all, a dialogue box gets `TP_FREE_WAIT`, and a loading flag
+    gets `TP_LOADING_WAIT` because a real zone load can use it.
     """
-    limit = TP_FREE_WAIT if timeout is None else timeout
     waited = 0.0
     while True:
-        try:
-            if await client.in_battle():
-                return False        # not transient, and not teleportable
-            if await is_free(client):
-                return True
-        except Exception:
-            return False
+        kind = await blocked_by(client)
+        if kind == BLOCK_NONE:
+            return BLOCK_NONE
+        if kind == BLOCK_DUEL:
+            return BLOCK_DUEL           # not transient, and not teleportable
+        limit = _wait_budget(kind) if timeout is None else timeout
         if waited >= limit:
-            return False
+            return kind
         await asyncio.sleep(interval)
         waited += interval
 
@@ -289,10 +380,24 @@ async def wait_until_free(client, timeout: float = None,
 on_teleport_result = None
 
 
-def _tp_result(landed: bool, how: str, zone: str = "") -> bool:
+#: Called as (message, client) for something worth saying that is not an
+#: outcome -- currently only the one place the loading gate is overridden,
+#: which is a decision a human should be able to see us make.
+on_teleport_note = None
+
+
+def _tp_note(message: str, client=None) -> None:
+    if on_teleport_note is not None:
+        try:
+            on_teleport_note(message, client)
+        except Exception:
+            pass
+
+
+def _tp_result(landed: bool, how: str, zone: str = "", client=None) -> bool:
     if on_teleport_result is not None:
         try:
-            on_teleport_result(bool(landed), how, zone)
+            on_teleport_result(bool(landed), how, zone, client)
         except Exception:
             pass
     return bool(landed)
@@ -320,20 +425,38 @@ async def navmap_tp(client: Client, xyz: XYZ = None, leader_client: Client = Non
     wants to record it.
     """
     # TODO: What is leader_client meant to be for?
-    if not await is_free(client):
-        # Upstream this is where the instruction is dropped. Wait for a
-        # loading screen or a dialogue box to clear rather than throwing
-        # the teleport away; a duel is not waited out.
-        if not await wait_until_free(client):
-            in_duel = False
-            try:
-                in_duel = await client.in_battle()
-            except Exception:
-                pass
-            return _tp_result(
-                False,
-                "the wizard was in a duel" if in_duel else
-                f"still loading or in dialogue after {TP_FREE_WAIT:.0f}s")
+    blocker = await blocked_by(client)
+    if blocker:
+        # Upstream this is where the instruction is dropped, silently and
+        # for any of four reasons. Wait instead -- and then answer each
+        # reason on its own terms.
+        blocker = await wait_until_free(client)
+        if blocker in (BLOCK_DUEL, BLOCK_DIALOGUE, BLOCK_UNREADABLE):
+            # Nothing a teleport can do about any of these. Say which.
+            waited = "" if blocker == BLOCK_DUEL \
+                else f" after {TP_FREE_WAIT:.0f}s"
+            return _tp_result(False, describe_block(blocker) + waited,
+                              client=client)
+        if blocker in LOADING_BLOCKS:
+            # A "loading screen" that has not ended in TP_LOADING_WAIT is
+            # not a loading screen. Krokotopia's longest transition is a
+            # few seconds; `PageFlip` left open is forever. Dropping the
+            # teleport here is what produced nineteen identical failures
+            # over five minutes while the wizard stood still, out of
+            # combat, with no dialogue box and an NPC popup on screen --
+            # a wizard that was plainly interactive.
+            #
+            # So push through. The cost of teleporting during a genuine
+            # load is a write the zone load overwrites, which the
+            # `check_success` fallbacks below already handle; the cost of
+            # not doing it is the run stopping.
+            _tp_note(f"{describe_block(blocker)} and had not cleared in "
+                     f"{TP_LOADING_WAIT:.0f}s — teleporting anyway rather "
+                     f"than dropping the instruction", client)
+        elif blocker:
+            return _tp_result(False,
+                              f"{describe_block(blocker)} after "
+                              f"{TP_FREE_WAIT:.0f}s", client=client)
 
     starting_zone = await client.zone_name() # for loading the correct wad and to walk to target as a last resort
     starting_xyz = await client.body.position()
@@ -352,11 +475,11 @@ async def navmap_tp(client: Client, xyz: XYZ = None, leader_client: Client = Non
         return await check_success() or not await is_free(client) or await client.zone_name() != starting_zone
 
     if check_sigma(starting_xyz, target_xyz):
-        return _tp_result(True, "already there", starting_zone)
+        return _tp_result(True, "already there", starting_zone, client)
 
     await client.teleport(target_xyz)
     if await finished_tp():
-        return _tp_result(True, "direct", starting_zone)
+        return _tp_result(True, "direct", starting_zone, client)
 
     try:
         # attempt to use the nav data
@@ -367,7 +490,7 @@ async def navmap_tp(client: Client, xyz: XYZ = None, leader_client: Client = Non
         # Unable to load nav data. Fall back to primitive spiral pattern
         await fallback_spiral_tp(client, target_xyz)
         return _tp_result(await check_success(), "spiral (no nav data)",
-                          starting_zone)
+                          starting_zone, client)
 
     # continuation of nav data tp, don't want to swallow potential exceptions in this section
     closest_vertex = vertices[0]
@@ -408,15 +531,15 @@ async def navmap_tp(client: Client, xyz: XYZ = None, leader_client: Client = Non
     if await check_success():
         if await is_free(client) and await client.zone_name() == starting_zone:
             await client.goto(target_xyz.x, target_xyz.y)
-        return _tp_result(True, "nav midpoint", starting_zone)
+        return _tp_result(True, "nav midpoint", starting_zone, client)
     await client.teleport(avg_xyz) # average point
     if await check_success():
         if await is_free(client) and await client.zone_name() == starting_zone:
             await client.goto(target_xyz.x, target_xyz.y)
-        return _tp_result(True, "nav average", starting_zone)
+        return _tp_result(True, "nav average", starting_zone, client)
     await fallback_spiral_tp(client, target_xyz)
     return _tp_result(await check_success(), "spiral (nav exhausted)",
-                      starting_zone)
+                      starting_zone, client)
 
 
 def calc_chunks(points: list[XYZ], entity_distance: float = 3147.0) -> list[XYZ]:

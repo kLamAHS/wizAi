@@ -147,6 +147,11 @@ class _Seat:
         #: a step another has already left is the one behind -- see
         #: `LiveWorker._who_is_behind`.
         self.goals_seen = []
+        #: the tracked quest's NAME, which is what `questlist` can place
+        #: in a questline. The goal cannot be placed: "Talk to Professor
+        #: Winthrop" is the objective of nine Krokotopia quests spanning
+        #: main #2 to #19. See `LiveWorker._behind_by_questline`.
+        self.quest_name = ""
         #: when the goal last CHANGED. The wizard whose goal moved most
         #: recently is the one that got ahead -- quest names have no
         #: order, but "who advanced last" does.
@@ -572,10 +577,32 @@ class LiveWorker(QThread):
                 await self._read_goal(seat)
                 self._check_in_step(seat)
                 self._check_progress(seat)
+                self._check_caught_up()
 
-                if seat.runner is not None:
+                catching = self._catching_up()
+                if seat.runner is not None and catching is None:
                     await self._stage(seat, "script step",
                                       self._script_step(seat), wheel=True)
+                elif seat.runner is not None:
+                    # Paused, not fought with. While the party is out of
+                    # step the script's instructions are wrong for every
+                    # wizard in it -- the laggard's most of all, since
+                    # each `tp quest` drags it back to its own marker --
+                    # so running them is worse than not running them.
+                    self._say_once(
+                        seat, "script-paused",
+                        f"script paused while {catching.name} finishes the "
+                        f"step it missed")
+
+                if catching is seat:
+                    # The whole point. This wizard is not followed
+                    # anywhere; it is driven through its own step until
+                    # its quest state catches the party's.
+                    await self._stage(seat, "finishing the missed step",
+                                      self._quest_the_missed_step(seat),
+                                      wheel=True)
+                    await asyncio.sleep(0.5)
+                    continue
 
                 if driven:
                     # Unconditional, ahead of the chain below: a wedged
@@ -1858,6 +1885,8 @@ class LiveWorker(QThread):
                 # coordinator asks again every round after that.
                 backend.on_recovered_cast = \
                     self._recovered_cast_hook(seat)
+                backend.on_recovery_failed = \
+                    self._recovery_failed_hook(seat)
                 backend.damage_rate = seat.tel.damage_rate
                 seat.tel.resolver = backend.resolver
                 seat.backend = backend
@@ -2064,6 +2093,20 @@ class LiveWorker(QThread):
             del seat.goals_seen[:-12]
         seat.goal = goal
 
+        # The quest NAME, alongside the goal and on the same poll. It is
+        # what `questlist` can place in a questline; the goal cannot be
+        # placed reliably, because one goal line belongs to as many as
+        # nine quests seventeen steps apart. Failing to read it leaves
+        # the previous value rather than clearing it -- a blank read is
+        # not evidence the wizard changed quest, and `_behind_by_
+        # questline` would silently drop that seat out of the comparison.
+        try:
+            name = await questing.read_quest_name(seat.client)
+        except Exception:
+            name = ""
+        if name:
+            seat.quest_name = name
+
         zone = position = None
         try:
             zone = await seat.client.zone_name()
@@ -2147,7 +2190,18 @@ class LiveWorker(QThread):
             try:
                 if fighting is None:
                     fighting = await party.in_battle(seat.client)
-                bits.append("in a duel" if fighting else "out of combat")
+                if fighting and left is not None and left <= 0:
+                    # A wizard on 0% is not fighting, whatever the duel
+                    # phase says. Rev bb8f2b3c has four consecutive
+                    # minutes of "0% health · in a duel" after the
+                    # `defeated` entry, which reads as a wizard grinding
+                    # a long fight when it is a corpse waiting for the
+                    # allies to finish -- the one state where the script
+                    # legitimately sits still, and the one the log made
+                    # look like the bug.
+                    bits.append("defeated, waiting for the duel to end")
+                else:
+                    bits.append("in a duel" if fighting else "out of combat")
             except Exception:
                 bits.append("combat state unread")
             bits.append(seat.goal or "no quest goal")
@@ -2200,28 +2254,81 @@ class LiveWorker(QThread):
                       f"that wait has no timeout at all and would have "
                       f"blocked the script for good")
 
-        def teleported(landed, how, zone):
+        def whose(client):
+            """The name of the wizard a hook is talking about.
+
+            The hooks are module-level, so they fire for whichever
+            wizard the script was driving -- and without this every
+            entry read "a scripted teleport did not land" with no way
+            to tell which of four wizards it was. Nineteen of those in
+            one run's log named nobody at all.
+            """
+            if client is None:
+                return ""
+            for other in self.seats:
+                if other.client is client:
+                    return other.name
+            return ""
+
+        def teleported(landed, how, zone, client=None):
             # Only the failures. A run makes thousands of these and the
             # ones that worked are what the `zone` entries already show.
             if landed:
                 return
+            name = whose(client)
+            said = (f"{name}'s scripted teleport did not land" if name
+                    else "a scripted teleport did not land")
             for other in self.seats:
                 try:
                     other.tel.note_questing(
                         "teleport-failed",
-                        f"a scripted teleport did not land — {how}"
-                        + (f" (in {zone})" if zone else ""))
+                        f"{said} — {how}" + (f" (in {zone})" if zone else ""))
                 except Exception:
                     pass
             self._say_once(
                 self.seats[0], "tp-failed",
-                f"a scripted teleport did not land — {how}. Upstream this "
-                f"returns nothing at all, so the script cannot tell and its "
-                f"next instruction is for wherever it meant to be")
+                f"{said} — {how}. Upstream this returns nothing at all, so "
+                f"the script cannot tell and its next instruction is for "
+                f"wherever it meant to be")
 
-        for install, key in ((scripts.on_waitfor_timeout, "waitfor-hook"),
-                             (scripts.on_teleport_result, "teleport-hook")):
-            ok, why = install(gave_up if key == "waitfor-hook" else teleported)
+        def tp_noted(message, client=None):
+            name = whose(client)
+            said = f"{name}: {message}" if name else message
+            for other in self.seats:
+                try:
+                    other.tel.note_questing("teleport-forced", said)
+                except Exception:
+                    pass
+            self._say_once(self.seats[0], "tp-forced", said)
+
+        def party_task_failed(what, failures):
+            """Wizards that fell out of an instruction the others finished.
+
+            Upstream this was not merely unreported, it was unsurvivable:
+            `asyncio.TaskGroup` cancels every sibling when one task
+            raises, so the party's instruction died with whichever
+            wizard was unluckiest. Now they all finish and this says who
+            did not.
+            """
+            for label, exc in failures:
+                said = (f"`{what}` failed for one wizard "
+                        f"({type(exc).__name__}: {exc}) — the others "
+                        f"finished it, so the party is a step apart until "
+                        f"something puts them back together")
+                for other in self.seats:
+                    try:
+                        other.tel.note_questing("party-task-failed", said)
+                    except Exception:
+                        pass
+                self._say_once(self.seats[0], f"party-task-{what}", said)
+
+        installs = ((scripts.on_waitfor_timeout, "waitfor-hook", gave_up),
+                    (scripts.on_teleport_result, "teleport-hook", teleported),
+                    (scripts.on_teleport_note, "teleport-note", tp_noted),
+                    (scripts.on_party_task_failed, "party-task-hook",
+                     party_task_failed))
+        for install, key, hook in installs:
+            ok, why = install(hook)
             if not ok:
                 self._say_once(self.seats[0], key, why,
                                kind="stage-failed", detail=why)
@@ -2395,6 +2502,50 @@ class LiveWorker(QThread):
             f"{idle / 60:.0f} min with no change — {note} — while "
             f"{count} ran")
 
+    def _behind_by_questline(self):
+        """The seat the quest list says is furthest back, or None.
+
+        None means "this rule has nothing to say", not "nobody is
+        behind" -- the caller falls through to the older rules. It says
+        nothing when the list will not load, when fewer than two wizards
+        are on a quest it can place (side quests carry no order), when
+        the party is split across worlds, when the gap is within
+        `BEHIND_BY`, or when two wizards are equally far back.
+
+        That is a lot of nothing, deliberately. The rule this replaces
+        was a guess that named the wrong wizard; a rule that answers
+        only when it knows is worth more than one that always answers.
+        """
+        from .. import questlist
+
+        if not questlist.loaded():
+            return None
+        places = [questlist.position_of(s.quest_name) if s.quest_name
+                  else questlist.Position() for s in self.seats]
+        # A wizard whose name would not read can still be placed from
+        # its goal, IF the goal is unambiguous. The rest of the party
+        # says roughly where to look.
+        known = [p.order for p in places if p.comparable]
+        near = (sum(known) / len(known)) if known else None
+        world = next((p.world for p in places if p.world), None)
+        for i, seat in enumerate(self.seats):
+            if places[i].comparable or not seat.goal:
+                continue
+            places[i] = questlist.position_from_goal(seat.goal, world, near)
+        index, gap, why = questlist.furthest_behind(places)
+        if index is None:
+            self._behind_why = why
+            # Cleared, not left: `_check_in_step` reads `_behind_gap` to
+            # decide whether to pause the script, and a stale distance
+            # from three ticks ago would start a catch-up on a party the
+            # questline can no longer place.
+            self._behind_gap = 0
+            return None
+        self._behind_basis = f"the questline says so — {why}"
+        self._behind_gap = gap
+        self._behind_places = places
+        return self.seats[index]
+
     def _who_is_behind(self):
         """Which wizard is on a step the others have finished, or None.
 
@@ -2414,16 +2565,33 @@ class LiveWorker(QThread):
         `_should_catch_up` sends the other wizards back to, so naming the
         wrong one walks the party to a wizard that is ahead of them.
 
-        Quest names have no order, but the party demonstrates one: if
-        another wizard has HELD this wizard's current goal and has since
-        moved off it, that step is finished and this wizard is still on
-        it. Nothing else is inferred. Two wizards behind, or none
-        identifiable, returns None -- an honest "cannot tell" beats
-        confidently walking the party to the wrong wizard.
+        Three rules, tried in order of how much they actually know.
+
+        FIRST the questline. Quest names have no order in the game, but
+        they have one outside it, and `questlist` carries it: the
+        wizard on Krokotopia main #7 is behind the wizard on #9, as a
+        fact rather than an inference. This is the only rule that can
+        say HOW far behind, and the only one that works when the party
+        never overlapped -- which is most of a long desync, and is why
+        rev bb8f2b3c logged "which one is behind cannot be told" thirty
+        times.
+
+        SECOND the party's own demonstration: if another wizard has HELD
+        this wizard's current goal and has since moved off it, that step
+        is finished and this wizard is still on it.
+
+        THIRD, and only then, the clock.
+
+        Two wizards behind, or none identifiable, returns None -- an
+        honest "cannot tell" beats confidently walking the party to the
+        wrong wizard, because `_should_catch_up` MOVES them.
         """
         readable = [s for s in self.seats if s.goal]
         if len(readable) < 2:
             return None
+        ranked = self._behind_by_questline()
+        if ranked is not None:
+            return ranked
         behind = [s for s in readable
                   if any(o is not s and s.goal in o.goals_seen
                          and o.goal != s.goal for o in readable)]
@@ -2519,6 +2687,16 @@ class LiveWorker(QThread):
                         "pointer is fine, and deimoslang can only ask "
                         "whether a wizard is on a NAMED quest, never "
                         "whether two wizards are on the same one")
+
+        # A desync the questline can measure is one wizAi can actually
+        # finish, so it stops reporting and starts questing. Only that
+        # kind: `_behind` from the older rules says who, not how far, and
+        # without a distance there is no way to tell when to stop.
+        if (behind is not None and self.script
+                and getattr(self, "_behind_gap", 0) >= 1
+                and "questline" in getattr(self, "_behind_basis", "")):
+            self._start_catching_up(behind, self._behind_gap,
+                                    self._behind_basis)
 
     #: how long a wizard may be in a different zone from the rest of the
     #: party before it counts as left behind. Zone changes are not
@@ -2762,13 +2940,177 @@ class LiveWorker(QThread):
         and "we do" -- it is between it wandering off alone and it
         standing where the fight is.
 
-        The wizard that is BEHIND is never taken over. It is the one the
-        script's instructions are actually correct for, and it is the
-        one that has to finish the step; only the script knows how.
+        The wizard that is BEHIND is not followed anywhere; it is driven
+        through its own step by `_quest_the_missed_step`. This used to
+        say the script would do that, and it was wrong -- see
+        `_start_catching_up` for what the operator pointed out.
         """
         behind = getattr(self, "_behind", None)
         return (behind is not None and behind is not seat
                 and len(self.seats) > 1 and behind.client is not None)
+
+    # -- finishing the step that was missed --------------------------------
+    #: how long the party may spend on one missed step before the script
+    #: gets its wizards back.
+    #:
+    #: There has to be a bound, and it has to be generous. A missed step
+    #: can be a dialogue box (seconds) or a dungeon boss (many minutes),
+    #: and the script is paused throughout -- so too short abandons the
+    #: catch-up half-done, and no bound at all replaces one stall with a
+    #: better-documented one, which is the failure this whole project
+    #: exists to remove.
+    CATCH_UP_LIMIT = 900.0
+    #: and how long without the laggard's quest advancing before it is
+    #: written off as something wizAi's questing cannot finish.
+    CATCH_UP_STALL = 300.0
+
+    def _catching_up(self):
+        """The seat being caught up, or None."""
+        state = getattr(self, "_catch_up_state", None)
+        return None if state is None else state.get("seat")
+
+    def _start_catching_up(self, behind, gap, why):
+        """Stop taking script instructions and finish the missed step.
+
+        The operator's correction, in full, because it overturned what
+        `_catch_up` was built on:
+
+            Just teleporting back to a wizard you believe is behind
+            doesn't work because I think the script then just continues
+            on the same way. They need to actually quest with the other
+            wizard until they catch up.
+
+        Exactly right, and the reason is structural. One deimoslang
+        program drives the whole party from ONE instruction pointer.
+        When a wizard misses a step -- a dialogue that did not clear, a
+        teleport the game refused -- the pointer does not wait for it;
+        it is at the party's step and the wizard is at an earlier one.
+        Teleporting that wizard to the others moves its BODY. Its quest
+        state stays where it was, so the next `tp quest` sends it back
+        to its own marker and the next one after that, forever.
+
+        Nothing in the script can fix this. deimoslang has no way to say
+        "this wizard only, until its quest matches" -- a `waitfor` is
+        the closest thing and rev bb8f2b3c showed those were only ever
+        watching one wizard anyway. The quest state has to be advanced
+        by actually doing the step, which means somebody has to drive
+        that one wizard through it: teleport to ITS marker, clear ITS
+        dialogue, press X, and let the policy fight whatever turns up.
+        `questing.hop_once` is that, already written and already used by
+        auto-quest.
+
+        So the script is paused rather than fought with. It is the same
+        judgement `_should_catch_up` already makes about the wizards
+        that are ahead, taken to its conclusion: while the party is out
+        of step the script's instructions are wrong for everybody, so
+        running them is worse than not.
+        """
+        import time
+
+        if getattr(self, "_catch_up_state", None) is not None:
+            return
+        now = time.monotonic()
+        self._catch_up_state = {
+            "seat": behind, "gap": gap, "started": now, "moved": now,
+            "goal": behind.goal, "why": why,
+        }
+        said = (f"{behind.name} is {gap} quest(s) behind — pausing the "
+                f"script and finishing that step before the party goes on. "
+                f"Teleporting {behind.name} to the others would move it "
+                f"without advancing its quest, and the script would send it "
+                f"straight back")
+        for other in self.seats:
+            try:
+                other.tel.note_questing("catch-up-started", said)
+            except Exception:
+                pass
+        self._say(behind, said)
+
+    def _stop_catching_up(self, kind, said):
+        for other in self.seats:
+            try:
+                other.tel.note_questing(kind, said)
+            except Exception:
+                pass
+        seat = self._catching_up()
+        self._catch_up_state = None
+        if seat is not None:
+            self._say(seat, said)
+
+    def _check_caught_up(self):
+        """End the catch-up when it is done, or when it is not going to be.
+
+        Always ends it. A paused script that is never resumed is the
+        stall this replaces, so every exit here puts the wizards back on
+        the program -- including the ones that give up.
+        """
+        import time
+
+        from .. import questlist
+
+        state = getattr(self, "_catch_up_state", None)
+        if state is None:
+            return
+        seat = state["seat"]
+        now = time.monotonic()
+        if seat.client is None or seat not in self.seats:
+            self._stop_catching_up(
+                "catch-up-gave-up",
+                "the wizard being caught up is no longer connected — "
+                "the script has its wizards back")
+            return
+        if seat.goal and seat.goal != state["goal"]:
+            state["goal"] = seat.goal
+            state["moved"] = now
+
+        places = [questlist.position_of(s.quest_name) if s.quest_name
+                  else questlist.Position() for s in self.seats]
+        index, gap, _why = questlist.furthest_behind(places)
+        if index is None or self.seats[index] is not seat:
+            # Either nobody is behind any more or somebody else is,
+            # and in both cases this catch-up is over. A NEW laggard
+            # gets its own, from the top, rather than inheriting this
+            # one's clock.
+            self._stop_catching_up(
+                "catch-up-done",
+                f"{seat.name} is back with the party — the script has its "
+                f"wizards back")
+            return
+        if gap < state["gap"]:
+            # Progress, so the stall clock restarts even if the goal
+            # line happened not to change.
+            state["gap"] = gap
+            state["moved"] = now
+        waited = now - state["started"]
+        stalled = now - state["moved"]
+        if waited >= self.CATCH_UP_LIMIT or stalled >= self.CATCH_UP_STALL:
+            self._stop_catching_up(
+                "catch-up-gave-up",
+                f"{waited / 60:.0f} min trying to finish {seat.name}'s step "
+                f"and it is still {gap} quest(s) behind"
+                + (f" — nothing has moved for {stalled / 60:.0f} min"
+                   if stalled >= self.CATCH_UP_STALL else "")
+                + ". Giving the script its wizards back rather than holding "
+                  "the whole party here")
+
+    async def _quest_the_missed_step(self, seat):
+        """Drive the laggard through its own quest step, one hop a tick.
+
+        `questing.hop_once` and nothing new: teleport to this wizard's
+        OWN quest marker, clear whatever dialogue is in the way, press X
+        if something is interactable, and stop the moment a fight starts
+        -- the policy takes it from there, and the wizards that came
+        back are in the circle.
+        """
+        from .. import questing
+
+        if await questing.in_battle(seat.client):
+            return                       # the policy owns this now
+        await questing.hop_once(
+            seat.client,
+            on_status=lambda m: self._say_once(seat, f"catch-up:{m[:24]}",
+                                               f"catching up — {m}"))
+
 
     async def _catch_up(self, seat):
         """Put this wizard back with the one that fell behind.
@@ -3155,6 +3497,22 @@ class LiveWorker(QThread):
             self.seat_round_done.emit(seat.index, rec)
             if seat.index == 0:
                 self.round_done.emit(rec)
+
+    def _recovery_failed_hook(self, seat):
+        return lambda why: self._on_recovery_failed(why, seat)
+
+    def _on_recovery_failed(self, why, seat=None):
+        """The runner-up did not go out either. Say so, and say why.
+
+        Re-emitted like `_on_recovered_cast` for the same reason: the
+        Decisions table already has this round reading "passed", and the
+        row is only useful with the reason on it.
+        """
+        seat = self.seats[0] if seat is None else seat
+        self._say(seat, why)
+        rec = seat.tel.note_recovery_failed(why)
+        if rec is not None:
+            self.seat_round_done.emit(seat.index, rec)
 
     def _on_recovered_cast(self, card, target, first, seat=None):
         """The runner-up went out; the round was not lost after all.

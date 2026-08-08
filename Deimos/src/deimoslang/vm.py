@@ -112,6 +112,93 @@ def _waitfor_gave_up(kind, waited, inverted):
         pass
 
 
+#: Called as (what, failures) when one or more wizards failed an
+#: instruction the rest completed. `failures` is a list of (label,
+#: exception). wizAi sets this so the wizard that dropped out of a mass
+#: instruction reaches the run's log by name.
+on_party_task_failed = None
+
+
+class PartyTaskGroup:
+    """`asyncio.TaskGroup` without the part that ends the party's turn.
+
+    Upstream every mass instruction in this file fans out over the
+    selected clients inside `async with asyncio.TaskGroup() as tg`, and
+    that context manager is documented to do this:
+
+        If any task in the group fails with an exception other than
+        CancelledError, the remaining tasks in the group are cancelled.
+
+    Four wizards, one instruction, and any one of them raising -- a
+    memory read that lost a race, an entity that was not there yet, a
+    quest position that would not resolve -- cancels the other three
+    MID-INSTRUCTION. They are not failing. They are being cancelled
+    because somebody else failed.
+
+    That is the reported symptom exactly: "if they were all in the same
+    zone, the same teleport should work for all of them, but some will
+    just not move at all". Some did move -- the ones whose task had
+    already finished. The rest were cancelled partway, which for
+    `navmap_tp` can mean landing on an intermediate nav vertex, and then
+    the ExceptionGroup propagates and takes the whole VM step with it.
+
+    Same interface, so the diff at each of the thirteen call sites is
+    one word, and re-applying it after a Deimos update is mechanical.
+    The difference is that every wizard gets to finish, failures are
+    collected rather than raised, and `on_party_task_failed` says who
+    fell out. One wizard's bad luck stops being the party's problem --
+    which is the whole point of a hivemind.
+
+    Not raising is deliberate. The scripts already wrap their
+    instructions in retry loops precisely because the primitives report
+    nothing; raising here would restore the upstream behaviour of ending
+    the program for one wizard's transient failure.
+    """
+
+    def __init__(self, what: str = ""):
+        self.what = what
+        self._entries: list = []
+        self.failures: list = []
+
+    async def __aenter__(self):
+        return self
+
+    def create_task(self, coro, *, name=None):
+        task = asyncio.ensure_future(coro)
+        self._entries.append((name, task))
+        return task
+
+    async def __aexit__(self, exc_type, exc, tb):
+        if exc_type is not None:
+            # The fan-out loop itself raised, so the tasks created so far
+            # were never going to be a complete instruction anyway.
+            for _label, task in self._entries:
+                task.cancel()
+            return False
+        if not self._entries:
+            return False
+        # return_exceptions is the whole patch: gather without it has the
+        # same first-failure-wins behaviour TaskGroup does.
+        results = await asyncio.gather(*(t for _l, t in self._entries),
+                                       return_exceptions=True)
+        for (label, task), result in zip(self._entries, results):
+            if isinstance(result, BaseException):
+                self.failures.append((label or _task_label(task), result))
+        if self.failures and on_party_task_failed is not None:
+            try:
+                on_party_task_failed(self.what, list(self.failures))
+            except Exception:
+                pass
+        return False
+
+
+def _task_label(task) -> str:
+    try:
+        return task.get_coro().__qualname__
+    except Exception:
+        return "a wizard"
+
+
 class VMError(Exception):
     pass
 
@@ -1387,7 +1474,7 @@ class VM:
                 args = instruction.data[2]
                 assert type(args) == list
                 assert type(args[0]) == TeleportKind
-                async with asyncio.TaskGroup() as tg:
+                async with PartyTaskGroup("teleport") as tg:
                     match args[0]:
                         case TeleportKind.position:
                             for client in clients:
@@ -1446,9 +1533,21 @@ class VM:
                                 tg.create_task(client.tp_to_closest_mob())
                         case TeleportKind.quest:
                             # TODO: "quest" could instead be treated as an XYZ expression or something
-                            for client in clients:
+                            #
+                            # wizAi patch: the position read moved INSIDE
+                            # the task. Upstream it is awaited in the
+                            # fan-out loop, so a wizard whose quest
+                            # position will not resolve -- mid-load, or
+                            # between quests -- stops the loop before the
+                            # wizards after it are given a task at all.
+                            # The most-used instruction in the arc
+                            # scripts, and the one where "some just will
+                            # not move" costs the most.
+                            async def tp_to_quest(client):
                                 pos = await client.quest_position.position()
-                                tg.create_task(navmap_tp(client, pos))
+                                await navmap_tp(client, pos)
+                            for client in clients:
+                                tg.create_task(tp_to_quest(client))
                         case TeleportKind.friend_icon:
                             async def proxy(client: SprintyClient): # type: ignore
                                 # probably doesn't need mouseless
@@ -1479,7 +1578,7 @@ class VM:
             case "goto":
                 args = instruction.data[2]
                 assert type(args) == list
-                async with asyncio.TaskGroup() as tg:
+                async with PartyTaskGroup("goto") as tg:
                     for client in clients:
                         pos = await eval_arg(args[0], client)
                         tg.create_task(client.goto(pos.x, pos.y))
@@ -1514,39 +1613,63 @@ class VM:
                     WaitforKind.battle: Client.in_battle,
                     WaitforKind.free: is_free,
                 }
+                # wizAi patch -- the `client=client` default arguments
+                # below are the fix, and they are not a style preference.
+                #
+                # Upstream these proxies are `async def proxy(): return
+                # await method(client)`, closing over the LOOP VARIABLE.
+                # Python binds that by reference, and none of the tasks
+                # runs until the group awaits them -- by which time
+                # `client` is the last wizard in the list. So a party of
+                # four creates four waits and all four poll wizard four.
+                #
+                # `waitfor dialog` therefore returns when the LAST wizard
+                # has a dialogue box, whatever the other three are doing.
+                # `waitfor zonechange` returns when the last wizard
+                # changed zone. The script then marches on with three
+                # wizards it never actually waited for -- silently,
+                # because from the VM's side the wait completed
+                # normally. This is the desync: not a wizard falling
+                # behind and nobody noticing, but a wait that was only
+                # ever watching one wizard.
+                #
+                # `cursor` and `click` in this same file pass the client
+                # as a parameter and are correct; the waitfor proxies
+                # were the three that did not.
                 if args[0] in method_map:
                     method = method_map[args[0]]
-                    async with asyncio.TaskGroup() as tg:
+                    async with PartyTaskGroup("waitfor") as tg:
                         for client in clients:
-                            async def proxy(): # type: ignore
+                            async def proxy(client=client): # type: ignore
                                 return await method(client)
                             tg.create_task(waitfor_impl(proxy))
                 else:
                     match args[0]:
                         case WaitforKind.zonechange:
                             if completion:
-                                async with asyncio.TaskGroup() as tg:
+                                async with PartyTaskGroup("waitfor") as tg:
                                     for client in clients:
                                         tg.create_task(waitfor_coro(client.is_loading, True))
                             else:
-                                async with asyncio.TaskGroup() as tg:
+                                async with PartyTaskGroup("waitfor") as tg:
                                     for client in clients:
                                         starting_zone = await client.zone_name()
-                                        async def proxy():
+                                        async def proxy(client=client,
+                                                        starting_zone=starting_zone):
                                             return starting_zone != (await client.zone_name())
                                         tg.create_task(waitfor_coro(proxy, False))
                         case WaitforKind.window:
                             window_path = await eval_arg(args[1], clients[0] if clients else None)
-                            async with asyncio.TaskGroup() as tg:
+                            async with PartyTaskGroup("waitfor") as tg:
                                 for client in clients:
-                                    async def proxy():
+                                    async def proxy(client=client):
                                         return await is_visible_by_path(client, window_path)
                                     tg.create_task(waitfor_impl(proxy))
                         case _:
                             raise VMError(f"Unimplemented waitfor kind: {instruction}")
             case "sendkey":
                 args = instruction.data[2]
-                async with asyncio.TaskGroup() as tg:
+                async with PartyTaskGroup("sendkey") as tg:
                     for client in clients:
                         key = await eval_arg(args[0], client)
                         time = 0.1 if args[1] is None else await eval_arg(args[1], client)
@@ -1577,19 +1700,19 @@ class VM:
             case "buypotions":
                 args = instruction.data[2]
                 ifneeded = await eval_arg(args[0], clients[0]) if clients else False
-                async with asyncio.TaskGroup() as tg:
+                async with PartyTaskGroup("buypotions") as tg:
                     for client in clients:
                         if ifneeded:
                             tg.create_task(refill_potions_if_needed(client, mark=True, recall=True))
                         else:
                             tg.create_task(refill_potions(client, mark=True, recall=True))
             case "relog":
-                async with asyncio.TaskGroup() as tg:
+                async with PartyTaskGroup("relog") as tg:
                     for client in clients:
                         tg.create_task(logout_and_in(client))
             case "cursor":
                 args = instruction.data[2]
-                async with asyncio.TaskGroup() as tg:
+                async with PartyTaskGroup("cursor") as tg:
                     for client in clients:
                         match args[0]:
                             case CursorKind.position:
@@ -1611,7 +1734,7 @@ class VM:
                                 await asyncio.sleep(.2)
             case "click":
                 args = instruction.data[2]
-                async with asyncio.TaskGroup() as tg:
+                async with PartyTaskGroup("click") as tg:
                     for client in clients:
                         match args[0]:
                             case ClickKind.position:
@@ -1630,7 +1753,7 @@ class VM:
                                 raise VMError(f"Unimplemented click kind: {instruction}")
             case "tozone":
                 args = instruction.data[2]
-                async with asyncio.TaskGroup() as tg:
+                async with PartyTaskGroup("tozone") as tg:
                     for client in clients:
                         zone_path = await eval_arg(args[0], client)
                         tg.create_task(toZone([client], "/".join(zone_path) if isinstance(zone_path, list) else zone_path))
@@ -1638,7 +1761,7 @@ class VM:
                 args = instruction.data[2]
                 friend_name = await eval_arg(args[0], clients[0]) if clients else args[0]
                 
-                async with asyncio.TaskGroup() as tg:
+                async with PartyTaskGroup("select_friend") as tg:
                     for client in clients:
                         tg.create_task(self.select_friend_from_list(client, friend_name))
             case _:
