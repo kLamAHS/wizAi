@@ -575,9 +575,15 @@ class LiveWorker(QThread):
                                       self._auto_dialogue(client), wheel=True)
 
                 await self._read_goal(seat)
+                # Ends any catch-up BEFORE deciding whether to start
+                # one. The other order meant a catch-up started this
+                # tick was judged finished on the same tick, by state
+                # that had not had a chance to change -- which is
+                # exactly what the first live run shows, `started` and
+                # `done` sharing a timestamp.
+                self._check_caught_up()
                 self._check_in_step(seat)
                 self._check_progress(seat)
-                self._check_caught_up()
 
                 catching = self._catching_up()
                 if seat.runner is not None and catching is None:
@@ -2502,6 +2508,79 @@ class LiveWorker(QThread):
             f"{idle / 60:.0f} min with no change — {note} — while "
             f"{count} ran")
 
+    def _places(self):
+        """Where every seat sits in the questline, one `Position` each.
+
+        ONE function because there were two, and they disagreed. The
+        rule that STARTS a catch-up placed a wizard by quest name and
+        fell back to its goal line; the rule that ENDS one placed by
+        quest name only. Live at rev 7888c35a the names did not read at
+        all, so the first found a five-quest gap from the goals and the
+        second found nothing to compare -- `catch-up-started` and
+        `catch-up-done` are in that export at the same timestamp, on all
+        three wizards.
+
+        A start condition and a stop condition computed two different
+        ways is a bug waiting for the day they differ, and that day was
+        the first run.
+        """
+        from .. import questlist
+
+        places = [questlist.position_of(s.quest_name) if s.quest_name
+                  else questlist.Position() for s in self.seats]
+        # A wizard whose name would not read can still be placed from
+        # its goal, IF the goal is unambiguous. The rest of the party
+        # says roughly where to look -- "Talk To Lieutenant Standish in
+        # Palace of Fire" is Krokotopia #12 AND #13, and only a
+        # neighbour tells you which.
+        #
+        # Repeated until it stops helping, because one pass makes the
+        # answer depend on seat order: a wizard placed from its goal
+        # then becomes a hint for the next one, and in a single pass
+        # only the wizards after it get the benefit. Rev 7888c35a
+        # placed wizard 1 at #12 purely because wizard 2's NAME
+        # happened to read and seed it; had the two been swapped, the
+        # party would have been unplaceable.
+        for _pass in range(len(self.seats)):
+            known = [p.order for p in places if p.comparable]
+            if not known:
+                # Nothing to hint with, so goals can only be placed on
+                # their own merits. One attempt, then give up.
+                near = world = None
+            else:
+                near = sum(known) / len(known)
+                world = next(p.world for p in places if p.comparable)
+            moved = False
+            for i, seat in enumerate(self.seats):
+                if places[i].comparable or not seat.goal:
+                    continue
+                found = questlist.position_from_goal(seat.goal, world, near)
+                if found.comparable:
+                    places[i] = found
+                    moved = True
+                elif not places[i].how:
+                    # Keep the reason even when it did not place, so
+                    # `_how_placed` can say WHY rather than "no quest".
+                    places[i] = found
+            if not moved:
+                break
+        return places
+
+    def _how_placed(self):
+        """One short line saying how each wizard was located, for the log.
+
+        The first live run placed all three wizards by goal text, which
+        means `read_quest_name` returned nothing for any of them -- and
+        nothing in the export said so. Placement is now the thing two
+        rules and a script pause hang off, so how it was arrived at is
+        worth a few characters.
+        """
+        bits = []
+        for seat, place in zip(self.seats, self._places()):
+            where = f"#{place.order}" if place.comparable else "unplaced"
+            bits.append(f"{seat.name} {where} ({place.how or 'no quest'})")
+        return " · ".join(bits)
+
     def _behind_by_questline(self):
         """The seat the quest list says is furthest back, or None.
 
@@ -2520,18 +2599,7 @@ class LiveWorker(QThread):
 
         if not questlist.loaded():
             return None
-        places = [questlist.position_of(s.quest_name) if s.quest_name
-                  else questlist.Position() for s in self.seats]
-        # A wizard whose name would not read can still be placed from
-        # its goal, IF the goal is unambiguous. The rest of the party
-        # says roughly where to look.
-        known = [p.order for p in places if p.comparable]
-        near = (sum(known) / len(known)) if known else None
-        world = next((p.world for p in places if p.world), None)
-        for i, seat in enumerate(self.seats):
-            if places[i].comparable or not seat.goal:
-                continue
-            places[i] = questlist.position_from_goal(seat.goal, world, near)
+        places = self._places()
         index, gap, why = questlist.furthest_behind(places)
         if index is None:
             self._behind_why = why
@@ -2660,9 +2728,16 @@ class LiveWorker(QThread):
         # look at two windows; this says which wizard is on what.
         where = " · ".join(f"{s.name}: {s.goal or 'unreadable'}"
                            for s in self.seats)
+        # Bound before the `if`, not inside it. It was assigned inside,
+        # and read after -- so on every tick where the desync line had
+        # not CHANGED, `behind` was unbound and the whole service loop
+        # stage died with an UnboundLocalError. Live at rev 7888c35a
+        # that fired on all three wizards, and it is the second time an
+        # unguarded read in this file has taken the tick down (see
+        # `_heartbeat` and `runner.steps`).
+        behind = self._behind
         if where != getattr(self, "_said_desync", ""):
             self._said_desync = where
-            behind = getattr(self, "_behind", None)
             # Every seat's log, not just the one this tick belongs to: a
             # desync is a fact about the party, and whichever export gets
             # opened first should show it.
@@ -2675,7 +2750,14 @@ class LiveWorker(QThread):
                            f"({getattr(self, '_behind_basis', '')})"
                            if behind else
                            f" — which one is behind cannot be told: "
-                           f"{getattr(self, '_behind_basis', 'no evidence')}"))
+                           f"{getattr(self, '_behind_basis', 'no evidence')}")
+                        # How each wizard was located, because that is
+                        # what everything above hangs off and the first
+                        # live run gave no way to see it. All three were
+                        # placed by goal text, which means the quest
+                        # NAME read returned nothing for any of them --
+                        # invisible in the export.
+                        + f" — placed: {self._how_placed()}")
                 except Exception:
                     pass
             self._say(seat,
@@ -3063,9 +3145,7 @@ class LiveWorker(QThread):
             state["goal"] = seat.goal
             state["moved"] = now
 
-        places = [questlist.position_of(s.quest_name) if s.quest_name
-                  else questlist.Position() for s in self.seats]
-        index, gap, _why = questlist.furthest_behind(places)
+        index, gap, _why = questlist.furthest_behind(self._places())
         if index is None or self.seats[index] is not seat:
             # Either nobody is behind any more or somebody else is,
             # and in both cases this catch-up is over. A NEW laggard
