@@ -1767,7 +1767,14 @@ def greedy_ttk(max_turns: int = None, continuation=None):
             # Nothing on offer even connects inside the horizon; fall
             # back to the heuristic rather than flailing.
             strat.last_candidates = []      # none of it decided anything
-            return school_aware_blade_stack(3)(sim, s)
+            fallback = school_aware_blade_stack(3)(sim, s)
+            if fallback is None:
+                # The heuristic knows about blades and nukes. A hand
+                # holding neither -- two heals, say -- leaves it with
+                # nothing to say, and its silence is a pass. See
+                # `heal_if_hurt` for the six rounds that cost.
+                fallback = heal_if_hurt(sim, s)
+            return fallback
         return best_action
 
     #: the last decision's whole candidate set, newest call wins. Read by
@@ -1862,6 +1869,81 @@ def _buff_options(sim, s, school, target=0):
     if s.player.aura is None:
         options = options + castable(sim, s, "aura")
     return options or castable(sim, s, "prism")
+
+
+#: below this fraction of max health, a wizard with nothing else to do
+#: should heal rather than pass. Above it, banking the pip is defensible;
+#: below it another round of ~30 incoming is not. See `heal_if_hurt`.
+HEAL_BELOW = 0.5
+
+
+def heal_if_hurt(sim, s):
+    """The biggest castable heal, when this wizard is hurt and idle.
+
+    For one branch only: the lookahead has decided that nothing in hand
+    connects with the board inside the horizon, and the heuristic it
+    falls back to knows about blades and nukes and nothing else. A hand
+    holding only heals reaches that branch, finds no blade and no nuke,
+    and returns None -- which is a pass.
+
+    Sebastian's fight 2 at rev 3d026ada is six rounds of exactly that.
+    Rounds 8 through 13, hand `Pixie Life` and `Sprite` throughout, and
+    he went 514 -> 343 -> 168 health while passing every one of them. A
+    life wizard on 20% health holding a heal and four pips did nothing
+    six times, and the fight ran thirteen rounds.
+
+    Deliberately last in line. It is reached only where the alternative
+    is passing, so it cannot outbid a cast that moves the fight along --
+    which is the failure mode a "heal when hurt" rule usually has, and
+    why the rollout scores health only on lines that already win.
+    """
+    from w101_sim import castable
+
+    me = getattr(s, "player", None)
+    if me is None:
+        return None
+    try:
+        left = float(me.hp) / float(me.max_hp)
+    except (AttributeError, TypeError, ValueError, ZeroDivisionError):
+        return None
+    if left >= HEAL_BELOW:
+        return None
+    # `_is_inert` is the full-health case and cannot fire below half,
+    # but it is the house rule for "this heal banks nothing" and asking
+    # it here keeps the two in one place.
+    heals = [c for c in castable(sim, s, "heal") if not _is_inert(c, s)]
+    if not heals:
+        return None
+    # Biggest first: this is the round the wizard had nothing else to
+    # spend, so there is no reason to save the larger one for later.
+    return (max(heals, key=_heal_amount), 0)
+
+
+def _heal_amount(card) -> float:
+    """What this card restores over its whole life, from its ops.
+
+    `Card` has no `heal` field: a straight heal carries `amount` and a
+    heal-over-time carries `total`, which is what `Sim._resolve_ops`
+    reads for each (`o["amount"]` under `kind == "heal"`, `o["total"]`
+    under `"hot"`). Asking the card for a `heal` attribute answers zero
+    for every heal in the game, which would silently turn "the biggest
+    one" into "whichever happened to sort first".
+
+    Sprite is why the two are added rather than either taken alone: it
+    is 30 up front and 270 over three rounds, so its `amount` alone
+    ranks it below a Pixie that restores less than half as much.
+    """
+    total = 0.0
+    for op in getattr(card, "ops", None) or []:
+        try:
+            kind = op.get("op")
+            if kind == "heal":
+                total += float(op.get("amount", 0) or 0)
+            elif kind == "hot":
+                total += float(op.get("total", 0) or 0)
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return total
 
 
 def school_aware_blade_stack(n_buffs=3):
