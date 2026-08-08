@@ -2194,9 +2194,28 @@ class MainWindow(QMainWindow):
             self.status.setText(f"deck set — {len(chosen)} cards")
 
     # -- scripts ---------------------------------------------------------
+    def party_identities(self):
+        """[(name, school)] in seat order, for filling a preset in.
+
+        The school comes from this window; the NAME has to come off a
+        live client, because Wizard101 will not say it outside the
+        character-select screen and wizAi learns it from the first duel
+        (`_Seat.wizard_name`). So before a run the names are blank and
+        only the schools get filled -- which the dialog says out loud
+        rather than quietly doing half the job.
+        """
+        schools = [c.get("school", "") for c in self.seat_configs_now()]
+        names = [""] * len(schools)
+        live = self.live
+        for i, seat in enumerate(getattr(live, "seats", None) or []):
+            if i < len(names):
+                names[i] = getattr(seat, "wizard_name", None) or ""
+        return list(zip(names, schools))
+
     def on_edit_script(self):
         from .scriptdialog import edit_script
-        source = edit_script(self, self.script_source)
+        source = edit_script(self, self.script_source,
+                             self.party_identities())
         if source is not None:
             self.script_source = source
             lines = len([ln for ln in source.splitlines() if ln.strip()])

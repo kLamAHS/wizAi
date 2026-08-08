@@ -11461,6 +11461,102 @@ def test_a_stall_that_keeps_going_is_said_more_than_once():
     assert said == [1, 1, 2, 3, 4, 4], said
 
 
+# ------------------------------------------------------------- preset scripts
+_QUESTER = (
+    '###deimos_expertmode\n'
+    '# @name: Arc 1 Quester\n'
+    'var Main_Account = "QuestingAccountName"\n'
+    'var Main_Account_School = "SchoolGoesHere"\n'
+    'var Questee2 = "QuestingAccountName"\n'
+    'var Questee2_School = "SchoolGoesHere"\n'
+    'var Questee3 = "QuestingAccountName"\n'
+    'var Questee3_School = "SchoolGoesHere"\n'
+    'block Go {\n'
+    '  if NOT Main_Account = "QuestingAccountName" { p1 sendkey X }\n'
+    '  if NOT Main_Account_School = "SchoolGoesHere" { p1 sendkey X }\n'
+    '  if NOT Questee2 = "QuestingAccountName" { p2 sendkey X }\n'
+    '  if NOT Questee2_School = "SchoolGoesHere" { p2 sendkey X }\n'
+    '  if NOT Questee3 = "QuestingAccountName" { p3 sendkey X }\n'
+    '  if NOT Questee3_School = "SchoolGoesHere" { p3 sendkey X }\n'
+    '}\n')
+
+
+def test_a_preset_gets_the_partys_real_names_put_into_it():
+    """The structural fix for what cost rev 8e5a9c75 forty minutes. An
+    operator has to type four names correctly into a 14,000-line file,
+    and when they do not the script does not complain -- it skips every
+    friend-teleport it has and the party can never regroup. wizAi
+    already knows all four."""
+    from deimos_bridge.scripts import configure
+
+    out, filled = configure(_QUESTER, [("Phönix", "storm"),
+                                       ("Konstantin", "ice")])
+    assert dict(filled) == {"Main_Account": "Phönix",
+                            "Main_Account_School": "storm",
+                            "Questee2": "Konstantin",
+                            "Questee2_School": "ice"}
+    assert 'var Main_Account = "Phönix"' in out
+    assert 'var Questee2 = "Konstantin"' in out
+    # A seat the party does not have is left alone.
+    assert 'var Questee3 = "QuestingAccountName"' in out
+
+
+def test_filling_a_preset_leaves_the_scripts_own_guards_alone():
+    """The guards compare against the placeholder literal -- that is how
+    the script tests whether it was configured. Rewriting them would
+    turn every guard permanently false and disable the very code the
+    filling exists to switch on."""
+    from deimos_bridge.scripts import configure
+
+    out, _filled = configure(_QUESTER, [("Phönix", "storm")])
+    assert 'if NOT Main_Account = "QuestingAccountName"' in out
+    assert 'if NOT Main_Account_School = "SchoolGoesHere"' in out
+
+
+def test_a_name_the_operator_typed_is_never_overwritten():
+    """They may be running a script whose p1 is not wizAi's seat 1."""
+    from deimos_bridge.scripts import configure
+
+    theirs = _QUESTER.replace('var Main_Account = "QuestingAccountName"',
+                              'var Main_Account = "Someone Else"')
+    out, filled = configure(theirs, [("Phönix", "storm")])
+    assert 'var Main_Account = "Someone Else"' in out
+    assert "Main_Account" not in dict(filled)
+
+
+def test_a_wizard_with_no_name_yet_still_gets_its_school():
+    """Before a run the names are not knowable -- the game will not give
+    them outside character select. Half the job is worth doing; the
+    dialog says which half."""
+    from deimos_bridge.scripts import configure
+
+    out, filled = configure(_QUESTER, [("", "storm")])
+    assert dict(filled) == {"Main_Account_School": "storm"}
+    assert 'var Main_Account = "QuestingAccountName"' in out
+
+
+def test_presets_are_listed_by_their_own_name(tmp_path, monkeypatch):
+    from deimos_bridge import scripts
+
+    (tmp_path / "arc1.txt").write_text(_QUESTER, encoding="utf-8")
+    (tmp_path / "no_header.txt").write_text("###deimos_expertmode\n",
+                                            encoding="utf-8")
+    monkeypatch.setattr(scripts, "PRESET_DIR", str(tmp_path))
+    got = dict((t, p) for t, p in scripts.presets())
+    assert "Arc 1 Quester" in got, got
+    assert "no header" in got, got
+
+
+def test_no_presets_is_a_normal_answer(tmp_path, monkeypatch):
+    """wizAi ships none of its own; the directory is where an operator's
+    go. Listing must work even when Deimos is not importable, because
+    the dialog that lists them is where you find that out."""
+    from deimos_bridge import scripts
+
+    monkeypatch.setattr(scripts, "PRESET_DIR", str(tmp_path / "nothing"))
+    assert scripts.presets() == []
+
+
 # --------------------------------------------------- an unconfigured script
 def test_a_script_still_on_its_placeholders_is_named():
     """Rev 8e5a9c75 is 110 minutes long and the last 40 are three wizards

@@ -174,6 +174,111 @@ def unconfigured(source: str):
     return found
 
 
+#: Where preset scripts live. Kept under `data/` rather than beside this
+#: module because `deimos_bridge/scripts.py` already owns that name, and
+#: a `scripts/` package next to it would shadow the module on import.
+PRESET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "data", "scripts")
+
+
+def presets():
+    """[(title, path)] for the scripts shipped with wizAi, by title.
+
+    Empty is a normal answer -- wizAi ships no scripts of its own, and
+    the directory is where an operator's own arc questers go so they are
+    a dropdown rather than a paste every session.
+
+    The title is the script's own `# @name:` line if it has one, else
+    the filename. Nothing is compiled here: listing has to work even
+    when Deimos is not importable, because the dialog that lists them is
+    also where you find out Deimos is not importable.
+    """
+    import glob
+
+    found = []
+    for path in sorted(glob.glob(os.path.join(PRESET_DIR, "*.txt"))
+                       + glob.glob(os.path.join(PRESET_DIR, "*.deimos"))):
+        found.append((preset_title(path), path))
+    return sorted(found)
+
+
+def preset_title(path: str) -> str:
+    import re
+
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            head = handle.read(4096)
+    except Exception:
+        return os.path.basename(path)
+    m = re.search(r"^#\s*@name:\s*(.+)$", head, re.MULTILINE)
+    if m:
+        return m.group(1).strip()
+    return os.path.splitext(os.path.basename(path))[0].replace("_", " ")
+
+
+def read_preset(path: str) -> str:
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        return handle.read()
+
+
+#: Which of a quester's account variables belongs to which wizard, and
+#: which holds a school. The TTS template's own comment settles the
+#: order -- "Name of the main account. Also MUST BE SET AS p1" -- and
+#: every script built from that template inherits it.
+ACCOUNT_VARS = ("Main_Account", "Questee2", "Questee3", "Questee4")
+SCHOOL_VARS = ("Main_Account_School", "Questee2_School",
+               "Questee3_School", "Questee4_School")
+
+
+def configure(source: str, wizards):
+    """(source, filled). Put the party's real names into the script.
+
+    `wizards` is [(name, school)] in seat order, p1 first.
+
+    This is the structural fix for what cost rev 8e5a9c75 forty minutes.
+    The quester needs its account names to match the wizards actually
+    logged in, an operator has to type them by hand into a 14,000-line
+    file, and when they do not the script does not complain -- it guards
+    its own friend-teleports with `if NOT Main_Account =
+    "QuestingAccountName"` and quietly skips every one of them. The
+    party then has no way to regroup and the run ends as a stall.
+
+    wizAi already knows both facts: the name comes off the client's own
+    combat member, and the school is what the seat was configured with.
+    So it fills them in, and the operator cannot get it wrong.
+
+    Only placeholders are touched -- see `unconfigured`. A name the
+    operator typed themselves is theirs, even if it disagrees with what
+    wizAi read, because they may be running a script whose p1 is not
+    wizAi's seat 1.
+    """
+    import re
+
+    blanks = dict(unconfigured(source))
+    if not blanks:
+        return source, []
+    filled = []
+    for index, (var, school_var) in enumerate(zip(ACCOUNT_VARS, SCHOOL_VARS)):
+        if index >= len(wizards):
+            break
+        name, school = wizards[index]
+        for target, value in ((var, name), (school_var, school)):
+            placeholder = blanks.get(target)
+            if not placeholder or not value:
+                continue
+            # The `var` line only. The guards elsewhere compare against
+            # the placeholder literal and MUST keep doing so -- that is
+            # how the script tests whether it was configured, and
+            # rewriting them would turn every guard permanently false.
+            pattern = rf'(^\s*var\s+{re.escape(target)}\s*=\s*)"' \
+                      rf'{re.escape(placeholder)}"'
+            source, n = re.subn(pattern, lambda m: f'{m.group(1)}"{value}"',
+                                source, count=1, flags=re.MULTILINE)
+            if n:
+                filled.append((target, value))
+    return source, filled
+
+
 def check(source: str):
     """(ok, reason) — does this script compile?
 
