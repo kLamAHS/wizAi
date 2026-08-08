@@ -11110,6 +11110,8 @@ def test_a_waitfor_that_gives_up_is_reported_to_every_seat(monkeypatch):
     monkeypatch.setattr(scripts, "on_teleport_result",
                         lambda hook: (True, ""))
     monkeypatch.setattr(scripts, "on_teleport_note", lambda hook: (True, ""))
+    monkeypatch.setattr(scripts, "on_party_task_failed",
+                        lambda hook: (True, ""))
 
     worker._watch_waitfor(worker.seats[0])
     assert len(installed) == 1
@@ -11136,6 +11138,8 @@ def test_a_deimos_without_the_hook_is_reported_not_ignored(monkeypatch):
     monkeypatch.setattr(scripts, "on_teleport_result",
                         lambda hook: (True, ""))
     monkeypatch.setattr(scripts, "on_teleport_note", lambda hook: (True, ""))
+    monkeypatch.setattr(scripts, "on_party_task_failed",
+                        lambda hook: (True, ""))
 
     worker._watch_waitfor(worker.seats[0])           # must not raise
     note = [e for e in worker.seats[0].tel.questing
@@ -11157,6 +11161,8 @@ def test_a_teleport_that_did_not_land_is_reported_to_every_seat(monkeypatch):
     monkeypatch.setattr(scripts, "on_teleport_result",
                         lambda hook: (got.append(hook), (True, ""))[1])
     monkeypatch.setattr(scripts, "on_teleport_note", lambda hook: (True, ""))
+    monkeypatch.setattr(scripts, "on_party_task_failed",
+                        lambda hook: (True, ""))
 
     worker._watch_waitfor(worker.seats[0])
     got[0](True, "direct", "Olde Town")             # a teleport that worked
@@ -11187,6 +11193,8 @@ def test_a_failed_teleport_names_the_wizard_it_happened_to(monkeypatch):
     monkeypatch.setattr(scripts, "on_teleport_result",
                         lambda hook: (got.append(hook), (True, ""))[1])
     monkeypatch.setattr(scripts, "on_teleport_note", lambda hook: (True, ""))
+    monkeypatch.setattr(scripts, "on_party_task_failed",
+                        lambda hook: (True, ""))
 
     worker._watch_waitfor(worker.seats[0])
     got[0](False, "a dialogue box was open after 8s", "Olde Town",
@@ -11231,6 +11239,34 @@ def test_a_teleport_that_pushed_through_a_stale_load_is_visible(monkeypatch):
         assert len(note) == 1
         assert note[0]["detail"].startswith("Phönix: "), note[0]["detail"]
         assert "PageFlip" in note[0]["detail"]
+
+
+def test_a_wizard_that_fell_out_of_a_mass_instruction_is_named(monkeypatch):
+    """Upstream a mass instruction runs inside `asyncio.TaskGroup`, which
+    cancels every sibling when one task raises -- so one wizard's
+    transient failure took the other three down with it, and nothing
+    said so. `PartyTaskGroup` lets them all finish; this is where the
+    one that did not surfaces."""
+    from deimos_bridge import scripts
+
+    worker, _read = _zoned_party(["Olde Town", "Olde Town"])
+    worker.seats[0].runner = type("R", (), {"running": True, "steps": 1})()
+    got = []
+    monkeypatch.setattr(scripts, "on_waitfor_timeout", lambda h: (True, ""))
+    monkeypatch.setattr(scripts, "on_teleport_result", lambda h: (True, ""))
+    monkeypatch.setattr(scripts, "on_teleport_note", lambda h: (True, ""))
+    monkeypatch.setattr(scripts, "on_party_task_failed",
+                        lambda hook: (got.append(hook), (True, ""))[1])
+
+    worker._watch_waitfor(worker.seats[0])
+    got[0]("teleport", [("tp_to_quest", RuntimeError("MemoryReadError"))])
+    for seat in worker.seats:
+        note = [e for e in seat.tel.questing
+                if e["kind"] == "party-task-failed"]
+        assert len(note) == 1
+        assert "`teleport` failed for one wizard" in note[0]["detail"]
+        assert "MemoryReadError" in note[0]["detail"]
+        assert "the others finished it" in note[0]["detail"]
 
 
 # ------------------------------------------------------------- who is behind

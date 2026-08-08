@@ -2260,9 +2260,32 @@ class LiveWorker(QThread):
                     pass
             self._say_once(self.seats[0], "tp-forced", said)
 
+        def party_task_failed(what, failures):
+            """Wizards that fell out of an instruction the others finished.
+
+            Upstream this was not merely unreported, it was unsurvivable:
+            `asyncio.TaskGroup` cancels every sibling when one task
+            raises, so the party's instruction died with whichever
+            wizard was unluckiest. Now they all finish and this says who
+            did not.
+            """
+            for label, exc in failures:
+                said = (f"`{what}` failed for one wizard "
+                        f"({type(exc).__name__}: {exc}) — the others "
+                        f"finished it, so the party is a step apart until "
+                        f"something puts them back together")
+                for other in self.seats:
+                    try:
+                        other.tel.note_questing("party-task-failed", said)
+                    except Exception:
+                        pass
+                self._say_once(self.seats[0], f"party-task-{what}", said)
+
         installs = ((scripts.on_waitfor_timeout, "waitfor-hook", gave_up),
                     (scripts.on_teleport_result, "teleport-hook", teleported),
-                    (scripts.on_teleport_note, "teleport-note", tp_noted))
+                    (scripts.on_teleport_note, "teleport-note", tp_noted),
+                    (scripts.on_party_task_failed, "party-task-hook",
+                     party_task_failed))
         for install, key, hook in installs:
             ok, why = install(hook)
             if not ok:

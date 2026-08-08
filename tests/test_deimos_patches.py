@@ -195,3 +195,132 @@ def test_the_wait_is_bounded():
          ns)
     assert 0 < ns["TP_FREE_WAIT"] <= 30, \
         "long enough for a loading screen, short enough not to be a hang"
+
+
+# --------------------------------------------- one wizard's failure, one wizard
+def test_a_mass_instruction_does_not_cancel_the_wizards_that_were_fine():
+    """`asyncio.TaskGroup` is documented to cancel every remaining task
+    when one raises. Upstream all thirteen mass instructions fan out
+    inside one, so a single wizard's transient failure cancels the other
+    three MID-INSTRUCTION and the VM step dies with an ExceptionGroup.
+
+    The operator's report is the symptom exactly: "if they were all in
+    the same zone, the same teleport should work for all of them, but
+    some will just not move at all"."""
+    src = _source(VM)
+    assert "class PartyTaskGroup" in src, \
+        "the non-cancelling group is gone -- one wizard's bad luck is the " \
+        "party's problem again"
+    # Statements only -- the class docstring quotes the upstream line.
+    used = [l.strip() for l in src.splitlines()
+            if l.strip().startswith("async with asyncio.TaskGroup()")]
+    assert not used, \
+        f"a mass instruction is back on asyncio.TaskGroup, which cancels " \
+        f"the wizards that were doing fine: {used}"
+    assert src.count("async with PartyTaskGroup(") >= 13, \
+        "not every mass instruction was moved off TaskGroup"
+    body = src.split("class PartyTaskGroup", 1)[1].split("\ndef ", 1)[0]
+    assert "return_exceptions=True" in body, \
+        "gather without return_exceptions has the same first-failure-wins " \
+        "behaviour TaskGroup does"
+
+
+def test_every_wizard_in_a_wait_is_actually_waited_on():
+    """Upstream: `async def proxy(): return await method(client)` inside
+    `for client in clients`. Python closes over the loop VARIABLE and no
+    task runs until the group awaits it, so all N waits poll the LAST
+    wizard. `waitfor dialog` returns when wizard four has a dialogue box
+    whatever the other three are doing, and the script marches on with
+    three wizards it never waited for. That is the desync."""
+    src = _source(VM)
+    block = src.split('case "waitfor":', 1)[1].split('case "sendkey":', 1)[0]
+    proxies = [line.strip() for line in block.splitlines()
+               if line.strip().startswith("async def proxy(")]
+    assert proxies, "the waitfor proxies are gone; check this test still fits"
+    for line in proxies:
+        assert "client=client" in line, \
+            f"this wait closes over the loop variable, so it polls only the " \
+            f"last wizard: {line}"
+    zone = block.split("WaitforKind.zonechange", 1)[1]
+    assert "starting_zone=starting_zone" in zone, \
+        "the zone-change wait compares every wizard against the last " \
+        "wizard's starting zone"
+
+
+def test_a_quest_teleport_reads_its_position_inside_its_own_task():
+    """Upstream `pos = await client.quest_position.position()` is awaited
+    in the fan-out loop, so a wizard whose quest position will not
+    resolve stops the loop before the wizards after it are given a task
+    at all. It is the most-used instruction in the arc scripts."""
+    src = _source(VM)
+    block = src.split("TeleportKind.quest:", 1)[1].split("TeleportKind.", 1)[0]
+    assert "async def tp_to_quest" in block, \
+        "the quest teleport reads every position up front again"
+    lines = [l.strip() for l in block.splitlines()]
+    body = lines.index("async def tp_to_quest(client):")
+    fan = next(i for i, l in enumerate(lines) if l.startswith("for client in"))
+    assert body < fan, "the read has to be inside the task, not before it"
+
+
+def test_the_non_cancelling_group_really_does_not_cancel(monkeypatch):
+    """Not a source check. `PartyTaskGroup` is pure asyncio, so it can be
+    lifted out of vm.py and run: three wizards, one of them raising, and
+    the other two must still finish."""
+    import asyncio
+
+    src = _source(VM)
+    block = ("class PartyTaskGroup"
+             + src.split("class PartyTaskGroup", 1)[1]
+                  .split("class VMError", 1)[0])
+    ns = {"asyncio": asyncio, "on_party_task_failed": None}
+    exec(block, ns)
+
+    finished, told = [], []
+    ns["on_party_task_failed"] = lambda what, fails: told.append((what, fails))
+
+    async def ok(name):
+        await asyncio.sleep(0.01)
+        finished.append(name)
+
+    async def boom(name):
+        raise RuntimeError(f"{name} lost a memory read")
+
+    async def run():
+        async with ns["PartyTaskGroup"]("teleport") as tg:
+            tg.create_task(boom("wizard 1"))
+            tg.create_task(ok("wizard 2"))
+            tg.create_task(ok("wizard 3"))
+
+    asyncio.run(run())                      # must not raise an ExceptionGroup
+    assert finished == ["wizard 2", "wizard 3"], \
+        f"the wizards that were fine got cancelled anyway: {finished}"
+    assert told and told[0][0] == "teleport"
+    assert len(told[0][1]) == 1 and isinstance(told[0][1][0][1], RuntimeError)
+
+
+def test_the_upstream_group_would_have_cancelled_them():
+    """The control. If this ever stops holding, `asyncio.TaskGroup`
+    changed and the patch above may no longer be needed."""
+    import asyncio
+
+    finished = []
+
+    async def ok(name):
+        await asyncio.sleep(0.01)
+        finished.append(name)
+
+    async def boom():
+        raise RuntimeError("lost a memory read")
+
+    async def run():
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(boom())
+            tg.create_task(ok("wizard 2"))
+            tg.create_task(ok("wizard 3"))
+
+    try:
+        asyncio.run(run())
+    except BaseException:
+        pass
+    assert finished == [], \
+        "asyncio.TaskGroup no longer cancels siblings; re-check the patch"
