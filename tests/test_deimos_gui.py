@@ -480,7 +480,13 @@ class _XYZ:
 
 class _QuestClient:
     def __init__(self, root, position=_XYZ(1.0, 2.0, 3.0), in_battle=False,
-                 loading=0, zone="Wizard City"):
+                 loading=0, zone="Wizard City", lands=True, quest_at=None):
+        self.lands = lands
+        #: where the marker is, when it is somewhere other than where
+        #: the wizard already stands. Defaults to the wizard's own
+        #: position, which is what every test written before arrival
+        #: was checked assumes.
+        self.quest_at = quest_at
         self.root_window = root
         self.mouse_handler = _Mouse()
         self.teleported = []
@@ -494,6 +500,8 @@ class _QuestClient:
 
         class _QP:
             async def position(self):
+                if client.quest_at is not None:
+                    return client.quest_at
                 if client._position is None:
                     raise RuntimeError("no quest")
                 return client._position
@@ -502,6 +510,22 @@ class _QuestClient:
 
     async def teleport(self, position):
         self.teleported.append(position)
+        # Arrival is part of the contract now: `teleport_to_quest`
+        # checks where the wizard ended up, because a teleport that
+        # silently did nothing used to return the same answer as one
+        # that worked. `lands` False models exactly that failure.
+        if self.lands:
+            self._position = position
+
+    @property
+    def body(self):
+        client = self
+
+        class _Body:
+            async def position(self):
+                return client._position
+
+        return _Body()
 
     async def in_battle(self):
         return self._in_battle
@@ -704,6 +728,147 @@ def test_a_failed_dialogue_click_is_not_reported_as_no_dialogue():
     quiet, _ = _dialogue_root(visible=False)
     assert asyncio.run(advance_dialogue(_QuestClient(quiet), settle=0)) \
         == (0, "")
+
+
+def test_a_quest_teleport_that_does_not_land_is_retried():
+    """The operator's point: "the questing scripts ... add protections
+    at the very least to the quest marker teleports which often fail".
+    This was one bare `client.teleport(position)` with no check that it
+    landed, while the quester wraps every `tp quest` in `times 10`."""
+    import asyncio
+
+    from deimos_bridge.questing import QUEST_TP_TRIES, teleport_to_quest
+    root, _ = _dialogue_root(visible=False)
+
+    client = _QuestClient(root, lands=False,     # teleports do nothing
+                          quest_at=_XYZ(9000.0, 9000.0, 0.0))
+    ok, reason = asyncio.run(teleport_to_quest(client))
+    assert ok is False
+    assert len(client.teleported) >= QUEST_TP_TRIES, \
+        f"gave up after {len(client.teleported)} attempt(s)"
+    assert "would not take after" in reason and "away and the cutoff" in reason
+
+
+def test_a_quest_teleport_bumps_out_of_bounds_when_plain_attempts_fail():
+    """`tp XYZ(0,100000,0)` appears 116 times in the quester, always just
+    before a real teleport: the game clamps the wizard back to the
+    nearest valid point, which forces the position update the next
+    teleport needs. A teleport issued from a position the client already
+    thinks is correct is the one that silently does nothing."""
+    import asyncio
+
+    from deimos_bridge.questing import NOWHERE, teleport_to_quest
+    root, _ = _dialogue_root(visible=False)
+
+    client = _QuestClient(root, lands=False,
+                          quest_at=_XYZ(9000.0, 9000.0, 0.0))
+    asyncio.run(teleport_to_quest(client))
+    bumped = [p for p in client.teleported
+              if abs(getattr(p, "y", 0) - NOWHERE[1]) < 1]
+    assert bumped, "never tried the out-of-bounds bump"
+
+
+def test_a_quest_teleport_that_works_does_not_pay_for_the_protections():
+    """The common case is a teleport that simply works, and a party of
+    four should not pay twenty-four window lookups a hop for it."""
+    import asyncio
+
+    from deimos_bridge.questing import teleport_to_quest
+    root, _ = _dialogue_root(visible=False)
+
+    client = _QuestClient(root)
+    ok, reason = asyncio.run(teleport_to_quest(client))
+    assert ok is True and reason == ""
+    assert len(client.teleported) == 1, "retried a teleport that worked"
+    assert not client.mouse_handler.clicks, "closed menus it did not need to"
+
+
+def test_close_menus_shuts_every_window_it_can_reach():
+    """wizAi knew about one of these paths (`NPCServicesWin`) and the
+    quester closes twenty-four, 63 times across the program -- once
+    after essentially every quest teleport. A window left open blocks
+    movement AND reads to `is_loading()` as a loading screen, so the
+    next teleport is refused too."""
+    import asyncio
+
+    from deimos_bridge.questing import close_menus
+
+    shop = _Win("exit", visible=True)
+    tournament = _Win("exit", visible=True)
+    hidden = _Win("exit", visible=False)
+    root = _Win("root", [
+        _Win("WorldView", [
+            _Win("shopGUI", [_Win("buyWindow", [shop])]),
+            _Win("TournamentRanking", [tournament]),
+            _Win("ClassPicture", [hidden]),
+        ])])
+    client = _QuestClient(root)
+    closed = asyncio.run(close_menus(client))
+    assert closed == 2, f"closed {closed}"
+    assert shop in client.mouse_handler.clicks
+    assert tournament in client.mouse_handler.clicks
+    assert hidden not in client.mouse_handler.clicks
+
+
+def test_close_menus_keeps_going_past_a_window_that_will_not_close():
+    """One button whose path has moved must not stop the other
+    twenty-three. The point is to leave the wizard able to move."""
+    import asyncio
+
+    from deimos_bridge.questing import close_menus
+
+    class _Angry(_Win):
+        async def is_visible(self):
+            raise RuntimeError("this window is not answering")
+
+    root = _Win("root", [
+        _Win("WorldView", [
+            _Win("TournamentRanking", [_Angry("exit", visible=True)]),
+            _Win("shopGUI", [_Win("buyWindow", [_Win("exit", visible=True)])]),
+        ])])
+    client = _QuestClient(root)
+    assert asyncio.run(close_menus(client)) == 1
+
+
+def test_x_is_pressed_until_something_happens_not_once(monkeypatch):
+    """X is a proximity interact and does nothing until the wizard has
+    finished arriving, which after a teleport is a second or two. One
+    press lands in the gap and the step never starts -- the quester
+    presses up to twenty."""
+    import asyncio
+
+    from deimos_bridge import questing
+    from deimos_bridge.questing import press_x_until
+    monkeypatch.setattr(questing, "keycode_x", lambda: "X")
+    root, _ = _dialogue_root(visible=False)
+    client = _QuestClient(root)
+
+    state = {"n": 0}
+
+    async def done():
+        state["n"] += 1
+        return state["n"] > 4              # the interact takes a moment
+
+    pressed, why = asyncio.run(press_x_until(client, done, tries=20))
+    assert why == ""
+    assert 1 <= pressed <= 5, f"pressed {pressed}"
+    assert len(client.keys) == pressed
+
+
+def test_pressing_x_gives_up_rather_than_hammering_forever(monkeypatch):
+    import asyncio
+
+    from deimos_bridge import questing
+    from deimos_bridge.questing import press_x_until
+    monkeypatch.setattr(questing, "keycode_x", lambda: "X")
+    root, _ = _dialogue_root(visible=False)
+    client = _QuestClient(root)
+
+    async def never():
+        return False
+
+    pressed, _why = asyncio.run(press_x_until(client, never, tries=6))
+    assert pressed == 6
 
 
 def test_teleport_to_quest_reports_failure_rather_than_raising():
@@ -986,9 +1151,13 @@ def test_service_loop_runs_requests_while_the_fight_loop_waits(qapp):
         tasks = [asyncio.ensure_future(worker._service_loop(client)),
                  asyncio.ensure_future(worker._request_loop(client))]
         worker.request("teleport")
-        for _ in range(40):                 # ~2s of 50ms ticks
+        # Waits for the REPORT, not for the first teleport. A quest
+        # teleport is a retry loop now -- it checks where the wizard
+        # landed and tries again -- so the first `client.teleport` is
+        # the middle of the action rather than the end of it.
+        for _ in range(120):                # ~6s of 50ms ticks
             await asyncio.sleep(0.05)
-            if client.teleported:
+            if any("teleported" in m for m in said):
                 break
         worker._stop = True
         for task in tasks:

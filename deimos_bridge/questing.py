@@ -419,16 +419,109 @@ async def _close_services(client):
     return True, ""
 
 
-async def teleport_to_quest(client):
-    """(ok, reason). Jump to the current quest marker."""
+#: how many times a quest teleport is tried before it is called failed.
+#: The quester wraps every one in `times 10 { ... }`; ten is its number
+#: and there is no reason to be braver than the script people run.
+QUEST_TP_TRIES = 4
+#: how close counts as arrived, in the game's units.
+ARRIVED_WITHIN = 750.0
+
+
+async def teleport_to_quest(client, tries: int = None, on_status=None):
+    """(ok, reason). Get to the quest marker, with the script's protections.
+
+    The operator's point, and it lands squarely on what this used to be:
+
+        the thing with the questing scripts though is that it fixes (or
+        adds protections at the very least) to the quest marker
+        teleports which often fail
+
+    This was one bare `client.teleport(position)`. Not even `navmap_tp`
+    -- so no nav-mesh route, no midpoint or spiral fallback, none of the
+    loading-gate work in `teleport_math` -- and no check that it landed.
+    Meanwhile the quester wraps every `tp quest` in
+
+        times 10 { tp quest; call Close_Menus; times 20 { sendkey X } }
+
+    and precedes 116 of its teleports with `tp XYZ(0,100000,0)`. Those
+    are not stylistic. A quest teleport fails often enough that a loop
+    around it is the normal way to write one.
+
+    So: `navmap_tp` where Deimos is importable, retried, menus closed
+    between attempts because a window left open blocks the next one and
+    reads as a loading screen, and the out-of-bounds bump once a plain
+    attempt has not moved the wizard.
+    """
     position, reason = await read_quest_position(client)
     if position is None:
         return False, reason
+    tries = QUEST_TP_TRIES if tries is None else tries
+    hop = _navmap_tp()
+    last = ""
+    for attempt in range(max(1, tries)):
+        if attempt:
+            # Between attempts, not before the first: the common case is
+            # a teleport that simply works, and a party of four paying
+            # for twenty-four window lookups per hop is not free.
+            await close_menus(client, on_status)
+            if attempt > 1:
+                await _bump(client, position)
+        try:
+            if hop is not None:
+                await hop(client, position)
+            else:
+                await client.teleport(position)
+        except Exception as exc:
+            last = f"{type(exc).__name__}: {exc}"
+            continue
+        await asyncio.sleep(0.4)
+        arrived, why = await _at(client, position)
+        if arrived:
+            return True, ""
+        last = why
+    return False, (f"the quest marker would not take after {tries} "
+                   f"attempts — {last}" if last else
+                   f"the quest marker would not take after {tries} attempts")
+
+
+def _navmap_tp():
+    """Deimos's `navmap_tp`, or None if Deimos is not importable.
+
+    Worth reaching for rather than teleporting raw: it carries the nav
+    mesh, the midpoint and spiral fallbacks, and wizAi's own patches to
+    the loading gate. Optional, because `questing` is the module that is
+    meant to work on plain wizwalker.
+    """
     try:
-        await client.teleport(position)
+        from .deimos_path import ensure_path
+        ensure_path()
+        from src.teleport_math import navmap_tp
+        return navmap_tp
+    except Exception:
+        return None
+
+
+async def _at(client, position, within: float = None):
+    """(arrived, why). Did the wizard actually end up there?
+
+    The half that was missing entirely. A teleport that silently does
+    nothing and a teleport that worked returned the same answer, so the
+    caller retried nothing and reported success.
+    """
+    within = ARRIVED_WITHIN if within is None else within
+    try:
+        here = await client.body.position()
     except Exception as exc:
-        return False, f"teleport failed ({type(exc).__name__}: {exc})"
-    return True, ""
+        return False, (f"could not read the position afterwards "
+                       f"({type(exc).__name__})")
+    try:
+        gap = sum((getattr(here, a, 0.0) - getattr(position, a, 0.0)) ** 2
+                  for a in ("x", "y", "z")) ** 0.5
+    except Exception:
+        return False, "the positions would not compare"
+    if gap <= within:
+        return True, ""
+    return False, f"still {gap:,.0f} away and the cutoff is {within:,.0f}"
 
 
 def keycode_x():
@@ -467,6 +560,154 @@ async def press_x(client, seconds: float = 0.1):
                        f"({type(exc).__name__}: {exc}) — sigils, dungeon "
                        f"doors and quest NPCs all need it, so nothing will "
                        f"start")
+
+
+#: Windows that swallow a wizard, and the button that closes each.
+#:
+#: Lifted from the `Close_Menus` block of the TTS Arc 1 quester, which
+#: calls it 63 times -- once after essentially every `tp quest`. That is
+#: not decoration. A quest teleport lands a wizard on an NPC, a shop, a
+#: sigil or a reagent, any of which can put a window up; a window up
+#: blocks movement, and `client.is_loading()` reports some of them as a
+#: LOADING SCREEN, so the next teleport is refused as well. The script
+#: has this because without it a quester stops.
+#:
+#: wizAi had one of these paths (`NPCServicesWin`) and no others, which
+#: is why `hop_once` could clear a conversation and still be stuck.
+CLOSE_MENU_PATHS = (
+    ["WorldView", "NPCServicesWin", "wndDialogMain", "Exit"],
+    ["WorldView", "ShoppingReagentWindow", "buyWindow", "exit"],
+    ["WorldView", "", "Exit"],
+    ["WorldView", "TournamentRanking", "exit"],
+    ["WorldView", "mainwindow", "exit"],
+    ["WorldView", "main", "exit"],
+    ["WorldView", "shopGUI", "buyWindow", "exit"],
+    ["WorldView", "NPCTrainingGUI", "Dialog", "ExitButton"],
+    ["WorldView", "NPCTrainingGUI", "TrainingSelection", "ExitButton"],
+    ["WorldView", "NPCTrainingShadowMagicGUI", "Dialog", "ExitButton"],
+    ["WorldView", "ShoppingPetSnackWindow", "buyWindow", "exit"],
+    ["WorldView", "wndDialogMain", "btnYes"],
+    ["WorldView", "wndDialogMain", "btnRight"],
+    ["MessageBoxModalWindow", "messageBoxBG", "messageBoxLayout",
+     "AdjustmentWindow", "Layout", "centerButton"],
+    ["MessageBoxModalWindow", "messageBoxBG", "messageBoxLayout",
+     "AdjustmentWindow", "Layout", "rightButton"],
+    ["MessageBoxModalWindow", "messageBoxBG", "messageBoxLayout",
+     "AdjustmentWindow", "RetryBtn"],
+    ["WorldView", "PlanningPhase", "MessageBoxModalWindow", "messageBoxBG",
+     "messageBoxLayout", "AdjustmentWindow", "Layout", "centerButton"],
+    ["WorldView", "PlanningPhase", "MessageBoxModalWindow", "messageBoxBG",
+     "messageBoxLayout", "AdjustmentWindow", "Layout", "rightButton"],
+    ["WorldView", "PetLevelUpWindow", "wndPetLevelBkg", "btnPetLevelClose"],
+    ["WorldView", "ClassPicture", "exit"],
+    ["WorldView", "HelpHousingTips2", "toolbar", "exit"],
+    ["WorldView", "SocialSystemsWindow", "CloseSocialSystemsButton"],
+    ["WorldView", "windowHUD", "NewFriendsListWindow", "btnClose"],
+    ["WorldView", "", "messageBoxBG", "ControlSprite", "cancelButton"],
+)
+
+
+async def close_menus(client, on_status=None) -> int:
+    """Click shut every window in `CLOSE_MENU_PATHS`. Returns how many.
+
+    Only what is visible, and every failure is swallowed per window: the
+    point is to leave the wizard able to move, and one window whose
+    button has moved must not stop the other twenty-three being closed.
+
+    Deliberately NOT limited to the windows that block movement. The
+    script closes all of them because the cost of closing one that was
+    harmless is nothing, and the cost of missing one is a wizard that
+    stands still for the rest of the run.
+    """
+    closed = 0
+    try:
+        async with client.mouse_handler:
+            for path in CLOSE_MENU_PATHS:
+                try:
+                    window = await window_from_path(client.root_window, path)
+                    if window is None or not await _visible(window):
+                        continue
+                    await client.mouse_handler.click_window(window)
+                    closed += 1
+                    await asyncio.sleep(0.15)
+                except Exception:
+                    continue
+    except Exception:
+        return closed
+    if closed and on_status:
+        on_status(f"closed {closed} window(s) that were blocking movement")
+    return closed
+
+
+#: Somewhere no zone contains. The quester uses `tp XYZ(0,100000,0)` 116
+#: times, always immediately before a real teleport, and it is not
+#: superstition: the game clamps the wizard back to the nearest valid
+#: point, which forces a position update the next teleport can act on. A
+#: teleport issued from a position the client thinks is already correct
+#: is the one that silently does nothing.
+NOWHERE = (0.0, 100000.0, 0.0)
+
+
+async def _bump(client, like) -> bool:
+    """Shove the wizard out of bounds so the next teleport takes.
+
+    Built from the type of a position we already hold rather than by
+    importing `wizwalker.XYZ`. The first version imported it, and in any
+    environment where that import fails the bump did nothing at all --
+    silently, and only in the case it exists for.
+    """
+    try:
+        target = type(like)(*NOWHERE)
+    except Exception:
+        try:
+            from wizwalker import XYZ
+            target = XYZ(*NOWHERE)
+        except Exception:
+            return False
+    try:
+        await client.teleport(target)
+        await asyncio.sleep(0.4)
+        return True
+    except Exception:
+        return False
+
+
+async def press_x_until(client, done, tries: int = 20,
+                        gap: float = 0.15):
+    """(pressed, reason). Press X until `done()` says so, or `tries` runs out.
+
+    One press was what wizAi did, and the script presses up to twenty --
+    `times 20 { sendkey X, .1 }` around a `windowvisible` check, 185
+    times across the program. The reason is that X is a proximity
+    interact: it does nothing until the wizard has actually finished
+    arriving, and after a teleport that can be a second or two of
+    settling. A single press lands in the gap and the step never starts.
+    """
+    key = keycode_x()
+    if key is None:
+        return 0, ("wizwalker did not provide a keycode for X, so "
+                   "interacting is disabled — sigils, dungeon doors and "
+                   "quest NPCs all need it")
+    pressed = 0
+    for _ in range(max(1, tries)):
+        try:
+            if await done():
+                return pressed, ""
+        except Exception:
+            pass
+        try:
+            await client.send_key(key, 0.1)
+            pressed += 1
+        except Exception as exc:
+            return pressed, (f"could not press X to interact "
+                             f"({type(exc).__name__}: {exc})")
+        await asyncio.sleep(gap)
+    try:
+        if await done():
+            return pressed, ""
+    except Exception:
+        pass
+    return pressed, ""
 
 
 async def in_battle(client) -> bool:
@@ -604,13 +845,19 @@ async def hop_once(client, settle: float = 1.2, on_status=None) -> bool:
         return False
 
     say("teleporting to the quest marker…")
-    ok, reason = await teleport_to_quest(client)
+    ok, reason = await teleport_to_quest(client, on_status=say)
     if not ok:
         say(reason)
         return False
 
     await asyncio.sleep(settle)
     await wait_until_ready(client)          # a door starts a zone change
+
+    # Before the interact, not after. A quest teleport lands on NPCs,
+    # shops and sigils, and anything it puts on screen blocks movement
+    # and reads to `is_loading()` as a loading screen -- so the next hop
+    # is refused too. The quester calls `Close_Menus` here 63 times.
+    await close_menus(client, say)
 
     if await open_dialogue_if_near(client, on_status=say):
         await asyncio.sleep(settle)
@@ -621,11 +868,14 @@ async def hop_once(client, settle: float = 1.2, on_status=None) -> bool:
         return True
 
     # Arriving is often not enough: sigils, dungeon doors and quest NPCs
-    # need an interact. A failed interact is the difference between "the
-    # hop is working" and "the wizard is standing on the sigil doing
-    # nothing", so it is said rather than discarded.
-    ok, why = await press_x(client)
-    if not ok and why:
+    # need an interact. X is a proximity key and does nothing until the
+    # wizard has finished settling, so one press lands in the gap and
+    # the step never starts -- the quester presses up to twenty.
+    async def something_happened():
+        return await in_dialogue(client) or await in_battle(client)
+
+    pressed, why = await press_x_until(client, something_happened)
+    if why:
         say(why)
     await asyncio.sleep(settle)
     await wait_until_ready(client)
