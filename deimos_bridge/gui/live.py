@@ -147,6 +147,11 @@ class _Seat:
         #: a step another has already left is the one behind -- see
         #: `LiveWorker._who_is_behind`.
         self.goals_seen = []
+        #: since when this wizard's tracker has been on something that
+        #: is not the world's main line, and the last side quest that
+        #: was said. See `LiveWorker._check_on_questline`.
+        self.off_line_since = None
+        self.said_off_line = ""
         #: the tracked quest's NAME, which is what `questlist` can place
         #: in a questline. The goal cannot be placed: "Talk to Professor
         #: Winthrop" is the objective of nine Krokotopia quests spanning
@@ -583,6 +588,7 @@ class LiveWorker(QThread):
                 # `done` sharing a timestamp.
                 self._check_caught_up()
                 self._check_in_step(seat)
+                self._check_on_questline()
                 self._check_progress(seat)
 
                 catching = self._catching_up()
@@ -2581,6 +2587,118 @@ class LiveWorker(QThread):
             bits.append(f"{seat.name} {where} ({place.how or 'no quest'})")
         return " · ".join(bits)
 
+    #: how long a wizard may be off the main line before it is said.
+    #: Picking a side quest up is normal and often deliberate -- the
+    #: scripts do it for training points and gear. Staying on one is
+    #: not, because the tracker follows the SELECTED quest and every
+    #: `tp quest` goes there until something changes it.
+    OFF_QUESTLINE_AFTER = 120.0
+
+    def _check_on_questline(self):
+        """Notice a wizard whose tracker has wandered off the storyline.
+
+        The operator's request, and it is a real failure mode rather
+        than a tidiness one:
+
+            it would be beneficial since the bot sometimes loses the
+            main questline to realize when it's lost it
+
+        Wizard101's quest arrow follows whichever quest is SELECTED. A
+        wizard that accepts a side quest -- or has one auto-selected
+        after a dialogue -- has its arrow, and therefore every `tp
+        quest` the script issues, pointed at the side quest from that
+        moment. The party's main-line progress simply stops, and until
+        now nothing said so: rev 8e5a9c75 has Sebastian going from
+        Krokotopia main #13 to `unplaced` at t=790 and running the
+        remaining seven minutes there, visible only as three characters
+        in a placement string nobody was reading for that.
+
+        Only said once per change, and only after `OFF_QUESTLINE_AFTER`,
+        because being briefly off the line is how you finish a side
+        quest on purpose.
+        """
+        import time
+
+        from .. import questlist
+
+        if not questlist.loaded():
+            return
+        now = time.monotonic()
+        places = self._places()
+        # Where the party as a whole is, so the message can say what
+        # this wizard should be on instead of just what it is on.
+        main = [p for p in places if p.on_main]
+        theirs = (f"#{min(p.order for p in main)}" if main else "")
+        for seat, place in zip(self.seats, places):
+            if seat.client is None:
+                continue
+            if place.on_main or not place.known:
+                # `known` False is a read that failed or a quest the
+                # list has never heard of -- not evidence of anything.
+                # Saying "off the questline" on an unreadable tracker
+                # would fire on every load screen.
+                if seat.off_line_since and place.on_main:
+                    seat.tel.note_questing(
+                        "back-on-questline",
+                        f"{seat.name} is back on the main line at "
+                        f"#{place.order} ({place.name!r}) after "
+                        f"{(now - seat.off_line_since) / 60:.0f} min away")
+                    self._say(seat, f"{seat.name} is back on the main line")
+                seat.off_line_since = None
+                seat.said_off_line = ""
+                continue
+            if seat.off_line_since is None:
+                seat.off_line_since = now
+                continue
+            away = now - seat.off_line_since
+            if away < self.OFF_QUESTLINE_AFTER:
+                continue
+            if seat.said_off_line == place.name:
+                continue
+            seat.said_off_line = place.name
+            said = (f"{seat.name} has been off the main questline for "
+                    f"{away / 60:.0f} min — its tracker is on "
+                    f"{place.name!r}, which is a side quest"
+                    + (f", while the party is on {theirs}" if theirs else "")
+                    + ". Every `tp quest` goes to the side quest until the "
+                      "main one is selected again")
+            for other in self.seats:
+                try:
+                    other.tel.note_questing("off-questline", said)
+                except Exception:
+                    pass
+            self._say(seat, said)
+
+    def _quests_agree(self):
+        """(together, why), or (None, why) when the list cannot say.
+
+        The question `goals_agree` was answering badly. Two wizards on
+        the same quest are together even when their goal lines differ,
+        and on a multi-objective step they always differ -- that is what
+        a multi-objective step IS.
+
+        None rather than True when fewer than two wizards can be placed:
+        "no evidence" and "no desync" are different, and the caller has
+        a weaker rule to fall back on.
+        """
+        from .. import questlist
+
+        if not questlist.loaded():
+            return None, "the quest list did not load"
+        places = self._places()
+        orders = [p.order for p in places if p.comparable]
+        if len(orders) < 2:
+            return None, "fewer than two wizards could be placed"
+        worlds = {p.world for p in places if p.comparable}
+        if len(worlds) > 1:
+            return False, (f"the party is in {len(worlds)} different worlds "
+                           f"({', '.join(sorted(worlds))})")
+        spread = max(orders) - min(orders)
+        if spread < questlist.BEHIND_BY:
+            return True, (f"all within {spread} quest(s) of each other, "
+                          f"whatever their goal lines say")
+        return False, f"{spread} quests apart (#{min(orders)}–#{max(orders)})"
+
     def _behind_by_questline(self):
         """The seat the quest list says is furthest back, or None.
 
@@ -2701,20 +2819,47 @@ class LiveWorker(QThread):
         simultaneous. One wizard clicks the NPC seconds before the
         other, so a bare inequality would report a desync on every
         normal handover. Only a disagreement that PERSISTS is one.
+
+        And measured on the QUEST, not the goal line, whenever the
+        questline can place the party. Rev 8e5a9c75 is twenty minutes of
+        this being wrong: 22 `quest-desync` entries, every one of them
+        three wizards inside one quest. Krokotopia #12 is "Gather the
+        Troops", whose objectives are
+
+            Private Primwell · Private Archibald · Private Livingston
+            · Private Farnsworth · Lieutenant Standish
+
+        so a party working through it correctly shows three different
+        goal lines at all times, and `goals_agree` calls that a desync
+        on every tick. `_behind` then flapped between all three wizards
+        -- eight "another wizard has finished that step", seven guesses
+        from the clock, seven "cannot be told" -- and all 22 named a
+        laggard in a party that was together.
+
+        The questline said so each time and was overruled by the older
+        rules underneath it. Now it wins: within `BEHIND_BY` quests is
+        in step, whatever the goal lines say. Goal text is the fallback
+        for a party the list cannot place, where it is the only evidence
+        there is.
         """
         import time
 
         if len(self.seats) < 2:
             return
-        from .. import questing
+        from .. import questing, questlist
 
         goals = [s.goal for s in self.seats]
         now = time.monotonic()
-        if questing.goals_agree(goals):
+        together, why = self._quests_agree()
+        if together is None:
+            together = questing.goals_agree(goals)
+            why = "by goal text — the questline could not place the party"
+        if together:
             self._in_step_since = now
             self._said_desync = ""
             self._behind = None
             return
+        self._in_step_why = why
         since = getattr(self, "_in_step_since", None)
         if since is None:
             self._in_step_since = now

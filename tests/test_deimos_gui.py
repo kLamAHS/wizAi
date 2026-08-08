@@ -11438,6 +11438,137 @@ def test_a_wizard_that_fell_out_of_a_mass_instruction_is_named(monkeypatch):
         assert "the others finished it" in note[0]["detail"]
 
 
+# ------------------------------------------------- in step, and on the line
+def _party_on_quests(names, goals=None):
+    worker, _read = _zoned_party(["Krokotopia/KT_Pyramid/KT_PalaceOfFire"]
+                                 * len(names))
+    worker.script = "###deimos_expertmode"
+    for i, (seat, name) in enumerate(zip(worker.seats, names)):
+        seat.quest_name = name
+        seat.goal = goals[i] if goals else f"goal {i}"
+        seat.goals_seen = [seat.goal]
+    return worker
+
+
+def test_one_quest_with_five_npcs_is_not_a_desync():
+    """Rev 8e5a9c75 is twenty minutes of getting this wrong: 22
+    `quest-desync` entries, every one of them three wizards inside one
+    quest. Krokotopia #12 is "Gather the Troops" -- Primwell,
+    Archibald, Livingston, Farnsworth, Standish -- so a party working
+    through it correctly shows three different goal lines at all times,
+    and comparing goal TEXT calls that a desync on every tick."""
+    import time
+
+    worker = _party_on_quests(
+        ["Gather the Troops", "Gather the Troops", "Payback"],
+        ["Talk To Private Farnsworth in Palace of Fire",
+         "Talk To Private Livingston in Palace of Fire",
+         "Defeat Flame Guardian in Palace of Fire (0 of 3)"])
+    together, why = worker._quests_agree()
+    assert together is True, why
+    assert "within 1 quest" in why
+
+    worker._check_in_step(worker.seats[0])
+    worker._in_step_since = time.monotonic() - 600
+    worker._check_in_step(worker.seats[0])
+    assert not [e for e in worker.seats[0].tel.questing
+                if e["kind"] == "quest-desync"], "still crying desync"
+    assert worker._behind is None
+
+
+def test_a_real_gap_is_still_a_desync():
+    import time
+
+    worker = _party_on_quests(["Gather the Troops",      # #12
+                               "Find My Colleague"])     # #7
+    together, why = worker._quests_agree()
+    assert together is False
+    assert "5 quests apart" in why
+    worker._check_in_step(worker.seats[0])
+    worker._in_step_since = time.monotonic() - 600
+    worker._check_in_step(worker.seats[0])
+    assert [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "quest-desync"]
+
+
+def test_a_party_the_list_cannot_place_still_falls_back_to_goals():
+    """Goal text is weak evidence, but for a party the list cannot place
+    it is the only evidence there is."""
+    worker = _party_on_quests(["A Quest Nobody Wrote Down"] * 2,
+                              ["Talk To Someone", "Talk To Someone Else"])
+    together, why = worker._quests_agree()
+    assert together is None, why
+    assert "fewer than two" in why
+
+
+# ------------------------------------------------------ losing the main line
+def test_a_wizard_whose_tracker_wanders_off_the_main_line_is_reported():
+    """The operator's request. Wizard101's arrow follows whichever quest
+    is SELECTED, so a wizard that picks up a side quest has every `tp
+    quest` aimed at it from then on and the party's main-line progress
+    silently stops. Rev 8e5a9c75 has Sebastian dropping from Krokotopia
+    #13 to unplaced at t=790 and staying there for seven minutes."""
+    import time
+
+    worker = _party_on_quests(["Gather the Troops", "Gather the Troops",
+                               "Zeke's Quest That Is Not Main"])
+    # Third wizard is on a real quest the list knows, with no place in
+    # the line -- which is what a side quest looks like.
+    from deimos_bridge import questlist
+    side = questlist.Position(world="Krokotopia", name="Krokotopian Bundle",
+                              how="by quest name", questline=None)
+    worker._places = lambda: [questlist.position_of("Gather the Troops"),
+                              questlist.position_of("Gather the Troops"),
+                              side]
+    worker._check_on_questline()                    # starts the clock
+    assert not [e for e in worker.seats[2].tel.questing
+                if e["kind"] == "off-questline"], "said it far too early"
+
+    worker.seats[2].off_line_since = time.monotonic() - 300
+    worker._check_on_questline()
+    said = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "off-questline"]
+    assert len(said) == 1, said
+    assert "Krokotopian Bundle" in said[0]["detail"]
+    assert "side quest" in said[0]["detail"]
+    assert "#12" in said[0]["detail"], "should say where the party is"
+    # once per side quest, not once per tick
+    worker._check_on_questline()
+    assert len([e for e in worker.seats[0].tel.questing
+                if e["kind"] == "off-questline"]) == 1
+
+
+def test_getting_back_on_the_main_line_is_reported_too():
+    import time
+
+    from deimos_bridge import questlist
+
+    worker = _party_on_quests(["Gather the Troops", "Gather the Troops"])
+    worker.seats[1].off_line_since = time.monotonic() - 300
+    worker.seats[1].said_off_line = "Krokotopian Bundle"
+    worker._check_on_questline()
+    back = [e for e in worker.seats[1].tel.questing
+            if e["kind"] == "back-on-questline"]
+    assert back and "#12" in back[0]["detail"]
+    assert worker.seats[1].off_line_since is None
+
+
+def test_an_unreadable_tracker_is_not_called_a_side_quest():
+    """`known` False is a read that failed or a quest the list has never
+    heard of. Saying "off the questline" on that would fire on every
+    loading screen."""
+    from deimos_bridge import questlist
+
+    worker = _party_on_quests(["Gather the Troops", "Gather the Troops"])
+    worker._places = lambda: [questlist.position_of("Gather the Troops"),
+                              questlist.Position()]          # nothing read
+    worker._check_on_questline()
+    worker._check_on_questline()
+    assert worker.seats[1].off_line_since is None
+    assert not [e for e in worker.seats[1].tel.questing
+                if e["kind"] == "off-questline"]
+
+
 # ---------------------------------------------------- finishing a missed step
 def _desynced(orders):
     """A scripted party whose wizards are on the given Krokotopia steps."""

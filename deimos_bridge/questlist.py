@@ -124,14 +124,20 @@ class Position:
     and both are in the same world.
     """
 
-    __slots__ = ("world", "order", "name", "area", "how")
+    __slots__ = ("world", "order", "name", "area", "how", "questline")
 
-    def __init__(self, world=None, order=None, name="", area="", how=""):
+    def __init__(self, world=None, order=None, name="", area="", how="",
+                 questline=None):
         self.world = world
         self.order = order
         self.name = name
         self.area = area
         self.how = how
+        #: "main" for the world's storyline, None for a side quest. The
+        #: tracker follows whichever quest is SELECTED, so a wizard that
+        #: picks one up has every `tp quest` aimed at it from then on --
+        #: which is what "the bot loses the main questline" is.
+        self.questline = questline
 
     def __repr__(self):                          # pragma: no cover - debug
         return f"<Position {self.world} #{self.order} {self.name!r}>"
@@ -139,6 +145,22 @@ class Position:
     @property
     def comparable(self) -> bool:
         return self.world is not None and self.order is not None
+
+    @property
+    def on_main(self) -> bool:
+        """Is this wizard following the world's storyline?
+
+        A side quest is not a failure in itself -- the scripts pick up
+        plenty deliberately. It becomes one when the tracker STAYS on it,
+        because every quest teleport then goes to the side quest and the
+        party's main-line progress stops without anything saying so.
+        """
+        return self.questline == "main" and self.order is not None
+
+    @property
+    def known(self) -> bool:
+        """Did the list recognise the quest at all?"""
+        return bool(self.name) and self.how != "not in the list"
 
     def describe(self) -> str:
         if not self.name:
@@ -163,7 +185,8 @@ def position_of(quest_name) -> Position:
                     order=quest.get("questline_order"),
                     name=quest.get("name") or "",
                     area=quest.get("area") or "",
-                    how="by quest name")
+                    how="by quest name",
+                    questline=quest.get("questline"))
 
 
 def position_from_goal(goal, world=None, near=None) -> Position:
@@ -196,7 +219,8 @@ def position_from_goal(goal, world=None, near=None) -> Position:
         return Position(name=candidates[0].get("name") or "",
                         world=candidates[0].get("world"),
                         area=candidates[0].get("area") or "",
-                        how="the goal matched, but that quest has no order")
+                        how="the goal matched, but that quest has no order",
+                        questline=candidates[0].get("questline"))
     if near is not None and len(ordered) > 1:
         closest = min(abs((q["questline_order"]) - near) for q in ordered)
         ordered = [q for q in ordered
@@ -212,7 +236,8 @@ def position_from_goal(goal, world=None, near=None) -> Position:
                     order=quest.get("questline_order"),
                     name=quest.get("name") or "",
                     area=quest.get("area") or "",
-                    how="by goal text")
+                    how="by goal text",
+                    questline=quest.get("questline"))
 
 
 def _strip_zone(goal) -> str:
