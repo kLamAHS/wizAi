@@ -541,6 +541,19 @@ class RoundRecord:
     #: this wizard's own share included. The measurement that survives a
     #: shared mob -- see `_party_expected`.
     party_predicted: float = None
+    # -- pacing. Seconds, on the same clock as the questing log ---------
+    #: when the round's planning phase opened, run-relative
+    at: float = None
+    #: from the previous round finishing to this one opening. The
+    #: GAME's time: cast animations, the other wizards' turns, the
+    #: planning timer running down when somebody did not click.
+    waited: float = None
+    #: seconds inside `decide()`. OURS: the memory read, the policy,
+    #: and the wait at the hivemind barrier for the rest of the party.
+    planned: float = None
+    #: seconds spent clicking the chosen card out. Ours as well, and
+    #: `cast_time` is the knob on it.
+    acted: float = None
 
     @property
     def error(self):
@@ -629,6 +642,11 @@ class Telemetry:
         self.started_at = None
         self._fight = 0
         self._pending = None       # RoundRecord awaiting its actual damage
+        #: the last round recorded, damage or no damage. `_pending` is
+        #: cleared the moment the next board settles against it and is
+        #: never set for a round the board could not be read for, so it
+        #: cannot carry pacing. See `time_round`.
+        self._pending_pace = None
         self._listeners = []
         self._curve = []           # [(episode, kill rate %)]
         self._ttk = []             # [(episode, mean turns to kill)]
@@ -663,6 +681,7 @@ class Telemetry:
         self.fights.clear()
         self._fight = 0
         self._pending = None
+        self._pending_pace = None
         self.clear_curve()
 
     def start_fight(self):
@@ -763,6 +782,7 @@ class Telemetry:
                      for e in s.enemies],
         )
 
+        rec.at = round(self.clock(), 1)
         rec.party_hits = _party_hits(party, seat)
         rec.party_predicted = _party_expected(party, rec.target_name)
 
@@ -790,6 +810,7 @@ class Telemetry:
             f.passes += 1
         f.unresolved = len(rec.unresolved)
         self._pending = rec
+        self._pending_pace = rec
         self._emit("round", rec)
         return rec
 
@@ -813,13 +834,75 @@ class Telemetry:
         self._pending = None
         rec = RoundRecord(fight=self._fight, round=int(round_number or 0),
                           passing=True, reason=reason,
-                          policy="board read failed")
+                          policy="board read failed",
+                          at=round(self.clock(), 1))
         self.rounds.append(rec)
         f = self.fights[-1]
         f.rounds = max(f.rounds, rec.round)
         f.passes += 1
+        self._pending_pace = rec
         self._emit("round", rec)
         return rec
+
+    def time_round(self, waited=None, planned=None, acted=None):
+        """Stamp the round that has just been played with what it cost.
+
+        Called from the combat handler AFTER the cast, because two of
+        the three numbers are not known when `observe` runs. It writes
+        to `_pending_pace` rather than `_pending`: `_settle` clears
+        `_pending` as soon as the next board arrives, and a lost round
+        never sets it at all, but a lost round still took time and that
+        time is exactly the kind this is meant to find.
+
+        `waited` is the game's, `planned` and `acted` are ours. The
+        split is the whole point -- "a round takes 46 seconds" is not
+        actionable and "40 of them are the game's animation" and "20 of
+        them are our barrier" call for opposite fixes.
+        """
+        rec = self._pending_pace
+        if rec is None:
+            return None
+        if waited is not None:
+            rec.waited = round(float(waited), 2)
+        if planned is not None:
+            rec.planned = round(float(planned), 2)
+        if acted is not None:
+            rec.acted = round(float(acted), 2)
+        return rec
+
+    def pacing(self):
+        """Where a round's seconds went, over the run.
+
+        Medians rather than means: one round spent in a stalled
+        `waitfor` drags a mean far enough to hide the ordinary round,
+        and the ordinary round is what "it is very slow" is about.
+        """
+        def mid(values):
+            values = sorted(v for v in values if v is not None)
+            if not values:
+                return None
+            n = len(values)
+            return round(values[n // 2] if n % 2
+                         else (values[n // 2 - 1] + values[n // 2]) / 2, 1)
+
+        rounds = self.rounds
+        out = {
+            "rounds": len(rounds),
+            "waited": mid(r.waited for r in rounds),
+            "planned": mid(r.planned for r in rounds),
+            "acted": mid(r.acted for r in rounds),
+        }
+        # The round-to-round wall clock, which is the number the
+        # operator actually feels, and which is NOT waited+planned+acted
+        # -- anything outside the handler falls in the difference.
+        gaps = []
+        for prev, rec in zip(rounds, rounds[1:]):
+            if (prev.at is None or rec.at is None
+                    or rec.fight != prev.fight or rec.at < prev.at):
+                continue
+            gaps.append(rec.at - prev.at)
+        out["round_to_round"] = mid(gaps)
+        return out
 
     #: How many questing events a run keeps. Days of running would
     #: otherwise put a megabyte of "teleported" in every export; the
@@ -832,6 +915,20 @@ class Telemetry:
     #: was it doing for those twenty minutes" afterwards -- a cap that
     #: throws the beginning away cannot.
     QUESTING_LOG = 2000
+
+    def clock(self):
+        """Seconds since this run's first timed event.
+
+        One zero for the whole export, so a round's `at` and a questing
+        note's `at` can be read against each other -- "the party was
+        forty seconds a round while the desync was open" is a question
+        the export could not answer while the two used different clocks.
+        """
+        import time
+
+        if self.started_at is None:
+            self.started_at = time.monotonic()
+        return time.monotonic() - self.started_at
 
     def note_questing(self, kind, detail=""):
         """Record something that happened OUTSIDE a duel.
@@ -848,12 +945,8 @@ class Telemetry:
         human needs. Timestamps are relative to the run so two wizards'
         logs line up without a clock.
         """
-        import time
-
-        if self.started_at is None:
-            self.started_at = time.monotonic()
         self.questing.append({
-            "at": round(time.monotonic() - self.started_at, 1),
+            "at": round(self.clock(), 1),
             "fight": len(self.fights),
             "kind": kind,
             "detail": detail,
@@ -1500,6 +1593,11 @@ class Telemetry:
             "hand_visibility": self.hand_visibility(),
             "hidden_cards": self.hidden_cards(),
             "questing": self.questing_counts(),
+            # Where a round's seconds went. "It is very slow" was a
+            # report the exports could not answer at all: rounds carried
+            # no time in them, so a 46-second round and a 12-second one
+            # looked identical in the file.
+            "pacing": self.pacing(),
         }
 
     def to_json(self, path):

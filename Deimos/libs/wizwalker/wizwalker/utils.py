@@ -624,7 +624,22 @@ def check_if_process_running(handle: int) -> bool:
     """
     # https://docs.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getexitcodeprocess
     exit_code = ctypes.wintypes.DWORD()
-    kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+    # wizAi patch -- upstream discards this BOOL. GetExitCodeProcess
+    # returns zero on failure and leaves `exit_code` untouched, so a
+    # handle it could not query answered 0, which is not 259, which
+    # read as "the client has exited". The caller that asks is
+    # `MemoryReader.read_bytes`, and its response to a False here is to
+    # convert an ordinary transient read failure into `ClientClosedError`
+    # -- an exception the deimoslang VM has no handler for, so the
+    # instruction re-enters and throws forever. A live run wedged one
+    # wizard that way for twenty-five attempts with the client sitting
+    # right there on screen.
+    #
+    # A query that failed is not evidence of death. Only an exit code
+    # the OS actually reported, and that is not STILL_ACTIVE, is.
+    ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+    if not ok:
+        return True
     # 259 is the value of IS_ALIVE
     return exit_code.value == 259
 

@@ -324,3 +324,112 @@ def test_the_upstream_group_would_have_cancelled_them():
         pass
     assert finished == [], \
         "asyncio.TaskGroup no longer cancels siblings; re-check the patch"
+
+
+# ------------------------------------------------- the friends list name match
+UTILS_SRC = "Deimos/src/utils.py"
+
+
+def test_a_first_name_still_finds_a_full_friends_list_entry():
+    """Upstream `_cycle_friends_list` compares `friend_name == name`, and
+    Wizard101's friends list holds the FULL name -- a live run's list
+    reads "Sebastian S." and "Phoenix SkarabaeusSender" -- while what
+    supplies a name to a friend teleport usually has only the first: a
+    combat member read gives "Sebastian".
+
+    So every regroup raised `Could not find friend with ... name
+    Sebastian` on a friend that was right there in the list."""
+    src = _source(UTILS_SRC)
+    assert "def _same_wizard" in src, \
+        "the first-name match is gone -- friend teleports fail on full names"
+    block = src.split("def _cycle_friends_list", 1)[1].split("\nasync def ", 1)[0]
+    assert "_same_wizard(friend_name, name)" in block, \
+        "the loose match is no longer consulted"
+    assert 'friend_name == name' in block, \
+        "the exact match must still be tried first"
+
+
+def test_a_first_name_that_two_friends_answer_to_is_refused():
+    """"could be" is not "is". Taking an ambiguous first name would
+    teleport the party to the wrong wizard, which is worse than not
+    teleporting at all."""
+    src = _source(UTILS_SRC)
+    block = src.split("def _cycle_friends_list", 1)[1].split("\nasync def ", 1)[0]
+    assert "ambiguous" in block, \
+        "an ambiguous first name is being taken as a match again"
+
+
+def test_the_name_match_runs_as_written():
+    """Not a source check. Lifted out and run against the names in a
+    live friends list."""
+    src = _source(UTILS_SRC)
+    ns = {}
+    exec(src[src.index("def _same_wizard"):
+             src.index("async def _cycle_friends_list")], ns)
+    same = ns["_same_wizard"]
+
+    # what a live run actually had
+    assert same("sebastian s.", "sebastian")
+    assert same("ph\u00f6nix skarab\u00e4ussender", "ph\u00f6nix")
+    # a full name on both sides, and the list's abbreviation of it
+    assert same("sebastian silverstaff", "sebastian silverstaff")
+    assert same("sebastian s.", "sebastian silverstaff")
+    # and the ones it must NOT match
+    assert not same("sebastianus k.", "sebastian")
+    assert not same("konstantin v.", "sebastian")
+    assert not same("sebastian s.", "sebastian jones")
+    assert not same("", "sebastian")
+
+
+# ------------------------------------------------- a query is not a corpse
+WW_UTILS = "Deimos/libs/wizwalker/wizwalker/utils.py"
+
+
+def test_a_failed_liveness_query_is_not_a_dead_client():
+    """Upstream `check_if_process_running` is::
+
+        exit_code = ctypes.wintypes.DWORD()
+        kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+        return exit_code.value == 259
+
+    The BOOL is discarded. `GetExitCodeProcess` returns zero on failure
+    and leaves `exit_code` at 0, which is not 259, which reads as "the
+    client has exited" -- and `MemoryReader.read_bytes` turns that into
+    `ClientClosedError`, which the deimoslang VM has no handler for, so
+    the instruction re-enters and throws for the rest of the run. A live
+    party did exactly that for twenty-five attempts with the client
+    still on screen.
+    """
+    import ctypes
+    import ctypes.wintypes
+
+    src = _source(WW_UTILS)
+    body = src[src.index("def check_if_process_running"):]
+    body = body[:body.index("\ndef ", 1)]
+
+    calls = []
+
+    class _Kernel32:
+        def __init__(self, ok, code):
+            self._ok, self._code = ok, code
+
+        def GetExitCodeProcess(self, handle, out):
+            calls.append(handle)
+            if self._code is not None:
+                ctypes.cast(out, ctypes.POINTER(
+                    ctypes.wintypes.DWORD)).contents.value = self._code
+            return self._ok
+
+    def run(ok, code):
+        ns = {"ctypes": ctypes, "kernel32": _Kernel32(ok, code)}
+        exec(body, ns)
+        return ns["check_if_process_running"](1234)
+
+    # the query failed: inconclusive, and the safe answer is "running"
+    assert run(0, None) is True
+    # the query worked and said STILL_ACTIVE
+    assert run(1, 259) is True
+    # the query worked and reported a real exit code -- this one IS dead
+    assert run(1, 0) is False
+    assert run(1, 1) is False
+    assert calls, "the patch stopped calling GetExitCodeProcess at all"

@@ -150,7 +150,10 @@ class ScriptDialog(QDialog):
         if not source.strip():
             self._say("nothing to check", ok=False)
             return
-        ok, reason = check(source)
+        # The party's size, when there is one: a script's `Questee4` is
+        # not unconfigured for a party of three, and calling it that put
+        # a defect that did not exist at the top of a live export.
+        ok, reason = check(source, len(self._wizards) or None)
         self._say(reason, ok=ok)
 
     def _say(self, message, ok):
