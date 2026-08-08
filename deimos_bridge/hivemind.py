@@ -970,7 +970,8 @@ class Hivemind:
         if step and self.overkill_guard and ledger.casts:
             alive_now = any(e.alive for e in board.enemies)
             alive_before = any(e.alive for e in sub.state.enemies)
-            if alive_before and not alive_now and self._hold_was_kept(sub):
+            if (alive_before and not alive_now and self._hold_was_kept(sub)
+                    and self._has_something_to_save(sub)):
                 # Every mob is spoken for. Firing into it buys nothing
                 # and spends a card the next fight will want.
                 policy = sub.policy
@@ -983,6 +984,31 @@ class Hivemind:
             return sub.policy(sub.sim, board), ("party" if step else "solo")
         except Exception as exc:
             return None, f"policy raised {type(exc).__name__}: {exc}"
+
+    #: card kinds the overkill guard is protecting. Everything else in a
+    #: hand is either not spent on the enemy at all or is not worth a
+    #: round to save. See `_has_something_to_save`.
+    SPENDABLE = ("damage", "drain", "dot")
+
+    def _has_something_to_save(self, sub):
+        """Is there a card here whose value a hold actually preserves?
+
+        The guard exists to stop a nuke being fired into a board that is
+        already dead -- "spends a card the next fight will want". A hand
+        with no attack in it has nothing of that kind to spend, so
+        holding it saves nothing and costs the wizard its round.
+
+        Sebastian's fight 2 round 12 at rev 3d026ada is the case:
+        `held this card — the rest of the party already has this board
+        dead this round`, hand `Pixie Life` and `Sprite`, on 168 of 860
+        health. Two heals were held back from a mob they were never
+        going to be cast at, by a wizard that needed one of them.
+        """
+        hand = getattr(getattr(sub, "state", None), "hand", None) or []
+        for card in hand:
+            if getattr(card, "kind", "") in self.SPENDABLE:
+                return True
+        return False
 
     # -- holding twice on the same broken promise --------------------------
     def _hold_was_kept(self, sub):

@@ -12944,3 +12944,285 @@ def test_a_box_that_does_come_up_clears_the_count(monkeypatch):
     assert seat.x_pressed == 0
     assert not [e for e in seat.tel.questing
                 if e["kind"] == "unstuck-x-does-nothing"]
+
+
+def test_a_catch_up_gets_its_own_clock_not_the_stall_that_caused_it():
+    """Rev 3d026ada: `catch-up-started` and `catch-up-gave-up` on the
+    same timestamp, reason "has not moved or fought for 122s". The 122s
+    were spent stuck BEFORE the catch-up — which is why there is a
+    catch-up at all. Every catch-up worth having is for a wizard that
+    was already standing still, so an absolute idle clock kills all of
+    them at birth and none ever gets a tick to teleport anywhere."""
+    import time
+
+    worker = _behind_party()
+    laggard = worker.seats[0]
+    now = time.monotonic()
+    worker._catch_up_state = {
+        "seats": [laggard], "gap": 1, "started": now,      # just began
+        "moved": now, "goals": {id(laggard): laggard.goal}, "why": "",
+    }
+    for seat in worker.seats:
+        seat.progress = ("KT_PalaceOfFire", (1, 2, 3), seat.goal)
+        # stuck for a long time already, which is the reason for the
+        # catch-up, not a reason to abandon it
+        seat.progress_at = now - 122.0
+        seat.in_duel = False
+
+    worker._check_caught_up()
+    assert worker._catch_up_state is not None, \
+        "the catch-up gave up before it had run for a single tick"
+
+
+def test_the_idle_clock_still_fires_once_the_catch_up_has_had_its_chance():
+    import time
+
+    worker = _behind_party()
+    laggard = worker.seats[0]
+    now = time.monotonic()
+    began = now - worker.CATCH_UP_IDLE - 1
+    worker._catch_up_state = {
+        "seats": [laggard], "gap": 1, "started": began, "moved": began,
+        "goals": {id(laggard): laggard.goal}, "why": "",
+    }
+    for seat in worker.seats:
+        seat.progress = ("KT_PalaceOfFire", (1, 2, 3), seat.goal)
+        seat.progress_at = now - 500.0
+        seat.in_duel = False
+
+    worker._check_caught_up()
+    assert worker._catch_up_state is None, \
+        "it held the party after a full CATCH_UP_IDLE of nothing happening"
+
+
+def test_a_written_off_step_is_written_down_once_not_fourteen_hundred_times():
+    """Rev 3d026ada spent 25 of Phönix's log entries on one sentence,
+    the last of them "1440 times in a row". The verdict does not change
+    while the step does not, so repeating it says nothing new."""
+    import time
+
+    worker = _behind_party()
+    laggard = _make_it_give_up(worker)
+    for _ in range(50):
+        worker._in_step_since = time.monotonic() - worker.DESYNC_GRACE - 1
+        worker._check_in_step(worker.seats[0])
+
+    said = [e for e in laggard.tel.questing
+            if e["kind"] == "catch-up-written-off"]
+    assert len(said) == 1, f"the same verdict was logged {len(said)} times"
+    assert "times in a row" not in said[0]["detail"]
+
+
+def test_every_wizards_export_carries_the_write_off():
+    """Three files get uploaded and each has to explain why its wizard
+    stopped waiting for the one that is behind."""
+    import time
+
+    worker = _behind_party()
+    _make_it_give_up(worker)
+    worker._in_step_since = time.monotonic() - worker.DESYNC_GRACE - 1
+    worker._check_in_step(worker.seats[0])
+    for seat in worker.seats:
+        kinds = [e["kind"] for e in seat.tel.questing]
+        assert "catch-up-written-off" in kinds, f"{seat.name} was not told"
+
+
+# --------------------------------------- letting go of the game clients
+#
+# The operator's report: "Having to open and close wizard101 constantly
+# sucks, would there be a way to make it able to unhook safely with a
+# button so I can relaunch once I pull the newer github repo".
+#
+# Three things conspired. `stop()` only set a flag; `wait_for_combat`
+# polls forever and never read it; so between fights Stop did nothing,
+# the window got closed instead, the worker died where it stood, and
+# the teardown that unhooks never ran.
+
+def _parked(stops_after=None):
+    """A seat whose `wait_for_combat` never returns on its own."""
+    import asyncio
+
+    worker, _read = _zoned_party(["Olde Town"])
+    seat = worker.seats[0]
+    entered = {"n": 0}
+
+    class _Combat:
+        async def wait_for_combat(self):
+            entered["n"] += 1
+            await asyncio.Event().wait()          # exactly what upstream does
+
+    seat.combat = _Combat()
+    return worker, seat, entered
+
+
+def test_stop_is_answered_between_fights_not_only_during_one():
+    """`CombatHandler.wait_for_combat` polls `in_combat` forever, so a
+    parked fight loop never looked at `_stop`. Out of combat — which is
+    most of a questing run — Stop did nothing at all."""
+    import asyncio
+
+    worker, seat, _entered = _parked()
+    worker.STOP_POLL = 0.01
+
+    async def drive():
+        task = asyncio.ensure_future(worker._wait_for_combat(seat))
+        await asyncio.sleep(0.05)
+        assert not task.done(), "it did not wait for a duel at all"
+        worker.stop()
+        return await asyncio.wait_for(task, 2.0)
+
+    assert asyncio.run(drive()) is False, \
+        "a stop while waiting has to end the loop, not start a fight"
+
+
+def test_a_duel_that_does_start_is_still_played():
+    import asyncio
+
+    worker, seat, _entered = _parked()
+    worker.STOP_POLL = 0.01
+    played = []
+
+    class _Combat:
+        async def wait_for_combat(self):
+            played.append(True)
+
+    seat.combat = _Combat()
+    assert asyncio.run(worker._wait_for_combat(seat)) is True
+    assert played, "the fight was skipped"
+
+
+def test_what_the_wait_raises_still_reaches_the_fight_loop():
+    """The loop swallows memory errors by name. Losing the exception
+    inside the stop-poll would turn a broken read into a silent pass."""
+    import asyncio
+
+    worker, seat, _entered = _parked()
+    worker.STOP_POLL = 0.01
+
+    class _Combat:
+        async def wait_for_combat(self):
+            raise RuntimeError("the duel read failed")
+
+    seat.combat = _Combat()
+    with pytest.raises(RuntimeError, match="the duel read failed"):
+        asyncio.run(worker._wait_for_combat(seat))
+
+
+# -- and the unhook itself
+
+class _Client:
+    def __init__(self, fails=False):
+        self.fails, self.closed = fails, False
+
+    async def close(self):
+        if self.fails:
+            raise RuntimeError("the process went away")
+        self.closed = True
+
+
+class _Handler:
+    def __init__(self, clients):
+        self.clients = clients
+
+
+def test_one_client_that_will_not_close_does_not_strand_the_others():
+    """`ClientHandler.close` is a bare loop with no guard around each
+    client, so the first one that throws leaves every client after it
+    hooked — and a hooked client wizAi is not driving is exactly the
+    state that forces Wizard101 to be restarted."""
+    import asyncio
+
+    worker, _read = _zoned_party(["Olde Town"] * 3)
+    said = []
+    worker.status.connect(said.append)
+    clients = [_Client(), _Client(fails=True), _Client()]
+
+    asyncio.run(worker._unhook(_Handler(clients)))
+
+    assert clients[0].closed and clients[2].closed, \
+        "one failure stranded the clients after it"
+    assert said and "unhooked 2 of 3" in said[-1]
+    assert "closed and reopened" in said[-1], \
+        "the operator was not told which clients still need a restart"
+
+
+def test_a_clean_unhook_says_the_game_can_stay_open():
+    """The one question worth answering here. "disconnected" was all it
+    used to say, and that is the fact that was never in doubt."""
+    import asyncio
+
+    worker, _read = _zoned_party(["Olde Town"] * 3)
+    said = []
+    worker.status.connect(said.append)
+    clients = [_Client(), _Client(), _Client()]
+
+    asyncio.run(worker._unhook(_Handler(clients)))
+
+    assert all(c.closed for c in clients)
+    assert "Wizard101 can stay open" in said[-1]
+
+
+def test_a_client_with_no_seat_is_still_released():
+    """It connected, so it is hooked. Whether wizAi found a seat for it
+    has nothing to do with whether the game gets its memory back."""
+    import asyncio
+
+    worker, _read = _zoned_party(["Olde Town"])
+    clients = [_Client(), _Client()]
+    asyncio.run(worker._unhook(_Handler(clients)))
+    assert all(c.closed for c in clients)
+
+
+def test_unhooking_nothing_says_so_rather_than_claiming_success():
+    import asyncio
+
+    worker, _read = _zoned_party(["Olde Town"])
+    said = []
+    worker.status.connect(said.append)
+    asyncio.run(worker._unhook(_Handler([])))
+    assert "nothing was hooked" in said[-1]
+
+
+def test_the_fight_loop_waits_through_the_stop_aware_wrapper():
+    """A guard, because the direct call is the obvious thing to write
+    and it is what stranded the hooks."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._fight_loop)
+    assert "await self._wait_for_combat(seat)" in src
+    assert "await seat.combat.wait_for_combat()" not in src, \
+        "the fight loop parks where Stop cannot reach it again"
+
+
+def test_the_teardown_unhooks_every_client_itself():
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._go)
+    assert "await self._unhook(handler)" in src
+    assert "await handler.close()" not in src, \
+        "back to the unguarded loop that strands clients after a failure"
+
+
+def test_the_window_has_an_unhook_button_that_waits_for_the_release(qapp):
+    """The operator's actual ask: a button, so the game can be left
+    running while wizAi is pulled and relaunched."""
+    import inspect
+
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    assert hasattr(win, "unhook_btn")
+    assert not win.unhook_btn.isEnabled(), \
+        "nothing is hooked before a run starts"
+    # Pressing it with nothing connected says so rather than pretending
+    win.on_unhook_live()
+    assert "not connected" in win.status.text()
+
+    src = inspect.getsource(MainWindow.closeEvent)
+    assert "UNHOOK_GRACE_MS" in src, \
+        "closing the window is the path that stranded hooks most often"
+    assert MainWindow.UNHOOK_GRACE_MS >= 10000

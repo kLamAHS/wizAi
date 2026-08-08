@@ -2296,3 +2296,43 @@ def test_a_seat_label_the_game_has_not_named_yet_is_not_a_separate_circle():
         sub.state.player.name = real       # the game knows
         sub.name = f"wizard {sub.seat + 1}"  # the GUI does not, yet
     assert len(_duel_groups(subs)) == 1
+
+
+def test_a_hand_with_nothing_to_spend_is_not_held():
+    """The guard exists to stop a nuke being fired into a board that is
+    already dead — "spends a card the next fight will want". A hand with
+    no attack in it has nothing of that kind to spend, so holding saves
+    nothing and costs the wizard its round.
+
+    Sebastian's fight 2 round 12 at rev 3d026ada: `held this card — the
+    rest of the party already has this board dead this round`, hand
+    `Pixie` and `Sprite`, on 168 of 860 health. Two heals were held back
+    from a mob they were never going to be cast at, by a wizard that
+    needed one of them."""
+    hive = Hivemind(passes=2)
+    subs = party(2, board=((40, "ice"),))
+    _actions, armed = hive.plan(subs)
+    assert [m for m in armed.moves if m.note == "held"], \
+        "the guard has to fire on an armed hand for this to prove anything"
+
+    healers = party(2, board=((40, "ice"),))
+    table = cards()
+    for sub in healers:
+        sub.state.player.hand = [table["Pixie"], table["Sprite"]]
+        sub.state.player.hp = sub.state.player.max_hp * 0.2
+    _actions, plan_ = Hivemind(passes=2).plan(healers)
+    assert not [m for m in plan_.moves if m.note == "held"], \
+        "a wizard holding only heals was told to save them for the party"
+
+
+def test_a_hand_with_one_attack_left_in_it_is_still_held():
+    """The rule is "nothing worth saving", not "no attack was chosen".
+    One nuke among the heals is exactly what the guard is for."""
+    hive = Hivemind(passes=2)
+    subs = party(2, board=((40, "ice"),))
+    table = cards()
+    for sub in subs:
+        sub.state.player.hand = [table["Pixie"], table["Fire Cat"]]
+    _actions, plan_ = hive.plan(subs)
+    assert [m for m in plan_.moves if m.note == "held"], \
+        "a nuke on a dead board is the case the guard was written for"

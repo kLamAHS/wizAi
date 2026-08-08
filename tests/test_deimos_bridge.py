@@ -1563,3 +1563,88 @@ def test_a_pip_that_unlocks_nothing_is_not_worth_a_round():
 
     sim, state = _seat_2_at_f5r2()
     assert banking_unlocks(sim, state) is False
+
+
+# ------------------------------ a hand of heals is not a reason to pass
+#
+# Sebastian's fight 2 at rev 3d026ada, rounds 8 through 13: hand `Pixie
+# Life` and `Sprite` throughout, health 514 -> 343 -> 168 of 860, and he
+# passed every one of them. The lookahead decides nothing in hand
+# connects with the board inside the horizon and falls back to a
+# heuristic that knows about blades and nukes; a hand holding neither
+# leaves it with nothing to say, and its silence is a pass.
+
+def _hurt(hand, hp, max_hp=860, pips=6):
+    import random
+
+    from data_full import load_spells_full
+    from w101_sim import Actor, Boss, Sim, State
+
+    cards = load_spells_full()
+    deck = ["Pixie"] * 3 + ["Sprite"] * 3
+    sim = Sim(cards, deck, "life",
+              Boss(name="boss", hp=400, school="fire", dmg=40),
+              rng=random.Random(4), player_hp=max_hp)
+    p = Actor(name="W", school="life", hp=hp, max_hp=max_hp, team=0,
+              norm_pips=pips)
+    p.hand = [cards[n] for n in hand]
+    p.deck = [cards[n] for n in deck]
+    foes = [Actor(name="boss", school="fire", hp=400, max_hp=400, team=1)]
+    return sim, State(p, foes), cards
+
+
+def test_a_hurt_wizard_holding_only_heals_heals_itself():
+    from deimos_bridge.policies import heal_if_hurt
+
+    sim, s, _cards = _hurt(["Pixie", "Sprite"], hp=168)
+    move = heal_if_hurt(sim, s)
+    assert move is not None, "it passed with a heal in hand on 20% health"
+    card, _target = move
+    assert card.name == "Pixie", \
+        f"took {card.name}; Pixie restores 400 against Sprite's 300"
+
+
+def test_a_healthy_wizard_banks_the_pip_instead():
+    """Above half health another round of incoming is survivable and
+    banking is defensible. This rule only speaks where the alternative
+    is doing nothing at all."""
+    from deimos_bridge.policies import heal_if_hurt
+
+    sim, s, _cards = _hurt(["Pixie", "Sprite"], hp=700)
+    assert heal_if_hurt(sim, s) is None
+
+
+def test_a_heal_that_cannot_be_paid_for_is_not_offered():
+    from deimos_bridge.policies import heal_if_hurt
+
+    sim, s, _cards = _hurt(["Pixie"], hp=100, pips=0)
+    assert heal_if_hurt(sim, s) is None
+
+
+def test_the_biggest_heal_is_measured_from_the_ops_not_the_card():
+    """`Card` has no `heal` field. Reading one answers zero for every
+    heal in the game, which turns "the biggest" into "whichever sorted
+    first" — and Sprite is 30 up front plus 270 over three rounds, so
+    its up-front number alone ranks it under a Pixie worth less."""
+    from data_full import load_spells_full
+    from deimos_bridge.policies import _heal_amount
+
+    cards = load_spells_full()
+    assert _heal_amount(cards["Satyr"]) == 860
+    assert _heal_amount(cards["Pixie"]) == 400
+    # 30 up front plus a heal-over-time, which is most of its value
+    assert _heal_amount(cards["Sprite"]) > _heal_amount(cards["Pixie"]) / 2
+    assert _heal_amount(cards["Sprite"]) > 200
+    assert _heal_amount(cards["Leprechaun"]) == 0    # not a heal at all
+
+
+def test_the_lookahead_reaches_the_heal_rather_than_passing():
+    """Not the helper in isolation — the branch that stranded Sebastian.
+    Nothing in hand connects with the board, so the blade-stack fallback
+    has nothing to say, and what it says must not be a pass."""
+    from deimos_bridge.policies import _split, greedy_ttk
+
+    sim, s, _cards = _hurt(["Pixie", "Sprite"], hp=168)
+    card, _target = _split(greedy_ttk()(sim, s))
+    assert card is not None, "six rounds of doing nothing on 20% health"
+    assert card.kind == "heal"

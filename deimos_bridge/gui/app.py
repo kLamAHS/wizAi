@@ -1207,6 +1207,17 @@ class MainWindow(QMainWindow):
         self.stop_btn.clicked.connect(self.on_stop_live)
         row.addWidget(self.stop_btn)
 
+        self.unhook_btn = QPushButton("Unhook")
+        self.unhook_btn.setEnabled(False)
+        self.unhook_btn.setToolTip(
+            "End the run and release every client's memory hooks, so the "
+            "game can be left running while wizAi is updated and "
+            "relaunched. Without it a hooked client has to be closed and "
+            "reopened before wizAi can attach to it again — which is a "
+            "restart of Wizard101 for every code change.")
+        self.unhook_btn.clicked.connect(self.on_unhook_live)
+        row.addWidget(self.unhook_btn)
+
         self.export_btn = QPushButton("Export run")
         self.export_btn.clicked.connect(self.on_export)
         row.addWidget(self.export_btn)
@@ -2399,6 +2410,7 @@ class MainWindow(QMainWindow):
         self.live.seat_named.connect(self.on_seat_named)
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
+        self.unhook_btn.setEnabled(True)
         # Train stays live. Every input to a useful training run -- the
         # deck the picker learned from the last fight, the health the
         # client reported -- only exists once connected, so requiring a
@@ -2410,6 +2422,24 @@ class MainWindow(QMainWindow):
             self.live.stop()
             self.status.setText("stopping after this fight…")
         self.stop_btn.setEnabled(False)
+
+    def on_unhook_live(self):
+        """End the run and hand the clients back to the game.
+
+        The same stop, said differently, because what the operator is
+        asking for is different: not "finish up" but "let go, I am
+        replacing the program". The worker's teardown reports which
+        clients were released, and that report is the answer to the
+        only question that matters here — can Wizard101 be left open.
+        """
+        if self.live is None or not self.live.isRunning():
+            self.status.setText(
+                "nothing is hooked — wizAi is not connected to a client")
+            return
+        self.live.stop()
+        self.status.setText("releasing the hooks — leave the game open…")
+        self.stop_btn.setEnabled(False)
+        self.unhook_btn.setEnabled(False)
 
     def on_live_status(self, message):
         self.status.setText(message)
@@ -2786,14 +2816,34 @@ class MainWindow(QMainWindow):
     def _live_over(self):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
+        self.unhook_btn.setEnabled(False)
         self.train_btn.setEnabled(True)
         self.refresh_all()
         self._update_policy_state()
 
+    #: how long closing the window waits for the run to let go of the
+    #: clients. Generous on purpose: every millisecond short of what the
+    #: teardown needs is a Wizard101 client left hooked, and the cost of
+    #: that is closing and reopening the game. Three seconds was the old
+    #: value and it was set when `stop()` could not interrupt a fight
+    #: loop at all, so it was almost always too short.
+    UNHOOK_GRACE_MS = 20000
+
     def closeEvent(self, event):
         if self.live is not None and self.live.isRunning():
+            self.status.setText("releasing the hooks before closing…")
             self.live.stop()
-            self.live.wait(3000)
+            if not self.live.wait(self.UNHOOK_GRACE_MS):
+                # Said rather than swallowed. Closing anyway is right --
+                # refusing to close is worse -- but the operator has to
+                # know the clients are still hooked, because the next
+                # launch will not be able to attach to them.
+                QMessageBox.warning(
+                    self, "wizAi",
+                    "The live run did not let go of the game clients "
+                    f"within {self.UNHOOK_GRACE_MS // 1000}s, so their "
+                    "memory hooks are still in place. Close and reopen "
+                    "Wizard101 before starting wizAi again.")
         super().closeEvent(event)
 
     def on_export(self):
