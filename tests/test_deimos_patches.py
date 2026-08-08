@@ -324,3 +324,58 @@ def test_the_upstream_group_would_have_cancelled_them():
         pass
     assert finished == [], \
         "asyncio.TaskGroup no longer cancels siblings; re-check the patch"
+
+
+# ------------------------------------------------- the friends list name match
+UTILS_SRC = "Deimos/src/utils.py"
+
+
+def test_a_first_name_still_finds_a_full_friends_list_entry():
+    """Upstream `_cycle_friends_list` compares `friend_name == name`, and
+    Wizard101's friends list holds the FULL name -- a live run's list
+    reads "Sebastian S." and "Phoenix SkarabaeusSender" -- while what
+    supplies a name to a friend teleport usually has only the first: a
+    combat member read gives "Sebastian".
+
+    So every regroup raised `Could not find friend with ... name
+    Sebastian` on a friend that was right there in the list."""
+    src = _source(UTILS_SRC)
+    assert "def _same_wizard" in src, \
+        "the first-name match is gone -- friend teleports fail on full names"
+    block = src.split("def _cycle_friends_list", 1)[1].split("\nasync def ", 1)[0]
+    assert "_same_wizard(friend_name, name)" in block, \
+        "the loose match is no longer consulted"
+    assert 'friend_name == name' in block, \
+        "the exact match must still be tried first"
+
+
+def test_a_first_name_that_two_friends_answer_to_is_refused():
+    """"could be" is not "is". Taking an ambiguous first name would
+    teleport the party to the wrong wizard, which is worse than not
+    teleporting at all."""
+    src = _source(UTILS_SRC)
+    block = src.split("def _cycle_friends_list", 1)[1].split("\nasync def ", 1)[0]
+    assert "ambiguous" in block, \
+        "an ambiguous first name is being taken as a match again"
+
+
+def test_the_name_match_runs_as_written():
+    """Not a source check. Lifted out and run against the names in a
+    live friends list."""
+    src = _source(UTILS_SRC)
+    ns = {}
+    exec(src[src.index("def _same_wizard"):
+             src.index("async def _cycle_friends_list")], ns)
+    same = ns["_same_wizard"]
+
+    # what a live run actually had
+    assert same("sebastian s.", "sebastian")
+    assert same("ph\u00f6nix skarab\u00e4ussender", "ph\u00f6nix")
+    # a full name on both sides, and the list's abbreviation of it
+    assert same("sebastian silverstaff", "sebastian silverstaff")
+    assert same("sebastian s.", "sebastian silverstaff")
+    # and the ones it must NOT match
+    assert not same("sebastianus k.", "sebastian")
+    assert not same("konstantin v.", "sebastian")
+    assert not same("sebastian s.", "sebastian jones")
+    assert not same("", "sebastian")

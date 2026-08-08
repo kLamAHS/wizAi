@@ -3360,16 +3360,37 @@ class LiveWorker(QThread):
 
         indices, gap, _why = questlist.furthest_behind(self._places())
         behind = {id(self.seats[i]) for i in indices}
-        if not behind or behind != {id(s) for s in seats}:
-            # Nobody is behind any more, or a DIFFERENT set is, and in
-            # both cases this catch-up is over. A new laggard gets its
-            # own, from the top, rather than inheriting this one's clock.
+        started = {id(s) for s in seats}
+        if not behind:
             names = " and ".join(s.name for s in seats)
             self._stop_catching_up(
                 "catch-up-done",
                 f"{names} back with the party — the script has its "
                 f"wizards back")
             return
+        if not behind <= started:
+            # Somebody NEW is behind, so this catch-up is answering the
+            # wrong question and a fresh one should start from the top.
+            self._stop_catching_up(
+                "catch-up-done",
+                "a different wizard is behind now — starting again rather "
+                "than inheriting this catch-up's clock")
+            return
+        if behind != started:
+            # A SUBSET. One of the group caught up and the others have
+            # not, which is progress, not a reason to stop -- and
+            # stopping on it is what rev 1dcf4193 did: two catch-ups
+            # ended 10.6s and 0.4s after they began, because in a party
+            # of three somebody's quest ticks over almost immediately.
+            caught = [s for s in seats if id(s) not in behind]
+            seats = [s for s in seats if id(s) in behind]
+            state["seats"] = seats
+            state["moved"] = now
+            if caught:
+                self._say(caught[0],
+                          f"{' and '.join(s.name for s in caught)} caught up; "
+                          f"still finishing the step for "
+                          f"{' and '.join(s.name for s in seats)}")
         if gap < state["gap"]:
             # Progress, so the stall clock restarts even if the goal
             # line happened not to change.

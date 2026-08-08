@@ -875,6 +875,35 @@ async def sync_camera(client: Client, xyz: XYZ = None, yaw: float = None):
     await camera.write_yaw(yaw)
 
 
+def _same_wizard(entry: str, wanted: str) -> bool:
+    """Is this friends-list entry the wizard `wanted` names?
+
+    Wizard101 names are two words -- "Sebastian Silverstaff" -- and the
+    friends list shows them in full, sometimes abbreviated to
+    "Sebastian S.". What hands a name to a friend teleport usually has
+    only the first: a combat member read gives "Sebastian", and that is
+    what wizAi fills a quester's `Questee2` with.
+
+    So a first name matches a full one, in either direction, and ONLY on
+    the first word -- "Sebastian" must not match "Sebastianus", and a
+    surname must not match a different wizard's forename. Uniqueness is
+    the caller's job: this says "could be", and `_cycle_friends_list`
+    takes the answer only when exactly one entry says so.
+    """
+    entry_parts = (entry or "").split()
+    wanted_parts = (wanted or "").split()
+    if not entry_parts or not wanted_parts:
+        return False
+    if entry_parts[0] != wanted_parts[0]:
+        return False
+    # One of the two is a bare first name; otherwise the surnames have
+    # to be compatible, allowing the list's "S." abbreviation.
+    if len(entry_parts) == 1 or len(wanted_parts) == 1:
+        return True
+    short, long = sorted((entry_parts[1], wanted_parts[1]), key=len)
+    return long.startswith(short.rstrip("."))
+
+
 async def _cycle_friends_list(client, right_button, friends_list, icon, icon_list, name, current_page):
 
     if name is not None:
@@ -885,7 +914,17 @@ async def _cycle_friends_list(client, right_button, friends_list, icon, icon_lis
     match = None
     idx = 0
 
-    for idx, friend_entry in enumerate(list(_friend_list_entry.finditer(list_text))):
+    # wizAi patch -- see `_same_wizard`. Upstream this compares
+    # `friend_name == name`, and Wizard101's friends list holds the FULL
+    # name ("Sebastian S.", "Phoenix SkarabaeusSender") while everything
+    # that supplies a name to this function tends to have only the first
+    # ("Sebastian"). Exact equality then never matches and the caller
+    # raises `Could not find friend with ... name Sebastian` -- which is
+    # what a live run does at every regroup, on a friend that is right
+    # there in the list.
+    entries = list(_friend_list_entry.finditer(list_text))
+    loose = None
+    for idx, friend_entry in enumerate(entries):
         friend_icon = int(friend_entry.group("icon_index"))
         friend_icon_list = int(friend_entry.group("icon_list"))
         friend_name = (friend_entry.group("name")).lower()
@@ -908,9 +947,16 @@ async def _cycle_friends_list(client, right_button, friends_list, icon, icon_lis
             if friend_name == name:
                 match = friend_entry
                 break
+            if _same_wizard(friend_name, name):
+                # Remembered, not taken. A first name is only good
+                # enough when exactly one friend answers to it.
+                loose = (friend_entry, idx) if loose is None else "ambiguous"
 
         else:
             raise RuntimeError("Invalid args")
+
+    if match is None and loose is not None and loose != "ambiguous":
+        match, idx = loose
 
     if match:
         target_page = (idx // 10) + 1

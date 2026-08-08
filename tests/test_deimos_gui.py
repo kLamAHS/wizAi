@@ -11968,6 +11968,34 @@ def test_progress_towards_catching_up_restarts_the_stall_clock():
     assert worker._catch_up_state["gap"] == 4
 
 
+def test_one_of_the_group_catching_up_does_not_end_the_catch_up():
+    """Rev 1dcf4193: two catch-ups ended 10.6s and 0.4s after they began.
+    The stop rule fired whenever the behind SET changed, and in a party
+    of three somebody's quest ticks over almost immediately -- so
+    `{Konstantin, Phoenix}` became `{Konstantin}` and the whole thing
+    stopped with Konstantin still a quest behind.
+
+    A subset is progress. Only an empty set, or a wizard who was not in
+    the group, ends it."""
+    worker = _desynced([11, 4, 4])
+    behind = [worker.seats[1], worker.seats[2]]
+    worker._start_catching_up(behind, 7, "the questline says so")
+    assert worker._catching_up() == behind
+
+    worker.seats[2].quest_name = "Assault on the Palace"      # caught up
+    worker._check_caught_up()
+    assert worker._catching_up() == [worker.seats[1]], \
+        "gave up on the wizard that is still behind"
+    assert not [e for e in worker.seats[0].tel.questing
+                if e["kind"] == "catch-up-done"], "called it done too early"
+
+    worker.seats[1].quest_name = "Assault on the Palace"      # and now both
+    worker._check_caught_up()
+    assert worker._catching_up() == []
+    assert [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "catch-up-done"]
+
+
 def test_a_new_laggard_gets_its_own_catch_up_not_this_ones_clock():
     worker = _desynced([11, 4, 9])
     worker._start_catching_up(worker.seats[1], 7, "the questline says so")
