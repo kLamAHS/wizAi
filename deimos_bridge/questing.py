@@ -221,6 +221,43 @@ async def read_quest_position(client):
     return position, ""
 
 
+async def read_quest_name(client) -> str:
+    """The tracked quest's NAME, or "" if it will not read.
+
+    Different from `read_quest_goal`, and needed alongside it. The goal
+    is the step ("Talk To Professor Winthrop in Altar of Kings"); the
+    name is the quest that step belongs to ("Back to Winthrop").
+
+    Comparing two wizards needs the name. "Talk to Professor Winthrop"
+    is the objective of NINE Krokotopia quests spanning main #2 to main
+    #19, so a comparison built on goal text can put a wizard seventeen
+    steps from where it is -- and `_catch_up` MOVES wizards, so a wrong
+    answer drags one backwards through work it has already done. See
+    `questlist`.
+
+    Read the way `VM._fetch_tracked_quest_text` reads it, deliberately:
+    both sides of a comparison should come out of the same field, and a
+    Deimos update that changes how the tracked quest resolves should
+    move this with it.
+
+    Empty on any failure, like `read_quest_goal`, and for the same
+    reason: this feeds a comparison between seats, where "could not
+    read" must never look like "on a different quest".
+    """
+    try:
+        tracked = await client.quest_id()
+        manager = await client.quest_manager()
+        for quest_id, quest in (await manager.quest_data()).items():
+            if quest_id != tracked:
+                continue
+            key = await quest.name_lang_key()
+            name = await client.cache_handler.get_langcode_name(key)
+            return strip_markup(name).strip()
+    except Exception:
+        return ""
+    return ""
+
+
 # --------------------------------------------------------------------------
 # actions
 # --------------------------------------------------------------------------

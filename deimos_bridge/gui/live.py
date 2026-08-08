@@ -147,6 +147,11 @@ class _Seat:
         #: a step another has already left is the one behind -- see
         #: `LiveWorker._who_is_behind`.
         self.goals_seen = []
+        #: the tracked quest's NAME, which is what `questlist` can place
+        #: in a questline. The goal cannot be placed: "Talk to Professor
+        #: Winthrop" is the objective of nine Krokotopia quests spanning
+        #: main #2 to #19. See `LiveWorker._behind_by_questline`.
+        self.quest_name = ""
         #: when the goal last CHANGED. The wizard whose goal moved most
         #: recently is the one that got ahead -- quest names have no
         #: order, but "who advanced last" does.
@@ -2066,6 +2071,20 @@ class LiveWorker(QThread):
             del seat.goals_seen[:-12]
         seat.goal = goal
 
+        # The quest NAME, alongside the goal and on the same poll. It is
+        # what `questlist` can place in a questline; the goal cannot be
+        # placed reliably, because one goal line belongs to as many as
+        # nine quests seventeen steps apart. Failing to read it leaves
+        # the previous value rather than clearing it -- a blank read is
+        # not evidence the wizard changed quest, and `_behind_by_
+        # questline` would silently drop that seat out of the comparison.
+        try:
+            name = await questing.read_quest_name(seat.client)
+        except Exception:
+            name = ""
+        if name:
+            seat.quest_name = name
+
         zone = position = None
         try:
             zone = await seat.client.zone_name()
@@ -2461,6 +2480,45 @@ class LiveWorker(QThread):
             f"{idle / 60:.0f} min with no change — {note} — while "
             f"{count} ran")
 
+    def _behind_by_questline(self):
+        """The seat the quest list says is furthest back, or None.
+
+        None means "this rule has nothing to say", not "nobody is
+        behind" -- the caller falls through to the older rules. It says
+        nothing when the list will not load, when fewer than two wizards
+        are on a quest it can place (side quests carry no order), when
+        the party is split across worlds, when the gap is within
+        `BEHIND_BY`, or when two wizards are equally far back.
+
+        That is a lot of nothing, deliberately. The rule this replaces
+        was a guess that named the wrong wizard; a rule that answers
+        only when it knows is worth more than one that always answers.
+        """
+        from .. import questlist
+
+        if not questlist.loaded():
+            return None
+        places = [questlist.position_of(s.quest_name) if s.quest_name
+                  else questlist.Position() for s in self.seats]
+        # A wizard whose name would not read can still be placed from
+        # its goal, IF the goal is unambiguous. The rest of the party
+        # says roughly where to look.
+        known = [p.order for p in places if p.comparable]
+        near = (sum(known) / len(known)) if known else None
+        world = next((p.world for p in places if p.world), None)
+        for i, seat in enumerate(self.seats):
+            if places[i].comparable or not seat.goal:
+                continue
+            places[i] = questlist.position_from_goal(seat.goal, world, near)
+        index, gap, why = questlist.furthest_behind(places)
+        if index is None:
+            self._behind_why = why
+            return None
+        self._behind_basis = f"the questline says so — {why}"
+        self._behind_gap = gap
+        self._behind_places = places
+        return self.seats[index]
+
     def _who_is_behind(self):
         """Which wizard is on a step the others have finished, or None.
 
@@ -2480,16 +2538,33 @@ class LiveWorker(QThread):
         `_should_catch_up` sends the other wizards back to, so naming the
         wrong one walks the party to a wizard that is ahead of them.
 
-        Quest names have no order, but the party demonstrates one: if
-        another wizard has HELD this wizard's current goal and has since
-        moved off it, that step is finished and this wizard is still on
-        it. Nothing else is inferred. Two wizards behind, or none
-        identifiable, returns None -- an honest "cannot tell" beats
-        confidently walking the party to the wrong wizard.
+        Three rules, tried in order of how much they actually know.
+
+        FIRST the questline. Quest names have no order in the game, but
+        they have one outside it, and `questlist` carries it: the
+        wizard on Krokotopia main #7 is behind the wizard on #9, as a
+        fact rather than an inference. This is the only rule that can
+        say HOW far behind, and the only one that works when the party
+        never overlapped -- which is most of a long desync, and is why
+        rev bb8f2b3c logged "which one is behind cannot be told" thirty
+        times.
+
+        SECOND the party's own demonstration: if another wizard has HELD
+        this wizard's current goal and has since moved off it, that step
+        is finished and this wizard is still on it.
+
+        THIRD, and only then, the clock.
+
+        Two wizards behind, or none identifiable, returns None -- an
+        honest "cannot tell" beats confidently walking the party to the
+        wrong wizard, because `_should_catch_up` MOVES them.
         """
         readable = [s for s in self.seats if s.goal]
         if len(readable) < 2:
             return None
+        ranked = self._behind_by_questline()
+        if ranked is not None:
+            return ranked
         behind = [s for s in readable
                   if any(o is not s and s.goal in o.goals_seen
                          and o.goal != s.goal for o in readable)]

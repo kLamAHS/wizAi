@@ -11279,6 +11279,47 @@ def _party_on(goals_history):
     return worker
 
 
+def test_the_questline_outranks_the_older_guesses():
+    """The party never overlapped -- no wizard has held another's goal --
+    so the history rule has nothing and the old code fell through to the
+    clock, which is a guess. The quest list knows: Krokotopia main #4 is
+    behind main #9, as a fact."""
+    worker = _party_on([["Assault on the Palace"], ["Fragments of a Key"]])
+    worker.seats[0].quest_name = "Assault on the Palace"      # main #11
+    worker.seats[1].quest_name = "Fragments of a Key"         # main #4
+    behind = worker._who_is_behind()
+    assert behind is worker.seats[1], "the questline was ignored"
+    assert "the questline says so" in worker._behind_basis
+    assert "#4 against #11" in worker._behind_basis
+    assert worker._behind_gap == 7
+
+
+def test_a_questline_that_cannot_place_a_wizard_falls_back(monkeypatch):
+    """A side quest carries no order, so the questline rule must decline
+    and the party's own demonstration must still be reachable. A rule
+    that answers only when it knows is worth more than one that always
+    answers -- but it must not block the ones underneath it."""
+    worker = _party_on([["Talk To Danforth", "Find Key Stone"],
+                        ["Talk To Danforth"]])
+    # Neither name is in the list at all.
+    worker.seats[0].quest_name = "A Quest Nobody Wrote Down"
+    worker.seats[1].quest_name = "Another One"
+    behind = worker._who_is_behind()
+    assert behind is worker.seats[1]
+    assert worker._behind_basis == "another wizard has finished that step"
+
+
+def test_a_party_one_step_apart_is_not_dragged_together():
+    """`BEHIND_BY` exists because turning a quest in is not simultaneous.
+    Reporting every handover as a desync would have the party regrouping
+    on itself constantly."""
+    worker = _party_on([["Quarter Master"], ["Back to the Archeologist"]])
+    worker.seats[0].quest_name = "Quarter Master"              # main #9
+    worker.seats[1].quest_name = "Back to the Archeologist"    # main #10
+    assert worker._behind_by_questline() is None
+    assert "within 1 step" in worker._behind_why
+
+
 def test_the_wizard_still_on_a_finished_step_is_the_one_behind():
     """Rev 1d28f745, the second of two desyncs sixteen seconds apart::
 
