@@ -49,11 +49,22 @@ from pathlib import Path
 
 DATA = Path(__file__).resolve().parent / "data" / "quests.json.gz"
 
-#: How far apart two orders have to be before it is worth acting on.
-#: One step is normal -- a party rarely turns a quest in on the same
-#: tick -- and calling that a desync would have wizAi regrouping
-#: constantly. Two is a wizard that missed something.
-BEHIND_BY = 2
+#: How many quests apart counts as apart at all.
+#:
+#: One, and the number matters. This was two, on the reasoning that a
+#: party rarely turns a quest in on the same tick so a gap of one is a
+#: handover rather than a desync. That confuses MAGNITUDE with
+#: TRANSIENCE, and rev 8e5a9c75 is what it costs: Sebastian sat one
+#: quest ahead of the other two for eight unbroken minutes and then
+#: wandered off the line entirely, and every check said the party was
+#: together.
+#:
+#: A handover is a gap of one that lasts seconds. A desync is a gap of
+#: one that lasts twenty minutes. Duration tells them apart and
+#: magnitude does not, so duration is what filters -- see
+#: `LiveWorker.DESYNC_GRACE`, which already existed for exactly this and
+#: was sitting behind a floor that never let it run.
+BEHIND_BY = 1
 
 _lock = threading.Lock()
 _loaded = None
@@ -124,14 +135,20 @@ class Position:
     and both are in the same world.
     """
 
-    __slots__ = ("world", "order", "name", "area", "how")
+    __slots__ = ("world", "order", "name", "area", "how", "questline")
 
-    def __init__(self, world=None, order=None, name="", area="", how=""):
+    def __init__(self, world=None, order=None, name="", area="", how="",
+                 questline=None):
         self.world = world
         self.order = order
         self.name = name
         self.area = area
         self.how = how
+        #: "main" for the world's storyline, None for a side quest. The
+        #: tracker follows whichever quest is SELECTED, so a wizard that
+        #: picks one up has every `tp quest` aimed at it from then on --
+        #: which is what "the bot loses the main questline" is.
+        self.questline = questline
 
     def __repr__(self):                          # pragma: no cover - debug
         return f"<Position {self.world} #{self.order} {self.name!r}>"
@@ -139,6 +156,22 @@ class Position:
     @property
     def comparable(self) -> bool:
         return self.world is not None and self.order is not None
+
+    @property
+    def on_main(self) -> bool:
+        """Is this wizard following the world's storyline?
+
+        A side quest is not a failure in itself -- the scripts pick up
+        plenty deliberately. It becomes one when the tracker STAYS on it,
+        because every quest teleport then goes to the side quest and the
+        party's main-line progress stops without anything saying so.
+        """
+        return self.questline == "main" and self.order is not None
+
+    @property
+    def known(self) -> bool:
+        """Did the list recognise the quest at all?"""
+        return bool(self.name) and self.how != "not in the list"
 
     def describe(self) -> str:
         if not self.name:
@@ -163,7 +196,8 @@ def position_of(quest_name) -> Position:
                     order=quest.get("questline_order"),
                     name=quest.get("name") or "",
                     area=quest.get("area") or "",
-                    how="by quest name")
+                    how="by quest name",
+                    questline=quest.get("questline"))
 
 
 def position_from_goal(goal, world=None, near=None) -> Position:
@@ -196,7 +230,8 @@ def position_from_goal(goal, world=None, near=None) -> Position:
         return Position(name=candidates[0].get("name") or "",
                         world=candidates[0].get("world"),
                         area=candidates[0].get("area") or "",
-                        how="the goal matched, but that quest has no order")
+                        how="the goal matched, but that quest has no order",
+                        questline=candidates[0].get("questline"))
     if near is not None and len(ordered) > 1:
         closest = min(abs((q["questline_order"]) - near) for q in ordered)
         ordered = [q for q in ordered
@@ -212,7 +247,8 @@ def position_from_goal(goal, world=None, near=None) -> Position:
                     order=quest.get("questline_order"),
                     name=quest.get("name") or "",
                     area=quest.get("area") or "",
-                    how="by goal text")
+                    how="by goal text",
+                    questline=quest.get("questline"))
 
 
 def _strip_zone(goal) -> str:
@@ -226,37 +262,35 @@ def _strip_zone(goal) -> str:
 
 
 def furthest_behind(positions):
-    """(index, gap, why) for the wizard that is genuinely behind.
+    """(indices, gap, why) for the wizards that are genuinely behind.
 
     `positions` is one `Position` per wizard, positionally. Returns
-    `(None, 0, why)` when the question has no answer -- which is most of
-    the time, and is the point. It answers only when every comparable
-    wizard is in the same world, exactly one is furthest back, and the
-    gap is at least `BEHIND_BY`.
+    `([], 0, why)` when the question has no answer.
 
-    A tie means two wizards are equally behind, and moving one of them
-    is not obviously right; a caller that wants to regroup the party can
-    still do that without naming anybody.
+    A LIST, not a single index, and that is the second half of the same
+    correction. This used to refuse whenever two wizards tied at the
+    back -- "there is no one to catch up" -- and in a party of three
+    that is the ordinary case, not an edge case: rev 8e5a9c75 has two
+    wizards on Krokotopia #12 and one on #13 for the whole run. Two
+    wizards being equally behind does not mean nobody is behind. It
+    means two of them have a step to finish.
     """
     usable = [(i, p) for i, p in enumerate(positions)
               if p is not None and p.comparable]
     if len(usable) < 2:
-        return None, 0, ("fewer than two wizards have a place in the line "
-                         "(side quests have no order)")
+        return [], 0, ("fewer than two wizards have a place in the line "
+                       "(side quests have no order)")
     worlds = {p.world for _i, p in usable}
     if len(worlds) > 1:
-        return None, 0, (f"the party is split across {len(worlds)} worlds "
-                         f"({', '.join(sorted(worlds))}), which is not a "
-                         f"gap in one line")
+        return [], 0, (f"the party is split across {len(worlds)} worlds "
+                       f"({', '.join(sorted(worlds))}), which is not a "
+                       f"gap in one line")
     lowest = min(p.order for _i, p in usable)
     highest = max(p.order for _i, p in usable)
     gap = highest - lowest
     if gap < BEHIND_BY:
-        return None, 0, (f"the party is within {gap} step(s) of each other, "
-                         f"which is normal")
+        return [], 0, (f"the party is all on the same quest (#{lowest})")
     at_back = [i for i, p in usable if p.order == lowest]
-    if len(at_back) > 1:
-        return None, gap, (f"{len(at_back)} wizards are equally far back "
-                           f"(#{lowest}), so there is no one to catch up")
-    return at_back[0], gap, (f"#{lowest} against #{highest} — {gap} quests "
-                             f"behind the furthest ahead")
+    who = "1 wizard is" if len(at_back) == 1 else f"{len(at_back)} wizards are"
+    return at_back, gap, (f"#{lowest} against #{highest} — {who} {gap} "
+                          f"quest(s) behind the furthest ahead")

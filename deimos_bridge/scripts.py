@@ -130,6 +130,155 @@ def mentions_clients(source: str) -> int:
     return max(found) if found else 0
 
 
+def unconfigured(source: str):
+    """[(name, value)] for variables still at the script's own placeholder.
+
+    Rev 8e5a9c75 is 110 minutes long and the last 40 of them are three
+    wizards standing in Krokotopia's hub, out of combat, full health,
+    while the script executed 106,000 instructions and moved nobody.
+    The cause is in the file's first thirty lines::
+
+        var Main_Account = "QuestingAccountName"
+        var Questee2     = "QuestingAccountName"
+        var Main_Account_School = "SchoolGoesHere"
+
+    Never filled in. The quester guards most of its friend-teleports
+    with `if NOT Main_Account = "QuestingAccountName"`, so an
+    unconfigured script does not fail -- it silently skips the one
+    mechanism it has for putting a party back together. Three of them
+    got through the guards anyway and threw `Could not find friend with
+    ... name QuestingAccountName`, which is how this became visible at
+    all, and only because `PartyTaskGroup` now reports what it catches.
+
+    So: a wizard falls behind, and the script's own regroup is disabled.
+    That is the whole failure, and it is checkable before the run starts.
+
+    How a placeholder is recognised, without a hardcoded list of them:
+    the script COMPARES the variable against the same literal it was
+    assigned. `var X = "Y"` alone is just a value; `var X = "Y"` plus
+    `if NOT X = "Y"` elsewhere is the author saying "Y means unset".
+    That generalises to any script written the same way, which is all of
+    the ones built from this template.
+    """
+    import re
+
+    found = []
+    for name, value in re.findall(r'^\s*var\s+(\w+)\s*=\s*"([^"]*)"',
+                                  source or "", re.MULTILINE):
+        if not value:
+            continue
+        pattern = rf'{re.escape(name)}\s*=\s*"{re.escape(value)}"'
+        # More than one is the `var` line plus at least one guard.
+        if len(re.findall(pattern, source)) > 1:
+            found.append((name, value))
+    return found
+
+
+#: Where preset scripts live. Kept under `data/` rather than beside this
+#: module because `deimos_bridge/scripts.py` already owns that name, and
+#: a `scripts/` package next to it would shadow the module on import.
+PRESET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "data", "scripts")
+
+
+def presets():
+    """[(title, path)] for the scripts shipped with wizAi, by title.
+
+    Empty is a normal answer -- wizAi ships no scripts of its own, and
+    the directory is where an operator's own arc questers go so they are
+    a dropdown rather than a paste every session.
+
+    The title is the script's own `# @name:` line if it has one, else
+    the filename. Nothing is compiled here: listing has to work even
+    when Deimos is not importable, because the dialog that lists them is
+    also where you find out Deimos is not importable.
+    """
+    import glob
+
+    found = []
+    for path in sorted(glob.glob(os.path.join(PRESET_DIR, "*.txt"))
+                       + glob.glob(os.path.join(PRESET_DIR, "*.deimos"))):
+        found.append((preset_title(path), path))
+    return sorted(found)
+
+
+def preset_title(path: str) -> str:
+    import re
+
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            head = handle.read(4096)
+    except Exception:
+        return os.path.basename(path)
+    m = re.search(r"^#\s*@name:\s*(.+)$", head, re.MULTILINE)
+    if m:
+        return m.group(1).strip()
+    return os.path.splitext(os.path.basename(path))[0].replace("_", " ")
+
+
+def read_preset(path: str) -> str:
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        return handle.read()
+
+
+#: Which of a quester's account variables belongs to which wizard, and
+#: which holds a school. The TTS template's own comment settles the
+#: order -- "Name of the main account. Also MUST BE SET AS p1" -- and
+#: every script built from that template inherits it.
+ACCOUNT_VARS = ("Main_Account", "Questee2", "Questee3", "Questee4")
+SCHOOL_VARS = ("Main_Account_School", "Questee2_School",
+               "Questee3_School", "Questee4_School")
+
+
+def configure(source: str, wizards):
+    """(source, filled). Put the party's real names into the script.
+
+    `wizards` is [(name, school)] in seat order, p1 first.
+
+    This is the structural fix for what cost rev 8e5a9c75 forty minutes.
+    The quester needs its account names to match the wizards actually
+    logged in, an operator has to type them by hand into a 14,000-line
+    file, and when they do not the script does not complain -- it guards
+    its own friend-teleports with `if NOT Main_Account =
+    "QuestingAccountName"` and quietly skips every one of them. The
+    party then has no way to regroup and the run ends as a stall.
+
+    wizAi already knows both facts: the name comes off the client's own
+    combat member, and the school is what the seat was configured with.
+    So it fills them in, and the operator cannot get it wrong.
+
+    Only placeholders are touched -- see `unconfigured`. A name the
+    operator typed themselves is theirs, even if it disagrees with what
+    wizAi read, because they may be running a script whose p1 is not
+    wizAi's seat 1.
+    """
+    import re
+
+    blanks = dict(unconfigured(source))
+    if not blanks:
+        return source, []
+    filled = []
+    for index, (var, school_var) in enumerate(zip(ACCOUNT_VARS, SCHOOL_VARS)):
+        if index >= len(wizards):
+            break
+        name, school = wizards[index]
+        for target, value in ((var, name), (school_var, school)):
+            placeholder = blanks.get(target)
+            if not placeholder or not value:
+                continue
+            # The `var` line only. The guards elsewhere compare against
+            # the placeholder literal and MUST keep doing so -- that is
+            # how the script tests whether it was configured, and
+            # rewriting them would turn every guard permanently false.
+            pattern = rf'(^\s*var\s+{re.escape(target)}\s*=\s*)"' \
+                      rf'{re.escape(placeholder)}"'
+            source, n = re.subn(pattern, lambda m: f'{m.group(1)}"{value}"',
+                                source, count=1, flags=re.MULTILINE)
+            if n:
+                filled.append((target, value))
+    return source, filled
+
+
 def check(source: str):
     """(ok, reason) — does this script compile?
 
@@ -163,6 +312,19 @@ def check(source: str):
     need = wants_clients(source)
     if need > 1:
         note += f", and it says it needs {need} wizards"
+    # A warning, not a refusal: a solo run does not need the account
+    # names, and it is the operator's script to run. But an unconfigured
+    # party script cannot regroup itself, and that is worth knowing
+    # before rather than after -- see `unconfigured`.
+    blanks = unconfigured(source)
+    if blanks:
+        note += ("\n\n⚠ " + f"{len(blanks)} setting(s) are still at the "
+                 f"script's placeholder value: "
+                 + ", ".join(f"{n} = \"{v}\"" for n, v in blanks[:6])
+                 + (" …" if len(blanks) > 6 else "")
+                 + ". The script skips its own friend-teleports while "
+                   "these are unset, so a wizard that falls behind cannot "
+                   "be pulled back — fill them in before a party run.")
     return True, note
 
 

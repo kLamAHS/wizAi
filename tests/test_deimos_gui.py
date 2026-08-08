@@ -11438,6 +11438,349 @@ def test_a_wizard_that_fell_out_of_a_mass_instruction_is_named(monkeypatch):
         assert "the others finished it" in note[0]["detail"]
 
 
+def test_a_stall_that_keeps_going_is_said_more_than_once():
+    """Keyed on the situation alone this fired exactly once in a
+    forty-minute stall, at the five-minute mark, while `stuck-detail`
+    said the same sentence 69 times."""
+    import time
+
+    worker, _read = _zoned_party(["Krokotopia/KT_Hub"])
+    worker.script = "###deimos_expertmode"
+    seat = worker.seats[0]
+    seat.runner = type("R", (), {"running": True, "steps": 10_000})()
+    seat.progress = ("Krokotopia/KT_Hub", (0, 0, 0), "Talk To Standish")
+    worker._script_drives = lambda _s: True
+
+    said = []
+    for minutes in (6, 8, 11, 21, 41, 42):
+        seat.progress_at = time.monotonic() - minutes * 60
+        worker._check_progress(seat)
+        said.append(len([e for e in seat.tel.questing
+                         if e["kind"] == "no-progress"]))
+    # 6 min says it; 8 is the same band; 11, 21 and 41 each double.
+    assert said == [1, 1, 2, 3, 4, 4], said
+
+
+# ------------------------------------------------------------- preset scripts
+_QUESTER = (
+    '###deimos_expertmode\n'
+    '# @name: Arc 1 Quester\n'
+    'var Main_Account = "QuestingAccountName"\n'
+    'var Main_Account_School = "SchoolGoesHere"\n'
+    'var Questee2 = "QuestingAccountName"\n'
+    'var Questee2_School = "SchoolGoesHere"\n'
+    'var Questee3 = "QuestingAccountName"\n'
+    'var Questee3_School = "SchoolGoesHere"\n'
+    'block Go {\n'
+    '  if NOT Main_Account = "QuestingAccountName" { p1 sendkey X }\n'
+    '  if NOT Main_Account_School = "SchoolGoesHere" { p1 sendkey X }\n'
+    '  if NOT Questee2 = "QuestingAccountName" { p2 sendkey X }\n'
+    '  if NOT Questee2_School = "SchoolGoesHere" { p2 sendkey X }\n'
+    '  if NOT Questee3 = "QuestingAccountName" { p3 sendkey X }\n'
+    '  if NOT Questee3_School = "SchoolGoesHere" { p3 sendkey X }\n'
+    '}\n')
+
+
+def test_a_preset_gets_the_partys_real_names_put_into_it():
+    """The structural fix for what cost rev 8e5a9c75 forty minutes. An
+    operator has to type four names correctly into a 14,000-line file,
+    and when they do not the script does not complain -- it skips every
+    friend-teleport it has and the party can never regroup. wizAi
+    already knows all four."""
+    from deimos_bridge.scripts import configure
+
+    out, filled = configure(_QUESTER, [("Phönix", "storm"),
+                                       ("Konstantin", "ice")])
+    assert dict(filled) == {"Main_Account": "Phönix",
+                            "Main_Account_School": "storm",
+                            "Questee2": "Konstantin",
+                            "Questee2_School": "ice"}
+    assert 'var Main_Account = "Phönix"' in out
+    assert 'var Questee2 = "Konstantin"' in out
+    # A seat the party does not have is left alone.
+    assert 'var Questee3 = "QuestingAccountName"' in out
+
+
+def test_filling_a_preset_leaves_the_scripts_own_guards_alone():
+    """The guards compare against the placeholder literal -- that is how
+    the script tests whether it was configured. Rewriting them would
+    turn every guard permanently false and disable the very code the
+    filling exists to switch on."""
+    from deimos_bridge.scripts import configure
+
+    out, _filled = configure(_QUESTER, [("Phönix", "storm")])
+    assert 'if NOT Main_Account = "QuestingAccountName"' in out
+    assert 'if NOT Main_Account_School = "SchoolGoesHere"' in out
+
+
+def test_a_name_the_operator_typed_is_never_overwritten():
+    """They may be running a script whose p1 is not wizAi's seat 1."""
+    from deimos_bridge.scripts import configure
+
+    theirs = _QUESTER.replace('var Main_Account = "QuestingAccountName"',
+                              'var Main_Account = "Someone Else"')
+    out, filled = configure(theirs, [("Phönix", "storm")])
+    assert 'var Main_Account = "Someone Else"' in out
+    assert "Main_Account" not in dict(filled)
+
+
+def test_a_wizard_with_no_name_yet_still_gets_its_school():
+    """Before a run the names are not knowable -- the game will not give
+    them outside character select. Half the job is worth doing; the
+    dialog says which half."""
+    from deimos_bridge.scripts import configure
+
+    out, filled = configure(_QUESTER, [("", "storm")])
+    assert dict(filled) == {"Main_Account_School": "storm"}
+    assert 'var Main_Account = "QuestingAccountName"' in out
+
+
+def test_presets_are_listed_by_their_own_name(tmp_path, monkeypatch):
+    from deimos_bridge import scripts
+
+    (tmp_path / "arc1.txt").write_text(_QUESTER, encoding="utf-8")
+    (tmp_path / "no_header.txt").write_text("###deimos_expertmode\n",
+                                            encoding="utf-8")
+    monkeypatch.setattr(scripts, "PRESET_DIR", str(tmp_path))
+    got = dict((t, p) for t, p in scripts.presets())
+    assert "Arc 1 Quester" in got, got
+    assert "no header" in got, got
+
+
+def test_no_presets_is_a_normal_answer(tmp_path, monkeypatch):
+    """wizAi ships none of its own; the directory is where an operator's
+    go. Listing must work even when Deimos is not importable, because
+    the dialog that lists them is where you find that out."""
+    from deimos_bridge import scripts
+
+    monkeypatch.setattr(scripts, "PRESET_DIR", str(tmp_path / "nothing"))
+    assert scripts.presets() == []
+
+
+# --------------------------------------------------- an unconfigured script
+def test_a_script_still_on_its_placeholders_is_named():
+    """Rev 8e5a9c75 is 110 minutes long and the last 40 are three wizards
+    standing in Krokotopia's hub while the script ran 106,000
+    instructions and moved nobody. The cause is in the file's first
+    thirty lines::
+
+        var Main_Account = "QuestingAccountName"
+
+    The quester guards its friend-teleports with `if NOT Main_Account =
+    "QuestingAccountName"`, so an unconfigured script does not fail --
+    it silently skips the one mechanism it has for putting a party back
+    together."""
+    from deimos_bridge.scripts import unconfigured
+
+    source = (
+        '###deimos_expertmode\n'
+        'var Main_Account = "QuestingAccountName"\n'
+        'var Questee2 = "QuestingAccountName"\n'
+        'var Main_Account_School = "SchoolGoesHere"\n'
+        'var SpeedDelay = 1\n'
+        'block Go {\n'
+        '  if NOT Main_Account = "QuestingAccountName" {\n'
+        '    p1 friendtp Main_Account\n'
+        '  }\n'
+        '  if NOT Questee2 = "QuestingAccountName" { p2 friendtp Questee2 }\n'
+        '  if NOT Main_Account_School = "SchoolGoesHere" { p1 sendkey X }\n'
+        '}\n')
+    got = dict(unconfigured(source))
+    assert got == {"Main_Account": "QuestingAccountName",
+                   "Questee2": "QuestingAccountName",
+                   "Main_Account_School": "SchoolGoesHere"}, got
+
+
+def test_a_filled_in_setting_is_not_called_a_placeholder():
+    """No hardcoded list of placeholder strings. What marks one is that
+    the script COMPARES the variable against the same literal it was
+    assigned -- the author's own way of saying "this means unset"."""
+    from deimos_bridge.scripts import unconfigured
+
+    source = (
+        '###deimos_expertmode\n'
+        'var Main_Account = "Phoenix Deathblade"\n'
+        'var Questee2 = "QuestingAccountName"\n'
+        'block Go {\n'
+        '  if NOT Main_Account = "QuestingAccountName" { p1 sendkey X }\n'
+        '  if NOT Questee2 = "QuestingAccountName" { p2 sendkey X }\n'
+        '}\n')
+    got = dict(unconfigured(source))
+    assert "Main_Account" not in got, "flagged a name that was filled in"
+    assert got == {"Questee2": "QuestingAccountName"}
+
+
+def test_a_value_that_is_never_compared_is_not_a_placeholder():
+    """`var SpeedDelay = "1"` is just a value. Without a guard against
+    the same literal there is nothing to say it means unset."""
+    from deimos_bridge.scripts import unconfigured
+
+    source = ('###deimos_expertmode\n'
+              'var Zone = "Krokotopia/KT_Hub"\n'
+              'block Go { p1 tozone Zone }\n')
+    assert unconfigured(source) == []
+
+
+# ------------------------------------------------- in step, and on the line
+def _party_on_quests(names, goals=None):
+    worker, _read = _zoned_party(["Krokotopia/KT_Pyramid/KT_PalaceOfFire"]
+                                 * len(names))
+    worker.script = "###deimos_expertmode"
+    for i, (seat, name) in enumerate(zip(worker.seats, names)):
+        seat.quest_name = name
+        seat.goal = goals[i] if goals else f"goal {i}"
+        seat.goals_seen = [seat.goal]
+    return worker
+
+
+def test_one_quest_with_five_npcs_is_not_a_desync():
+    """Krokotopia #12 is "Gather the Troops" -- Primwell, Archibald,
+    Livingston, Farnsworth, Standish -- so a party working through it
+    correctly shows three different goal lines at all times. Comparing
+    goal TEXT calls that a desync on every tick."""
+    import time
+
+    worker = _party_on_quests(
+        ["Gather the Troops", "Gather the Troops", "Gather the Troops"],
+        ["Talk To Private Farnsworth in Palace of Fire",
+         "Talk To Private Livingston in Palace of Fire",
+         "Talk To Private Archibald in Palace of Fire"])
+    together, why = worker._quests_agree()
+    assert together is True, why
+    assert "same quest" in why
+
+    worker._check_in_step(worker.seats[0])
+    worker._in_step_since = time.monotonic() - 600
+    worker._check_in_step(worker.seats[0])
+    assert not [e for e in worker.seats[0].tel.questing
+                if e["kind"] == "quest-desync"], "still crying desync"
+    assert worker._behind is None
+
+
+def test_one_quest_apart_and_staying_there_is_a_desync():
+    """Rev 8e5a9c75, and the correction to the correction. Sebastian sat
+    on Krokotopia #13 while the other two sat on #12 for eight unbroken
+    minutes, and `BEHIND_BY = 2` called the party together for the whole
+    run. A handover is a gap of one that lasts seconds; a desync is a
+    gap of one that lasts twenty minutes. `DESYNC_GRACE` tells them
+    apart, and it was sitting behind a floor that never let it run."""
+    import time
+
+    worker = _party_on_quests(
+        ["Gather the Troops", "Gather the Troops", "Payback"],
+        ["Talk To Private Farnsworth in Palace of Fire",
+         "Talk To Private Livingston in Palace of Fire",
+         "Defeat Flame Guardian in Palace of Fire (0 of 3)"])
+    together, why = worker._quests_agree()
+    assert together is False, why
+    assert "1 quests apart" in why or "#12" in why
+
+    worker._check_in_step(worker.seats[0])
+    assert not [e for e in worker.seats[0].tel.questing
+                if e["kind"] == "quest-desync"], "fired inside the grace period"
+    worker._in_step_since = time.monotonic() - 600
+    worker._check_in_step(worker.seats[0])
+    said = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "quest-desync"]
+    assert said, "the whole-run desync is invisible again"
+    # ...and BOTH wizards on #12 are named, not neither.
+    assert "2 wizards are 1 quest(s) behind" in said[0]["detail"], \
+        said[0]["detail"]
+
+
+def test_a_real_gap_is_still_a_desync():
+    import time
+
+    worker = _party_on_quests(["Gather the Troops",      # #12
+                               "Find My Colleague"])     # #7
+    together, why = worker._quests_agree()
+    assert together is False
+    assert "5 quests apart" in why
+    worker._check_in_step(worker.seats[0])
+    worker._in_step_since = time.monotonic() - 600
+    worker._check_in_step(worker.seats[0])
+    assert [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "quest-desync"]
+
+
+def test_a_party_the_list_cannot_place_still_falls_back_to_goals():
+    """Goal text is weak evidence, but for a party the list cannot place
+    it is the only evidence there is."""
+    worker = _party_on_quests(["A Quest Nobody Wrote Down"] * 2,
+                              ["Talk To Someone", "Talk To Someone Else"])
+    together, why = worker._quests_agree()
+    assert together is None, why
+    assert "fewer than two" in why
+
+
+# ------------------------------------------------------ losing the main line
+def test_a_wizard_whose_tracker_wanders_off_the_main_line_is_reported():
+    """The operator's request. Wizard101's arrow follows whichever quest
+    is SELECTED, so a wizard that picks up a side quest has every `tp
+    quest` aimed at it from then on and the party's main-line progress
+    silently stops. Rev 8e5a9c75 has Sebastian dropping from Krokotopia
+    #13 to unplaced at t=790 and staying there for seven minutes."""
+    import time
+
+    worker = _party_on_quests(["Gather the Troops", "Gather the Troops",
+                               "Zeke's Quest That Is Not Main"])
+    # Third wizard is on a real quest the list knows, with no place in
+    # the line -- which is what a side quest looks like.
+    from deimos_bridge import questlist
+    side = questlist.Position(world="Krokotopia", name="Krokotopian Bundle",
+                              how="by quest name", questline=None)
+    worker._places = lambda: [questlist.position_of("Gather the Troops"),
+                              questlist.position_of("Gather the Troops"),
+                              side]
+    worker._check_on_questline()                    # starts the clock
+    assert not [e for e in worker.seats[2].tel.questing
+                if e["kind"] == "off-questline"], "said it far too early"
+
+    worker.seats[2].off_line_since = time.monotonic() - 300
+    worker._check_on_questline()
+    said = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "off-questline"]
+    assert len(said) == 1, said
+    assert "Krokotopian Bundle" in said[0]["detail"]
+    assert "side quest" in said[0]["detail"]
+    assert "#12" in said[0]["detail"], "should say where the party is"
+    # once per side quest, not once per tick
+    worker._check_on_questline()
+    assert len([e for e in worker.seats[0].tel.questing
+                if e["kind"] == "off-questline"]) == 1
+
+
+def test_getting_back_on_the_main_line_is_reported_too():
+    import time
+
+    from deimos_bridge import questlist
+
+    worker = _party_on_quests(["Gather the Troops", "Gather the Troops"])
+    worker.seats[1].off_line_since = time.monotonic() - 300
+    worker.seats[1].said_off_line = "Krokotopian Bundle"
+    worker._check_on_questline()
+    back = [e for e in worker.seats[1].tel.questing
+            if e["kind"] == "back-on-questline"]
+    assert back and "#12" in back[0]["detail"]
+    assert worker.seats[1].off_line_since is None
+
+
+def test_an_unreadable_tracker_is_not_called_a_side_quest():
+    """`known` False is a read that failed or a quest the list has never
+    heard of. Saying "off the questline" on that would fire on every
+    loading screen."""
+    from deimos_bridge import questlist
+
+    worker = _party_on_quests(["Gather the Troops", "Gather the Troops"])
+    worker._places = lambda: [questlist.position_of("Gather the Troops"),
+                              questlist.Position()]          # nothing read
+    worker._check_on_questline()
+    worker._check_on_questline()
+    assert worker.seats[1].off_line_since is None
+    assert not [e for e in worker.seats[1].tel.questing
+                if e["kind"] == "off-questline"]
+
+
 # ---------------------------------------------------- finishing a missed step
 def _desynced(orders):
     """A scripted party whose wizards are on the given Krokotopia steps."""
@@ -11502,7 +11845,7 @@ def test_starting_and_stopping_a_catch_up_agree_on_where_everyone_is():
     worker._start_catching_up(behind, worker._behind_gap,
                               worker._behind_basis)
     worker._check_caught_up()
-    assert worker._catching_up() is worker.seats[1], \
+    assert worker._catching_up() == [worker.seats[1]], \
         "the stop rule disagreed with the start rule about who is where"
 
 
@@ -11556,7 +11899,7 @@ def test_a_wizard_that_is_behind_is_driven_through_its_own_step():
     assert behind is worker.seats[1]
     worker._start_catching_up(behind, worker._behind_gap,
                               worker._behind_basis)
-    assert worker._catching_up() is worker.seats[1]
+    assert worker._catching_up() == [worker.seats[1]]
     said = [e for e in worker.seats[0].tel.questing
             if e["kind"] == "catch-up-started"]
     assert said and "pausing the script" in said[0]["detail"]
@@ -11570,7 +11913,7 @@ def test_the_catch_up_ends_when_the_party_is_level_again():
     worker._start_catching_up(worker.seats[1], 7, "the questline says so")
     worker.seats[1].quest_name = "Assault on the Palace"   # caught up
     worker._check_caught_up()
-    assert worker._catching_up() is None
+    assert worker._catching_up() == []
     done = [e for e in worker.seats[0].tel.questing
             if e["kind"] == "catch-up-done"]
     assert done and "has its wizards back" in done[0]["detail"]
@@ -11587,7 +11930,7 @@ def test_a_catch_up_that_is_getting_nowhere_gives_the_script_its_wizards_back():
     state = worker._catch_up_state
     state["started"] = time.monotonic() - worker.CATCH_UP_LIMIT - 1
     worker._check_caught_up()
-    assert worker._catching_up() is None
+    assert worker._catching_up() == []
     gave = [e for e in worker.seats[0].tel.questing
             if e["kind"] == "catch-up-gave-up"]
     assert gave and "still 7 quest(s) behind" in gave[0]["detail"]
@@ -11603,7 +11946,7 @@ def test_a_catch_up_that_stops_advancing_is_written_off_sooner():
     worker._start_catching_up(worker.seats[1], 7, "the questline says so")
     worker._catch_up_state["moved"] = time.monotonic() - worker.CATCH_UP_STALL - 1
     worker._check_caught_up()
-    assert worker._catching_up() is None
+    assert worker._catching_up() == []
     gave = [e for e in worker.seats[0].tel.questing
             if e["kind"] == "catch-up-gave-up"]
     assert gave and "nothing has moved" in gave[0]["detail"]
@@ -11620,7 +11963,8 @@ def test_progress_towards_catching_up_restarts_the_stall_clock():
     worker._catch_up_state["moved"] = time.monotonic() - worker.CATCH_UP_STALL - 1
     worker.seats[1].quest_name = "Find My Colleague"       # #2 -> #7
     worker._check_caught_up()
-    assert worker._catching_up() is worker.seats[1], "gave up despite progress"
+    assert worker._catching_up() == [worker.seats[1]], \
+        "gave up despite progress"
     assert worker._catch_up_state["gap"] == 4
 
 
@@ -11630,7 +11974,7 @@ def test_a_new_laggard_gets_its_own_catch_up_not_this_ones_clock():
     worker.seats[1].quest_name = "Quarter Master"          # now level with s2
     worker.seats[2].quest_name = "Digging in the Dirt"     # s2 fell back
     worker._check_caught_up()
-    assert worker._catching_up() is None, \
+    assert worker._catching_up() == [], \
         "the old catch-up must end before a new one starts"
 
 
@@ -11690,15 +12034,35 @@ def test_a_questline_that_cannot_place_a_wizard_falls_back(monkeypatch):
     assert worker._behind_basis == "another wizard has finished that step"
 
 
-def test_a_party_one_step_apart_is_not_dragged_together():
-    """`BEHIND_BY` exists because turning a quest in is not simultaneous.
-    Reporting every handover as a desync would have the party regrouping
-    on itself constantly."""
+def test_a_handover_is_filtered_by_TIME_not_by_size_of_gap():
+    """This asserted the opposite, and the opposite was wrong.
+
+    Turning a quest in is not simultaneous, so a party is briefly one
+    quest apart on every handover -- and the first fix for that was a
+    floor of two, which also swallowed a gap of one that lasted a whole
+    run. A handover is a gap of one that lasts seconds; a desync is a
+    gap of one that lasts twenty minutes. Only the clock separates
+    them.
+
+    So the gap IS seen immediately, and `DESYNC_GRACE` decides whether
+    it is worth saying."""
+    import time
+
     worker = _party_on([["Quarter Master"], ["Back to the Archeologist"]])
     worker.seats[0].quest_name = "Quarter Master"              # main #9
     worker.seats[1].quest_name = "Back to the Archeologist"    # main #10
-    assert worker._behind_by_questline() is None
-    assert "within 1 step" in worker._behind_why
+    assert worker._behind_by_questline() is worker.seats[0], \
+        "a one-quest gap is invisible again"
+    assert worker._behind_gap == 1
+
+    worker._check_in_step(worker.seats[0])       # starts the grace clock
+    assert not [e for e in worker.seats[0].tel.questing
+                if e["kind"] == "quest-desync"], "reported a handover"
+    worker._in_step_since = time.monotonic() - worker.DESYNC_GRACE - 1
+    worker._check_in_step(worker.seats[0])
+    assert [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "quest-desync"], \
+        "a gap that outlived the grace period is a desync"
 
 
 def test_the_wizard_still_on_a_finished_step_is_the_one_behind():
