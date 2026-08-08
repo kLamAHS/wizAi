@@ -165,6 +165,14 @@ class _Seat:
         #: that is not the prompt the rest of the party is standing at.
         #: See `LiveWorker._check_same_sigil`.
         self.apart_since = None
+        #: flat distance to this wizard's quest marker, or None. A marker
+        #: in another zone reads as a six-figure nonsense distance,
+        #: because the coordinates are in that zone's space -- which is
+        #: precisely the discriminator `_start_catching_up` needs.
+        self.marker_away = None
+        #: the zone this seat's write-off was recorded in, so arriving
+        #: somewhere new can clear it. See `LiveWorker._written_off`.
+        self.zone_for_writeoff = None
         #: fruitless presses of X from one spot, and which spot. See
         #: `LiveWorker._x_did_nothing_here`.
         self.x_pressed = 0
@@ -2279,11 +2287,31 @@ class LiveWorker(QThread):
         except Exception:
             pass
 
+        # How far the quest marker is, on the same poll that already read
+        # the body's position. Consumed by `_start_catching_up`, which
+        # cannot await -- and which must not start a catch-up for a
+        # marker no within-zone teleport can reach. See `MARKER_IN_ZONE`.
+        seat.marker_away = None
+        try:
+            marker, _why = await questing.read_quest_position(seat.client)
+            if marker is not None and at is not None:
+                dx, dy = at.x - marker.x, at.y - marker.y
+                seat.marker_away = (dx * dx + dy * dy) ** 0.5
+        except Exception:
+            pass
+
         where = (zone, position, seat.goal)
         if where != seat.progress:
             seat.progress = where
             seat.progress_at = now
             seat.said_stuck = ""
+        if zone and zone != seat.zone_for_writeoff:
+            # A zone change makes a written-off step a different
+            # proposition -- see `_written_off`. Kept here rather than in
+            # `_check_together`, which only runs when there are two
+            # wizards and only every `TOGETHER_POLL` seconds.
+            seat.zone_for_writeoff = zone
+            self._forget_write_off(seat)
 
     #: seconds between heartbeat entries per wizard. A minute is fine
     #: enough to see a stall start and end, and coarse enough that an
@@ -3174,6 +3202,24 @@ class LiveWorker(QThread):
                 and getattr(self, "_behind_gap", 0) >= 1
                 and "questline" in getattr(self, "_behind_basis", "")):
             group = getattr(self, "_behind_group", None) or [behind]
+            away = self._marker_out_of_reach(group)
+            if away is not None:
+                # Not a catch-up. Getting there is the script's job and
+                # the script is good at it -- rev 1843e387 spent 116s
+                # failing to hop Phönix out of KT_Hub and the script did
+                # it in eight seconds the moment it had the wheel back.
+                self._say_once(
+                    behind, f"marker-away:{behind.name}",
+                    f"{behind.name} is {self._behind_gap} quest(s) behind "
+                    f"and its objective is {away:,.0f} away — another zone. "
+                    f"A quest teleport cannot cross one, so this is the "
+                    f"script's journey to make, not a step wizAi can "
+                    f"finish. Leaving it to the script",
+                    kind="catch-up-out-of-zone",
+                    detail=(f"{behind.name}'s objective is {away:,.0f} away, "
+                            f"which is another zone. Not pausing the script "
+                            f"for a hop that cannot reach it"))
+                return
             if self._written_off(group):
                 # Tried, and it did not work. Running the script is not
                 # a good answer either, but it is the only OTHER answer,
@@ -3734,6 +3780,51 @@ class LiveWorker(QThread):
         if place is not None and place.comparable:
             return (place.world, place.order)
         return (None, seat.quest_name or seat.goal or "")
+
+    def _forget_write_off(self, seat):
+        """Arriving somewhere new earns the step another attempt.
+
+        A write-off says "wizAi's questing cannot finish this step". At
+        rev 1843e387 that was true and beside the point: the catch-up
+        ran while Phönix was in KT_Hub and its objective was in
+        KT_PalaceOfFire, where no within-zone teleport could reach it.
+        It failed, was written off permanently -- and then the SCRIPT
+        moved the whole party into KT_PalaceOfFire eight seconds later,
+        which is the one place the catch-up would have worked.
+
+        The verdict was about a situation, not about the step, and the
+        situation changed. So a zone change clears it.
+        """
+        wrote = self._wrote_off.pop(id(seat), None)
+        if wrote is not None:
+            self._said_written_off.discard(f"wrote-off:{wrote[0]}")
+
+    #: How far a quest marker can be and still be somewhere a within-zone
+    #: teleport can reach. Inside a zone the marker is hundreds to a few
+    #: thousand units off; a marker in ANOTHER zone is read in that
+    #: zone's coordinate space and comes back as six figures -- rev
+    #: 1843e387 logged 98,813, 110,890 and 115,018 for three wizards
+    #: whose objectives were all elsewhere. Twenty thousand is far above
+    #: any real within-zone distance and far below those.
+    MARKER_IN_ZONE = 20000.0
+
+    def _marker_out_of_reach(self, seats):
+        """Is the laggard's objective somewhere a hop cannot go?
+
+        `questing.hop_once` teleports to the quest marker and presses X.
+        That is a within-zone move: Wizard101's quest teleport does not
+        cross a zone boundary, and the script -- which knows the route,
+        the sigil and the door -- is the only thing here that can.
+
+        So a catch-up aimed across a zone boundary is not a hard case,
+        it is an impossible one, and starting it spends the party's one
+        attempt in the one place it cannot succeed.
+        """
+        for seat in seats:
+            away = getattr(seat, "marker_away", None)
+            if away is not None and away > self.MARKER_IN_ZONE:
+                return away
+        return None
 
     def _written_off(self, group):
         """Has a catch-up already given up on this exact step?
