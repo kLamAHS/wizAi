@@ -180,6 +180,9 @@ class WizAiBackend:
         #: slowly. NOT `on_failed_cast` -- nothing has failed yet, and
         #: that one rewrites the round. See `report_slow_cast`.
         self.on_slow_cast = None
+        #: optional callback(waited, planned, acted) with what the round
+        #: just played cost, in seconds. See `report_round_timing`.
+        self.on_round_timing = None
         #: optional callback(card, target, first choice) when the chosen
         #: card would not go out and the runner-up was played instead.
         #: NOT `on_failed_cast` -- that one has already run and recorded
@@ -972,6 +975,23 @@ class WizAiBackend:
                 f"again with a longer pause between selecting the card and "
                 f"clicking the target")
 
+    def report_round_timing(self, waited, planned, acted):
+        """What the round that just went out cost, in seconds.
+
+        Three numbers rather than one because they have three different
+        owners. `waited` is the game's -- cast animations, the other
+        wizards' turns, the thirty-second planning timer running down
+        because somebody did not click. `planned` is the memory read,
+        the policy, and the wait at the hivemind barrier. `acted` is the
+        two clicks, whose knob is `cast_time`.
+
+        A live party ran at roughly forty-six seconds a round and the
+        export had no way to say which of the three that was, so the
+        only available answers were guesses about the barrier.
+        """
+        if self.on_round_timing:
+            self.on_round_timing(waited, planned, acted)
+
     def _deck_remaining(self, read_hand):
         """Best-effort undrawn deck. Only its *size* and the kinds in it
         matter -- `Featurizer.key` uses it for a scarcity count and
@@ -1091,6 +1111,12 @@ class WizAiCombatHandler:
         self._last_read = None
         #: rounds lost to a failed board read, surfaced at the end of a run
         self._read_failures = 0
+        #: when the previous round's handling finished, so the next one
+        #: can say how long the GAME took between them. See `handle_round`.
+        self._left_round_at = None
+        #: how long `decide()` took this round, filled in mid-round so
+        #: the report at the end can name it separately from the cast.
+        self._planned = None
         backend.attach_combat(self)
 
     # `CombatHandler` supplies get_members/get_cards/round_number/
@@ -1098,6 +1124,29 @@ class WizAiCombatHandler:
     # valid `combat` for the backend.
 
     async def handle_round(self):
+        """Time the round, then play it. See `_handle_round`.
+
+        A wrapper rather than a stopwatch threaded through the body,
+        because the body has five ways out -- lost read, pass, no such
+        card, no target, cast failure -- and a round that ended one of
+        those ways is precisely the round whose cost is worth knowing.
+        """
+        import time
+
+        entered = time.monotonic()
+        waited = (None if self._left_round_at is None
+                  else entered - self._left_round_at)
+        self._planned = None
+        try:
+            return await self._handle_round()
+        finally:
+            left = time.monotonic()
+            self._left_round_at = left
+            acted = (None if self._planned is None
+                     else left - entered - self._planned)
+            self.backend.report_round_timing(waited, self._planned, acted)
+
+    async def _handle_round(self):
         # Announced before anything is read: the coordinator only waits
         # for seats it knows are in a duel, so a wizard still walking to
         # the circle never stalls the ones already swinging -- and one
@@ -1113,6 +1162,9 @@ class WizAiCombatHandler:
         # wraps its whole round the same way (sprinty_combat.py:1783).
         # Without this the first cast silently does nothing.
         async with self.client.mouse_handler:
+            import time
+
+            began = time.monotonic()
             try:
                 decision = await self.backend.decide()
             except Exception as exc:
@@ -1131,9 +1183,11 @@ class WizAiCombatHandler:
                 # scored against the damage model. A round the run could
                 # not read has to appear as exactly that.
                 self._read_failures += 1
+                self._planned = time.monotonic() - began
                 await self._report_lost_round(exc)
                 await self.pass_button()
                 return
+            self._planned = time.monotonic() - began
             read = self.backend.last_read
             self._last_read = read
 

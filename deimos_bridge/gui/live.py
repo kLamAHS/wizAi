@@ -161,6 +161,10 @@ class _Seat:
         #: recently is the one that got ahead -- quest names have no
         #: order, but "who advanced last" does.
         self.goal_at = 0.0
+        #: since when this wizard has been standing at a press-X prompt
+        #: that is not the prompt the rest of the party is standing at.
+        #: See `LiveWorker._check_same_sigil`.
+        self.apart_since = None
         #: (zone, rounded position, goal) as last seen, and when it last
         #: CHANGED. A script that is stepping while none of these move is
         #: a script hammering something that is not working -- see
@@ -1610,7 +1614,10 @@ class LiveWorker(QThread):
             # own guards. That is checkable in the first thirty lines of
             # the file, and it belongs where somebody reads it after the
             # run as well as before.
-            blanks = scripts.unconfigured(self.script)
+            # Only the slots this party HAS. `Questee4` in a party of
+            # three is the script's fourth seat sitting empty, which is
+            # what it is meant to do -- see `scripts.unfilled`.
+            blanks = scripts.unfilled(self.script, len(party))
             if blanks and len(party) > 1:
                 said = (f"the script has {len(blanks)} setting(s) still at "
                         f"its placeholder value ("
@@ -1916,6 +1923,7 @@ class LiveWorker(QThread):
                 backend.on_school_mismatch = self._school_hook(seat)
                 backend.on_defeated = self._defeated_hook(seat)
                 backend.on_slow_cast = self._slow_cast_hook(seat)
+                backend.on_round_timing = self._round_timing_hook(seat)
                 # Bound late and read per round: the rate only becomes
                 # non-zero once this seat has finished a fight, and the
                 # coordinator asks again every round after that.
@@ -3193,6 +3201,125 @@ class LiveWorker(QThread):
         seat, target = await self._check_together()
         if seat is not None:
             await self._rejoin(seat, target)
+            return
+        await self._check_same_sigil()
+
+    #: How far apart two wizards at a press-X prompt can be and still be
+    #: at the SAME one. A sigil's own interact range is a few hundred
+    #: units (`questing.QUEST_RADIUS` is 750 for the comparable "is this
+    #: the quest NPC" question), so anything past this is two prompts.
+    SAME_SIGIL_WITHIN = 1200.0
+    #: ...and for how long, before it is said. Wizards reach a sigil at
+    #: different times and one still walking is not a split party.
+    SPLIT_AFTER = 45.0
+
+    async def _check_same_sigil(self):
+        """Everyone at a prompt, same zone, nowhere near each other.
+
+        The failure a live run sat in for the last twenty minutes of rev
+        1dcf4193, and the one the window could not name. All three
+        wizards were in Krokotopia/KT_Pyramid/KT_PalaceOfFire, all three
+        had "Press X to Enter" on screen, and the party never moved --
+        because two of them were at Edo's Chamber and one was at Akori's.
+        A sigil admits the wizards standing on IT. Pressing X at a
+        different one, forever, is not a stall any zone check can see:
+        the zone agrees, the goal agrees, and every wizard is doing
+        something.
+
+        Reported, not fixed. What puts the party back on one sigil is
+        the script's own friend teleport -- which is exactly what was
+        broken for this run (`Deimos/src/utils.py`, `_same_wizard`) --
+        and dragging wizards between sigils from out here would fight
+        the script for the wheel at the one moment it is about to work.
+        So this says the sentence the operator needed and leaves the
+        driving alone.
+        """
+        import time
+
+        from .. import party, questing
+
+        live = [s for s in self.seats if s.client is not None]
+        if len(live) < 2:
+            return
+        zones = {s.zone_seen for s in live}
+        if len(zones) != 1 or not next(iter(zones)):
+            return                       # not everyone in one zone
+        zone = next(iter(zones))
+
+        at_prompt, where = [], {}
+        for seat in live:
+            try:
+                if not await questing.near_interactable(seat.client):
+                    continue
+                spot = await party.position(seat.client)
+            except Exception:
+                continue
+            if spot is None:
+                continue
+            at_prompt.append(seat)
+            where[seat] = spot
+        if len(at_prompt) < 2:
+            for seat in live:
+                seat.apart_since = None
+            return
+
+        def apart(a, b):
+            dx = where[a].x - where[b].x
+            dy = where[a].y - where[b].y
+            return (dx * dx + dy * dy) ** 0.5
+
+        # The biggest cluster is the sigil the party is at; anyone
+        # further than one sigil's width from all of it is at another.
+        # No majority means every wizard is on its own, which is a
+        # different report and one this cannot make honestly.
+        best, near = None, []
+        for seat in at_prompt:
+            group = [s for s in at_prompt
+                     if apart(seat, s) <= self.SAME_SIGIL_WITHIN]
+            if best is None or len(group) > len(near):
+                best, near = seat, group
+        odd = [s for s in at_prompt if s not in near]
+        now = time.monotonic()
+        # A strict majority, so "the party's sigil" is a fact rather than
+        # a coin toss. Two and two is a party that has genuinely split
+        # down the middle, and naming either half the odd one out would
+        # be a guess dressed up as a diagnosis.
+        if not odd or len(near) < 2 or len(near) <= len(odd):
+            for seat in live:
+                seat.apart_since = None
+            return
+
+        for seat in live:
+            if seat not in odd:
+                seat.apart_since = None
+        for seat in odd:
+            if seat.apart_since is None:
+                seat.apart_since = now
+        if now - min(s.apart_since for s in odd) < self.SPLIT_AFTER:
+            return
+
+        held = now - min(s.apart_since for s in odd)
+        gap = max(apart(s, best) for s in odd)
+        names = " and ".join(s.name for s in odd)
+        with_them = " and ".join(s.name for s in near)
+        detail = (f"{names} {'have' if len(odd) > 1 else 'has'} been at a "
+                  f"different press-X prompt from "
+                  f"{with_them} for {held:.0f}s — same zone ({zone}), "
+                  f"{gap:,.0f} apart. Two sigils in one zone are two "
+                  f"dungeons, and nobody can enter until the party is on "
+                  f"one of them")
+        # One status line, but an entry in EVERY wizard's log: three
+        # exports get uploaded and each one has to explain the twenty
+        # minutes its wizard spent pressing X at nothing.
+        key = f"split-sigil:{zone}"
+        self._say_once(odd[0], key, detail)
+        n = odd[0].stage_errors.get(key, 0)
+        if n == 1 or n % 20 == 0:
+            for seat in live:
+                try:
+                    seat.tel.note_questing("split-sigil", detail)
+                except Exception:
+                    pass
 
     def _should_catch_up(self, seat):
         """Should this wizard abandon its own errand and go help?
@@ -3616,6 +3743,17 @@ class LiveWorker(QThread):
     def _recovered_cast_hook(self, seat):
         return lambda card, target, first: self._on_recovered_cast(
             card, target, first, seat)
+
+    def _round_timing_hook(self, seat):
+        """What the round cost, straight into its record.
+
+        Silent: a number per round in the status bar would bury the
+        messages that need reading. It goes in the export, where "the
+        median round waited 34s on the game and 4s on us" is one line
+        of the summary instead of a guess.
+        """
+        return lambda waited, planned, acted: seat.tel.time_round(
+            waited, planned, acted)
 
     def _defeated_hook(self, seat):
         """Say a defeat out loud AND write it down.

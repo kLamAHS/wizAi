@@ -230,6 +230,29 @@ SCHOOL_VARS = ("Main_Account_School", "Questee2_School",
                "Questee3_School", "Questee4_School")
 
 
+def unfilled(source: str, party_size=None):
+    """Placeholders a party of this size could actually have filled in.
+
+    `Questee4` in a three-wizard party is not an unconfigured setting;
+    there is no fourth wizard to put in it, and the script's own guard
+    on it is doing exactly what it is for. Reporting it as a defect is
+    how a live run at rev 1dcf4193 opened its export with
+
+        the script has 2 setting(s) still at its placeholder value
+        (Questee4, Questee4_School)
+
+    which reads as the cause of everything after it and was nothing at
+    all. `party_size=None` keeps the whole list, for a pre-flight on a
+    script with no party attached yet.
+    """
+    blanks = unconfigured(source)
+    if party_size is None:
+        return blanks
+    spare = set(ACCOUNT_VARS[int(party_size):])
+    spare |= set(SCHOOL_VARS[int(party_size):])
+    return [(name, value) for name, value in blanks if name not in spare]
+
+
 def configure(source: str, wizards):
     """(source, filled). Put the party's real names into the script.
 
@@ -279,7 +302,7 @@ def configure(source: str, wizards):
     return source, filled
 
 
-def check(source: str):
+def check(source: str, party_size=None):
     """(ok, reason) — does this script compile?
 
     Worth doing before a run rather than after: a typo on line 40 of a
@@ -316,7 +339,7 @@ def check(source: str):
     # names, and it is the operator's script to run. But an unconfigured
     # party script cannot regroup itself, and that is worth knowing
     # before rather than after -- see `unconfigured`.
-    blanks = unconfigured(source)
+    blanks = unfilled(source, party_size)
     if blanks:
         note += ("\n\n⚠ " + f"{len(blanks)} setting(s) are still at the "
                  f"script's placeholder value: "

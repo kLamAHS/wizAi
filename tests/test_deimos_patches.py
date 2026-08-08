@@ -379,3 +379,57 @@ def test_the_name_match_runs_as_written():
     assert not same("konstantin v.", "sebastian")
     assert not same("sebastian s.", "sebastian jones")
     assert not same("", "sebastian")
+
+
+# ------------------------------------------------- a query is not a corpse
+WW_UTILS = "Deimos/libs/wizwalker/wizwalker/utils.py"
+
+
+def test_a_failed_liveness_query_is_not_a_dead_client():
+    """Upstream `check_if_process_running` is::
+
+        exit_code = ctypes.wintypes.DWORD()
+        kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+        return exit_code.value == 259
+
+    The BOOL is discarded. `GetExitCodeProcess` returns zero on failure
+    and leaves `exit_code` at 0, which is not 259, which reads as "the
+    client has exited" -- and `MemoryReader.read_bytes` turns that into
+    `ClientClosedError`, which the deimoslang VM has no handler for, so
+    the instruction re-enters and throws for the rest of the run. A live
+    party did exactly that for twenty-five attempts with the client
+    still on screen.
+    """
+    import ctypes
+    import ctypes.wintypes
+
+    src = _source(WW_UTILS)
+    body = src[src.index("def check_if_process_running"):]
+    body = body[:body.index("\ndef ", 1)]
+
+    calls = []
+
+    class _Kernel32:
+        def __init__(self, ok, code):
+            self._ok, self._code = ok, code
+
+        def GetExitCodeProcess(self, handle, out):
+            calls.append(handle)
+            if self._code is not None:
+                ctypes.cast(out, ctypes.POINTER(
+                    ctypes.wintypes.DWORD)).contents.value = self._code
+            return self._ok
+
+    def run(ok, code):
+        ns = {"ctypes": ctypes, "kernel32": _Kernel32(ok, code)}
+        exec(body, ns)
+        return ns["check_if_process_running"](1234)
+
+    # the query failed: inconclusive, and the safe answer is "running"
+    assert run(0, None) is True
+    # the query worked and said STILL_ACTIVE
+    assert run(1, 259) is True
+    # the query worked and reported a real exit code -- this one IS dead
+    assert run(1, 0) is False
+    assert run(1, 1) is False
+    assert calls, "the patch stopped calling GetExitCodeProcess at all"

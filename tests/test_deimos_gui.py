@@ -221,6 +221,78 @@ def test_unresolved_names_are_counted_across_rounds():
     assert tel.unresolved_names() == {"Ghost Spell": 2}
 
 
+def test_a_round_records_what_it_cost():
+    """"It is very slow" was unanswerable from an export: rounds carried
+    no time at all, so a 46-second round and a 12-second one were the
+    same file. Three numbers because they have three owners — the game's
+    animation, our planning, our clicking — and they call for opposite
+    fixes."""
+    tel = Telemetry()
+    tel.start_fight()
+    rec = tel.observe(_Decision("Sunbird"), _read(2000, 1))
+    tel.time_round(waited=34.0, planned=4.25, acted=1.5)
+    assert rec.waited == 34.0
+    assert rec.planned == 4.25
+    assert rec.acted == 1.5
+    assert rec.at is not None, "a round with no clock cannot be lined up"
+
+
+def test_a_round_the_board_could_not_be_read_for_is_still_timed():
+    """It is the round most worth timing. `_pending` is never set for
+    one — it is the damage-settling slot, and a lost round has no damage
+    — so pacing rides its own pointer."""
+    tel = Telemetry()
+    tel.start_fight()
+    tel.observe_lost_round(3, "read failed")
+    tel.time_round(waited=50.0, planned=9.0, acted=None)
+    assert tel.rounds[-1].waited == 50.0
+    assert tel.rounds[-1].planned == 9.0
+
+
+def test_pacing_reports_the_median_not_the_mean():
+    """One round parked in a stalled waitfor drags a mean past every
+    ordinary round, and the ordinary round is the complaint."""
+    tel = Telemetry()
+    tel.start_fight()
+    for n, waited in enumerate([10.0, 12.0, 11.0, 600.0], start=1):
+        tel.observe(_Decision("Sunbird"), _read(2000 - n, n))
+        tel.time_round(waited=waited, planned=2.0, acted=1.0)
+    pace = tel.pacing()
+    assert pace["rounds"] == 4
+    assert pace["waited"] == pytest.approx(11.5)
+    assert pace["planned"] == pytest.approx(2.0)
+
+
+def test_pacing_does_not_measure_across_a_fight_boundary():
+    """The gap between the last round of one duel and the first of the
+    next is questing, not a round — and it is minutes long."""
+    tel = Telemetry()
+    tel.start_fight()
+    tel.observe(_Decision("Sunbird"), _read(2000, 1)).at = 10.0
+    tel.observe(_Decision("Sunbird"), _read(1900, 2)).at = 25.0
+    tel.start_fight()
+    tel.observe(_Decision("Sunbird"), _read(2000, 1)).at = 900.0
+    assert tel.pacing()["round_to_round"] == pytest.approx(15.0)
+
+
+def test_pacing_says_nothing_rather_than_zero_when_nothing_was_timed():
+    tel = Telemetry()
+    tel.start_fight()
+    tel.observe(_Decision("Sunbird"), _read(2000, 1))
+    pace = tel.pacing()
+    assert pace["waited"] is None and pace["planned"] is None
+
+
+def test_the_questing_log_and_the_rounds_share_one_clock():
+    """Otherwise "the party was forty seconds a round while the desync
+    was open" cannot be asked of the export at all."""
+    tel = Telemetry()
+    tel.note_questing("zone", "somewhere -> elsewhere")
+    tel.start_fight()
+    rec = tel.observe(_Decision("Sunbird"), _read(2000, 1))
+    assert rec.at >= tel.questing[0]["at"]
+
+
 def test_a_broken_listener_cannot_stop_a_fight():
     tel = Telemetry()
     tel.subscribe(lambda event, payload: 1 / 0)
@@ -4248,6 +4320,11 @@ def _stub_handler(decide, read, card=None):
         def report_lost_round(self, number, reason):
             self.lost.append((number, reason))
 
+        def report_round_timing(self, waited, planned, acted):
+            self.timed.append((waited, planned, acted))
+
+    _Backend.timed = []
+
     class _Client:
         mouse_handler = _Mouseless()
 
@@ -4256,6 +4333,8 @@ def _stub_handler(decide, read, card=None):
     handler.backend = _Backend()
     handler._last_read = None
     handler._read_failures = 0
+    handler._left_round_at = None
+    handler._planned = None
     handler.pass_button = lambda: _tick(passes)
     handler.round_number = lambda: _value(4)
     handler._pick_card = lambda _read, _name: card
@@ -4289,6 +4368,62 @@ def test_the_handler_reports_a_failed_cast_rather_than_swallowing_it():
     assert handler.backend.gave_up and \
         "nothing else in hand" in handler.backend.gave_up[0], \
         "a passed round has to say whether anything else was tried"
+
+
+def test_every_way_out_of_a_round_still_says_what_it_cost():
+    """The round that ends badly is the one whose cost matters, and
+    `_handle_round` has five ways out. So the stopwatch is a wrapper
+    with a `finally`, not a line threaded through the body."""
+    import asyncio
+
+    from deimos_bridge.live_backend import PolicyDecision
+
+    class _Card:
+        async def cast(self, target, **kw):
+            raise RuntimeError("the board moved")
+
+    async def _cast_failed():
+        return PolicyDecision(card_name="Sunbird", target_index=0)
+
+    async def _read_failed():
+        raise RuntimeError("could not read the board")
+
+    async def _passed():
+        return PolicyDecision(passing=True, reason="nothing worth casting")
+
+    for decide, card in ((_cast_failed, _Card()), (_read_failed, None),
+                         (_passed, None)):
+        handler, _passes = _stub_handler(decide, read=object(), card=card)
+        handler.backend.timed = []
+        asyncio.run(handler.handle_round())
+        assert len(handler.backend.timed) == 1, \
+            f"{decide.__name__} left the round untimed"
+        waited, planned, acted = handler.backend.timed[0]
+        assert waited is None, "there was no previous round to wait after"
+        assert planned is not None and planned >= 0.0
+        assert acted is not None and acted >= 0.0
+
+
+def test_the_wait_is_measured_from_the_last_round_leaving_not_arriving():
+    """`waited` is the GAME's time — animations, the other wizards, the
+    planning timer. Measured from when we let go of the previous round,
+    so our own planning is never counted twice."""
+    import asyncio
+
+    from deimos_bridge.live_backend import PolicyDecision
+
+    async def _pass():
+        return PolicyDecision(passing=True, reason="pass")
+
+    handler, _passes = _stub_handler(_pass, read=object())
+    handler.backend.timed = []
+    asyncio.run(handler.handle_round())
+    left = handler._left_round_at
+    assert left is not None
+    asyncio.run(handler.handle_round())
+    assert handler.backend.timed[1][0] is not None, \
+        "the second round did not measure the gap before it"
+    assert handler.backend.timed[1][0] >= 0.0
 
 
 def test_a_round_lost_to_a_failed_read_goes_through_the_record():
@@ -6139,7 +6274,7 @@ def test_the_cast_uses_the_backends_click_pacing():
 
     from deimos_bridge import live_backend
 
-    src = inspect.getsource(live_backend.WizAiCombatHandler.handle_round)
+    src = inspect.getsource(live_backend.WizAiCombatHandler._handle_round)
     assert "sleep_time=self.backend.cast_time" in src
 
 
@@ -12172,3 +12307,192 @@ def test_the_heartbeat_reads_the_zone_when_nothing_else_has(monkeypatch):
     asyncio.run(worker._heartbeat(seat))
     beat = [e for e in seat.tel.questing if e["kind"] == "heartbeat"][0]
     assert "KT_Chamber" in beat["detail"]
+
+
+# --------------------------------------- two sigils in one zone
+#
+# What the last twenty minutes of rev 1dcf4193 was. Three wizards in
+# Krokotopia/KT_Pyramid/KT_PalaceOfFire, all three with "Press X to
+# Enter" up, party frozen -- two at Edo's Chamber and one at Akori's. No
+# zone check can see it: the zone agrees, the goal agrees, and every
+# wizard is doing something.
+
+def _sigil_party(spots, prompts=None):
+    """A worker whose seats stand at the given positions, all in one zone.
+
+    `spots` are (x, y) pairs; `prompts` says which seats have the game's
+    press-X window up (default: all of them).
+    """
+    class _XY:
+        def __init__(self, x, y):
+            self.x, self.y, self.z = float(x), float(y), 0.0
+
+    worker, _read = _zoned_party(["KT_PalaceOfFire"] * len(spots))
+    for seat, (x, y) in zip(worker.seats, spots):
+        seat.zone_seen = "KT_PalaceOfFire"
+        seat._spot = _XY(x, y)
+    shown = [True] * len(spots) if prompts is None else list(prompts)
+    for seat, up in zip(worker.seats, shown):
+        seat._prompt = up
+    return worker
+
+
+def _look_at_sigils(worker, monkeypatch):
+    import asyncio
+
+    from deimos_bridge import party, questing
+
+    def find(client):
+        return next(s for s in worker.seats if s.client is client)
+
+    async def near(client):
+        return find(client)._prompt
+
+    async def where(client):
+        return find(client)._spot
+
+    monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(party, "position", where)
+    asyncio.run(worker._check_same_sigil())
+    return [e for s in worker.seats for e in s.tel.questing
+            if e["kind"] == "split-sigil"]
+
+
+def test_two_sigils_in_one_zone_are_named(monkeypatch):
+    """The party is not stalled, stranded, off-questline or desynced.
+    It is standing on two different doors."""
+    import time
+
+    worker = _sigil_party([(0, 0), (100, 0), (5000, 0)])
+    assert _look_at_sigils(worker, monkeypatch) == [], \
+        "it fired before the clock had run"
+    for seat in worker.seats:
+        if seat.apart_since is not None:
+            seat.apart_since -= worker.SPLIT_AFTER + 1
+    said = _look_at_sigils(worker, monkeypatch)
+    assert len(said) == len(worker.seats), \
+        "every wizard's export has to explain its own twenty minutes"
+    detail = said[0]["detail"]
+    assert "w2" in detail and "w0 and w1" in detail
+    assert "KT_PalaceOfFire" in detail
+
+
+def test_a_party_on_one_sigil_is_left_alone(monkeypatch):
+    worker = _sigil_party([(0, 0), (150, 80), (60, 200)])
+    for seat in worker.seats:
+        seat.apart_since = 1.0                 # as if it had been running
+    assert _look_at_sigils(worker, monkeypatch) == []
+    assert all(s.apart_since is None for s in worker.seats)
+
+
+def test_a_wizard_not_at_a_prompt_at_all_is_not_a_split(monkeypatch):
+    """It is walking, or fighting, or stuck — all of which have their own
+    report. This one is only about wizards that are each at a door."""
+    worker = _sigil_party([(0, 0), (100, 0), (5000, 0)],
+                          prompts=[True, True, False])
+    for seat in worker.seats:
+        seat.apart_since = 1.0
+    assert _look_at_sigils(worker, monkeypatch) == []
+
+
+def test_three_wizards_at_three_different_prompts_is_not_reported(
+        monkeypatch):
+    """No majority means no answer to "which sigil is the party's", and
+    saying one of them is the odd one out would be a guess."""
+    worker = _sigil_party([(0, 0), (5000, 0), (10000, 0)])
+    for seat in worker.seats:
+        seat.apart_since = 1.0
+    assert _look_at_sigils(worker, monkeypatch) == []
+
+
+def test_a_party_in_different_zones_is_the_other_check(monkeypatch):
+    """Different zones is `_check_together`, which fetches the straggler.
+    This one must not double-report it."""
+    worker = _sigil_party([(0, 0), (100, 0), (5000, 0)])
+    worker.seats[2].zone_seen = "KT_Pyramid"
+    for seat in worker.seats:
+        seat.apart_since = 1.0
+    assert _look_at_sigils(worker, monkeypatch) == []
+
+
+def test_walking_to_the_sigil_clears_the_clock(monkeypatch):
+    """A wizard that arrives late is not a split party — it is a wizard
+    that arrived late, and the clock must not carry over."""
+    worker = _sigil_party([(0, 0), (100, 0), (5000, 0)])
+    _look_at_sigils(worker, monkeypatch)
+    assert worker.seats[2].apart_since is not None
+    worker.seats[2]._spot.x = 120.0                 # it walked over
+    assert _look_at_sigils(worker, monkeypatch) == []
+    assert worker.seats[2].apart_since is None
+
+
+def test_the_worker_wires_the_round_clock_to_the_export():
+    """A hook nothing installs measures nothing. The wiring is one line
+    in `_go` and it is the only thing between `report_round_timing` and
+    a file that can answer "why is it slow"."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._go)
+    assert "backend.on_round_timing = self._round_timing_hook(seat)" in src, \
+        "rounds are being played without recording what they cost"
+
+
+def test_the_round_clock_writes_through_to_the_record():
+    """Not a source check. The hook, run, against a real Telemetry."""
+    from deimos_bridge.gui.live import LiveWorker
+    from deimos_bridge.telemetry import Telemetry
+
+    class _Seat:
+        tel = Telemetry()
+
+    seat = _Seat()
+    seat.tel.start_fight()
+    rec = seat.tel.observe(_Decision("Sunbird"), _read(2000, 1))
+    LiveWorker._round_timing_hook(object(), seat)(31.0, 3.5, 0.9)
+    assert (rec.waited, rec.planned, rec.acted) == (31.0, 3.5, 0.9)
+
+
+def test_a_party_split_down_the_middle_names_no_odd_one_out(monkeypatch):
+    """Two at each sigil. Both halves are stuck and neither is "the
+    party" — calling one of them the straggler would be a coin toss
+    reported as a diagnosis."""
+    worker = _sigil_party([(0, 0), (100, 0), (5000, 0), (5100, 0)])
+    for seat in worker.seats:
+        seat.apart_since = 1.0
+    assert _look_at_sigils(worker, monkeypatch) == []
+
+
+def test_the_fourth_seat_of_a_party_of_three_is_not_unconfigured():
+    """Rev 1dcf4193's export opened with
+
+        the script has 2 setting(s) still at its placeholder value
+        (Questee4, Questee4_School)
+
+    which reads as the cause of the stall below it and was nothing —
+    there was no fourth wizard, and the script's guard on it was doing
+    exactly its job."""
+    from deimos_bridge.scripts import unconfigured, unfilled
+
+    source = (
+        '###deimos_expertmode\n'
+        'var Main_Account = "QuestingAccountName"\n'
+        'var Questee2 = "QuestingAccountName2"\n'
+        'var Questee4 = "QuestingAccountName4"\n'
+        'var Questee4_School = "SchoolPlaceholder"\n'
+        'if NOT Main_Account = "QuestingAccountName" then\n'
+        'if NOT Questee2 = "QuestingAccountName2" then\n'
+        'if NOT Questee4 = "QuestingAccountName4" then\n'
+        'if NOT Questee4_School = "SchoolPlaceholder" then\n')
+
+    everything = [n for n, _v in unconfigured(source)]
+    assert "Questee4" in everything, "the fixture is not exercising the case"
+
+    named = [n for n, _v in unfilled(source, 3)]
+    assert "Questee4" not in named and "Questee4_School" not in named
+    assert "Main_Account" in named and "Questee2" in named
+
+    # ...and with no party attached, nothing is filtered: a pre-flight on
+    # a pasted script does not know how many wizards will run it.
+    assert [n for n, _v in unfilled(source, None)] == everything
