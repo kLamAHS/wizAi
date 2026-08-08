@@ -1072,12 +1072,14 @@ class MainWindow(QMainWindow):
         # chart, a second chart and a table, which is taller than a laptop
         # window -- and Qt's answer to "does not fit" is to squeeze all
         # three until none of them is readable.
+        self.questing_panel = self._build_questing_tab()
         for panel, name in ((self.board, "Board"),
                             (self.decisions, "Decisions"),
                             (self.model, "Damage model"),
                             (self.learning, "Learning"),
                             (self.naming, "Naming"),
                             (self.runs, "Runs"),
+                            (self.questing_panel, "Questing"),
                             (self.party, "Hivemind")):
             tabs.addTab(scrollable(panel), name)
         self.tabs = tabs
@@ -1488,6 +1490,17 @@ class MainWindow(QMainWindow):
         self.script_btn = QPushButton("Paste script…")
         self.script_btn.clicked.connect(self.on_edit_script)
         script_row.addWidget(self.script_btn)
+        self.solo_script = QCheckBox("Solo pilot")
+        self.solo_script.setToolTip(
+            "Run the script for the leader ONLY; the other wizards follow "
+            "it and join its fights instead of being driven by the script. "
+            "The multi-wizard failures — friend teleports that miss, "
+            "desync, catch-ups — are all in the script coordinating a "
+            "party, and these scripts are built to quest solo when their "
+            "account settings stay at placeholders. Followers stay by "
+            "teleporting to the leader, so they lag on Talk/Collect steps "
+            "by design: they are combat support. Read at Play live.")
+        script_row.addWidget(self.solo_script)
         self.script_lab = _label("no script", PALETTE["muted"])
         script_row.addWidget(self.script_lab)
         script_row.addStretch()
@@ -2223,6 +2236,123 @@ class MainWindow(QMainWindow):
                 names[i] = getattr(seat, "wizard_name", None) or ""
         return list(zip(names, schools))
 
+    #: the Questing tab's modes, as (auto_quest, use_script, solo_script).
+    #: One dropdown instead of three checkboxes scattered across the
+    #: config box, because the checkboxes compose into nonsense —
+    #: auto-quest AND a script is two things walking one wizard — and
+    #: the tab is where somebody decides HOW the party quests.
+    QUEST_MODES = (
+        ("No questing — combat only", (False, False, False)),
+        ("Each wizard quests itself (wizAi's navigator)",
+         (True, False, False)),
+        ("Script drives the whole party", (False, True, False)),
+        ("Solo pilot — script drives the leader; the others follow, "
+         "fight and turn in their own steps", (False, True, True)),
+    )
+
+    def _build_questing_tab(self):
+        """The one place questing is chosen and watched.
+
+        The controls existed but were scattered — auto-quest here, the
+        script row there, solo pilot beside it — and the live state
+        existed only as log lines read after the fact. This tab is both:
+        pick the mode at the top, watch every wizard's quest underneath.
+        """
+        from .panels import _label, _table
+
+        panel = QWidget()
+        v = QVBoxLayout(panel)
+
+        row = QHBoxLayout()
+        row.addWidget(_label("Mode", PALETTE["muted"]))
+        self.quest_mode = QComboBox()
+        for name, _flags in self.QUEST_MODES:
+            self.quest_mode.addItem(name)
+        self.quest_mode.currentIndexChanged.connect(self.on_quest_mode)
+        row.addWidget(self.quest_mode, 2)
+        row.addWidget(_label("Leader", PALETTE["muted"]))
+        self.leader_pick = QComboBox()
+        for i in range(MAX_WIZARDS):
+            self.leader_pick.addItem(f"wizard {i + 1}")
+        self.leader_pick.setToolTip(
+            "Who sets the pace: the solo pilot's scripted wizard, and the "
+            "wizard followers chase. Read at Play live.")
+        row.addWidget(self.leader_pick)
+        self.quest_script_btn = QPushButton("Choose script…")
+        self.quest_script_btn.clicked.connect(self.on_edit_script)
+        row.addWidget(self.quest_script_btn)
+        self.quest_script_lab = _label("no script", PALETTE["muted"])
+        row.addWidget(self.quest_script_lab)
+        row.addStretch()
+        v.addLayout(row)
+
+        act = QHBoxLayout()
+        for label, action in (("Teleport all to leader", "teleport"),
+                              ("Advance dialogue (all)", "dialogue")):
+            btn = QPushButton(label)
+            btn.clicked.connect(
+                lambda _c, a=action: self._quest_request(a))
+            act.addWidget(btn)
+        act.addStretch()
+        v.addLayout(act)
+
+        self.quest_table = _table(["Wizard", "Doing", "Zone", "Quest",
+                                   "Goal", "Line", "Marker", "Still for"])
+        v.addWidget(self.quest_table)
+        v.addStretch()
+
+        # The checkboxes stay the source of truth — flipping one
+        # anywhere updates the dropdown, and the dropdown sets them.
+        for box in (self.auto_quest, self.use_script, self.solo_script):
+            box.toggled.connect(self._sync_quest_mode)
+        self._sync_quest_mode()
+        return panel
+
+    def on_quest_mode(self, index):
+        auto, script, solo = self.QUEST_MODES[index][1]
+        self.auto_quest.setChecked(auto)
+        self.use_script.setChecked(script)
+        self.solo_script.setChecked(solo)
+
+    def _sync_quest_mode(self, _on=None):
+        """Point the dropdown at whatever the checkboxes now say."""
+        flags = (self.auto_quest.isChecked(), self.use_script.isChecked(),
+                 self.solo_script.isChecked())
+        for i, (_name, mode) in enumerate(self.QUEST_MODES):
+            if mode == flags:
+                self.quest_mode.blockSignals(True)
+                self.quest_mode.setCurrentIndex(i)
+                self.quest_mode.blockSignals(False)
+                return
+        # A combination the list does not name (auto-quest AND a script,
+        # say, from the raw checkboxes) — leave the dropdown alone.
+
+    def _quest_request(self, action):
+        if self.live is None or not self.live.isRunning():
+            self.status.setText("not connected — press Play live first")
+            return
+        self.live.request(action)
+
+    def on_seat_quest(self, index, row):
+        """One wizard's live questing state into the Questing table."""
+        from .panels import _cell
+
+        t = self.quest_table
+        if t.rowCount() <= index:
+            t.setRowCount(index + 1)
+        marker = row.get("marker")
+        idle = row.get("idle") or 0.0
+        cells = (row.get("name", ""), row.get("doing", ""),
+                 row.get("zone", "").rsplit("/", 1)[-1],
+                 row.get("quest", ""), row.get("goal", ""),
+                 row.get("line", ""),
+                 "" if marker is None else
+                 ("other zone" if marker > 20000 else f"{marker:,.0f}"),
+                 f"{idle / 60:.0f} min" if idle >= 60 else "")
+        for col, text in enumerate(cells):
+            color = PALETTE["bad"] if (col == 7 and idle >= 300) else None
+            t.setItem(index, col, _cell(str(text), color))
+
     def on_edit_script(self):
         from .scriptdialog import edit_script
         source = edit_script(self, self.script_source,
@@ -2232,6 +2362,7 @@ class MainWindow(QMainWindow):
             lines = len([ln for ln in source.splitlines() if ln.strip()])
             self.script_lab.setText(f"{lines} line(s) loaded" if lines
                                     else "no script")
+            self.quest_script_lab.setText(self.script_lab.text())
             self.use_script.setChecked(bool(lines))
             self._push_script()
 
@@ -2389,7 +2520,9 @@ class MainWindow(QMainWindow):
                                hotkeys=self.hotkey_bindings(),
                                continuation=self.continuations[0],
                                seats=rest,
-                               follow_leader=self.follow_leader.isChecked())
+                               follow_leader=self.follow_leader.isChecked(),
+                               solo_script=self.solo_script.isChecked(),
+                               leader=self.leader_pick.currentIndex())
         self.live.status.connect(self.on_live_status)
         # Per wizard as well as into the one-line status bar: with four
         # of them talking the bar holds whichever spoke last, and a
@@ -2408,6 +2541,7 @@ class MainWindow(QMainWindow):
         self.live.seat_policy_changed.connect(self.on_seat_policy_installed)
         self.live.party_plan.connect(self.on_party_plan)
         self.live.seat_named.connect(self.on_seat_named)
+        self.live.seat_quest.connect(self.on_seat_quest)
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.unhook_btn.setEnabled(True)

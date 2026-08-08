@@ -222,6 +222,14 @@ class _Seat:
         #: when this wizard last tried to catch up with the leader. See
         #: `LiveWorker.FOLLOW_EVERY`.
         self.followed_at = 0.0
+        #: when this follower last took its OWN quest step, so the sync
+        #: does not hammer the marker. See `LiveWorker._sync_follower`.
+        self.synced_at = 0.0
+        #: the goal the sync is working on and since when, so a step
+        #: that will not turn in has a bounded budget before the
+        #: follower goes back to the pilot.
+        self.sync_goal = ""
+        self.sync_began = 0.0
         #: since when this wizard has been in a different zone from the
         #: rest of the party, and which zone that is. See
         #: `LiveWorker._check_together`.
@@ -303,6 +311,9 @@ class LiveWorker(QThread):
     seat_policy_changed = pyqtSignal(int, str)
     #: one round agreed by the whole party; payload is a `PartyPlan`
     party_plan = pyqtSignal(object)
+    #: one wizard's live questing state, every service tick — the feed
+    #: behind the Questing tab. (seat index, dict); see `_quest_row`.
+    seat_quest = pyqtSignal(int, object)
     #: (seat, the wizard's in-game name), once a duel has revealed it
     seat_named = pyqtSignal(int, str)
 
@@ -312,7 +323,8 @@ class LiveWorker(QThread):
                  buy_potions=False, script="",
                  hotkeys=None, continuation="", seats=None,
                  coordinate=True, passes=2, barrier=None,
-                 follow_leader=True, leader=0, label_windows=True):
+                 follow_leader=True, leader=0, label_windows=True,
+                 solo_script=False):
         super().__init__()
         # Seat 0 is always the arguments this was called with, so the
         # single-wizard signature is untouched; `seats` adds the rest.
@@ -367,6 +379,16 @@ class LiveWorker(QThread):
         #: see `deimos_bridge/party.py`.
         self.leader = max(0, min(int(leader), len(self.seats) - 1))
         self.follow_leader = bool(follow_leader)
+        #: solo-pilot mode: the script drives ONLY the leader, and the
+        #: rest of the party follows it and joins its fights. The whole
+        #: class of failure this run has been fighting -- friend
+        #: teleports that miss, one instruction pointer for four
+        #: wizards, desync, catch-ups -- is the script COORDINATING a
+        #: party, and the presets are documented to run solo when their
+        #: account settings stay at placeholders. So: coordinate with
+        #: wizAi's follow + hivemind instead, and let the script do the
+        #: one thing it is good at, which is the route.
+        self.solo_script = bool(solo_script)
         #: write which seat a client is onto its own title bar. Four
         #: identical "Wizard101" windows cannot be told apart, and the
         #: seat numbering only exists inside this program.
@@ -684,6 +706,14 @@ class LiveWorker(QThread):
                     # of the script's instructions, which is how a
                     # scripted run ends up standing in a doorway.
                     pass
+                elif self._follows(seat) and self._solo_pilot():
+                    # A solo-pilot follower is not merely an escort: it
+                    # is levelling the SAME questline. It turns its own
+                    # steps in at the places the pilot brings it to, and
+                    # follows the rest of the time. See `_sync_follower`.
+                    await self._stage(seat, "questing with the pilot",
+                                      self._sync_follower(client, seat),
+                                      wheel=True)
                 elif self._follows(seat):
                     # A follower does not quest. Two wizards taking their
                     # own quests walk to two places, and then the party
@@ -1054,9 +1084,22 @@ class LiveWorker(QThread):
         `p1`..`p4`, so while it is running none of them should also be
         taking their own quest or chasing the leader. Two things walking
         one wizard is how a scripted run ends up in a doorway.
+
+        Except in solo-pilot mode, where the VM was built over the
+        leader's client alone -- the others are not `p2`..`p4` at all,
+        so nothing scripted ever moves them and they are free to follow.
         """
         runner = self.seats[0].runner
-        return runner is not None and runner.running
+        if runner is None or not runner.running:
+            return False
+        if self.solo_script:
+            return seat.index == self.leader
+        return True
+
+    def _solo_pilot(self):
+        """Is this run a solo-pilot script run with followers?"""
+        return (self.solo_script and bool(self.script)
+                and len(self.seats) > 1)
 
     def _scripted(self, seat):
         """Does this seat run the party's script?
@@ -1624,6 +1667,27 @@ class LiveWorker(QThread):
         seat.script_said = False
         party = [s.client for s in self.seats if s.client is not None]
         try:
+            if self._solo_pilot():
+                # The pilot's client and nobody else's. `solo_source`
+                # puts the account settings back to their placeholders
+                # -- the dialog may have filled real names in -- so the
+                # script takes its own documented solo path and every
+                # p2..p4 branch is skipped by its own guards. The rest
+                # of the party is wizAi's to move: `_follows` says they
+                # chase the pilot, and the hivemind has them the moment
+                # they step into its duels.
+                pilot = self.seats[self.leader]
+                source, reset = scripts.solo_source(self.script)
+                seat.runner = scripts.make_runner(
+                    [pilot.client or client], source, solo=True)
+                self._say(seat,
+                          f"script loaded — solo pilot: it drives "
+                          f"{pilot.name} alone"
+                          + (f" ({len(reset)} account setting(s) reset to "
+                             f"placeholders so it quests solo)"
+                             if reset else "")
+                          + "; the others follow and fight")
+                return
             seat.runner = scripts.make_runner(party or [client], self.script)
             self._say(seat, "script loaded"
                       + (f" — driving {len(party)} wizard(s)"
@@ -1672,7 +1736,15 @@ class LiveWorker(QThread):
             self._say(seat, f"script not loaded: {exc}")
 
     def _follows(self, seat):
-        """Is this seat a follower rather than the one setting the pace?"""
+        """Is this seat a follower rather than the one setting the pace?
+
+        In solo-pilot mode every non-leader follows, whatever the
+        follow checkbox says -- following IS the mode. A follower that
+        stood still would just watch the pilot walk away, and one that
+        took its own quest would coordinate beautifully with nobody.
+        """
+        if self._solo_pilot():
+            return seat.index != self.leader
         return (self.follow_leader and len(self.seats) > 1
                 and seat.index != self.leader)
 
@@ -1712,6 +1784,87 @@ class LiveWorker(QThread):
             # makes the whole party pointless, so it is said -- but
             # thinned, because the cause is usually standing.
             self._say_once(seat, "follow", why)
+
+    #: goals a follower must NOT chase on its own. A defeat step is
+    #: satisfied by the PILOT's duels -- everyone in the circle who has
+    #: the quest gets the kill -- and a follower that hops to its own
+    #: defeat marker starts a fight alone, which is how Phönix died at
+    #: rev 3d026ada. Talk, collect and explore steps are per wizard and
+    #: are exactly what a follower has to do for itself.
+    FIGHT_GOALS = ("defeat", "kill")
+    #: how long a follower may work one of its own steps before going
+    #: back to the pilot. A talk turn-in is seconds; a step still open
+    #: after this is one this pass cannot finish.
+    SYNC_GIVE_UP = 45.0
+
+    async def _sync_follower(self, client, seat=None):
+        """One tick of a solo-pilot follower: same questline, no lag.
+
+        The operator's correction to the first cut of this mode, which
+        let followers drift behind: "that wont work for leveling 3
+        accounts at the same time ... they should all be on the same
+        questline or else you're doing 3x the questing".
+
+        They can be, because of how Wizard101 shares quest credit:
+
+          * Defeat steps: everyone in the duel circle with the quest
+            gets the kill. The follow already puts followers in the
+            pilot's fights, so these advance for free.
+          * Talk / collect / explore steps: per wizard -- and the pilot
+            has just walked the party to the exact objective. All the
+            follower has to do is turn its OWN step in while standing
+            there.
+
+        So, in priority order: finish a dialogue that is open; take the
+        wizard's own step when its own marker is within this zone and
+        the step is not a fight; otherwise follow the pilot. Taking a
+        step first costs nothing in keeping up, because the follow is a
+        teleport -- a follower that pauses ten seconds to turn a quest
+        in lands back on the pilot the next follow tick.
+        """
+        import time
+
+        from .. import questing
+
+        seat = self._seat_for(client) if seat is None else seat
+        if await questing.in_battle(client):
+            return                       # the policy owns this wizard now
+        if await questing.in_dialogue(client):
+            n, _why = await questing.advance_dialogue(client)
+            if n:
+                self._say_once(seat, "sync-dialogue",
+                               f"{seat.name} turned its own step in")
+            return
+        away = getattr(seat, "marker_away", None)
+        goal = (seat.goal or "").strip().lower()
+        fight = any(goal.startswith(w) for w in self.FIGHT_GOALS)
+        now = time.monotonic()
+        if away is not None and away <= self.MARKER_IN_ZONE and not fight:
+            # Its own objective is at hand and it is not a fight: work
+            # the step, and do NOT fall through to the follow meanwhile
+            # -- a teleport back to the pilot mid-turn-in is the follow
+            # undoing the sync. `hop_once` is the same hardened
+            # teleport-and-interact the catch-up uses, and marker-in-
+            # zone is the reachability test rev 1843e387 taught.
+            if goal != seat.sync_goal:
+                seat.sync_goal, seat.sync_began = goal, now
+            if now - seat.sync_began > self.SYNC_GIVE_UP:
+                # The step did not turn in. Staying here forever is a
+                # follower lost to the party; go back to the pilot and
+                # let the next pass at this objective try again.
+                self._say_once(seat, f"sync-gave-up:{goal[:24]}",
+                               f"{seat.name} could not finish its own step "
+                               f"({seat.goal}) in {self.SYNC_GIVE_UP:.0f}s — "
+                               f"following the pilot again")
+            else:
+                if now - seat.synced_at >= self.FOLLOW_EVERY:
+                    seat.synced_at = now
+                    await questing.hop_once(
+                        client,
+                        on_status=lambda m: self._say_once(
+                            seat, f"sync:{m[:24]}", f"own step — {m}"))
+                return
+        await self._follow_step(client, seat)
 
     async def _quest_step(self, client, seat=None):
         """One tick of whichever questing is in play.
@@ -2305,6 +2458,10 @@ class LiveWorker(QThread):
             seat.progress = where
             seat.progress_at = now
             seat.said_stuck = ""
+        try:
+            self.seat_quest.emit(seat.index, self._quest_row(seat, zone, now))
+        except Exception:
+            pass
         if zone and zone != seat.zone_for_writeoff:
             # A zone change makes a written-off step a different
             # proposition -- see `_written_off`. Kept here rather than in
@@ -2312,6 +2469,45 @@ class LiveWorker(QThread):
             # wizards and only every `TOGETHER_POLL` seconds.
             seat.zone_for_writeoff = zone
             self._forget_write_off(seat)
+
+    def _quest_row(self, seat, zone, now):
+        """One wizard's questing state, as the Questing tab shows it.
+
+        Pure assembly over fields the tick just read — no client I/O,
+        because this runs on every service tick for every seat. The tab
+        is the answer to a question the logs kept having to answer
+        after the fact: what is each wizard doing RIGHT NOW, and is
+        anybody stuck.
+        """
+        from .. import questlist
+
+        place = (questlist.position_of(seat.quest_name)
+                 if seat.quest_name else questlist.Position())
+        if seat.in_duel:
+            doing = "fighting"
+        elif self._script_drives(seat):
+            doing = "pilot (script)" if self._solo_pilot() else "script"
+        elif seat in self._catching_up():
+            doing = "catching up"
+        elif self._follows(seat):
+            doing = ("following + own steps" if self._solo_pilot()
+                     else "following")
+        elif self.auto_quest:
+            doing = "questing"
+        else:
+            doing = "idle"
+        return {
+            "name": seat.name,
+            "zone": zone or "",
+            "quest": seat.quest_name or "",
+            "goal": seat.goal or "",
+            "line": (f"#{place.order} ({place.world})" if place.comparable
+                     else ("side quest" if place.known
+                           and not place.on_main else "")),
+            "doing": doing,
+            "marker": seat.marker_away,
+            "idle": (now - seat.progress_at) if seat.progress_at else 0.0,
+        }
 
     #: seconds between heartbeat entries per wizard. A minute is fine
     #: enough to see a stall start and end, and coarse enough that an
@@ -2905,6 +3101,13 @@ class LiveWorker(QThread):
         for seat, place in zip(self.seats, places):
             if seat.client is None:
                 continue
+            if self._solo_pilot() and seat.index != self.leader:
+                # A follower's tracker drifting is expected -- nothing
+                # is questing it. The PILOT is still checked: it is the
+                # one wizard whose lost questline stalls the run, and
+                # the preset's own Auto_Find_Quest only kicks in after
+                # several full loops.
+                continue
             if place.on_main or not place.known:
                 # `known` False is a read that failed or a quest the
                 # list has never heard of -- not evidence of anything.
@@ -3120,10 +3323,16 @@ class LiveWorker(QThread):
         in step, whatever the goal lines say. Goal text is the fallback
         for a party the list cannot place, where it is the only evidence
         there is.
+
+        Not in solo-pilot mode. There, only the pilot's quest state
+        matters and the followers are behind BY DESIGN -- they are
+        combat support, kept together by the follow rather than by the
+        questline. Reporting that as desync and starting catch-ups for
+        it would re-create the exact churn the mode exists to remove.
         """
         import time
 
-        if len(self.seats) < 2:
+        if len(self.seats) < 2 or self._solo_pilot():
             return
         from .. import questing, questlist
 

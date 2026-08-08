@@ -302,6 +302,44 @@ def configure(source: str, wizards):
     return source, filled
 
 
+def solo_source(source: str):
+    """(source, reset) — put the account settings back to placeholders.
+
+    The solo-pilot mode runs a party script over ONE wizard, and the
+    scripts were built for exactly that degenerate case. TTS Arc 1's
+    own settings comment: "If you're solo questing, you do not have to
+    change any of the account information below." Every multi-client
+    branch is behind `if NOT Questee2 = "<placeholder>"` guards, so the
+    placeholder IS the off switch.
+
+    The complication is that `configure()` may already have filled real
+    names in — the source that reaches a run is the dialog's output, not
+    the file on disk. The placeholder is recoverable anyway: the guard
+    comparisons still hold it. This is `unconfigured`'s assigned-AND-
+    compared rule read backwards — find what the script compares the
+    variable against, and write that back onto the `var` line.
+    """
+    import re
+    from collections import Counter
+
+    reset = []
+    for name in ACCOUNT_VARS + SCHOOL_VARS:
+        # Every comparison of this variable against a literal, excluding
+        # the assignment itself ('var ' before the name).
+        guards = re.findall(rf'(?<!var ){re.escape(name)}\s*=\s*"([^"]*)"',
+                            source or "")
+        if not guards:
+            continue
+        placeholder = Counter(guards).most_common(1)[0][0]
+        new, n = re.subn(rf'(^\s*var\s+{re.escape(name)}\s*=\s*)"[^"]*"',
+                         lambda m: f'{m.group(1)}"{placeholder}"',
+                         source, count=1, flags=re.MULTILINE)
+        if n and new != source:
+            source = new
+            reset.append(name)
+    return source, reset
+
+
 def check(source: str, party_size=None):
     """(ok, reason) — does this script compile?
 
@@ -659,7 +697,7 @@ class ScriptRunner:
         self.finished = True
 
 
-def make_runner(clients, source: str):
+def make_runner(clients, source: str, solo: bool = False):
     """Compile `source` against every client, or raise with a reason.
 
     `clients` is the whole party. deimoslang scripts address wizards as
@@ -669,6 +707,15 @@ def make_runner(clients, source: str):
     wizards than you gave it". A single client is still accepted -- most
     scripts are solo -- but it is passed as a party of one, not as the
     only thing that exists.
+
+    `solo=True` waives the `@clients` requirement below, and only that.
+    It is for the solo-pilot mode, which deliberately runs a party
+    script over one wizard AFTER `solo_source` has reset the account
+    placeholders -- the script's own guards then skip every p2..p4
+    branch, so the sections the requirement protects are unreachable.
+    And if the author left one unguarded anyway, the stuck-instruction
+    reload (`ScriptRunner.STUCK_AT`) is the backstop, exactly as it is
+    for a party of two running a script that names p4.
     """
     ok, reason = available()
     if not ok:
@@ -680,7 +727,7 @@ def make_runner(clients, source: str):
     # about the script rather than about the machine it would run on.
     party = list(clients) if isinstance(clients, (list, tuple)) else [clients]
     need = wants_clients(source)
-    if need > len(party):
+    if not solo and need > len(party):
         raise RuntimeError(
             f"this script says it needs {need} wizards (its '@clients' "
             f"header) and {len(party)} {'is' if len(party) == 1 else 'are'} "

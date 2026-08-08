@@ -3955,8 +3955,9 @@ def test_every_tab_scrolls(qapp):
     from deimos_bridge.gui.app import MainWindow
 
     win = MainWindow(Telemetry())
-    # Board, Decisions, Damage model, Learning, Naming, Runs, Party.
-    assert win.tabs.count() == 7
+    # Board, Decisions, Damage model, Learning, Naming, Runs,
+    # Questing, Party.
+    assert win.tabs.count() == 8
     for i in range(win.tabs.count()):
         assert isinstance(win.tabs.widget(i), QScrollArea), i
         assert win.tabs.widget(i).widgetResizable()
@@ -13309,3 +13310,369 @@ def test_the_zone_change_that_clears_it_is_noticed_by_the_poll():
     assert "self._forget_write_off(seat)" in src
     assert "seat.marker_away" in src, \
         "the marker distance has to be read where the position already is"
+
+
+# ----------------------------------------------- the solo pilot
+#
+# The operator's proposal, after five runs of group-coordination
+# failures: "could we code a variant that runs a version of the scripts
+# for only one character and then have the others help with combat?"
+# Every catastrophic stall so far has been the script COORDINATING a
+# party — friend teleports that miss, one instruction pointer for four
+# wizards, desync, catch-ups. The presets are documented to quest solo
+# when their account settings stay at placeholders ("If you're solo
+# questing, you do not have to change any of the account information
+# below" — TTS Arc 1, line 23). So: script one wizard, and keep the
+# rest with it using the follow and the hivemind wizAi already has.
+
+def test_solo_source_restores_a_configured_preset_to_placeholders():
+    """The dialog fills real names in; the run needs them back OUT, or
+    the script's own guards enable every multi-account branch. The
+    placeholder is recovered from the guard comparisons — the
+    assigned-AND-compared rule read backwards."""
+    import os
+
+    from deimos_bridge import scripts
+
+    path = os.path.join(scripts.PRESET_DIR, "TTS Arc 1.txt")
+    if not os.path.exists(path):
+        pytest.skip("the TTS presets are not checked in")
+    src = open(path, encoding="utf-8").read()
+    filled, _ = scripts.configure(
+        src, [("Konstantin", "Fire"), ("Sebastian", "Life")])
+    assert "Konstantin" in filled, "the fixture never configured anything"
+
+    back, reset = scripts.solo_source(filled)
+    assert "Konstantin" not in back and "Sebastian" not in back
+    assert "Main_Account" in reset and "Questee2" in reset
+    # ...and the result reads as unconfigured again, which is the
+    # script's own solo mode.
+    assert [n for n, _v in scripts.unconfigured(back)]
+
+
+def test_solo_source_leaves_a_fresh_script_alone():
+    from deimos_bridge import scripts
+
+    src = ('###deimos_expertmode\n'
+           'var Questee2 = "QuestingAccountName"\n'
+           'if NOT Questee2 = "QuestingAccountName" { }\n')
+    back, reset = scripts.solo_source(src)
+    assert back == src and reset == []
+
+
+def test_make_runner_waives_the_client_requirement_only_for_solo():
+    """`@clients: > 1` protects a party script from running over fewer
+    wizards than it names. Solo mode runs it over ONE on purpose — the
+    account guards make the p2..p4 sections unreachable — so the gate
+    has to step aside there and nowhere else."""
+    import inspect
+
+    from deimos_bridge import scripts
+
+    src = inspect.getsource(scripts.make_runner)
+    assert "not solo and need > len(party)" in src
+
+
+def test_in_solo_mode_the_script_drives_only_the_leader():
+    worker = _behind_party()
+    worker.solo_script = True
+    worker.seats[0].runner = type("R", (), {"running": True})()
+    assert worker._script_drives(worker.seats[0])
+    assert not worker._script_drives(worker.seats[1])
+    assert not worker._script_drives(worker.seats[2])
+
+    # and in party mode the same runner drives everybody, as before
+    worker.solo_script = False
+    assert all(worker._script_drives(s) for s in worker.seats)
+
+
+def test_in_solo_mode_every_other_wizard_follows_whatever_the_box_says():
+    """Following IS the mode. A follower that stood still would watch
+    the pilot walk away; one questing on its own would coordinate
+    beautifully with nobody."""
+    worker = _behind_party()
+    worker.solo_script = True
+    worker.follow_leader = False                    # box unticked
+    assert not worker._follows(worker.seats[0])     # the pilot leads
+    assert worker._follows(worker.seats[1])
+    assert worker._follows(worker.seats[2])
+
+
+def test_solo_mode_reports_no_desync_and_starts_no_catch_up():
+    """The followers are behind BY DESIGN — they are combat support.
+    Desync reports and catch-ups for them would re-create the exact
+    churn the mode exists to remove."""
+    import time
+
+    worker = _behind_party()                        # one wizard 1 behind
+    worker.solo_script = True
+    worker._in_step_since = time.monotonic() - worker.DESYNC_GRACE - 1
+    worker._check_in_step(worker.seats[0])
+    assert worker._catch_up_state is None
+    assert not [e for s in worker.seats for e in s.tel.questing
+                if e["kind"] in ("quest-desync", "catch-up-started")]
+
+
+def test_solo_mode_still_notices_the_pilot_losing_the_questline():
+    """The one wizard whose lost questline stalls the run is the pilot.
+    A follower's tracker drifting is expected — nothing is questing it."""
+    import time
+
+    from deimos_bridge import questlist
+
+    worker = _party_on_quests(["Gather the Troops"] * 3)
+    worker.solo_script = True
+    side = questlist.Position(world="Krokotopia", name="Krokotopian Bundle",
+                              how="by quest name", questline=None)
+    on_main = questlist.position_of("Gather the Troops")
+
+    # a FOLLOWER off the line: silence
+    worker._places = lambda: [on_main, side, on_main]
+    worker.seats[1].off_line_since = time.monotonic() - 300
+    worker._check_on_questline()
+    assert not [e for e in worker.seats[0].tel.questing
+                if e["kind"] == "off-questline"]
+
+    # the PILOT off the line: said
+    worker._places = lambda: [side, on_main, on_main]
+    worker.seats[0].off_line_since = time.monotonic() - 300
+    worker._check_on_questline()
+    assert [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "off-questline"]
+
+
+def test_solo_setup_builds_the_vm_over_the_pilot_alone(monkeypatch):
+    """One client, the solo-ized source, and the waiver — the three
+    things that make it the script's own documented solo mode."""
+    import asyncio
+
+    from deimos_bridge import scripts
+
+    worker = _behind_party()
+    worker.solo_script = True
+    worker.script = ('###deimos_expertmode\n'
+                     '# @clients: > 1\n'
+                     'var Questee2 = "PlaceholderName"\n'
+                     'if NOT Questee2 = "PlaceholderName" { }\n')
+    # the dialog configured it, as it would live
+    worker.script = worker.script.replace(
+        'var Questee2 = "PlaceholderName"', 'var Questee2 = "Sebastian"')
+    for i, seat in enumerate(worker.seats):
+        seat.client = object()
+
+    built = {}
+
+    def fake_runner(clients, source, solo=False):
+        built.update(clients=clients, source=source, solo=solo)
+        return type("R", (), {"running": True})()
+
+    monkeypatch.setattr(scripts, "make_runner", fake_runner)
+    asyncio.run(worker._setup_script(worker.seats[0].client, worker.seats[0]))
+
+    assert built["solo"] is True
+    assert built["clients"] == [worker.seats[worker.leader].client], \
+        "the VM has to see the pilot's client and nobody else's"
+    assert '"Sebastian"' not in built["source"], \
+        "the configured name reached the VM — the multi-account branches are live"
+    assert 'var Questee2 = "PlaceholderName"' in built["source"]
+
+
+def test_party_mode_is_untouched_by_the_solo_plumbing(monkeypatch):
+    import asyncio
+
+    from deimos_bridge import scripts
+
+    worker = _behind_party()
+    worker.solo_script = False
+    worker.script = "###deimos_expertmode\n"
+    for seat in worker.seats:
+        seat.client = object()
+    built = {}
+
+    def fake_runner(clients, source, solo=False):
+        built.update(clients=clients, solo=solo)
+        return type("R", (), {"running": True})()
+
+    monkeypatch.setattr(scripts, "make_runner", fake_runner)
+    asyncio.run(worker._setup_script(worker.seats[0].client, worker.seats[0]))
+    assert built["solo"] is False
+    assert len(built["clients"]) == 3
+
+
+def test_the_window_offers_the_solo_pilot_and_passes_it_through(qapp):
+    import inspect
+
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    assert hasattr(win, "solo_script")
+    assert not win.solo_script.isChecked(), "party scripting stays the default"
+    src = inspect.getsource(MainWindow.on_start_live)
+    assert "solo_script=self.solo_script.isChecked()" in src
+
+
+# ------------------- followers on the SAME questline, not behind it
+#
+# The operator's correction to the first cut of the solo pilot: "that
+# wont work for leveling 3 accounts at the same time ... they should
+# all be on the same questline or else you're doing 3x the questing
+# having to switch back and forth who's the leader." They can be:
+# defeat credit is shared in the duel circle, and every other step is
+# turned in at the exact spot the pilot has just walked the party to.
+
+def _syncing_follower(monkeypatch, goal="Talk To Hetch Al'Dim",
+                      marker=640.0, dialogue=False, battle=False):
+    from deimos_bridge import questing
+
+    worker = _behind_party()
+    worker.solo_script = True
+    seat = worker.seats[1]
+    seat.goal = goal
+    seat.marker_away = marker
+    calls = {"hop": 0, "advance": 0, "follow": 0}
+
+    async def in_battle(_c):
+        return battle
+
+    async def in_dialogue(_c):
+        return dialogue
+
+    async def advance(_c, **kw):
+        calls["advance"] += 1
+        return 2, ""
+
+    async def hop(_c, **kw):
+        calls["hop"] += 1
+        return False
+
+    async def follow(*_a, **_kw):
+        calls["follow"] += 1
+
+    monkeypatch.setattr(questing, "in_battle", in_battle)
+    monkeypatch.setattr(questing, "in_dialogue", in_dialogue)
+    monkeypatch.setattr(questing, "advance_dialogue", advance)
+    monkeypatch.setattr(questing, "hop_once", hop)
+    monkeypatch.setattr(worker, "_follow_step", follow)
+    return worker, seat, calls
+
+
+def test_a_follower_at_its_own_objective_takes_the_step(monkeypatch):
+    import asyncio
+
+    worker, seat, calls = _syncing_follower(monkeypatch)
+    asyncio.run(worker._sync_follower(object(), seat))
+    assert calls["hop"] == 1
+    assert calls["follow"] == 0, \
+        "the follow teleported it away mid-turn-in"
+
+
+def test_a_follower_never_hops_to_its_own_defeat_marker(monkeypatch):
+    """Defeat credit comes from the PILOT's circle. A follower hopping
+    to its own defeat marker starts a fight alone, which is how Phönix
+    died at rev 3d026ada."""
+    import asyncio
+
+    worker, seat, calls = _syncing_follower(
+        monkeypatch, goal="Defeat Edo Nirini in Palace of Fire")
+    asyncio.run(worker._sync_follower(object(), seat))
+    assert calls["hop"] == 0
+    assert calls["follow"] == 1
+
+
+def test_a_follower_with_its_objective_elsewhere_just_follows(monkeypatch):
+    import asyncio
+
+    worker, seat, calls = _syncing_follower(monkeypatch, marker=110890.0)
+    asyncio.run(worker._sync_follower(object(), seat))
+    assert calls["hop"] == 0 and calls["follow"] == 1
+
+
+def test_an_open_dialogue_is_finished_before_anything_else(monkeypatch):
+    import asyncio
+
+    worker, seat, calls = _syncing_follower(monkeypatch, dialogue=True)
+    asyncio.run(worker._sync_follower(object(), seat))
+    assert calls["advance"] == 1
+    assert calls["hop"] == 0 and calls["follow"] == 0
+
+
+def test_a_fighting_follower_is_left_to_the_policy(monkeypatch):
+    import asyncio
+
+    worker, seat, calls = _syncing_follower(monkeypatch, battle=True)
+    asyncio.run(worker._sync_follower(object(), seat))
+    assert calls == {"hop": 0, "advance": 0, "follow": 0}
+
+
+def test_working_a_step_does_not_fall_through_to_the_follow(monkeypatch):
+    """Between hop attempts the follower WAITS at its objective. Falling
+    through to the follow teleports it back to the pilot with the step
+    half-done, and the sync never finishes anything."""
+    import asyncio
+
+    worker, seat, calls = _syncing_follower(monkeypatch)
+    asyncio.run(worker._sync_follower(object(), seat))    # hops, stamps gate
+    asyncio.run(worker._sync_follower(object(), seat))    # gate closed
+    assert calls["hop"] == 1
+    assert calls["follow"] == 0
+
+
+def test_a_step_that_will_not_turn_in_has_a_bounded_budget(monkeypatch):
+    """A follower lost to one impossible step is worse than one step
+    skipped — it stops fighting too."""
+    import asyncio
+    import time
+
+    worker, seat, calls = _syncing_follower(monkeypatch)
+    asyncio.run(worker._sync_follower(object(), seat))
+    seat.sync_began = time.monotonic() - worker.SYNC_GIVE_UP - 1
+    asyncio.run(worker._sync_follower(object(), seat))
+    assert calls["follow"] == 1, "it stayed on a step it cannot finish"
+
+
+def test_the_quest_row_says_what_each_wizard_is_doing():
+    worker = _behind_party()
+    worker.solo_script = True
+    worker.seats[0].runner = type("R", (), {"running": True})()
+    worker.seats[1].in_duel = True
+    import time
+
+    now = time.monotonic()
+    pilot = worker._quest_row(worker.seats[0], "KT_Hub", now)
+    fighter = worker._quest_row(worker.seats[1], "KT_Hub", now)
+    third = worker._quest_row(worker.seats[2], "KT_Hub", now)
+    assert pilot["doing"] == "pilot (script)"
+    assert fighter["doing"] == "fighting"
+    assert third["doing"] == "following + own steps"
+    assert pilot["quest"] and pilot["line"].startswith("#")
+
+
+def test_the_questing_tab_mode_and_checkboxes_agree_both_ways(qapp):
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    assert hasattr(win, "quest_mode") and hasattr(win, "quest_table")
+
+    # dropdown -> checkboxes
+    win.quest_mode.setCurrentIndex(3)
+    assert win.use_script.isChecked() and win.solo_script.isChecked()
+    assert not win.auto_quest.isChecked()
+    # checkboxes -> dropdown
+    win.solo_script.setChecked(False)
+    assert win.quest_mode.currentIndex() == 2
+    win.use_script.setChecked(False)
+    win.auto_quest.setChecked(True)
+    assert win.quest_mode.currentIndex() == 1
+
+    # the live feed renders a row
+    win.on_seat_quest(0, {"name": "Konstantin", "doing": "pilot (script)",
+                          "zone": "Krokotopia/KT_Hub", "quest": "Payback",
+                          "goal": "Talk To X", "line": "#13 (Krokotopia)",
+                          "marker": 98813.0, "idle": 400.0})
+    assert win.quest_table.item(0, 0).text() == "Konstantin"
+    assert win.quest_table.item(0, 6).text() == "other zone"
+    assert "min" in win.quest_table.item(0, 7).text()
+
+    import inspect
+    src = inspect.getsource(MainWindow.on_start_live)
+    assert "leader=self.leader_pick.currentIndex()" in src
