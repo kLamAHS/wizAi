@@ -4335,6 +4335,7 @@ def _stub_handler(decide, read, card=None):
     handler._read_failures = 0
     handler._left_round_at = None
     handler._planned = None
+    handler._last_round_number = None
     handler.pass_button = lambda: _tick(passes)
     handler.round_number = lambda: _value(4)
     handler._pick_card = lambda _read, _name: card
@@ -4416,6 +4417,10 @@ def test_the_wait_is_measured_from_the_last_round_leaving_not_arriving():
         return PolicyDecision(passing=True, reason="pass")
 
     handler, _passes = _stub_handler(_pass, read=object())
+    # Climbing, because a round number that does not move is a NEW duel
+    # — see `_same_duel`, and the test below it.
+    rounds = iter([1, 2])
+    handler.round_number = lambda: _value(next(rounds))
     handler.backend.timed = []
     asyncio.run(handler.handle_round())
     left = handler._left_round_at
@@ -12496,3 +12501,446 @@ def test_the_fourth_seat_of_a_party_of_three_is_not_unconfigured():
     # ...and with no party attached, nothing is filtered: a pre-flight on
     # a pasted script does not know how many wizards will run it.
     assert [n for n, _v in unfilled(source, None)] == everything
+
+
+# ----------------------------------- a wizard cannot un-finish a quest
+#
+# Rev 3822cc6c. Sebastian, in step with the party all run, read `Talk To
+# Robert Lancaster in Chamber of Fire` for one tick -- a real goal, and
+# one that belongs to Krokotopia #7. The party declared an EIGHT quest
+# gap and paused the script to catch him up. Fifteen seconds later he
+# read #15 again, which is where he had been the whole time.
+
+def _placed_party(names):
+    """A worker whose seats read the given tracked quest names."""
+    worker, _read = _zoned_party(["KT_Hub"] * len(names))
+    for seat, name in zip(worker.seats, names):
+        seat.quest_name = name
+        seat.goal = ""
+    return worker
+
+
+def test_a_backwards_reading_is_clamped_not_believed():
+    from deimos_bridge import questlist
+
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+
+    ahead = questlist.Position(world="Krokotopia", order=15, name="Back to "
+                               "Winthrop", how="by quest name")
+    kept = worker._no_further_back(seat, ahead)
+    assert kept.order == 15
+    assert seat.furthest["Krokotopia"] == 15
+
+    behind = questlist.Position(world="Krokotopia", order=7, name="Lancaster",
+                                how="by goal text")
+    clamped = worker._no_further_back(seat, behind)
+    assert clamped.order == 15, "a wizard was allowed to un-finish 8 quests"
+    assert "clamped" in clamped.how and "#7" in clamped.how, \
+        "a silent clamp hides a genuine reset behind a number that never moves"
+
+
+def test_going_forward_is_always_believed():
+    from deimos_bridge import questlist
+
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    for order in (3, 4, 9, 15):
+        place = questlist.Position(world="Krokotopia", order=order,
+                                   how="by quest name")
+        assert worker._no_further_back(seat, place).order == order
+    assert seat.furthest["Krokotopia"] == 15
+
+
+def test_the_next_world_starts_from_the_beginning():
+    """Marleybone #1 is not eight quests behind Krokotopia #15, and a
+    clamp that forgot which world it was in would pin every wizard at
+    the last world's number forever."""
+    from deimos_bridge import questlist
+
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    worker._no_further_back(seat, questlist.Position(
+        world="Krokotopia", order=15, how="by quest name"))
+    fresh = worker._no_further_back(seat, questlist.Position(
+        world="Marleybone", order=1, how="by quest name"))
+    assert fresh.order == 1 and "clamped" not in (fresh.how or "")
+
+
+def test_an_unplaceable_reading_passes_straight_through():
+    """A side quest has no order at all. Clamping it would invent one."""
+    from deimos_bridge import questlist
+
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    worker._no_further_back(seat, questlist.Position(
+        world="Krokotopia", order=15, how="by quest name"))
+    side = questlist.Position(world=None, order=None, name="a side quest")
+    assert worker._no_further_back(seat, side) is side
+
+
+def test_places_applies_the_clamp():
+    """Not just the helper — the function two rules and a script pause
+    hang off."""
+    worker = _placed_party(["Back to Winthrop"] * 3)
+    first = worker._places()
+    assert all(p.comparable for p in first), "the fixture did not place"
+    ahead = first[0].order
+
+    # seat 3's tracker flips to something much earlier in the line
+    worker.seats[2].quest_name = ""
+    worker.seats[2].goal = "Talk To Robert Lancaster in Chamber of Fire"
+    after = worker._places()
+    assert after[2].order >= ahead, \
+        "one tick of a shared goal line moved a wizard eight quests back"
+
+
+# ------------------------------- a catch-up that nothing is attempting
+
+def test_a_catch_up_where_nobody_moves_or_fights_lets_go_early():
+    """Rev 3822cc6c froze all three wizards at 8,083 instructions for the
+    rest of the export, with another 140s to run before CATCH_UP_STALL
+    would have released them. `hop_once` was teleporting Phönix to a
+    marker he was already standing on."""
+    import time
+
+    worker, _read = _zoned_party(["KT_PalaceOfFire"] * 3)
+    # Krokotopia #14 against #15 twice — the shape of rev 3822cc6c.
+    for seat, quest in zip(worker.seats, ["Give em Another Round",
+                                          "Back to Winthrop",
+                                          "Back to Winthrop"]):
+        seat.quest_name = quest
+    laggard = worker.seats[0]
+    now = time.monotonic()
+    worker._catch_up_state = {
+        "seats": [laggard], "gap": 1, "started": now - 100.0,
+        "moved": now - 100.0, "goals": {id(laggard): laggard.goal}, "why": "",
+    }
+    for seat in worker.seats:
+        seat.progress = ("KT_PalaceOfFire", (1, 2, 3), "Defeat Edo Nirini")
+        seat.progress_at = now - worker.CATCH_UP_IDLE - 1
+        seat.in_duel = False
+
+    worker._check_caught_up()
+    assert worker._catch_up_state is None, "the party is still frozen"
+    said = [e for s in worker.seats for e in s.tel.questing
+            if e["kind"] == "catch-up-gave-up"]
+    assert said, "it let go without saying why"
+    assert "not moved" in said[0]["detail"]
+
+
+def test_a_catch_up_whose_laggard_is_fighting_is_left_alone():
+    """A duel is the catch-up working. The goal line does not change
+    while a boss is fought, which is exactly why CATCH_UP_STALL is
+    generous — and why the short bound must not apply here."""
+    import time
+
+    worker, _read = _zoned_party(["KT_PalaceOfFire"] * 3)
+    # Krokotopia #14 against #15 twice — the shape of rev 3822cc6c.
+    for seat, quest in zip(worker.seats, ["Give em Another Round",
+                                          "Back to Winthrop",
+                                          "Back to Winthrop"]):
+        seat.quest_name = quest
+    laggard = worker.seats[0]
+    now = time.monotonic()
+    worker._catch_up_state = {
+        "seats": [laggard], "gap": 1, "started": now - 100.0,
+        "moved": now - 100.0, "goals": {id(laggard): laggard.goal}, "why": "",
+    }
+    for seat in worker.seats:
+        seat.progress = ("KT_PalaceOfFire", (1, 2, 3), "Defeat Edo Nirini")
+        seat.progress_at = now - worker.CATCH_UP_IDLE - 1
+        seat.in_duel = False
+    laggard.in_duel = True
+
+    worker._check_caught_up()
+    assert worker._catch_up_state is not None, \
+        "it gave up on a wizard that was fighting the step"
+
+
+def test_a_laggard_that_is_moving_keeps_its_full_budget():
+    import time
+
+    worker, _read = _zoned_party(["KT_PalaceOfFire"] * 3)
+    # Krokotopia #14 against #15 twice — the shape of rev 3822cc6c.
+    for seat, quest in zip(worker.seats, ["Give em Another Round",
+                                          "Back to Winthrop",
+                                          "Back to Winthrop"]):
+        seat.quest_name = quest
+    laggard = worker.seats[0]
+    now = time.monotonic()
+    worker._catch_up_state = {
+        "seats": [laggard], "gap": 1, "started": now - 100.0,
+        "moved": now - 100.0, "goals": {id(laggard): laggard.goal}, "why": "",
+    }
+    for seat in worker.seats:
+        seat.progress = ("KT_PalaceOfFire", (1, 2, 3), "Defeat Edo Nirini")
+        seat.progress_at = now - 5.0            # it moved five seconds ago
+        seat.in_duel = False
+
+    worker._check_caught_up()
+    assert worker._catch_up_state is not None
+
+
+# ------------------------------- the wait that was the walk to the sigil
+
+def test_the_first_round_of_a_fight_does_not_charge_the_walk_to_it():
+    """Rev 3822cc6c reports `waited: 114.82` on a 35-second round. That
+    is the zone change and the walk between duels, not the game taking
+    two minutes over a planning phase."""
+    import asyncio
+
+    from deimos_bridge.live_backend import PolicyDecision
+
+    async def _pass():
+        return PolicyDecision(passing=True, reason="pass")
+
+    handler, _passes = _stub_handler(_pass, read=object())
+    rounds = iter([1, 2, 1])                    # two rounds, then a new duel
+    handler.round_number = lambda: _value(next(rounds))
+    handler.backend.timed = []
+
+    for _ in range(3):
+        asyncio.run(handler.handle_round())
+
+    waits = [w for w, _p, _a in handler.backend.timed]
+    assert waits[0] is None, "there was no round before the first one"
+    assert waits[1] is not None, "the second round of a duel does wait"
+    assert waits[2] is None, "the walk between fights was charged to a round"
+
+
+# ------------------------------- giving up has to mean something
+#
+# Rev 3822cc6c, continued. `catch-up-gave-up` and `catch-up-started`
+# share a timestamp SEVEN times across thirty-five minutes -- every five
+# minutes, the same wizard, the same step, the same 8,083 instructions.
+# `_stop_catching_up` cleared the state and `_check_in_step` saw the same
+# desync on the very next tick and started the identical catch-up again.
+# The script was handed back its wizards for zero seconds each time.
+
+def _behind_party():
+    """A party where seat 1 is one quest behind the other two."""
+    worker, _read = _zoned_party(["KT_PalaceOfFire"] * 3)
+    worker.script = "###deimos_expertmode\n"
+    for seat, quest in zip(worker.seats, ["Give em Another Round",
+                                          "Back to Winthrop",
+                                          "Back to Winthrop"]):
+        seat.quest_name = quest
+        seat.goal = f"goal for {quest}"
+    return worker
+
+
+def _make_it_give_up(worker):
+    """Run a catch-up to its give-up, the way the live loop does."""
+    import time
+
+    laggard = worker.seats[0]
+    now = time.monotonic()
+    worker._catch_up_state = {
+        "seats": [laggard], "gap": 1, "started": now - 100.0,
+        "moved": now - 100.0, "goals": {id(laggard): laggard.goal}, "why": "",
+    }
+    for seat in worker.seats:
+        seat.progress = ("KT_PalaceOfFire", (1, 2, 3), seat.goal)
+        seat.progress_at = now - worker.CATCH_UP_IDLE - 1
+        seat.in_duel = False
+    worker._check_caught_up()
+    assert worker._catch_up_state is None, "the fixture did not give up"
+    return laggard
+
+
+def test_a_catch_up_that_gave_up_is_not_started_again_on_the_same_step():
+    import time
+
+    worker = _behind_party()
+
+    # First, the trigger DOES fire on this party — otherwise the test
+    # below proves nothing.
+    worker._in_step_since = time.monotonic() - worker.DESYNC_GRACE - 1
+    worker._check_in_step(worker.seats[0])
+    assert worker._catch_up_state is not None, \
+        "the fixture never triggers a catch-up at all"
+
+    laggard = _make_it_give_up(worker)
+    assert worker._written_off([laggard]), \
+        "giving up was a word rather than an act"
+
+    # ...and now the same tick that started one must not start another.
+    worker._in_step_since = time.monotonic() - worker.DESYNC_GRACE - 1
+    worker._check_in_step(worker.seats[0])
+    assert worker._catch_up_state is None, \
+        "gave up and started the identical catch-up on the next tick"
+    kinds = [e["kind"] for e in laggard.tel.questing]
+    assert "catch-up-written-off" in kinds, \
+        "the party stopped being paused and the export does not say why"
+
+
+def test_a_wizard_that_moved_on_gets_a_fresh_chance():
+    """A step that CHANGED is a different question, and the verdict on
+    the old one must not carry over to it."""
+    worker = _behind_party()
+    laggard = _make_it_give_up(worker)
+    assert worker._written_off([laggard])
+
+    # past the cooldown floor, which is a separate guard — see below
+    step, when = worker._wrote_off[id(laggard)]
+    worker._wrote_off[id(laggard)] = (step, when - worker.CATCH_UP_COOLDOWN - 1)
+
+    laggard.quest_name = "Back to Winthrop"        # it finished the step
+    assert not worker._written_off([laggard]), \
+        "a wizard that made progress is still being written off"
+    assert id(laggard) not in worker._wrote_off, \
+        "the stale verdict was not forgotten"
+
+
+def test_the_same_step_stays_written_off_however_long_it_has_been():
+    """Not a cooldown — a verdict. Seven attempts at an identical step
+    over thirty-five minutes produced nothing, and the thirty-sixth
+    minute is not going to be different."""
+    worker = _behind_party()
+    laggard = _make_it_give_up(worker)
+    step, when = worker._wrote_off[id(laggard)]
+    worker._wrote_off[id(laggard)] = (step, when - 3600.0)
+    assert worker._written_off([laggard])
+
+
+def test_the_cooldown_holds_even_when_the_step_reads_differently():
+    """Two readings that alternate must not be able to thrash the party
+    between them faster than the cooldown."""
+    worker = _behind_party()
+    laggard = _make_it_give_up(worker)
+    laggard.quest_name = "Payback"                 # a different step
+    assert worker._written_off([laggard]), \
+        "a changed reading beat the cooldown floor"
+
+
+def test_one_wizard_of_a_group_that_moved_on_reopens_the_question():
+    """Written off only when EVERY wizard in the group is."""
+    worker = _behind_party()
+    import time
+
+    now = time.monotonic()
+    a, b = worker.seats[0], worker.seats[1]
+    worker._wrote_off = {
+        id(a): (worker._step_key(a), now - worker.CATCH_UP_COOLDOWN - 1),
+    }
+    assert not worker._written_off([a, b]), \
+        "a group with an untried wizard in it was refused"
+
+
+def test_the_written_off_step_is_said_in_the_export():
+    """The operator has to be able to see WHY the party stopped being
+    paused, or "it gave up" and "it never noticed" look the same."""
+    worker = _behind_party()
+    laggard = _make_it_give_up(worker)
+    worker._behind = laggard
+    worker._behind_group = [laggard]
+    worker._behind_gap = 1
+    worker._behind_basis = "the questline says so"
+    worker._say_once(laggard, "k", "m", kind="catch-up-written-off",
+                     detail="already given up on this step")
+    kinds = [e["kind"] for e in laggard.tel.questing]
+    assert "catch-up-written-off" in kinds
+
+
+def test_x_is_not_pressed_a_fifth_time_from_a_spot_where_it_does_nothing(
+        monkeypatch):
+    """Rev 3822cc6c pressed X five times over twenty-four minutes while
+    Konstantin stood 22,778 units from `Talk To Professor Winthrop in
+    Altar of Kings` — a different zone — and every one logged "a box did
+    not come up". The first press is worth making. The fifth buries the
+    fact that this wizard needs moving, not interacting."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, seat = _wedged(dialogue=False, monkeypatch=monkeypatch)
+    worker.seats[0].runner = type("R", (), {"running": True,
+                                            "steps": 11582})()
+    pressed = []
+
+    async def press_x(_c, **kw):
+        pressed.append(True)
+        return True, ""
+
+    async def never_opens(_c, **kw):
+        return False
+
+    monkeypatch.setattr(questing, "press_x", press_x)
+    monkeypatch.setattr(questing, "dialogue_opened", never_opens)
+
+    for _ in range(6):
+        seat.unstuck_at = 0.0
+        asyncio.run(worker._unstick(seat))
+
+    assert len(pressed) == worker.X_TRIES_HERE, \
+        f"pressed X {len(pressed)} times at something that never answered"
+    gave_up = [e for e in seat.tel.questing
+               if e["kind"] == "unstuck-x-does-nothing"]
+    assert gave_up, "it stopped pressing X and the export does not say why"
+    assert "22,778" not in gave_up[0]["detail"]     # the fixture's own number
+    assert "the marker is 900 away" in gave_up[0]["detail"], \
+        "the reason it is going nowhere has to travel with the report"
+
+
+def test_moving_earns_a_fresh_pair_of_presses(monkeypatch):
+    """The count is per SPOT. A wizard that walked somewhere else is
+    asking a different question of a different interactable."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, seat = _wedged(dialogue=False, monkeypatch=monkeypatch)
+    worker.seats[0].runner = type("R", (), {"running": True,
+                                            "steps": 11582})()
+    pressed = []
+
+    async def press_x(_c, **kw):
+        pressed.append(True)
+        return True, ""
+
+    async def never_opens(_c, **kw):
+        return False
+
+    monkeypatch.setattr(questing, "press_x", press_x)
+    monkeypatch.setattr(questing, "dialogue_opened", never_opens)
+
+    for _ in range(4):
+        seat.unstuck_at = 0.0
+        asyncio.run(worker._unstick(seat))
+    assert len(pressed) == worker.X_TRIES_HERE
+
+    seat.progress = ("WizardCity/WC_NightSide", (9, 9, 9), seat.progress[2])
+    for _ in range(4):
+        seat.unstuck_at = 0.0
+        asyncio.run(worker._unstick(seat))
+    assert len(pressed) == worker.X_TRIES_HERE * 2, \
+        "a wizard that moved was still refused"
+
+
+def test_a_box_that_does_come_up_clears_the_count(monkeypatch):
+    """X working is the whole point of pressing it, and a working press
+    must not count towards giving up on the next one."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, seat = _wedged(dialogue=False, monkeypatch=monkeypatch)
+    worker.seats[0].runner = type("R", (), {"running": True,
+                                            "steps": 11582})()
+
+    async def press_x(_c, **kw):
+        return True, ""
+
+    async def opens(_c, **kw):
+        return True
+
+    monkeypatch.setattr(questing, "press_x", press_x)
+    monkeypatch.setattr(questing, "dialogue_opened", opens)
+
+    for _ in range(4):
+        seat.unstuck_at = 0.0
+        asyncio.run(worker._unstick(seat))
+    assert seat.x_pressed == 0
+    assert not [e for e in seat.tel.questing
+                if e["kind"] == "unstuck-x-does-nothing"]
