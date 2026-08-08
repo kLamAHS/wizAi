@@ -370,6 +370,9 @@ class LiveWorker(QThread):
         #: gives up has to be REMEMBERED, or `_check_in_step` starts the
         #: identical one on the next tick -- see `_written_off`.
         self._wrote_off = {}
+        #: step keys whose write-off has already been written to the
+        #: exports. The verdict does not change while the step does not.
+        self._said_written_off = set()
         #: whether the VM's give-up hook has been installed. Once per
         #: worker, not once per seat: it is module-level in the VM and
         #: fires for every wizard the script drives. See
@@ -3090,18 +3093,31 @@ class LiveWorker(QThread):
                 # a good answer either, but it is the only OTHER answer,
                 # and pausing it forever to re-attempt a step that has
                 # not moved in half an hour is the worse of the two.
+                key = f"wrote-off:{self._step_key(behind)}"
                 self._say_once(
-                    behind, f"wrote-off:{self._step_key(behind)}",
+                    behind, key,
                     f"{behind.name} is still behind, and a catch-up has "
                     f"already given up on this exact step — leaving it to "
                     f"the script rather than pausing the party again for "
-                    f"something that did not work",
-                    kind="catch-up-written-off",
-                    detail=(f"{' and '.join(s.name for s in group)} still "
+                    f"something that did not work")
+                # Written down ONCE per step, not on the `_say_once`
+                # cadence. The verdict never changes while the step does
+                # not, so repeating it says nothing new -- rev 3d026ada
+                # spent 25 of Phönix's log entries on this one sentence,
+                # the last of them "1440 times in a row".
+                if key not in self._said_written_off:
+                    self._said_written_off.add(key)
+                    said = (f"{' and '.join(s.name for s in group)} still "
                             f"{self._behind_gap} quest(s) behind on a step a "
                             f"catch-up has already given up on. The script "
                             f"keeps its wizards — wizAi's questing cannot "
-                            f"finish this one"))
+                            f"finish this one")
+                    for other in self.seats:
+                        try:
+                            other.tel.note_questing(
+                                "catch-up-written-off", said)
+                        except Exception:
+                            pass
                 return
             self._start_catching_up(group, self._behind_gap,
                                     self._behind_basis)
@@ -3655,8 +3671,12 @@ class LiveWorker(QThread):
                 continue
             if step != self._step_key(one):
                 # It moved. Forget the write-off so the new step gets
-                # its own chance rather than inheriting this verdict.
+                # its own chance rather than inheriting this verdict --
+                # and forget that it was said, so if the wizard is ever
+                # written off on this step again the export says so
+                # again rather than staying silent about a second one.
                 del self._wrote_off[id(one)]
+                self._said_written_off.discard(f"wrote-off:{step}")
                 return False
         return True
 
@@ -3734,8 +3754,18 @@ class LiveWorker(QThread):
         # this is exactly "standing still with nothing happening", and
         # it deliberately does NOT fire while anybody is in a duel: a
         # fight is the catch-up working.
-        idle = min((now - s.progress_at for s in seats
-                    if s.progress is not None), default=0.0)
+        #
+        # Measured from whichever is LATER, the wizard's last movement or
+        # the moment this catch-up began. Rev 3d026ada without that
+        # clamp is `catch-up-started` and `catch-up-gave-up` on the same
+        # timestamp with "has not moved or fought for 122s" -- the 122s
+        # were spent stuck BEFORE the catch-up, which is why there is a
+        # catch-up at all. Every catch-up worth having is for a wizard
+        # that was already standing still, so an absolute idle clock
+        # kills all of them at birth, and this one never got a single
+        # tick to teleport Phönix anywhere.
+        idle = min((now - max(s.progress_at, state["started"])
+                    for s in seats if s.progress is not None), default=0.0)
         going_nowhere = (idle >= self.CATCH_UP_IDLE
                          and not any(s.in_duel for s in seats))
         if (waited >= self.CATCH_UP_LIMIT or stalled >= self.CATCH_UP_STALL

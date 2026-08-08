@@ -12944,3 +12944,84 @@ def test_a_box_that_does_come_up_clears_the_count(monkeypatch):
     assert seat.x_pressed == 0
     assert not [e for e in seat.tel.questing
                 if e["kind"] == "unstuck-x-does-nothing"]
+
+
+def test_a_catch_up_gets_its_own_clock_not_the_stall_that_caused_it():
+    """Rev 3d026ada: `catch-up-started` and `catch-up-gave-up` on the
+    same timestamp, reason "has not moved or fought for 122s". The 122s
+    were spent stuck BEFORE the catch-up — which is why there is a
+    catch-up at all. Every catch-up worth having is for a wizard that
+    was already standing still, so an absolute idle clock kills all of
+    them at birth and none ever gets a tick to teleport anywhere."""
+    import time
+
+    worker = _behind_party()
+    laggard = worker.seats[0]
+    now = time.monotonic()
+    worker._catch_up_state = {
+        "seats": [laggard], "gap": 1, "started": now,      # just began
+        "moved": now, "goals": {id(laggard): laggard.goal}, "why": "",
+    }
+    for seat in worker.seats:
+        seat.progress = ("KT_PalaceOfFire", (1, 2, 3), seat.goal)
+        # stuck for a long time already, which is the reason for the
+        # catch-up, not a reason to abandon it
+        seat.progress_at = now - 122.0
+        seat.in_duel = False
+
+    worker._check_caught_up()
+    assert worker._catch_up_state is not None, \
+        "the catch-up gave up before it had run for a single tick"
+
+
+def test_the_idle_clock_still_fires_once_the_catch_up_has_had_its_chance():
+    import time
+
+    worker = _behind_party()
+    laggard = worker.seats[0]
+    now = time.monotonic()
+    began = now - worker.CATCH_UP_IDLE - 1
+    worker._catch_up_state = {
+        "seats": [laggard], "gap": 1, "started": began, "moved": began,
+        "goals": {id(laggard): laggard.goal}, "why": "",
+    }
+    for seat in worker.seats:
+        seat.progress = ("KT_PalaceOfFire", (1, 2, 3), seat.goal)
+        seat.progress_at = now - 500.0
+        seat.in_duel = False
+
+    worker._check_caught_up()
+    assert worker._catch_up_state is None, \
+        "it held the party after a full CATCH_UP_IDLE of nothing happening"
+
+
+def test_a_written_off_step_is_written_down_once_not_fourteen_hundred_times():
+    """Rev 3d026ada spent 25 of Phönix's log entries on one sentence,
+    the last of them "1440 times in a row". The verdict does not change
+    while the step does not, so repeating it says nothing new."""
+    import time
+
+    worker = _behind_party()
+    laggard = _make_it_give_up(worker)
+    for _ in range(50):
+        worker._in_step_since = time.monotonic() - worker.DESYNC_GRACE - 1
+        worker._check_in_step(worker.seats[0])
+
+    said = [e for e in laggard.tel.questing
+            if e["kind"] == "catch-up-written-off"]
+    assert len(said) == 1, f"the same verdict was logged {len(said)} times"
+    assert "times in a row" not in said[0]["detail"]
+
+
+def test_every_wizards_export_carries_the_write_off():
+    """Three files get uploaded and each has to explain why its wizard
+    stopped waiting for the one that is behind."""
+    import time
+
+    worker = _behind_party()
+    _make_it_give_up(worker)
+    worker._in_step_since = time.monotonic() - worker.DESYNC_GRACE - 1
+    worker._check_in_step(worker.seats[0])
+    for seat in worker.seats:
+        kinds = [e["kind"] for e in seat.tel.questing]
+        assert "catch-up-written-off" in kinds, f"{seat.name} was not told"
