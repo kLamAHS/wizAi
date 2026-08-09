@@ -13745,3 +13745,87 @@ def test_the_service_tick_hurries_while_the_script_is_hot():
     src = inspect.getsource(LiveWorker._service_loop)
     assert 'script_hot' in src, \
         "the tick sleeps its full half second between script bursts again"
+
+
+# ---------------------------- the script's pacing, without the editor
+#
+# "make those accessible in the gui" — SpeedDelay and DialogDelay are
+# the preset's own knobs, and editing a 14,000-line file is not a knob.
+
+def test_set_pacing_rewrites_the_presets_own_settings():
+    import os
+    import re
+
+    from deimos_bridge import scripts
+
+    path = os.path.join(scripts.PRESET_DIR, "TTS Arc 1.txt")
+    if not os.path.exists(path):
+        pytest.skip("the TTS presets are not checked in")
+    src = open(path, encoding="utf-8").read()
+    out, changed = scripts.set_pacing(src, step=0.5, dialog=1.5)
+    assert ("SpeedDelay", "0.5") in changed
+    assert ("DialogDelay", "1.5") in changed
+    assert re.search(r"^var SpeedDelay = 0\.5\b", out, re.M)
+    assert re.search(r"^var DialogDelay = 1\.5\b", out, re.M)
+    # ...and only those lines: every `sleep $SpeedDelay` still reads
+    # the variable, which is the point of rewriting the var.
+    assert out.count("$SpeedDelay") == src.count("$SpeedDelay")
+
+
+def test_none_means_the_scripts_own_pacing_stands():
+    from deimos_bridge import scripts
+
+    src = "###deimos_expertmode\nvar SpeedDelay = 1\n"
+    out, changed = scripts.set_pacing(src)
+    assert out == src and changed == []
+    out, changed = scripts.set_pacing(src, dialog=0.5)
+    assert out == src and changed == [], \
+        "a variable the script does not have must not be invented"
+
+
+def test_the_pacing_override_reaches_the_vm_in_both_modes(monkeypatch):
+    import asyncio
+
+    from deimos_bridge import scripts
+
+    for solo in (False, True):
+        worker = _behind_party()
+        worker.solo_script = solo
+        worker.script_step_delay = 0.5
+        worker.script_dialog_delay = 1.5
+        worker.script = ('###deimos_expertmode\n'
+                         'var SpeedDelay = 1\n'
+                         'var DialogDelay = 1\n')
+        for seat in worker.seats:
+            seat.client = object()
+        built = {}
+
+        def fake_runner(clients, source, solo=False):
+            built["source"] = source
+            return type("R", (), {"running": True})()
+
+        monkeypatch.setattr(scripts, "make_runner", fake_runner)
+        asyncio.run(worker._setup_script(worker.seats[0].client,
+                                         worker.seats[0]))
+        assert "var SpeedDelay = 0.5" in built["source"], f"solo={solo}"
+        assert "var DialogDelay = 1.5" in built["source"], f"solo={solo}"
+
+
+def test_the_questing_tab_offers_the_pacing_and_passes_it_through(qapp):
+    import inspect
+
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    assert hasattr(win, "pace_override")
+    assert not win.pace_override.isChecked(), \
+        "the script's own pacing stays the default"
+    assert not win.pace_step.isEnabled(), \
+        "spinners enabled while the override is off read as active"
+    win.pace_override.setChecked(True)
+    assert win.pace_step.isEnabled() and win.pace_dialog.isEnabled()
+
+    src = inspect.getsource(MainWindow.on_start_live)
+    assert "script_step_delay" in src and "script_dialog_delay" in src
+    assert "if self.pace_override.isChecked()" in src, \
+        "the override must be None when the box is unticked"

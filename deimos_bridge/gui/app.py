@@ -26,7 +26,8 @@ import argparse
 import sys
 
 from PyQt6.QtCore import QThread, pyqtSignal
-from PyQt6.QtWidgets import (QApplication, QComboBox, QFileDialog, QGroupBox,
+from PyQt6.QtWidgets import (QApplication, QComboBox, QDoubleSpinBox,
+                             QFileDialog, QGroupBox,
                              QHBoxLayout, QLabel, QLineEdit, QMainWindow,
                              QMessageBox, QProgressBar, QPushButton, QSpinBox, QCheckBox,
                              QTabWidget, QVBoxLayout, QWidget)
@@ -2286,6 +2287,38 @@ class MainWindow(QMainWindow):
         row.addStretch()
         v.addLayout(row)
 
+        pace = QHBoxLayout()
+        self.pace_override = QCheckBox("Override script pacing")
+        self.pace_override.setToolTip(
+            "The TTS presets pace themselves: `var SpeedDelay = 1` puts a "
+            "one-second sleep after nearly every action, and `DialogDelay` "
+            "the same before proceeding from dialogue. Tick this to run "
+            "them at your values instead — the script file itself is not "
+            "touched. The author's warning applies to dialogue: too fast "
+            "and quest pickups get missed. Read at Play live.")
+        pace.addWidget(self.pace_override)
+        pace.addWidget(_label("step", PALETTE["muted"]))
+        self.pace_step = QDoubleSpinBox()
+        self.pace_step.setRange(0.1, 5.0)
+        self.pace_step.setSingleStep(0.1)
+        self.pace_step.setValue(0.5)
+        self.pace_step.setSuffix(" s")
+        pace.addWidget(self.pace_step)
+        pace.addWidget(_label("dialogue", PALETTE["muted"]))
+        self.pace_dialog = QDoubleSpinBox()
+        self.pace_dialog.setRange(0.1, 5.0)
+        self.pace_dialog.setSingleStep(0.1)
+        self.pace_dialog.setValue(1.0)
+        self.pace_dialog.setSuffix(" s")
+        pace.addWidget(self.pace_dialog)
+        for spin in (self.pace_step, self.pace_dialog):
+            spin.setEnabled(False)
+        self.pace_override.toggled.connect(
+            lambda on: [s.setEnabled(on)
+                        for s in (self.pace_step, self.pace_dialog)])
+        pace.addStretch()
+        v.addLayout(pace)
+
         act = QHBoxLayout()
         for label, action in (("Teleport all to leader", "teleport"),
                               ("Advance dialogue (all)", "dialogue")):
@@ -2522,7 +2555,15 @@ class MainWindow(QMainWindow):
                                seats=rest,
                                follow_leader=self.follow_leader.isChecked(),
                                solo_script=self.solo_script.isChecked(),
-                               leader=self.leader_pick.currentIndex())
+                               leader=self.leader_pick.currentIndex(),
+                               script_step_delay=(
+                                   self.pace_step.value()
+                                   if self.pace_override.isChecked()
+                                   else None),
+                               script_dialog_delay=(
+                                   self.pace_dialog.value()
+                                   if self.pace_override.isChecked()
+                                   else None))
         self.live.status.connect(self.on_live_status)
         # Per wizard as well as into the one-line status bar: with four
         # of them talking the bar holds whichever spoke last, and a

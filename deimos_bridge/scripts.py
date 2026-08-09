@@ -340,6 +340,39 @@ def solo_source(source: str):
     return source, reset
 
 
+def set_pacing(source: str, step=None, dialog=None):
+    """(source, changed) — override the script's own pacing settings.
+
+    The TTS presets pace themselves with two settings the author put at
+    the top of the file::
+
+        var SpeedDelay = 1     # How long each step of the bot will take
+        var DialogDelay = 1    # How long before the bot proceeds after
+                               # dialogue
+
+    and sprinkle `sleep $SpeedDelay` after nearly every action. They are
+    the operator's knob, and editing a 14,000-line file to turn it is
+    not a knob — so the GUI passes the values here and the `var` lines
+    are rewritten before the VM ever sees them. `None` means "leave the
+    script's own value alone", per setting. deimoslang numbers are
+    floats (`tokenizer.py:352`), so 0.5 is as valid as 1.
+    """
+    import re
+
+    changed = []
+    for name, value in (("SpeedDelay", step), ("DialogDelay", dialog)):
+        if value is None:
+            continue
+        want = f"{float(value):g}"
+        new, n = re.subn(rf'(^\s*var\s+{name}\s*=\s*)[0-9.]+',
+                         lambda m: f"{m.group(1)}{want}",
+                         source, count=1, flags=re.MULTILINE)
+        if n and new != source:
+            source = new
+            changed.append((name, want))
+    return source, changed
+
+
 def check(source: str, party_size=None):
     """(ok, reason) — does this script compile?
 
