@@ -514,11 +514,20 @@ class ScriptRunner:
 
     #: seconds of instructions per burst. The service task holds this
     #: wizard's drive lock for the whole burst, so this is also the
-    #: longest a hotkey press can be made to wait behind the script --
-    #: which is why it is a fraction of a second and not the tight loop
-    #: Deimos runs. At a few thousand instructions a second it is still
-    #: three orders of magnitude more program than one step per tick.
-    SLICE = 0.5
+    #: longest a hotkey press can be made to wait behind the script.
+    #:
+    #: Was 0.5, and that number was most of "is there a long delay
+    #: between actions/teleports for scripts?" -- yes, and it was ours.
+    #: Between every 0.5s burst the service tick slept another 0.5s and
+    #: did its reads, so the script ran at roughly 40% duty cycle: every
+    #: action the author priced at one second cost two and a half. At
+    #: 2.5s a burst (with the tick's sleep shortened while the script is
+    #: mid-work, see `LiveWorker._script_step`) the duty cycle is ~85%.
+    #: A hotkey waiting 2.5s behind a burst is noticeable but fine --
+    #: hotkey actions already queue behind teleports twice that long,
+    #: and Stop does not wait at all: `should_stop` is checked between
+    #: individual instructions inside the burst.
+    SLICE = 2.5
     #: instructions in a burst, whatever the clock says. A `sleep 0`
     #: loop would otherwise spin the whole slice with the wheel held.
     MAX_STEPS = 20000

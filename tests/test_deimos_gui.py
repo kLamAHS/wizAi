@@ -13676,3 +13676,72 @@ def test_the_questing_tab_mode_and_checkboxes_agree_both_ways(qapp):
     import inspect
     src = inspect.getsource(MainWindow.on_start_live)
     assert "leader=self.leader_pick.currentIndex()" in src
+
+
+# ------------------------- the delay between script actions was ours
+#
+# The operator: "is there a long delay between actions/ teleports for
+# scripts? I feel like it teleports somewhere, waits a while then
+# teleports to the next place, same with dialogue". Yes: the script ran
+# in 0.5s bursts with a 0.5s sleep and a tickful of reads between them
+# — a ~40% duty cycle, so every action the author priced at one second
+# cost about two and a half.
+
+def test_the_script_burst_is_seconds_not_a_fraction_of_one():
+    from deimos_bridge.scripts import ScriptRunner
+
+    assert ScriptRunner.SLICE >= 2.0, \
+        "back to the 40% duty cycle the operator felt as 'a long delay'"
+
+
+def _stepping_runner(done, running=True):
+    class _R:
+        stale = False
+        failures = 0
+        steps = 5
+        last_error = ""
+
+        def __init__(self):
+            self.running = running
+
+        async def run_for(self, should_stop=None):
+            return done
+
+    return _R()
+
+
+def test_a_working_script_marks_its_seat_hot(monkeypatch):
+    """Hot means the tick comes straight back for the next burst instead
+    of sleeping its usual half second between them."""
+    import asyncio
+
+    worker = _behind_party()
+    seat = worker.seats[0]
+    seat.script_said = True
+    seat.runner = _stepping_runner(done=120)
+    asyncio.run(worker._script_step(seat))
+    assert seat.script_hot is True
+
+
+def test_a_script_with_nothing_to_run_cools_the_seat_down(monkeypatch):
+    """A parked or finished script must not keep the tick spinning at
+    ten times its normal rate for nothing."""
+    import asyncio
+
+    worker = _behind_party()
+    seat = worker.seats[0]
+    seat.script_said = True
+    seat.script_hot = True
+    seat.runner = _stepping_runner(done=0, running=True)
+    asyncio.run(worker._script_step(seat))
+    assert seat.script_hot is False
+
+
+def test_the_service_tick_hurries_while_the_script_is_hot():
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._service_loop)
+    assert 'script_hot' in src, \
+        "the tick sleeps its full half second between script bursts again"
