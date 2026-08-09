@@ -348,6 +348,7 @@ class WizAiBackend:
         decision.policy = self._why(policy, label)
         decision.candidates = list(getattr(policy, "last_candidates", ()) or ())
         self._note_party(decision)
+        decision = self._maybe_heal(sim, read, decision)
         # After `_note_party`, which rewrites the reason outright when the
         # seat was held. The numbers in `candidates` are the party-blind
         # ones whenever this fired, and a reader comparing them against
@@ -358,6 +359,112 @@ class WizAiBackend:
                                 "party's damage was counted, so this was "
                                 "decided as if alone)")
         self._record(decision, read)
+        return decision
+
+    #: below this fraction of max health a party member counts as in
+    #: danger, and a castable heal outranks an ordinary damage round.
+    #: Deliberately lower than the between-fights threshold: mid-fight,
+    #: a heal costs a round of damage, so it has to be needed rather
+    #: than merely nice.
+    HEAL_AT = 0.40
+
+    def _maybe_heal(self, sim, read, decision):
+        """Heal the party when somebody needs it, and only then.
+
+        The operator: "my life wizard has unicorn in its deck but I
+        havent seen it play it yet". Structural, not a tuning miss: the
+        rollout's sim is SOLO -- one player and the enemies -- so an
+        ally heal has no modelled value at all. Unicorn ties with doing
+        nothing on every board and can never win a round, while the
+        clicking layer underneath (`_resolve_target`) understands heals
+        perfectly and never gets handed one.
+
+        Each wizard's read already carries its teammates' health
+        (`state.allies`, index-aligned with `ally_members`), so this is
+        decided here, after the policy, from the live board:
+
+          * somebody -- self or a circle-mate -- is under `HEAL_AT`,
+          * the chosen line does NOT end the fight this round (a kill
+            is the best heal there is), and
+          * a heal in hand is castable,
+
+        then the round is spent on whichever heal restores the most
+        real health: an AoE like Unicorn is summed over everyone it
+        reaches, a single-target like Satyr is measured on the worst-
+        off wizard it can reach, and waste above max health does not
+        count. Aiming stays with `_resolve_target`, which already sends
+        a heal to whoever is hurt.
+        """
+        from w101_sim import castable
+
+        from .policies import _heal_amount
+
+        chosen = next((c for c in (decision.candidates or ())
+                       if getattr(c, "chosen", False)), None)
+        if chosen is not None and (chosen.turns or 99) <= 1:
+            return decision              # the kill ends the danger
+        spec = self.cards.get(decision.card_name) if decision.card_name \
+            else None
+        if spec is not None and getattr(spec, "kind", "") == "heal":
+            return decision              # the policy already chose one
+
+        state = read.state
+        party = [("me", state.player)] + [
+            (name, actor) for name, actor in
+            zip(getattr(read, "ally_members", ()) or (),
+                getattr(state, "allies", ()) or ())]
+        hurt = []
+        for name, actor in party:
+            try:
+                frac = float(actor.hp) / float(actor.max_hp)
+            except (AttributeError, TypeError, ZeroDivisionError):
+                continue
+            if actor.hp > 0 and frac < self.HEAL_AT:
+                hurt.append((name, actor))
+        if not hurt:
+            return decision
+
+        try:
+            heals = [c for c in castable(sim, state, "heal")
+                     if c.name in read.hand_cards]
+        except Exception:
+            return decision
+        best, delivered, helps_ally = None, 0.0, False
+        for card in heals:
+            amount = _heal_amount(card)
+            targets = {op.get("tgt", "self") for op in card.ops or ()
+                       if op.get("op") in ("heal", "hot")}
+            if targets <= {"self"}:
+                reach = [a for n, a in party if n == "me"]
+            elif "allies" in targets:
+                reach = [a for _n, a in party]
+            else:                        # single-target ally card; it can
+                reach = [max((a for _n, a in party),  # go to the worst off
+                             key=lambda a: a.max_hp - a.hp)]
+            if not any(a in (a2 for _n2, a2 in hurt) for a in reach):
+                continue
+            if "allies" in targets:
+                worth = sum(min(amount, a.max_hp - a.hp) for a in reach)
+            else:
+                worth = min(amount, max(a.max_hp - a.hp for a in reach))
+            if worth > delivered:
+                best, delivered = card, worth
+                helps_ally = not (targets <= {"self"})
+        if best is None:
+            return decision
+
+        was = decision.card_name or "pass"
+        who = ", ".join(
+            f"{'this wizard' if n == 'me' else n.split(':', 1)[-1]} on "
+            f"{a.hp / a.max_hp * 100:.0f}%" for n, a in hurt)
+        decision.card_name = best.name
+        decision.passing = False
+        decision.target_index = None
+        decision.target_kind = "ally" if helps_ally else "self"
+        decision.reason = (
+            f"healed instead — {who}: {best.name} restores "
+            f"~{delivered:,.0f} real health, and the chosen line "
+            f"({was}) did not end the fight this round")
         return decision
 
     def _check_defeated(self, read):

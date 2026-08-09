@@ -13893,3 +13893,123 @@ def test_the_modal_paths_are_the_same_ones_close_menus_clicks():
 
     for path in MODAL_BUTTON_PATHS:
         assert path in CLOSE_MENU_PATHS
+
+
+# ------------------------------- healing as a mechanic, not an accident
+#
+# "my life wizard has unicorn in its deck but I havent seen it play it
+# yet". Structural: the rollout's sim is SOLO — one player plus the
+# enemies — so an ally heal has no modelled value, ties with doing
+# nothing on every board, and can never win a round. Each wizard's read
+# already carries its teammates' health (`state.allies`); the rule that
+# spends a round on a heal lives after the policy, where that health is
+# visible.
+
+def _healing_backend(hand_names, my_hp=200, ally_hp=None, my_max=1000):
+    """A backend, a read with those cards in hand, and a stub sim."""
+    from data_full import load_cards
+    from deimos_bridge.live_backend import WizAiBackend
+
+    cards = load_cards("cards_clean.json")
+    read = _healer_read(my_hp=my_hp, my_max=my_max, ally_hp=ally_hp)
+    read.state.player.hand = [cards[n] for n in hand_names]
+    for n in hand_names:
+        read.hand_cards[n] = object()
+
+    backend = WizAiBackend.__new__(WizAiBackend)
+    backend.cards = cards
+
+    class _Sim:
+        def can_cast(self, _s, _c, *a, **kw):
+            return True
+
+    return backend, read, _Sim()
+
+
+def _combat_choice(card="Imp", turns=5):
+    from deimos_bridge.live_backend import PolicyDecision
+    from deimos_bridge.policies import Candidate
+
+    decision = PolicyDecision(card_name=card, target_index=0)
+    decision.candidates = [Candidate(card=card, target=0, turns=turns,
+                                     damage=100.0, pips=1, chosen=True,
+                                     horizon=12)]
+    return decision
+
+
+def test_a_hurt_teammate_gets_the_heal_over_an_ordinary_hit():
+    backend, read, sim = _healing_backend(["Imp", "Fairy"], my_hp=900,
+                                          ally_hp=200)
+    decision = backend._maybe_heal(sim, read, _combat_choice("Imp"))
+    assert decision.card_name == "Fairy"
+    assert decision.target_kind == "ally"
+    assert "Jeffrey" in decision.reason and "20%" in decision.reason
+    assert "Imp" in decision.reason, "the overridden pick should be named"
+
+
+def test_unicorn_wins_when_the_whole_team_is_battered():
+    """275 to everyone beats 860 to one wizard the moment two are hurt
+    enough — the AoE is summed over everyone it reaches, waste above
+    max health excluded."""
+    backend, read, sim = _healing_backend(["Unicorn", "Satyr"], my_hp=200,
+                                          ally_hp=300)
+    decision = backend._maybe_heal(sim, read, _combat_choice("Imp"))
+    # Unicorn: min(275, 800) + min(275, 700) = 550. Satyr: min(860, 800)
+    # = 800 to the single worst-off. Satyr genuinely restores more here.
+    assert decision.card_name == "Satyr"
+
+    backend, read, sim = _healing_backend(["Unicorn", "Fairy"], my_hp=200,
+                                          ally_hp=300)
+    decision = backend._maybe_heal(sim, read, _combat_choice("Imp"))
+    # Unicorn: 550 across the team. Fairy: min(420, 800) = 420.
+    assert decision.card_name == "Unicorn"
+
+
+def test_a_healthy_party_is_not_healed():
+    backend, read, sim = _healing_backend(["Fairy"], my_hp=900, ally_hp=800)
+    decision = backend._maybe_heal(sim, read, _combat_choice("Imp"))
+    assert decision.card_name == "Imp", "it healed nobody in particular"
+
+
+def test_a_kill_this_round_is_the_best_heal_there_is():
+    backend, read, sim = _healing_backend(["Fairy"], my_hp=200, ally_hp=200)
+    decision = backend._maybe_heal(sim, read, _combat_choice("Imp", turns=1))
+    assert decision.card_name == "Imp", \
+        "it healed instead of ending the fight"
+
+
+def test_a_self_only_heal_does_not_fire_for_a_hurt_teammate():
+    """Pixie's op says self. A teammate on 20% is not something it can
+    reach, and casting it anyway wastes the round the rule exists to
+    spend well."""
+    backend, read, sim = _healing_backend(["Pixie"], my_hp=900, ally_hp=200)
+    decision = backend._maybe_heal(sim, read, _combat_choice("Imp"))
+    assert decision.card_name == "Imp"
+
+    # ...but it does fire for the wizard itself.
+    backend, read, sim = _healing_backend(["Pixie"], my_hp=200, ally_hp=900)
+    decision = backend._maybe_heal(sim, read, _combat_choice("Imp"))
+    assert decision.card_name == "Pixie"
+    assert decision.target_kind == "self"
+
+
+def test_a_policy_that_already_chose_a_heal_is_left_alone():
+    backend, read, sim = _healing_backend(["Fairy"], my_hp=200, ally_hp=200)
+    decision = backend._maybe_heal(sim, read, _combat_choice("Fairy"))
+    assert decision.card_name == "Fairy"
+    assert "healed instead" not in (decision.reason or "")
+
+
+def test_a_pass_round_with_a_hurt_wizard_becomes_a_heal():
+    """The held round — the party already has the board dead — is the
+    cheapest heal round there will ever be."""
+    from deimos_bridge.live_backend import PolicyDecision
+
+    backend, read, sim = _healing_backend(["Fairy"], my_hp=200, ally_hp=900)
+    held = PolicyDecision(passing=True,
+                          reason="held this card — the rest of the party "
+                                 "already has this board dead this round")
+    held.candidates = []
+    decision = backend._maybe_heal(sim, read, held)
+    assert decision.card_name == "Fairy"
+    assert not decision.passing
