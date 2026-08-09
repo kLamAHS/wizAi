@@ -202,6 +202,9 @@ class _Seat:
         #: See `LiveWorker._unstick`.
         self.unstuck_at = 0.0
         self.steps_seen = None
+        #: the spot a desperation quest-teleport was already tried from,
+        #: as a `progress` stamp. See `LiveWorker._desperate_hop`.
+        self.hop_tried_at = None
         #: what `runner` was built from, so the service tick can notice
         #: the operator turning the script on, off, or replacing it
         self.script_source = None
@@ -407,6 +410,12 @@ class LiveWorker(QThread):
         self._stop = False
         #: the catch-up in progress, or None. See `_start_catching_up`.
         self._catch_up_state = None
+        #: until when the script takes no instructions because a
+        #: desperate quest-teleport is in flight or settling. A
+        #: monotonic deadline rather than a flag, so a hop that dies
+        #: mid-teleport releases the script by itself. See
+        #: `_desperate_hop` and `_hop_held`.
+        self._hop_pause_until = 0.0
         #: {seat id: (the step it gave up on, when)}. A catch-up that
         #: gives up has to be REMEMBERED, or `_check_in_step` starts the
         #: identical one on the next tick -- see `_written_off`.
@@ -664,7 +673,21 @@ class LiveWorker(QThread):
                 self._check_progress(seat)
 
                 catching = self._catching_up()
-                if seat.runner is not None and not catching:
+                if seat.runner is not None and self._hop_held():
+                    # A desperate quest-teleport is in flight or still
+                    # settling. The script's own tp loop re-teleports
+                    # within a second, aimed at the spot it was stuck on
+                    # -- the operator: "it's possible and even likely
+                    # for the bot to teleport away from the quest after
+                    # a desperate tp back to the place it was stuck,
+                    # which is usually 1000ish units away" -- so running
+                    # instructions now undoes the fix before it lands.
+                    self._say_once(
+                        seat, "script-held-hop",
+                        "script held for a moment so its own teleport "
+                        "does not drag the wizard back off the quest "
+                        "marker it was just sent to")
+                elif seat.runner is not None and not catching:
                     await self._stage(seat, "script step",
                                       self._script_step(seat), wheel=True)
                 elif seat.runner is not None:
@@ -980,12 +1003,28 @@ class LiveWorker(QThread):
 
     #: how many repeats of the same stage failure before the questing log
     #: says so again. The status line thins out at 20 because it is read
-    #: live; the export is read afterwards, and one entry per 60 is
-    #: enough to show a stall lasting minutes without burying the rest.
+    #: live; the export is read afterwards, and 60 sets where the
+    #: geometric cadence starts.
     STUCK_EVERY = 60
 
+    @staticmethod
+    def _thinning(n, every):
+        """The 1st repeat, then `every`, then doubling: 2×, 4×, 8×…
+
+        Linear cadence made the pattern BE the log: rev 30e83468 wrote
+        `catch-up-out-of-zone — 240 times in a row` into the export
+        every twelve seconds for as long as the run lasted, one entry
+        per sixty ticks of a condition that was never going to change.
+        Doubling keeps a stall visible at a cost that grows with its
+        length's logarithm instead.
+        """
+        if n == 1:
+            return True
+        times, remainder = divmod(n, every)
+        return remainder == 0 and times & (times - 1) == 0
+
     def _say_once(self, seat, key, message, kind="", detail=""):
-        """Say it the first time, then every 20th -- twice a second is spam.
+        """Say it the first time, then geometrically less often.
 
         The service tick runs twice a second, so a stage that is broken
         rather than unlucky would fill the status bar with one line and
@@ -1003,10 +1042,10 @@ class LiveWorker(QThread):
         seat = self.seats[0] if seat is None else seat
         n = seat.stage_errors.get(key, 0) + 1
         seat.stage_errors[key] = n
-        if n == 1 or n % 20 == 0:
+        if self._thinning(n, 20):
             self._say(seat, message + (f" (still failing after {n} tries)"
                                        if n > 1 else ""))
-        if kind and (n == 1 or n % self.STUCK_EVERY == 0):
+        if kind and self._thinning(n, self.STUCK_EVERY):
             try:
                 seat.tel.note_questing(
                     kind, detail + (f" — {n} times in a row" if n > 1 else ""))
@@ -2507,10 +2546,7 @@ class LiveWorker(QThread):
         after the fact: what is each wizard doing RIGHT NOW, and is
         anybody stuck.
         """
-        from .. import questlist
-
-        place = (questlist.position_of(seat.quest_name)
-                 if seat.quest_name else questlist.Position())
+        place = self._place_by_name(seat)
         if seat.in_duel:
             doing = "fighting"
         elif self._script_drives(seat):
@@ -2791,8 +2827,10 @@ class LiveWorker(QThread):
             where an unrequested interact is exactly what the script is
             asking for. Gated on something being in range, so it is a
             press at an NPC and not into empty air.
-          * No box, script looping: not a dialogue problem. Reported,
-            nothing touched.
+          * No box, script looping -- or parked with nothing in range,
+            or X already tried here for nothing: not a dialogue
+            problem. The wizard needs moving, and after a second look
+            `_desperate_hop` moves it.
 
         Never before `STUCK_AFTER`, so an ordinary conversation is never
         raced, and every read is written down either way.
@@ -2861,6 +2899,9 @@ class LiveWorker(QThread):
                       f"stuck {mins:.0f} min and X does nothing from here "
                       f"({why or 'at the quest marker'}) — this wizard needs "
                       f"moving, not interacting")
+            # ...so move it. This used to end here, with the diagnosis
+            # as the deliverable.
+            await self._desperate_hop(seat, mins, at_marker)
             return
 
         if parked and near:
@@ -2878,6 +2919,136 @@ class LiveWorker(QThread):
                       f"instruction and no dialogue open — pressed X. "
                       f"`waitfordialog` polls until a box exists and never "
                       f"times out, so making one exist is what it waits for")
+            return
+
+        # No box, nothing X can reach -- or a retry loop that is not
+        # working. What is left is moving the wizard -- once parked or
+        # looping is actually KNOWN, so the first look stays a look and
+        # the gentler fixes above are not skipped over on a guess.
+        if was is not None and steps is not None:
+            await self._desperate_hop(seat, mins, at_marker)
+
+    async def _desperate_hop(self, seat, mins, at_marker):
+        """The operator's own last resort, automated: a quest teleport.
+
+        "Sometimes when really stuck a simple fix is turning off the
+        script for a moment and pressing the teleport to quest button,
+        maybe that will help as a desperate fix if they get stuck too
+        long." That is what a person does at this point, and this is
+        that, with the judgement written in as guards. By the time it
+        runs the wizard is past `STUCK_AFTER`, out of combat, any open
+        dialogue has been handled and X has been offered everything it
+        can reach -- what is left is moving the wizard.
+
+        Each guard is a failure a live run has already had:
+
+        -- a second look first. The gentler fixes above deserve one
+           full pass (parked is unknowable on the first sample), so the
+           hop waits one `UNSTICK_EVERY` beyond `STUCK_AFTER`.
+        -- the marker must read, within this zone. Across a boundary
+           the coordinates are another zone's space and the teleport
+           lands underground -- rev 1843e387, four times over.
+        -- not from on top of the marker. Rev 3822cc6c teleported
+           Phönix to the spot he was already standing on, forever.
+        -- not under the wizard's own heal floor. A quest teleport
+           lands on sigils and mobs, and rev 85a68184's wizards died of
+           entering fights hurt; one resting at a wisp is standing
+           still on purpose.
+        -- once per spot. A hop that helps moves the wizard, which
+           resets the spot on its own; one that does not help will not
+           help twice.
+
+        And the script IS held for it -- the hop, plus a settle window
+        after it lands. The first version reasoned that a parked or
+        looping script could only be unblocked by the wizard arriving
+        at its objective, and the operator corrected it: "it's possible
+        and even likely for the bot to teleport away from the quest
+        after a desperate tp back to the place it was stuck, which is
+        usually 1000ish units away". A retry loop re-teleports within a
+        second, aimed a thousand units off the marker -- close enough
+        to look right, far enough to undo the fix before a dialogue
+        opens or a sigil finishes counting down. The hold is a
+        deadline, not a flag, so a hop cut off mid-teleport releases
+        the script by itself when `HOP_PAUSE_CEILING` runs out.
+        """
+        import time
+
+        from .. import questing
+
+        now = time.monotonic()
+        if now - seat.progress_at < self.STUCK_AFTER + self.UNSTICK_EVERY:
+            return
+        here = seat.progress or (None, None, None)
+        if seat.hop_tried_at == here:
+            return
+        away = seat.marker_away
+        if away is None:
+            # A marker that would not read may read on the next poll.
+            # Refusing permanently over one bad read would be worse.
+            return
+        if away > self.MARKER_IN_ZONE:
+            seat.hop_tried_at = here
+            seat.tel.note_questing(
+                "desperate-hop-refused",
+                f"stuck {mins:.0f} min, and the quest marker is "
+                f"{away:,.0f} away — another zone. A quest teleport "
+                f"cannot cross one, so the hop the operator would try by "
+                f"hand has nowhere to go from here")
+            return
+        if at_marker:
+            seat.hop_tried_at = here
+            seat.tel.note_questing(
+                "desperate-hop-refused",
+                f"stuck {mins:.0f} min on top of the quest marker — "
+                f"teleporting to the spot this wizard is standing on is "
+                f"the loop rev 3822cc6c spent 24 minutes in")
+            return
+        left = await self._health_left(seat)
+        if left is not None and left < self._health_needed(seat):
+            return
+        # Before the await, not after: a hop cut off mid-teleport by the
+        # stage deadline must not retry from this spot forever.
+        seat.hop_tried_at = here
+        # ...and the script stops taking instructions NOW, before the
+        # teleport, so its own tp loop cannot land one between ours and
+        # the dialogue it is meant to open.
+        self._hop_pause_until = now + self.HOP_PAUSE_CEILING
+        self._say(seat,
+                  f"stuck {mins:.0f} min and out of gentler fixes — doing "
+                  f"what the operator would do by hand: script held for a "
+                  f"moment, quest teleport, {away:,.0f} to the marker")
+        try:
+            fight = await questing.hop_once(
+                seat.client, on_status=lambda m: self._say(seat, m))
+        finally:
+            # The settle window: a sigil the hop lands on counts down
+            # for ~10s, and a turn-in needs the server round-trip. On
+            # ANY exit, so a hop that raised does not hold the script
+            # for the whole ceiling.
+            self._hop_pause_until = time.monotonic() + self.HOP_SETTLE
+        seat.tel.note_questing(
+            "desperate-hop",
+            f"stuck {mins:.0f} min — script held, quest-teleported "
+            f"{away:,.0f} to the marker"
+            + (", and a fight started" if fight else "")
+            + f"; the script gets the wheel back in {self.HOP_SETTLE:.0f}s")
+
+    #: the longest the script can be held by a hop that never returns.
+    #: A deadline rather than a flag: if `hop_once` is cut off or dies,
+    #: the script frees itself when this runs out.
+    HOP_PAUSE_CEILING = 90.0
+    #: how long the script stays held AFTER the hop lands. The operator:
+    #: "it's possible and even likely for the bot to teleport away from
+    #: the quest after a desperate tp back to the place it was stuck,
+    #: which is usually 1000ish units away" -- and a sigil the hop lands
+    #: on counts down ~10s before it admits anybody.
+    HOP_SETTLE = 15.0
+
+    def _hop_held(self):
+        """Is the script waiting out a desperate quest-teleport?"""
+        import time
+
+        return time.monotonic() < self._hop_pause_until
 
     #: how many fruitless presses of X from one spot before wizAi stops
     #: offering. One is worth making -- `waitfordialog` polls forever
@@ -2971,6 +3142,33 @@ class LiveWorker(QThread):
             f"{idle / 60:.0f} min with no change — {note} — while "
             f"{count} ran")
 
+    def _place_by_name(self, seat):
+        """`position_of` the tracked name — unless the goal disowns it.
+
+        One read for `_places` and the Questing tab both, so the number
+        that starts a catch-up and the number on screen cannot disagree.
+
+        The disowning is the fix for rev 30e83468. `_read_goal` keeps
+        the previous quest name on a blank read, so the name can lag
+        the goal by a quest -- and a stale name that still places wins
+        over a fresh goal that was never consulted, which is how
+        Sebastian stood on the same goal line as Konstantin and was
+        held two quests behind him. A name the goal line disowns places
+        nothing; the goal fallback in `_places` takes over from there.
+        """
+        from .. import questlist
+
+        if not seat.quest_name:
+            return questlist.Position()
+        place = questlist.position_of(seat.quest_name)
+        if (place.comparable and seat.goal
+                and questlist.goal_disowns(seat.quest_name, seat.goal)):
+            return questlist.Position(
+                how=(f"the name read {seat.quest_name!r} (#{place.order}), "
+                     f"but the goal line belongs to a different quest — a "
+                     f"stale read places nothing"))
+        return place
+
     def _places(self):
         """Where every seat sits in the questline, one `Position` each.
 
@@ -2989,8 +3187,7 @@ class LiveWorker(QThread):
         """
         from .. import questlist
 
-        places = [questlist.position_of(s.quest_name) if s.quest_name
-                  else questlist.Position() for s in self.seats]
+        places = [self._place_by_name(s) for s in self.seats]
         # A wizard whose name would not read can still be placed from
         # its goal, IF the goal is unambiguous. The rest of the party
         # says roughly where to look -- "Talk To Lieutenant Standish in
@@ -3027,6 +3224,33 @@ class LiveWorker(QThread):
                     places[i] = found
             if not moved:
                 break
+        # A wizard nothing could place, showing the SAME goal line,
+        # character for character, as a wizard that WAS placed, is on
+        # that wizard's quest -- text identity is evidence when there
+        # is no other evidence. Rev 30e83468's Sebastian read exactly
+        # Konstantin's goal while a lagging name read held him two
+        # quests back. Only the unplaceable are placed this way: two
+        # wizards placed at DIFFERENT quests sharing one goal line is
+        # a real thing (Krokotopia #12 and #13 both track "Talk To
+        # Lieutenant Standish"), and papering over a placement with
+        # text would erase a laggard the questline can actually see.
+        shared = {}
+        for i, seat in enumerate(self.seats):
+            if seat.goal:
+                shared.setdefault(seat.goal, []).append(i)
+        for members in shared.values():
+            placed = [places[i] for i in members if places[i].comparable]
+            if len(members) < 2 or not placed:
+                continue
+            best = max(placed, key=lambda p: p.order)
+            for i in members:
+                if places[i].comparable:
+                    continue
+                places[i] = questlist.Position(
+                    world=best.world, order=best.order, name=best.name,
+                    area=best.area, questline=best.questline,
+                    how=(f"the same goal line as a wizard placed at "
+                         f"#{best.order}"))
         return [self._no_further_back(seat, place)
                 for seat, place in zip(self.seats, places)]
 
@@ -3439,24 +3663,39 @@ class LiveWorker(QThread):
                 and getattr(self, "_behind_gap", 0) >= 1
                 and "questline" in getattr(self, "_behind_basis", "")):
             group = getattr(self, "_behind_group", None) or [behind]
-            away = self._marker_out_of_reach(group)
-            if away is not None:
-                # Not a catch-up. Getting there is the script's job and
-                # the script is good at it -- rev 1843e387 spent 116s
-                # failing to hop Phönix out of KT_Hub and the script did
-                # it in eight seconds the moment it had the wheel back.
+            # Reachability is per wizard, not per group. Rev 30e83468
+            # had Sebastian one turn-in from caught up and Phönix's
+            # marker a zone away in the same group, and a single
+            # verdict over both wastes whichever half it is wrong
+            # about: refuse and Sebastian's twenty-second step is held
+            # hostage to Phönix's geography, start and the catch-up's
+            # one budget burns out on the wizard nothing can drive.
+            near = []
+            for one in group:
+                away = self._marker_out_of_reach([one])
+                if away is None:
+                    near.append(one)
+                    continue
+                # Not a catch-up for this one. Getting there is the
+                # script's job and the script is good at it -- rev
+                # 1843e387 spent 116s failing to hop Phönix out of
+                # KT_Hub and the script did it in eight seconds the
+                # moment it had the wheel back.
                 self._say_once(
-                    behind, f"marker-away:{behind.name}",
-                    f"{behind.name} is {self._behind_gap} quest(s) behind "
+                    one, f"marker-away:{one.name}",
+                    f"{one.name} is {self._behind_gap} quest(s) behind "
                     f"and its objective is {away:,.0f} away — another zone. "
                     f"A quest teleport cannot cross one, so this is the "
                     f"script's journey to make, not a step wizAi can "
                     f"finish. Leaving it to the script",
                     kind="catch-up-out-of-zone",
-                    detail=(f"{behind.name}'s objective is {away:,.0f} away, "
+                    detail=(f"{one.name}'s objective is {away:,.0f} away, "
                             f"which is another zone. Not pausing the script "
                             f"for a hop that cannot reach it"))
+            if not near:
                 return
+            group = near
+            behind = group[0]
             if self._written_off(group):
                 # Tried, and it did not work. Running the script is not
                 # a good answer either, but it is the only OTHER answer,

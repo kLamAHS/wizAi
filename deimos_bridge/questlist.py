@@ -83,6 +83,19 @@ def _norm(text) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _tokens(text) -> frozenset:
+    """The normalised words, for matching that survives dropped ones.
+
+    The HUD and the data abbreviate differently: the HUD tracks `Talk
+    To Gordon Flemming` for a quest the data records as `Talk to Dr.
+    Gordon Flemming`, and exact-normalised comparison calls those two
+    different objectives. One side's words being a subset of the
+    other's is the loosest match that still cannot confuse two
+    different NPCs.
+    """
+    return frozenset(_norm(text).split())
+
+
 def _load():
     global _loaded
     with _lock:
@@ -116,6 +129,12 @@ class _Index:
             self.by_name.setdefault(name, quest)
             for objective in quest.get("objectives") or ():
                 self.by_objective.setdefault(_norm(objective), []).append(quest)
+        # The same objectives as word-sets, for `_loose_lookup`. One
+        # word is not an objective ("Explore" would subset-match half
+        # the list), so those never match loosely.
+        self.loose = [(frozenset(key.split()), quests_)
+                      for key, quests_ in self.by_objective.items()
+                      if len(key.split()) >= 2]
 
 
 def loaded() -> bool:
@@ -219,6 +238,8 @@ def position_from_goal(goal, world=None, near=None) -> Position:
     if not candidates:
         candidates = index.by_objective.get(_norm(goal))
     if not candidates:
+        candidates = _loose_lookup(index, goal)
+    if not candidates:
         return Position(name="", how="no quest lists that objective")
 
     if world:
@@ -259,6 +280,68 @@ def _strip_zone(goal) -> str:
     the zone and not the piece.
     """
     return re.sub(r"\s+in\s+[^,]+$", "", (goal or "").strip())
+
+
+def _loose_lookup(index, goal):
+    """The quests listing this goal, up to words the HUD dropped.
+
+    The HUD's `Talk To Gordon Flemming` is the data's `Talk to Dr.
+    Gordon Flemming`; exact lookup misses it, and the miss is not
+    neutral -- a goal that cannot be recognised keeps a stale
+    quest-name placement alive (see `goal_disowns`) and cost rev
+    30e83468 an endless "2 quests behind" on a wizard that was not.
+
+    ONE direction only: every word of the goal must appear in the
+    data's objective. The reverse -- the objective's words a subset of
+    the goal's -- reads natural but is a trap: the data carries an
+    objective that normalises to just "talk to", and that is a subset
+    of every talk goal in the game. It matched `Talk To Gordon
+    Flemming` to Krokotopia #12 on the first try.
+    """
+    goal_t = _tokens(_strip_zone(goal))
+    if len(goal_t) < 2:
+        return []
+    found = []
+    for tokens, quests in index.loose:
+        if goal_t <= tokens:
+            for quest in quests:
+                if quest not in found:
+                    found.append(quest)
+    return found
+
+
+def goal_disowns(quest_name, goal) -> bool:
+    """Does the goal line say the tracked quest NAME is a stale read?
+
+    The name and the goal describe the same tracked quest -- when both
+    reads are fresh. They are not always: `_read_goal` keeps the
+    previous name on a blank read, because a blank is not evidence of a
+    change, so the name can sit one quest in the past while the goal
+    has moved on. Rev 30e83468 is the cost: Sebastian's goal read `Talk
+    To Sergeant Major Talbot in The Oasis` -- Krokotopia #20, and
+    character for character the same text as the wizard he was measured
+    against -- while his name still read `Eye of Krok`, #18, and the
+    party held a catch-up over a two-quest gap that did not exist.
+
+    True only when the goal provably belongs to some OTHER quest in the
+    list: not one of the named quest's own objectives, but listed by a
+    different quest. A goal the list has never heard of proves nothing
+    -- the data's objectives are incomplete in places (`Into the Map
+    Room` lists a prose note instead of steps), and distrusting the
+    name over that would unplace every wizard walking such a quest.
+    """
+    index = _load()
+    quest = index.by_name.get(_norm(quest_name))
+    if quest is None:
+        return False
+    goal_t = _tokens(_strip_zone(goal))
+    if len(goal_t) < 2:
+        return False
+    for objective in quest.get("objectives") or ():
+        theirs = _tokens(_strip_zone(objective))
+        if len(theirs) >= 2 and (goal_t <= theirs or theirs <= goal_t):
+            return False
+    return bool(_loose_lookup(index, goal))
 
 
 def furthest_behind(positions):

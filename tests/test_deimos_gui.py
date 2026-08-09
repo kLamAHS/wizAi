@@ -14013,3 +14013,326 @@ def test_a_pass_round_with_a_hurt_wizard_becomes_a_heal():
     decision = backend._maybe_heal(sim, read, held)
     assert decision.card_name == "Fairy"
     assert not decision.passing
+
+
+# ------------------------------------------ a stale name read, disowned
+#
+# Rev 30e83468, the run the operator described as "it says they're on
+# different quests and gets stuck but he wasnt". Two shapes of one read
+# problem. Sebastian's goal moved to `Talk To Sergeant Major Talbot in
+# The Oasis` -- Krokotopia #20, the same text as the leader's -- while
+# his name read lagged at `Eye of Krok`, #18, and the stale name placed
+# him two quests behind a wizard standing on his own quest. Phönix's
+# tracker was on a Gordon Flemming side quest, his name read was just as
+# stale, and the party spent the rest of the run refusing catch-ups for
+# a wizard that was not behind.
+
+def test_a_stale_name_cannot_hold_a_wizard_behind_its_own_goal():
+    worker, _read = _zoned_party(["Krokotopia/KT_PalaceOfFire"] * 2)
+    goal = "Talk To Sergeant Major Talbot in The Oasis"
+    worker.seats[0].quest_name = "Permission to Enter"   # fresh: #20
+    worker.seats[0].goal = goal
+    worker.seats[1].quest_name = "Eye of Krok"           # stale: #18
+    worker.seats[1].goal = goal
+    places = worker._places()
+    assert [p.order for p in places] == [20, 20], \
+        [(p.order, p.how) for p in places]
+    together, why = worker._quests_agree()
+    assert together, why
+
+
+def test_wizards_sharing_a_goal_line_share_a_place():
+    """The belt to the disowning's braces: identical goal text is the
+    same quest even when the goal places nobody on its own -- a goal
+    the data does not list at all. The highest placement wins, and the
+    clamp keeps raising safe."""
+    worker, _read = _zoned_party(["Krokotopia/KT_Hub"] * 2)
+    goal = "Wibble the Wobble in Nowhere"
+    worker.seats[0].quest_name = "Into the Map Room"     # #16, prose-only
+    worker.seats[0].goal = goal
+    worker.seats[1].quest_name = ""                      # name never read
+    worker.seats[1].goal = goal
+    places = worker._places()
+    assert [p.order for p in places] == [16, 16], \
+        [(p.order, p.how) for p in places]
+    assert "same goal line" in places[1].how
+
+
+def test_the_questing_tab_does_not_show_a_disowned_placement():
+    """The tab reads the same placement the rules do, so a stale name
+    must not put `#18 (Krokotopia)` on screen either."""
+    worker, _read = _zoned_party(["Krokotopia/KT_Hub"])
+    seat = worker.seats[0]
+    seat.quest_name = "Eye of Krok"
+    seat.goal = "Talk To Sergeant Major Talbot in The Oasis"
+    row = worker._quest_row(seat, "Krokotopia/KT_Hub", 0.0)
+    assert row["line"] == "", row
+
+
+def test_a_zone_away_laggard_does_not_cost_the_reachable_one_its_catch_up():
+    """Reachability is per wizard. Rev 30e83468's behind group was
+    Sebastian, one twenty-second turn-in from caught up, and Phönix,
+    whose marker read a zone away -- and one verdict over both wastes
+    whichever half it is wrong about."""
+    import time
+
+    worker, _read = _zoned_party(["Krokotopia/KT_PalaceOfFire"] * 3)
+    worker.script = "###deimos_expertmode"
+    for seat, (name, marker) in zip(worker.seats, [
+            ("Fragments of a Key", 500.0),       # #4, reachable
+            ("Fragments of a Key", 110890.0),    # #4, another zone
+            ("Assault on the Palace", None)]):   # #11, the leader
+        seat.quest_name = name
+        seat.goal = f"step for {name}"
+        seat.marker_away = marker
+    worker._in_step_since = time.monotonic() - worker.DESYNC_GRACE - 1
+    worker._check_in_step(worker.seats[0])
+
+    assert worker._catch_up_state is not None, \
+        "the reachable laggard was refused for the other's geography"
+    assert worker._catching_up() == [worker.seats[0]]
+    kinds = [e["kind"] for e in worker.seats[1].tel.questing]
+    assert "catch-up-out-of-zone" in kinds, kinds
+
+
+def test_repeated_refusals_thin_out_instead_of_filling_the_export():
+    """Rev 30e83468: `catch-up-out-of-zone — 240 times in a row` every
+    twelve seconds, one entry per sixty ticks, for as long as the run
+    lasted. The pattern WAS the log. Doubling keeps a stall visible at
+    a handful of entries however long it runs."""
+    worker, _read = _zoned_party(["Krokotopia/KT_Hub"])
+    seat = worker.seats[0]
+    for _ in range(480):
+        worker._say_once(seat, "the-same-key", "still stuck",
+                         kind="catch-up-out-of-zone", detail="far away")
+    notes = [e for e in seat.tel.questing
+             if e["kind"] == "catch-up-out-of-zone"]
+    assert len(notes) == 5, [e["detail"] for e in notes]  # 1·60·120·240·480
+    assert "480 times in a row" in notes[-1]["detail"]
+
+
+# ------------------------------ the desperate fix: a quest teleport
+#
+# The operator: "Sometimes when really stuck a simple fix is turning
+# off the script for a moment and pressing the teleport to quest
+# button, maybe that will help as a desperate fix if they get stuck too
+# long." `_unstick`'s decision table used to end at a diagnosis — "this
+# wizard needs moving, not interacting" — with nobody to do the moving.
+
+def _desperately_wedged(monkeypatch, marker=900.0):
+    """A scripted wizard stuck past the second look: the script known
+    to be parked, nothing in range for X, the marker in this zone."""
+    import time
+
+    from deimos_bridge import questing
+
+    worker, seat = _wedged(dialogue=False, monkeypatch=monkeypatch)
+    seat.progress_at = (time.monotonic() - worker.STUCK_AFTER
+                        - worker.UNSTICK_EVERY - 1)
+    seat.marker_away = marker
+    worker.seats[0].runner = type("R", (), {"running": True,
+                                            "steps": 11582})()
+    seat.steps_seen = 11582                    # parked is already known
+
+    async def nothing_near(_c):
+        return False
+
+    monkeypatch.setattr(questing, "near_interactable", nothing_near)
+    return worker, seat
+
+
+def _armed_hop(monkeypatch, fight=False):
+    from deimos_bridge import questing
+
+    hopped = []
+
+    async def hop_once(_c, **kw):
+        hopped.append(True)
+        return fight
+
+    monkeypatch.setattr(questing, "hop_once", hop_once)
+    return hopped
+
+
+def test_stuck_past_the_gentler_fixes_hops_to_the_quest_marker(monkeypatch):
+    import asyncio
+
+    worker, seat = _desperately_wedged(monkeypatch)
+    hopped = _armed_hop(monkeypatch)
+    asyncio.run(worker._unstick(seat))
+    assert hopped == [True]
+    note = [e for e in seat.tel.questing if e["kind"] == "desperate-hop"]
+    assert note and "900" in note[0]["detail"]
+
+
+def test_the_first_look_is_not_desperate_yet(monkeypatch):
+    """The gentler fixes get a full pass first — parked is unknowable
+    on the first sample, so hopping immediately would skip the X that
+    might have been all the script was waiting for."""
+    import asyncio
+
+    worker, seat = _wedged(dialogue=False, monkeypatch=monkeypatch)
+    seat.marker_away = 900.0
+    hopped = _armed_hop(monkeypatch)
+    asyncio.run(worker._unstick(seat))
+    assert not hopped
+    assert [e["kind"] for e in seat.tel.questing] == ["stuck-detail"]
+
+
+def test_one_desperate_hop_per_spot(monkeypatch):
+    """A hop that helped moves the wizard and the spot resets itself; a
+    hop that did not help will not help twice."""
+    import asyncio
+
+    worker, seat = _desperately_wedged(monkeypatch)
+    hopped = _armed_hop(monkeypatch)
+    asyncio.run(worker._unstick(seat))
+    seat.unstuck_at = 0.0
+    asyncio.run(worker._unstick(seat))
+    assert hopped == [True]
+
+    seat.progress = ("WizardCity/WC_NightSide", (9, 9, 9), seat.progress[2])
+    seat.unstuck_at = 0.0
+    asyncio.run(worker._unstick(seat))
+    assert hopped == [True, True], "a new spot deserves a fresh attempt"
+
+
+def test_no_desperate_hop_across_a_zone_boundary(monkeypatch):
+    """Across a boundary the marker reads in the other zone's
+    coordinate space and the teleport lands underground."""
+    import asyncio
+
+    worker, seat = _desperately_wedged(monkeypatch, marker=110890.0)
+    hopped = _armed_hop(monkeypatch)
+    asyncio.run(worker._unstick(seat))
+    assert not hopped
+    note = [e for e in seat.tel.questing
+            if e["kind"] == "desperate-hop-refused"]
+    assert note and "another zone" in note[0]["detail"]
+
+
+def test_no_desperate_hop_from_on_top_of_the_marker(monkeypatch):
+    """Rev 3822cc6c teleported Phönix to the spot he was already
+    standing on, forever."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, seat = _desperately_wedged(monkeypatch)
+
+    async def on_it(_c):
+        return True, ""
+
+    monkeypatch.setattr(questing, "at_quest_marker", on_it)
+    hopped = _armed_hop(monkeypatch)
+    asyncio.run(worker._unstick(seat))
+    assert not hopped
+    note = [e for e in seat.tel.questing
+            if e["kind"] == "desperate-hop-refused"]
+    assert note and "standing on" in note[0]["detail"]
+
+
+def test_a_resting_wizard_is_not_hopped_into_a_fight(monkeypatch):
+    """A quest teleport lands on sigils and mobs. A wizard under its
+    own heal floor is standing still on purpose, and rev 85a68184's
+    wizards died of entering fights hurt."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    worker, seat = _desperately_wedged(monkeypatch)
+
+    async def resting(_self, _seat):
+        return 0.10
+
+    monkeypatch.setattr(LiveWorker, "_health_left", resting)
+    hopped = _armed_hop(monkeypatch)
+    asyncio.run(worker._unstick(seat))
+    assert not hopped
+
+
+def test_x_does_nothing_here_now_ends_in_a_hop(monkeypatch):
+    """The dead end this grew out of: X capped from this spot used to
+    end at "this wizard needs moving, not interacting" — a diagnosis
+    with nobody to act on it."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, seat = _desperately_wedged(monkeypatch)
+
+    async def near(_c):
+        return True
+
+    monkeypatch.setattr(questing, "near_interactable", near)
+    seat.x_pressed = worker.X_TRIES_HERE
+    seat.x_pressed_at = seat.progress
+    hopped = _armed_hop(monkeypatch)
+    asyncio.run(worker._unstick(seat))          # parked, X capped -> hop
+    assert hopped == [True]
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert "unstuck-x-does-nothing" in kinds
+    assert "desperate-hop" in kinds
+
+
+def test_the_hop_holds_the_script_and_then_lets_go(monkeypatch):
+    """The operator's correction to the first version: "it's possible
+    and even likely for the bot to teleport away from the quest after a
+    desperate tp back to the place it was stuck, which is usually
+    1000ish units away." The script's own tp loop re-teleports within a
+    second, so the hop must hold it — and hand it back after the settle
+    window, not the whole ceiling."""
+    import asyncio
+    import time
+
+    from deimos_bridge import questing
+
+    worker, seat = _desperately_wedged(monkeypatch)
+    held_during = []
+
+    async def hop_once(_c, **kw):
+        held_during.append(worker._hop_held())
+        return False
+
+    monkeypatch.setattr(questing, "hop_once", hop_once)
+    asyncio.run(worker._unstick(seat))
+    assert held_during == [True], "the script was not held while the hop ran"
+    assert worker._hop_held(), "the settle window should still hold it"
+    assert (worker._hop_pause_until - time.monotonic()
+            <= worker.HOP_SETTLE + 0.5), \
+        "after the hop lands only the settle window remains, not the ceiling"
+
+
+def test_a_hop_that_dies_still_frees_the_script(monkeypatch):
+    """The hold is a deadline, not a flag — and a hop that raises drops
+    straight to the settle window rather than holding the script for
+    the full ceiling."""
+    import asyncio
+    import time
+
+    import pytest
+
+    from deimos_bridge import questing
+
+    worker, seat = _desperately_wedged(monkeypatch)
+
+    async def hop_once(_c, **kw):
+        raise RuntimeError("cut off mid-teleport")
+
+    monkeypatch.setattr(questing, "hop_once", hop_once)
+    with pytest.raises(RuntimeError):
+        asyncio.run(worker._unstick(seat))
+    assert (worker._hop_pause_until - time.monotonic()
+            <= worker.HOP_SETTLE + 0.5), \
+        "a dead hop held the script for the whole ceiling"
+
+
+def test_the_service_loop_consults_the_hold_before_stepping(monkeypatch):
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._service_loop)
+    assert "self._hop_held()" in src
+    assert src.index("self._hop_held()") < src.index('"script step"'), \
+        "the hold must gate the script step, not follow it"
