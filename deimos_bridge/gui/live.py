@@ -222,6 +222,10 @@ class _Seat:
         #: when this wizard last tried to catch up with the leader. See
         #: `LiveWorker.FOLLOW_EVERY`.
         self.followed_at = 0.0
+        #: True while the script executed instructions this burst and
+        #: has more to run -- the service tick shortens its sleep so the
+        #: next burst starts promptly. See `LiveWorker._script_step`.
+        self.script_hot = False
         #: when this follower last took its OWN quest step, so the sync
         #: does not hammer the marker. See `LiveWorker._sync_follower`.
         self.synced_at = 0.0
@@ -324,7 +328,8 @@ class LiveWorker(QThread):
                  hotkeys=None, continuation="", seats=None,
                  coordinate=True, passes=2, barrier=None,
                  follow_leader=True, leader=0, label_windows=True,
-                 solo_script=False):
+                 solo_script=False, script_step_delay=None,
+                 script_dialog_delay=None):
         super().__init__()
         # Seat 0 is always the arguments this was called with, so the
         # single-wizard signature is untouched; `seats` adds the rest.
@@ -389,6 +394,12 @@ class LiveWorker(QThread):
         #: wizAi's follow + hivemind instead, and let the script do the
         #: one thing it is good at, which is the route.
         self.solo_script = bool(solo_script)
+        #: overrides for the script's own `SpeedDelay`/`DialogDelay`
+        #: settings, or None to run it as written. The author's pacing
+        #: is a knob, and editing a 14,000-line file is not a knob --
+        #: see `scripts.set_pacing`.
+        self.script_step_delay = script_step_delay
+        self.script_dialog_delay = script_dialog_delay
         #: write which seat a client is onto its own title bar. Four
         #: identical "Wizard101" windows cannot be told apart, and the
         #: seat numbering only exists inside this program.
@@ -724,7 +735,8 @@ class LiveWorker(QThread):
                     await self._stage(seat, "quest step",
                                       self._quest_step(client), wheel=True)
 
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(
+                    0.1 if getattr(seat, "script_hot", False) else 0.5)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -1151,6 +1163,13 @@ class LiveWorker(QThread):
             return
         done = await runner.run_for(
             should_stop=lambda: self._stop or seat.in_upkeep)
+        # Executed something and has more to do: the tick should come
+        # straight back rather than sleeping its usual half second. The
+        # sleep between bursts was half of the operator's "long delay
+        # between actions" -- the other half is the script's own
+        # SpeedDelay -- and the script pausing 0.6s for every 0.5s it
+        # ran doubled the cost of every step the author priced.
+        seat.script_hot = bool(done) and runner.running
         if runner.stale:
             # An instruction had to be cancelled, so the VM is part-way
             # through one. Reloading is the only honest recovery.
@@ -1667,6 +1686,15 @@ class LiveWorker(QThread):
         seat.script_said = False
         party = [s.client for s in self.seats if s.client is not None]
         try:
+            # The operator's pacing, if any, before either path builds:
+            # the same script text feeds both, and a knob that only
+            # worked in one mode would read as broken in the other.
+            source, paced = scripts.set_pacing(
+                self.script, self.script_step_delay,
+                self.script_dialog_delay)
+            if paced:
+                self._say(seat, "script pacing — " + ", ".join(
+                    f"{n} = {v}s" for n, v in paced))
             if self._solo_pilot():
                 # The pilot's client and nobody else's. `solo_source`
                 # puts the account settings back to their placeholders
@@ -1677,7 +1705,7 @@ class LiveWorker(QThread):
                 # chase the pilot, and the hivemind has them the moment
                 # they step into its duels.
                 pilot = self.seats[self.leader]
-                source, reset = scripts.solo_source(self.script)
+                source, reset = scripts.solo_source(source)
                 seat.runner = scripts.make_runner(
                     [pilot.client or client], source, solo=True)
                 self._say(seat,
@@ -1688,7 +1716,7 @@ class LiveWorker(QThread):
                              if reset else "")
                           + "; the others follow and fight")
                 return
-            seat.runner = scripts.make_runner(party or [client], self.script)
+            seat.runner = scripts.make_runner(party or [client], source)
             self._say(seat, "script loaded"
                       + (f" — driving {len(party)} wizard(s)"
                          if len(party) > 1 else ""))

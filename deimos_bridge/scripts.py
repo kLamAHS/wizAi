@@ -340,6 +340,39 @@ def solo_source(source: str):
     return source, reset
 
 
+def set_pacing(source: str, step=None, dialog=None):
+    """(source, changed) — override the script's own pacing settings.
+
+    The TTS presets pace themselves with two settings the author put at
+    the top of the file::
+
+        var SpeedDelay = 1     # How long each step of the bot will take
+        var DialogDelay = 1    # How long before the bot proceeds after
+                               # dialogue
+
+    and sprinkle `sleep $SpeedDelay` after nearly every action. They are
+    the operator's knob, and editing a 14,000-line file to turn it is
+    not a knob — so the GUI passes the values here and the `var` lines
+    are rewritten before the VM ever sees them. `None` means "leave the
+    script's own value alone", per setting. deimoslang numbers are
+    floats (`tokenizer.py:352`), so 0.5 is as valid as 1.
+    """
+    import re
+
+    changed = []
+    for name, value in (("SpeedDelay", step), ("DialogDelay", dialog)):
+        if value is None:
+            continue
+        want = f"{float(value):g}"
+        new, n = re.subn(rf'(^\s*var\s+{name}\s*=\s*)[0-9.]+',
+                         lambda m: f"{m.group(1)}{want}",
+                         source, count=1, flags=re.MULTILINE)
+        if n and new != source:
+            source = new
+            changed.append((name, want))
+    return source, changed
+
+
 def check(source: str, party_size=None):
     """(ok, reason) — does this script compile?
 
@@ -514,11 +547,20 @@ class ScriptRunner:
 
     #: seconds of instructions per burst. The service task holds this
     #: wizard's drive lock for the whole burst, so this is also the
-    #: longest a hotkey press can be made to wait behind the script --
-    #: which is why it is a fraction of a second and not the tight loop
-    #: Deimos runs. At a few thousand instructions a second it is still
-    #: three orders of magnitude more program than one step per tick.
-    SLICE = 0.5
+    #: longest a hotkey press can be made to wait behind the script.
+    #:
+    #: Was 0.5, and that number was most of "is there a long delay
+    #: between actions/teleports for scripts?" -- yes, and it was ours.
+    #: Between every 0.5s burst the service tick slept another 0.5s and
+    #: did its reads, so the script ran at roughly 40% duty cycle: every
+    #: action the author priced at one second cost two and a half. At
+    #: 2.5s a burst (with the tick's sleep shortened while the script is
+    #: mid-work, see `LiveWorker._script_step`) the duty cycle is ~85%.
+    #: A hotkey waiting 2.5s behind a burst is noticeable but fine --
+    #: hotkey actions already queue behind teleports twice that long,
+    #: and Stop does not wait at all: `should_stop` is checked between
+    #: individual instructions inside the burst.
+    SLICE = 2.5
     #: instructions in a burst, whatever the clock says. A `sleep 0`
     #: loop would otherwise spin the whole slice with the wheel held.
     MAX_STEPS = 20000

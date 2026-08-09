@@ -13676,3 +13676,220 @@ def test_the_questing_tab_mode_and_checkboxes_agree_both_ways(qapp):
     import inspect
     src = inspect.getsource(MainWindow.on_start_live)
     assert "leader=self.leader_pick.currentIndex()" in src
+
+
+# ------------------------- the delay between script actions was ours
+#
+# The operator: "is there a long delay between actions/ teleports for
+# scripts? I feel like it teleports somewhere, waits a while then
+# teleports to the next place, same with dialogue". Yes: the script ran
+# in 0.5s bursts with a 0.5s sleep and a tickful of reads between them
+# — a ~40% duty cycle, so every action the author priced at one second
+# cost about two and a half.
+
+def test_the_script_burst_is_seconds_not_a_fraction_of_one():
+    from deimos_bridge.scripts import ScriptRunner
+
+    assert ScriptRunner.SLICE >= 2.0, \
+        "back to the 40% duty cycle the operator felt as 'a long delay'"
+
+
+def _stepping_runner(done, running=True):
+    class _R:
+        stale = False
+        failures = 0
+        steps = 5
+        last_error = ""
+
+        def __init__(self):
+            self.running = running
+
+        async def run_for(self, should_stop=None):
+            return done
+
+    return _R()
+
+
+def test_a_working_script_marks_its_seat_hot(monkeypatch):
+    """Hot means the tick comes straight back for the next burst instead
+    of sleeping its usual half second between them."""
+    import asyncio
+
+    worker = _behind_party()
+    seat = worker.seats[0]
+    seat.script_said = True
+    seat.runner = _stepping_runner(done=120)
+    asyncio.run(worker._script_step(seat))
+    assert seat.script_hot is True
+
+
+def test_a_script_with_nothing_to_run_cools_the_seat_down(monkeypatch):
+    """A parked or finished script must not keep the tick spinning at
+    ten times its normal rate for nothing."""
+    import asyncio
+
+    worker = _behind_party()
+    seat = worker.seats[0]
+    seat.script_said = True
+    seat.script_hot = True
+    seat.runner = _stepping_runner(done=0, running=True)
+    asyncio.run(worker._script_step(seat))
+    assert seat.script_hot is False
+
+
+def test_the_service_tick_hurries_while_the_script_is_hot():
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._service_loop)
+    assert 'script_hot' in src, \
+        "the tick sleeps its full half second between script bursts again"
+
+
+# ---------------------------- the script's pacing, without the editor
+#
+# "make those accessible in the gui" — SpeedDelay and DialogDelay are
+# the preset's own knobs, and editing a 14,000-line file is not a knob.
+
+def test_set_pacing_rewrites_the_presets_own_settings():
+    import os
+    import re
+
+    from deimos_bridge import scripts
+
+    path = os.path.join(scripts.PRESET_DIR, "TTS Arc 1.txt")
+    if not os.path.exists(path):
+        pytest.skip("the TTS presets are not checked in")
+    src = open(path, encoding="utf-8").read()
+    out, changed = scripts.set_pacing(src, step=0.5, dialog=1.5)
+    assert ("SpeedDelay", "0.5") in changed
+    assert ("DialogDelay", "1.5") in changed
+    assert re.search(r"^var SpeedDelay = 0\.5\b", out, re.M)
+    assert re.search(r"^var DialogDelay = 1\.5\b", out, re.M)
+    # ...and only those lines: every `sleep $SpeedDelay` still reads
+    # the variable, which is the point of rewriting the var.
+    assert out.count("$SpeedDelay") == src.count("$SpeedDelay")
+
+
+def test_none_means_the_scripts_own_pacing_stands():
+    from deimos_bridge import scripts
+
+    src = "###deimos_expertmode\nvar SpeedDelay = 1\n"
+    out, changed = scripts.set_pacing(src)
+    assert out == src and changed == []
+    out, changed = scripts.set_pacing(src, dialog=0.5)
+    assert out == src and changed == [], \
+        "a variable the script does not have must not be invented"
+
+
+def test_the_pacing_override_reaches_the_vm_in_both_modes(monkeypatch):
+    import asyncio
+
+    from deimos_bridge import scripts
+
+    for solo in (False, True):
+        worker = _behind_party()
+        worker.solo_script = solo
+        worker.script_step_delay = 0.5
+        worker.script_dialog_delay = 1.5
+        worker.script = ('###deimos_expertmode\n'
+                         'var SpeedDelay = 1\n'
+                         'var DialogDelay = 1\n')
+        for seat in worker.seats:
+            seat.client = object()
+        built = {}
+
+        def fake_runner(clients, source, solo=False):
+            built["source"] = source
+            return type("R", (), {"running": True})()
+
+        monkeypatch.setattr(scripts, "make_runner", fake_runner)
+        asyncio.run(worker._setup_script(worker.seats[0].client,
+                                         worker.seats[0]))
+        assert "var SpeedDelay = 0.5" in built["source"], f"solo={solo}"
+        assert "var DialogDelay = 1.5" in built["source"], f"solo={solo}"
+
+
+def test_the_questing_tab_offers_the_pacing_and_passes_it_through(qapp):
+    import inspect
+
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    assert hasattr(win, "pace_override")
+    assert not win.pace_override.isChecked(), \
+        "the script's own pacing stays the default"
+    assert not win.pace_step.isEnabled(), \
+        "spinners enabled while the override is off read as active"
+    win.pace_override.setChecked(True)
+    assert win.pace_step.isEnabled() and win.pace_dialog.isEnabled()
+
+    src = inspect.getsource(MainWindow.on_start_live)
+    assert "script_step_delay" in src and "script_dialog_delay" in src
+    assert "if self.pace_override.isChecked()" in src, \
+        "the override must be None when the box is unticked"
+
+
+# -------------------- the third kind of dialogue nothing detected
+#
+# "I think sometimes the bot doesnt realize it's in dialogue and gets
+# stuck waiting too long." The modal message boxes — "Do you wish to be
+# transported?" when teleporting to a friend in a dungeon, "your friend
+# is busy", the zone-load retry — block the wizard exactly like a
+# dialogue and live under `MessageBoxModalWindow`, not `wndDialogMain`.
+# `close_menus` knew their buttons; `in_dialogue` and `advance_dialogue`
+# did not, so a wizard parked at one read as "no dialogue open".
+
+def _modal_root(visible=True):
+    button = _Win("centerButton", visible=visible)
+    return _Win("root", [
+        _Win("MessageBoxModalWindow", [
+            _Win("messageBoxBG", [
+                _Win("messageBoxLayout", [
+                    _Win("AdjustmentWindow", [
+                        _Win("Layout", [button])])])])])]), button
+
+
+def test_a_modal_prompt_counts_as_being_in_dialogue():
+    import asyncio
+
+    from deimos_bridge.questing import in_dialogue
+
+    root, _ = _modal_root(visible=True)
+    assert asyncio.run(in_dialogue(_QuestClient(root)))
+    root, _ = _modal_root(visible=False)
+    assert not asyncio.run(in_dialogue(_QuestClient(root)))
+
+
+def test_advance_dialogue_clicks_a_modal_confirm():
+    """The dungeon-teleport prompt is the follower's commonest wall:
+    the follow lands it at the sigil, the game asks, nothing answered."""
+    import asyncio
+
+    from deimos_bridge.questing import advance_dialogue
+
+    root, button = _modal_root(visible=True)
+    client = _QuestClient(root)
+
+    clicked = []
+    real = client.mouse_handler.click_window
+
+    async def click(window):
+        clicked.append(window)
+        button._visible = False         # the prompt is answered
+        return await real(window)
+
+    client.mouse_handler.click_window = click
+    clicks, why = asyncio.run(advance_dialogue(client, settle=0))
+    assert clicks == 1 and why == ""
+    assert clicked == [button], "it clicked something other than the confirm"
+
+
+def test_the_modal_paths_are_the_same_ones_close_menus_clicks():
+    """One list. The bug was three functions with three private ideas of
+    what counts as a blocking window."""
+    from deimos_bridge.questing import CLOSE_MENU_PATHS, MODAL_BUTTON_PATHS
+
+    for path in MODAL_BUTTON_PATHS:
+        assert path in CLOSE_MENU_PATHS
