@@ -410,6 +410,12 @@ class LiveWorker(QThread):
         self._stop = False
         #: the catch-up in progress, or None. See `_start_catching_up`.
         self._catch_up_state = None
+        #: until when the script takes no instructions because a
+        #: desperate quest-teleport is in flight or settling. A
+        #: monotonic deadline rather than a flag, so a hop that dies
+        #: mid-teleport releases the script by itself. See
+        #: `_desperate_hop` and `_hop_held`.
+        self._hop_pause_until = 0.0
         #: {seat id: (the step it gave up on, when)}. A catch-up that
         #: gives up has to be REMEMBERED, or `_check_in_step` starts the
         #: identical one on the next tick -- see `_written_off`.
@@ -667,7 +673,21 @@ class LiveWorker(QThread):
                 self._check_progress(seat)
 
                 catching = self._catching_up()
-                if seat.runner is not None and not catching:
+                if seat.runner is not None and self._hop_held():
+                    # A desperate quest-teleport is in flight or still
+                    # settling. The script's own tp loop re-teleports
+                    # within a second, aimed at the spot it was stuck on
+                    # -- the operator: "it's possible and even likely
+                    # for the bot to teleport away from the quest after
+                    # a desperate tp back to the place it was stuck,
+                    # which is usually 1000ish units away" -- so running
+                    # instructions now undoes the fix before it lands.
+                    self._say_once(
+                        seat, "script-held-hop",
+                        "script held for a moment so its own teleport "
+                        "does not drag the wizard back off the quest "
+                        "marker it was just sent to")
+                elif seat.runner is not None and not catching:
                     await self._stage(seat, "script step",
                                       self._script_step(seat), wheel=True)
                 elif seat.runner is not None:
@@ -2938,11 +2958,18 @@ class LiveWorker(QThread):
            resets the spot on its own; one that does not help will not
            help twice.
 
-        The script is not paused for it: a wizard this stuck has a
-        script parked inside a wait or spinning a retry loop, and a
-        wizard arriving at its own quest objective is something both of
-        those can only be unblocked by, not raced. The wheel is already
-        held by the `_unstick` stage.
+        And the script IS held for it -- the hop, plus a settle window
+        after it lands. The first version reasoned that a parked or
+        looping script could only be unblocked by the wizard arriving
+        at its objective, and the operator corrected it: "it's possible
+        and even likely for the bot to teleport away from the quest
+        after a desperate tp back to the place it was stuck, which is
+        usually 1000ish units away". A retry loop re-teleports within a
+        second, aimed a thousand units off the marker -- close enough
+        to look right, far enough to undo the fix before a dialogue
+        opens or a sigil finishes counting down. The hold is a
+        deadline, not a flag, so a hop cut off mid-teleport releases
+        the script by itself when `HOP_PAUSE_CEILING` runs out.
         """
         import time
 
@@ -2982,16 +3009,46 @@ class LiveWorker(QThread):
         # Before the await, not after: a hop cut off mid-teleport by the
         # stage deadline must not retry from this spot forever.
         seat.hop_tried_at = here
+        # ...and the script stops taking instructions NOW, before the
+        # teleport, so its own tp loop cannot land one between ours and
+        # the dialogue it is meant to open.
+        self._hop_pause_until = now + self.HOP_PAUSE_CEILING
         self._say(seat,
                   f"stuck {mins:.0f} min and out of gentler fixes — doing "
-                  f"what the operator would do by hand: a quest teleport, "
-                  f"{away:,.0f} to the marker, script left running")
-        fight = await questing.hop_once(
-            seat.client, on_status=lambda m: self._say(seat, m))
+                  f"what the operator would do by hand: script held for a "
+                  f"moment, quest teleport, {away:,.0f} to the marker")
+        try:
+            fight = await questing.hop_once(
+                seat.client, on_status=lambda m: self._say(seat, m))
+        finally:
+            # The settle window: a sigil the hop lands on counts down
+            # for ~10s, and a turn-in needs the server round-trip. On
+            # ANY exit, so a hop that raised does not hold the script
+            # for the whole ceiling.
+            self._hop_pause_until = time.monotonic() + self.HOP_SETTLE
         seat.tel.note_questing(
             "desperate-hop",
-            f"stuck {mins:.0f} min — quest-teleported {away:,.0f} to the "
-            f"marker" + (", and a fight started" if fight else ""))
+            f"stuck {mins:.0f} min — script held, quest-teleported "
+            f"{away:,.0f} to the marker"
+            + (", and a fight started" if fight else "")
+            + f"; the script gets the wheel back in {self.HOP_SETTLE:.0f}s")
+
+    #: the longest the script can be held by a hop that never returns.
+    #: A deadline rather than a flag: if `hop_once` is cut off or dies,
+    #: the script frees itself when this runs out.
+    HOP_PAUSE_CEILING = 90.0
+    #: how long the script stays held AFTER the hop lands. The operator:
+    #: "it's possible and even likely for the bot to teleport away from
+    #: the quest after a desperate tp back to the place it was stuck,
+    #: which is usually 1000ish units away" -- and a sigil the hop lands
+    #: on counts down ~10s before it admits anybody.
+    HOP_SETTLE = 15.0
+
+    def _hop_held(self):
+        """Is the script waiting out a desperate quest-teleport?"""
+        import time
+
+        return time.monotonic() < self._hop_pause_until
 
     #: how many fruitless presses of X from one spot before wizAi stops
     #: offering. One is worth making -- `waitfordialog` polls forever

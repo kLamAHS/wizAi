@@ -14273,3 +14273,66 @@ def test_x_does_nothing_here_now_ends_in_a_hop(monkeypatch):
     kinds = [e["kind"] for e in seat.tel.questing]
     assert "unstuck-x-does-nothing" in kinds
     assert "desperate-hop" in kinds
+
+
+def test_the_hop_holds_the_script_and_then_lets_go(monkeypatch):
+    """The operator's correction to the first version: "it's possible
+    and even likely for the bot to teleport away from the quest after a
+    desperate tp back to the place it was stuck, which is usually
+    1000ish units away." The script's own tp loop re-teleports within a
+    second, so the hop must hold it — and hand it back after the settle
+    window, not the whole ceiling."""
+    import asyncio
+    import time
+
+    from deimos_bridge import questing
+
+    worker, seat = _desperately_wedged(monkeypatch)
+    held_during = []
+
+    async def hop_once(_c, **kw):
+        held_during.append(worker._hop_held())
+        return False
+
+    monkeypatch.setattr(questing, "hop_once", hop_once)
+    asyncio.run(worker._unstick(seat))
+    assert held_during == [True], "the script was not held while the hop ran"
+    assert worker._hop_held(), "the settle window should still hold it"
+    assert (worker._hop_pause_until - time.monotonic()
+            <= worker.HOP_SETTLE + 0.5), \
+        "after the hop lands only the settle window remains, not the ceiling"
+
+
+def test_a_hop_that_dies_still_frees_the_script(monkeypatch):
+    """The hold is a deadline, not a flag — and a hop that raises drops
+    straight to the settle window rather than holding the script for
+    the full ceiling."""
+    import asyncio
+    import time
+
+    import pytest
+
+    from deimos_bridge import questing
+
+    worker, seat = _desperately_wedged(monkeypatch)
+
+    async def hop_once(_c, **kw):
+        raise RuntimeError("cut off mid-teleport")
+
+    monkeypatch.setattr(questing, "hop_once", hop_once)
+    with pytest.raises(RuntimeError):
+        asyncio.run(worker._unstick(seat))
+    assert (worker._hop_pause_until - time.monotonic()
+            <= worker.HOP_SETTLE + 0.5), \
+        "a dead hop held the script for the whole ceiling"
+
+
+def test_the_service_loop_consults_the_hold_before_stepping(monkeypatch):
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._service_loop)
+    assert "self._hop_held()" in src
+    assert src.index("self._hop_held()") < src.index('"script step"'), \
+        "the hold must gate the script step, not follow it"
