@@ -202,6 +202,9 @@ class _Seat:
         #: See `LiveWorker._unstick`.
         self.unstuck_at = 0.0
         self.steps_seen = None
+        #: the spot a desperation quest-teleport was already tried from,
+        #: as a `progress` stamp. See `LiveWorker._desperate_hop`.
+        self.hop_tried_at = None
         #: what `runner` was built from, so the service tick can notice
         #: the operator turning the script on, off, or replacing it
         self.script_source = None
@@ -2804,8 +2807,10 @@ class LiveWorker(QThread):
             where an unrequested interact is exactly what the script is
             asking for. Gated on something being in range, so it is a
             press at an NPC and not into empty air.
-          * No box, script looping: not a dialogue problem. Reported,
-            nothing touched.
+          * No box, script looping -- or parked with nothing in range,
+            or X already tried here for nothing: not a dialogue
+            problem. The wizard needs moving, and after a second look
+            `_desperate_hop` moves it.
 
         Never before `STUCK_AFTER`, so an ordinary conversation is never
         raced, and every read is written down either way.
@@ -2874,6 +2879,9 @@ class LiveWorker(QThread):
                       f"stuck {mins:.0f} min and X does nothing from here "
                       f"({why or 'at the quest marker'}) — this wizard needs "
                       f"moving, not interacting")
+            # ...so move it. This used to end here, with the diagnosis
+            # as the deliverable.
+            await self._desperate_hop(seat, mins, at_marker)
             return
 
         if parked and near:
@@ -2891,6 +2899,99 @@ class LiveWorker(QThread):
                       f"instruction and no dialogue open — pressed X. "
                       f"`waitfordialog` polls until a box exists and never "
                       f"times out, so making one exist is what it waits for")
+            return
+
+        # No box, nothing X can reach -- or a retry loop that is not
+        # working. What is left is moving the wizard -- once parked or
+        # looping is actually KNOWN, so the first look stays a look and
+        # the gentler fixes above are not skipped over on a guess.
+        if was is not None and steps is not None:
+            await self._desperate_hop(seat, mins, at_marker)
+
+    async def _desperate_hop(self, seat, mins, at_marker):
+        """The operator's own last resort, automated: a quest teleport.
+
+        "Sometimes when really stuck a simple fix is turning off the
+        script for a moment and pressing the teleport to quest button,
+        maybe that will help as a desperate fix if they get stuck too
+        long." That is what a person does at this point, and this is
+        that, with the judgement written in as guards. By the time it
+        runs the wizard is past `STUCK_AFTER`, out of combat, any open
+        dialogue has been handled and X has been offered everything it
+        can reach -- what is left is moving the wizard.
+
+        Each guard is a failure a live run has already had:
+
+        -- a second look first. The gentler fixes above deserve one
+           full pass (parked is unknowable on the first sample), so the
+           hop waits one `UNSTICK_EVERY` beyond `STUCK_AFTER`.
+        -- the marker must read, within this zone. Across a boundary
+           the coordinates are another zone's space and the teleport
+           lands underground -- rev 1843e387, four times over.
+        -- not from on top of the marker. Rev 3822cc6c teleported
+           Phönix to the spot he was already standing on, forever.
+        -- not under the wizard's own heal floor. A quest teleport
+           lands on sigils and mobs, and rev 85a68184's wizards died of
+           entering fights hurt; one resting at a wisp is standing
+           still on purpose.
+        -- once per spot. A hop that helps moves the wizard, which
+           resets the spot on its own; one that does not help will not
+           help twice.
+
+        The script is not paused for it: a wizard this stuck has a
+        script parked inside a wait or spinning a retry loop, and a
+        wizard arriving at its own quest objective is something both of
+        those can only be unblocked by, not raced. The wheel is already
+        held by the `_unstick` stage.
+        """
+        import time
+
+        from .. import questing
+
+        now = time.monotonic()
+        if now - seat.progress_at < self.STUCK_AFTER + self.UNSTICK_EVERY:
+            return
+        here = seat.progress or (None, None, None)
+        if seat.hop_tried_at == here:
+            return
+        away = seat.marker_away
+        if away is None:
+            # A marker that would not read may read on the next poll.
+            # Refusing permanently over one bad read would be worse.
+            return
+        if away > self.MARKER_IN_ZONE:
+            seat.hop_tried_at = here
+            seat.tel.note_questing(
+                "desperate-hop-refused",
+                f"stuck {mins:.0f} min, and the quest marker is "
+                f"{away:,.0f} away — another zone. A quest teleport "
+                f"cannot cross one, so the hop the operator would try by "
+                f"hand has nowhere to go from here")
+            return
+        if at_marker:
+            seat.hop_tried_at = here
+            seat.tel.note_questing(
+                "desperate-hop-refused",
+                f"stuck {mins:.0f} min on top of the quest marker — "
+                f"teleporting to the spot this wizard is standing on is "
+                f"the loop rev 3822cc6c spent 24 minutes in")
+            return
+        left = await self._health_left(seat)
+        if left is not None and left < self._health_needed(seat):
+            return
+        # Before the await, not after: a hop cut off mid-teleport by the
+        # stage deadline must not retry from this spot forever.
+        seat.hop_tried_at = here
+        self._say(seat,
+                  f"stuck {mins:.0f} min and out of gentler fixes — doing "
+                  f"what the operator would do by hand: a quest teleport, "
+                  f"{away:,.0f} to the marker, script left running")
+        fight = await questing.hop_once(
+            seat.client, on_status=lambda m: self._say(seat, m))
+        seat.tel.note_questing(
+            "desperate-hop",
+            f"stuck {mins:.0f} min — quest-teleported {away:,.0f} to the "
+            f"marker" + (", and a fight started" if fight else ""))
 
     #: how many fruitless presses of X from one spot before wizAi stops
     #: offering. One is worth making -- `waitfordialog` polls forever

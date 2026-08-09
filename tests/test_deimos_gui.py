@@ -14109,3 +14109,167 @@ def test_repeated_refusals_thin_out_instead_of_filling_the_export():
              if e["kind"] == "catch-up-out-of-zone"]
     assert len(notes) == 5, [e["detail"] for e in notes]  # 1·60·120·240·480
     assert "480 times in a row" in notes[-1]["detail"]
+
+
+# ------------------------------ the desperate fix: a quest teleport
+#
+# The operator: "Sometimes when really stuck a simple fix is turning
+# off the script for a moment and pressing the teleport to quest
+# button, maybe that will help as a desperate fix if they get stuck too
+# long." `_unstick`'s decision table used to end at a diagnosis — "this
+# wizard needs moving, not interacting" — with nobody to do the moving.
+
+def _desperately_wedged(monkeypatch, marker=900.0):
+    """A scripted wizard stuck past the second look: the script known
+    to be parked, nothing in range for X, the marker in this zone."""
+    import time
+
+    from deimos_bridge import questing
+
+    worker, seat = _wedged(dialogue=False, monkeypatch=monkeypatch)
+    seat.progress_at = (time.monotonic() - worker.STUCK_AFTER
+                        - worker.UNSTICK_EVERY - 1)
+    seat.marker_away = marker
+    worker.seats[0].runner = type("R", (), {"running": True,
+                                            "steps": 11582})()
+    seat.steps_seen = 11582                    # parked is already known
+
+    async def nothing_near(_c):
+        return False
+
+    monkeypatch.setattr(questing, "near_interactable", nothing_near)
+    return worker, seat
+
+
+def _armed_hop(monkeypatch, fight=False):
+    from deimos_bridge import questing
+
+    hopped = []
+
+    async def hop_once(_c, **kw):
+        hopped.append(True)
+        return fight
+
+    monkeypatch.setattr(questing, "hop_once", hop_once)
+    return hopped
+
+
+def test_stuck_past_the_gentler_fixes_hops_to_the_quest_marker(monkeypatch):
+    import asyncio
+
+    worker, seat = _desperately_wedged(monkeypatch)
+    hopped = _armed_hop(monkeypatch)
+    asyncio.run(worker._unstick(seat))
+    assert hopped == [True]
+    note = [e for e in seat.tel.questing if e["kind"] == "desperate-hop"]
+    assert note and "900" in note[0]["detail"]
+
+
+def test_the_first_look_is_not_desperate_yet(monkeypatch):
+    """The gentler fixes get a full pass first — parked is unknowable
+    on the first sample, so hopping immediately would skip the X that
+    might have been all the script was waiting for."""
+    import asyncio
+
+    worker, seat = _wedged(dialogue=False, monkeypatch=monkeypatch)
+    seat.marker_away = 900.0
+    hopped = _armed_hop(monkeypatch)
+    asyncio.run(worker._unstick(seat))
+    assert not hopped
+    assert [e["kind"] for e in seat.tel.questing] == ["stuck-detail"]
+
+
+def test_one_desperate_hop_per_spot(monkeypatch):
+    """A hop that helped moves the wizard and the spot resets itself; a
+    hop that did not help will not help twice."""
+    import asyncio
+
+    worker, seat = _desperately_wedged(monkeypatch)
+    hopped = _armed_hop(monkeypatch)
+    asyncio.run(worker._unstick(seat))
+    seat.unstuck_at = 0.0
+    asyncio.run(worker._unstick(seat))
+    assert hopped == [True]
+
+    seat.progress = ("WizardCity/WC_NightSide", (9, 9, 9), seat.progress[2])
+    seat.unstuck_at = 0.0
+    asyncio.run(worker._unstick(seat))
+    assert hopped == [True, True], "a new spot deserves a fresh attempt"
+
+
+def test_no_desperate_hop_across_a_zone_boundary(monkeypatch):
+    """Across a boundary the marker reads in the other zone's
+    coordinate space and the teleport lands underground."""
+    import asyncio
+
+    worker, seat = _desperately_wedged(monkeypatch, marker=110890.0)
+    hopped = _armed_hop(monkeypatch)
+    asyncio.run(worker._unstick(seat))
+    assert not hopped
+    note = [e for e in seat.tel.questing
+            if e["kind"] == "desperate-hop-refused"]
+    assert note and "another zone" in note[0]["detail"]
+
+
+def test_no_desperate_hop_from_on_top_of_the_marker(monkeypatch):
+    """Rev 3822cc6c teleported Phönix to the spot he was already
+    standing on, forever."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, seat = _desperately_wedged(monkeypatch)
+
+    async def on_it(_c):
+        return True, ""
+
+    monkeypatch.setattr(questing, "at_quest_marker", on_it)
+    hopped = _armed_hop(monkeypatch)
+    asyncio.run(worker._unstick(seat))
+    assert not hopped
+    note = [e for e in seat.tel.questing
+            if e["kind"] == "desperate-hop-refused"]
+    assert note and "standing on" in note[0]["detail"]
+
+
+def test_a_resting_wizard_is_not_hopped_into_a_fight(monkeypatch):
+    """A quest teleport lands on sigils and mobs. A wizard under its
+    own heal floor is standing still on purpose, and rev 85a68184's
+    wizards died of entering fights hurt."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    worker, seat = _desperately_wedged(monkeypatch)
+
+    async def resting(_self, _seat):
+        return 0.10
+
+    monkeypatch.setattr(LiveWorker, "_health_left", resting)
+    hopped = _armed_hop(monkeypatch)
+    asyncio.run(worker._unstick(seat))
+    assert not hopped
+
+
+def test_x_does_nothing_here_now_ends_in_a_hop(monkeypatch):
+    """The dead end this grew out of: X capped from this spot used to
+    end at "this wizard needs moving, not interacting" — a diagnosis
+    with nobody to act on it."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, seat = _desperately_wedged(monkeypatch)
+
+    async def near(_c):
+        return True
+
+    monkeypatch.setattr(questing, "near_interactable", near)
+    seat.x_pressed = worker.X_TRIES_HERE
+    seat.x_pressed_at = seat.progress
+    hopped = _armed_hop(monkeypatch)
+    asyncio.run(worker._unstick(seat))          # parked, X capped -> hop
+    assert hopped == [True]
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert "unstuck-x-does-nothing" in kinds
+    assert "desperate-hop" in kinds
