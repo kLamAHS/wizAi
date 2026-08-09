@@ -157,3 +157,65 @@ def test_the_krokotopia_main_line_is_complete():
     orders = sorted(q["questline_order"] for q in kt)
     assert orders == list(range(1, len(orders) + 1)), \
         f"gaps in the Krokotopia line: {orders[:20]}"
+
+
+# ------------------------------------------- a goal that disowns the name
+#
+# Rev 30e83468. `_read_goal` keeps the previous quest name on a blank
+# read, because a blank is not evidence of a change -- so the name can
+# lag the goal by a quest. Sebastian's goal read `Talk To Sergeant Major
+# Talbot in The Oasis`, Krokotopia #20 and character for character the
+# same text as the wizard he was measured against, while his name still
+# read `Eye of Krok`, #18 -- and the party held a catch-up over a
+# two-quest gap that did not exist.
+
+def test_a_goal_belonging_to_another_quest_disowns_the_name():
+    assert questlist.goal_disowns(
+        "Eye of Krok", "Talk To Sergeant Major Talbot in The Oasis")
+
+
+def test_a_quests_own_objectives_do_not_disown_it():
+    """Both steps of a two-step quest, zone suffix and all."""
+    for goal in ("Defeat Krokenkahmen and Collect Eye of Krok",
+                 "Talk To Professor Winthrop in Throne Room of Fire"):
+        assert not questlist.goal_disowns("Eye of Krok", goal), goal
+
+
+def test_a_goal_the_list_has_never_heard_of_proves_nothing():
+    """The data's objectives are incomplete in places -- `Into the Map
+    Room` lists a prose note instead of steps -- so a goal nothing
+    lists must not convict the name over the data's own gaps."""
+    assert not questlist.goal_disowns("Eye of Krok", "goal for Eye of Krok")
+    assert not questlist.goal_disowns(
+        "Into the Map Room", "Use the Krokotech Monolith")
+
+
+def test_an_unknown_quest_cannot_be_disowned():
+    assert not questlist.goal_disowns(
+        "Fight the Kraken of Nonexistent Bay", "Talk To Sergeant Major Talbot")
+
+
+def test_the_hud_dropping_a_title_still_finds_the_quest():
+    """The HUD tracks `Talk To Gordon Flemming` for quests the data
+    records as `Talk to Dr. Gordon Flemming`. Every quest listing him
+    is a side quest, so the answer is "known, with no place in the
+    line" -- not #18, which is where a stale name read had put the
+    wizard tracking him in rev 30e83468."""
+    p = questlist.position_from_goal("Talk To Gordon Flemming in Royal Hall",
+                                     world="Krokotopia")
+    assert not p.comparable
+    assert p.name, "the loose match did not find the quest at all"
+    assert "no order" in p.how
+
+
+def test_the_loose_match_only_narrows_from_the_goal_side():
+    """The reverse direction is a trap: the data carries an objective
+    that normalises to just "talk to", which is a subset of every talk
+    goal in the game -- it matched `Talk To Gordon Flemming` to
+    Krokotopia #12 on the first try."""
+    hits = questlist._loose_lookup(
+        questlist._load(), "Talk To Gordon Flemming in Royal Hall")
+    assert hits, "the dropped 'Dr.' hid the quest entirely"
+    assert all("Flemming" in " ".join(q.get("objectives") or ())
+               for q in hits), \
+        "a generic 'talk to' objective subset-matched a talk goal"

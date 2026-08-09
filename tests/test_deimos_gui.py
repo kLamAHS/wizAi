@@ -14013,3 +14013,99 @@ def test_a_pass_round_with_a_hurt_wizard_becomes_a_heal():
     decision = backend._maybe_heal(sim, read, held)
     assert decision.card_name == "Fairy"
     assert not decision.passing
+
+
+# ------------------------------------------ a stale name read, disowned
+#
+# Rev 30e83468, the run the operator described as "it says they're on
+# different quests and gets stuck but he wasnt". Two shapes of one read
+# problem. Sebastian's goal moved to `Talk To Sergeant Major Talbot in
+# The Oasis` -- Krokotopia #20, the same text as the leader's -- while
+# his name read lagged at `Eye of Krok`, #18, and the stale name placed
+# him two quests behind a wizard standing on his own quest. Phönix's
+# tracker was on a Gordon Flemming side quest, his name read was just as
+# stale, and the party spent the rest of the run refusing catch-ups for
+# a wizard that was not behind.
+
+def test_a_stale_name_cannot_hold_a_wizard_behind_its_own_goal():
+    worker, _read = _zoned_party(["Krokotopia/KT_PalaceOfFire"] * 2)
+    goal = "Talk To Sergeant Major Talbot in The Oasis"
+    worker.seats[0].quest_name = "Permission to Enter"   # fresh: #20
+    worker.seats[0].goal = goal
+    worker.seats[1].quest_name = "Eye of Krok"           # stale: #18
+    worker.seats[1].goal = goal
+    places = worker._places()
+    assert [p.order for p in places] == [20, 20], \
+        [(p.order, p.how) for p in places]
+    together, why = worker._quests_agree()
+    assert together, why
+
+
+def test_wizards_sharing_a_goal_line_share_a_place():
+    """The belt to the disowning's braces: identical goal text is the
+    same quest even when the goal places nobody on its own -- a goal
+    the data does not list at all. The highest placement wins, and the
+    clamp keeps raising safe."""
+    worker, _read = _zoned_party(["Krokotopia/KT_Hub"] * 2)
+    goal = "Wibble the Wobble in Nowhere"
+    worker.seats[0].quest_name = "Into the Map Room"     # #16, prose-only
+    worker.seats[0].goal = goal
+    worker.seats[1].quest_name = ""                      # name never read
+    worker.seats[1].goal = goal
+    places = worker._places()
+    assert [p.order for p in places] == [16, 16], \
+        [(p.order, p.how) for p in places]
+    assert "same goal line" in places[1].how
+
+
+def test_the_questing_tab_does_not_show_a_disowned_placement():
+    """The tab reads the same placement the rules do, so a stale name
+    must not put `#18 (Krokotopia)` on screen either."""
+    worker, _read = _zoned_party(["Krokotopia/KT_Hub"])
+    seat = worker.seats[0]
+    seat.quest_name = "Eye of Krok"
+    seat.goal = "Talk To Sergeant Major Talbot in The Oasis"
+    row = worker._quest_row(seat, "Krokotopia/KT_Hub", 0.0)
+    assert row["line"] == "", row
+
+
+def test_a_zone_away_laggard_does_not_cost_the_reachable_one_its_catch_up():
+    """Reachability is per wizard. Rev 30e83468's behind group was
+    Sebastian, one twenty-second turn-in from caught up, and Phönix,
+    whose marker read a zone away -- and one verdict over both wastes
+    whichever half it is wrong about."""
+    import time
+
+    worker, _read = _zoned_party(["Krokotopia/KT_PalaceOfFire"] * 3)
+    worker.script = "###deimos_expertmode"
+    for seat, (name, marker) in zip(worker.seats, [
+            ("Fragments of a Key", 500.0),       # #4, reachable
+            ("Fragments of a Key", 110890.0),    # #4, another zone
+            ("Assault on the Palace", None)]):   # #11, the leader
+        seat.quest_name = name
+        seat.goal = f"step for {name}"
+        seat.marker_away = marker
+    worker._in_step_since = time.monotonic() - worker.DESYNC_GRACE - 1
+    worker._check_in_step(worker.seats[0])
+
+    assert worker._catch_up_state is not None, \
+        "the reachable laggard was refused for the other's geography"
+    assert worker._catching_up() == [worker.seats[0]]
+    kinds = [e["kind"] for e in worker.seats[1].tel.questing]
+    assert "catch-up-out-of-zone" in kinds, kinds
+
+
+def test_repeated_refusals_thin_out_instead_of_filling_the_export():
+    """Rev 30e83468: `catch-up-out-of-zone — 240 times in a row` every
+    twelve seconds, one entry per sixty ticks, for as long as the run
+    lasted. The pattern WAS the log. Doubling keeps a stall visible at
+    a handful of entries however long it runs."""
+    worker, _read = _zoned_party(["Krokotopia/KT_Hub"])
+    seat = worker.seats[0]
+    for _ in range(480):
+        worker._say_once(seat, "the-same-key", "still stuck",
+                         kind="catch-up-out-of-zone", detail="far away")
+    notes = [e for e in seat.tel.questing
+             if e["kind"] == "catch-up-out-of-zone"]
+    assert len(notes) == 5, [e["detail"] for e in notes]  # 1·60·120·240·480
+    assert "480 times in a row" in notes[-1]["detail"]

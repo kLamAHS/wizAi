@@ -980,12 +980,28 @@ class LiveWorker(QThread):
 
     #: how many repeats of the same stage failure before the questing log
     #: says so again. The status line thins out at 20 because it is read
-    #: live; the export is read afterwards, and one entry per 60 is
-    #: enough to show a stall lasting minutes without burying the rest.
+    #: live; the export is read afterwards, and 60 sets where the
+    #: geometric cadence starts.
     STUCK_EVERY = 60
 
+    @staticmethod
+    def _thinning(n, every):
+        """The 1st repeat, then `every`, then doubling: 2×, 4×, 8×…
+
+        Linear cadence made the pattern BE the log: rev 30e83468 wrote
+        `catch-up-out-of-zone — 240 times in a row` into the export
+        every twelve seconds for as long as the run lasted, one entry
+        per sixty ticks of a condition that was never going to change.
+        Doubling keeps a stall visible at a cost that grows with its
+        length's logarithm instead.
+        """
+        if n == 1:
+            return True
+        times, remainder = divmod(n, every)
+        return remainder == 0 and times & (times - 1) == 0
+
     def _say_once(self, seat, key, message, kind="", detail=""):
-        """Say it the first time, then every 20th -- twice a second is spam.
+        """Say it the first time, then geometrically less often.
 
         The service tick runs twice a second, so a stage that is broken
         rather than unlucky would fill the status bar with one line and
@@ -1003,10 +1019,10 @@ class LiveWorker(QThread):
         seat = self.seats[0] if seat is None else seat
         n = seat.stage_errors.get(key, 0) + 1
         seat.stage_errors[key] = n
-        if n == 1 or n % 20 == 0:
+        if self._thinning(n, 20):
             self._say(seat, message + (f" (still failing after {n} tries)"
                                        if n > 1 else ""))
-        if kind and (n == 1 or n % self.STUCK_EVERY == 0):
+        if kind and self._thinning(n, self.STUCK_EVERY):
             try:
                 seat.tel.note_questing(
                     kind, detail + (f" — {n} times in a row" if n > 1 else ""))
@@ -2507,10 +2523,7 @@ class LiveWorker(QThread):
         after the fact: what is each wizard doing RIGHT NOW, and is
         anybody stuck.
         """
-        from .. import questlist
-
-        place = (questlist.position_of(seat.quest_name)
-                 if seat.quest_name else questlist.Position())
+        place = self._place_by_name(seat)
         if seat.in_duel:
             doing = "fighting"
         elif self._script_drives(seat):
@@ -2971,6 +2984,33 @@ class LiveWorker(QThread):
             f"{idle / 60:.0f} min with no change — {note} — while "
             f"{count} ran")
 
+    def _place_by_name(self, seat):
+        """`position_of` the tracked name — unless the goal disowns it.
+
+        One read for `_places` and the Questing tab both, so the number
+        that starts a catch-up and the number on screen cannot disagree.
+
+        The disowning is the fix for rev 30e83468. `_read_goal` keeps
+        the previous quest name on a blank read, so the name can lag
+        the goal by a quest -- and a stale name that still places wins
+        over a fresh goal that was never consulted, which is how
+        Sebastian stood on the same goal line as Konstantin and was
+        held two quests behind him. A name the goal line disowns places
+        nothing; the goal fallback in `_places` takes over from there.
+        """
+        from .. import questlist
+
+        if not seat.quest_name:
+            return questlist.Position()
+        place = questlist.position_of(seat.quest_name)
+        if (place.comparable and seat.goal
+                and questlist.goal_disowns(seat.quest_name, seat.goal)):
+            return questlist.Position(
+                how=(f"the name read {seat.quest_name!r} (#{place.order}), "
+                     f"but the goal line belongs to a different quest — a "
+                     f"stale read places nothing"))
+        return place
+
     def _places(self):
         """Where every seat sits in the questline, one `Position` each.
 
@@ -2989,8 +3029,7 @@ class LiveWorker(QThread):
         """
         from .. import questlist
 
-        places = [questlist.position_of(s.quest_name) if s.quest_name
-                  else questlist.Position() for s in self.seats]
+        places = [self._place_by_name(s) for s in self.seats]
         # A wizard whose name would not read can still be placed from
         # its goal, IF the goal is unambiguous. The rest of the party
         # says roughly where to look -- "Talk To Lieutenant Standish in
@@ -3027,6 +3066,33 @@ class LiveWorker(QThread):
                     places[i] = found
             if not moved:
                 break
+        # A wizard nothing could place, showing the SAME goal line,
+        # character for character, as a wizard that WAS placed, is on
+        # that wizard's quest -- text identity is evidence when there
+        # is no other evidence. Rev 30e83468's Sebastian read exactly
+        # Konstantin's goal while a lagging name read held him two
+        # quests back. Only the unplaceable are placed this way: two
+        # wizards placed at DIFFERENT quests sharing one goal line is
+        # a real thing (Krokotopia #12 and #13 both track "Talk To
+        # Lieutenant Standish"), and papering over a placement with
+        # text would erase a laggard the questline can actually see.
+        shared = {}
+        for i, seat in enumerate(self.seats):
+            if seat.goal:
+                shared.setdefault(seat.goal, []).append(i)
+        for members in shared.values():
+            placed = [places[i] for i in members if places[i].comparable]
+            if len(members) < 2 or not placed:
+                continue
+            best = max(placed, key=lambda p: p.order)
+            for i in members:
+                if places[i].comparable:
+                    continue
+                places[i] = questlist.Position(
+                    world=best.world, order=best.order, name=best.name,
+                    area=best.area, questline=best.questline,
+                    how=(f"the same goal line as a wizard placed at "
+                         f"#{best.order}"))
         return [self._no_further_back(seat, place)
                 for seat, place in zip(self.seats, places)]
 
@@ -3439,24 +3505,39 @@ class LiveWorker(QThread):
                 and getattr(self, "_behind_gap", 0) >= 1
                 and "questline" in getattr(self, "_behind_basis", "")):
             group = getattr(self, "_behind_group", None) or [behind]
-            away = self._marker_out_of_reach(group)
-            if away is not None:
-                # Not a catch-up. Getting there is the script's job and
-                # the script is good at it -- rev 1843e387 spent 116s
-                # failing to hop Phönix out of KT_Hub and the script did
-                # it in eight seconds the moment it had the wheel back.
+            # Reachability is per wizard, not per group. Rev 30e83468
+            # had Sebastian one turn-in from caught up and Phönix's
+            # marker a zone away in the same group, and a single
+            # verdict over both wastes whichever half it is wrong
+            # about: refuse and Sebastian's twenty-second step is held
+            # hostage to Phönix's geography, start and the catch-up's
+            # one budget burns out on the wizard nothing can drive.
+            near = []
+            for one in group:
+                away = self._marker_out_of_reach([one])
+                if away is None:
+                    near.append(one)
+                    continue
+                # Not a catch-up for this one. Getting there is the
+                # script's job and the script is good at it -- rev
+                # 1843e387 spent 116s failing to hop Phönix out of
+                # KT_Hub and the script did it in eight seconds the
+                # moment it had the wheel back.
                 self._say_once(
-                    behind, f"marker-away:{behind.name}",
-                    f"{behind.name} is {self._behind_gap} quest(s) behind "
+                    one, f"marker-away:{one.name}",
+                    f"{one.name} is {self._behind_gap} quest(s) behind "
                     f"and its objective is {away:,.0f} away — another zone. "
                     f"A quest teleport cannot cross one, so this is the "
                     f"script's journey to make, not a step wizAi can "
                     f"finish. Leaving it to the script",
                     kind="catch-up-out-of-zone",
-                    detail=(f"{behind.name}'s objective is {away:,.0f} away, "
+                    detail=(f"{one.name}'s objective is {away:,.0f} away, "
                             f"which is another zone. Not pausing the script "
                             f"for a hop that cannot reach it"))
+            if not near:
                 return
+            group = near
+            behind = group[0]
             if self._written_off(group):
                 # Tried, and it did not work. Running the script is not
                 # a good answer either, but it is the only OTHER answer,
