@@ -14336,3 +14336,123 @@ def test_the_service_loop_consults_the_hold_before_stepping(monkeypatch):
     assert "self._hop_held()" in src
     assert src.index("self._hop_held()") < src.index('"script step"'), \
         "the hold must gate the script step, not follow it"
+
+
+# --------------------------- a wedged dialogue clears on the fast lane
+#
+# Rev ed709013, the run photographed with General Khaba's MORE button up
+# on all three clients. The script's own dialogue handling logged
+# `Dialogue detected. Clearing...` fifteen times in eight milliseconds
+# and the button never got clicked — and wizAi, whose own clicker works,
+# granted the script the full five STUCK_AFTER minutes before touching
+# it. A box open across two looks thirty seconds apart has had over a
+# hundred of the script's own polls at it; that is a wedge, not a
+# conversation.
+
+def test_a_wedged_dialogue_is_cleared_well_before_full_stuck(monkeypatch):
+    import asyncio
+    import time
+
+    worker, seat = _wedged(dialogue=True, monkeypatch=monkeypatch)
+    seat.progress_at = time.monotonic() - worker.DIALOG_WEDGE - 1
+    asyncio.run(worker._unstick(seat))
+    assert seat.tel.questing == [], "one look is a conversation, not a wedge"
+    seat.unstuck_at = 0.0
+    asyncio.run(worker._unstick(seat))
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert kinds == ["stuck-detail", "unstuck-dialogue"]
+
+
+def test_a_box_that_closed_between_looks_is_left_alone(monkeypatch):
+    import asyncio
+    import time
+
+    from deimos_bridge import questing
+
+    worker, seat = _wedged(dialogue=True, monkeypatch=monkeypatch)
+    seat.progress_at = time.monotonic() - worker.DIALOG_WEDGE - 1
+    asyncio.run(worker._unstick(seat))
+
+    async def closed(_c):
+        return False
+
+    monkeypatch.setattr(questing, "in_dialogue", closed)
+    seat.unstuck_at = 0.0
+    asyncio.run(worker._unstick(seat))
+    assert seat.tel.questing == [], "a box that cleared itself needed nothing"
+
+
+def test_an_ordinary_conversation_is_never_raced(monkeypatch):
+    import asyncio
+    import time
+
+    worker, seat = _wedged(dialogue=True, monkeypatch=monkeypatch)
+    seat.progress_at = time.monotonic() - worker.DIALOG_WEDGE + 30
+    asyncio.run(worker._unstick(seat))
+    assert seat.tel.questing == []
+    assert seat.box_seen is False
+
+
+# ------------------------- the first duel's names go into the script
+#
+# Rev ed709013 logged `script-unconfigured` at 92s and again at 403s —
+# the second one AFTER the first fight had put all three wizards' names
+# on the seats. The knowledge arrived and nothing used it, so the script
+# spent the whole run silently skipping its own friend-teleports. The
+# operator: "the auto run starts after the first combat when the names
+# are set for the characters just so you know".
+
+def _named_party():
+    worker, _read = _zoned_party(["KT_Hub"] * 3)
+    worker.script = _QUESTER
+    for seat, (name, school) in zip(worker.seats,
+                                    [("Phönix", "storm"),
+                                     ("Sebastian", "life"),
+                                     ("Konstantin", "ice")]):
+        seat.wizard_name = name
+        seat.school = school
+    return worker
+
+
+def test_the_first_duels_names_fill_the_script():
+    worker = _named_party()
+    worker._fill_script_names()
+    assert 'var Main_Account = "Phönix"' in worker.script
+    assert 'var Questee2 = "Sebastian"' in worker.script
+    assert 'var Questee3 = "Konstantin"' in worker.script
+    kinds = [e["kind"] for e in worker.seats[0].tel.questing]
+    assert "script-configured" in kinds
+    # ...and the guards the script tests itself with stay untouched, so
+    # its own "am I configured" checks now pass.
+    assert 'if NOT Main_Account = "QuestingAccountName"' in worker.script
+
+    worker._fill_script_names()
+    kinds = [e["kind"] for e in worker.seats[0].tel.questing]
+    assert kinds.count("script-configured") == 1, "filled twice"
+
+
+def test_the_fill_waits_for_every_seat_to_have_a_name():
+    worker = _named_party()
+    worker.seats[2].wizard_name = None
+    worker._fill_script_names()
+    assert 'var Main_Account = "QuestingAccountName"' in worker.script, \
+        "filled half the party — the half-done fill is the original bug"
+
+
+def test_the_fill_rebuilds_the_runner_by_changing_the_source():
+    """Setting `self.script` is the whole trigger: `_sync_script`
+    rebuilds on any difference from the seat's `script_source`."""
+    worker = _named_party()
+    worker.seats[0].script_source = worker.script      # runner up to date
+    worker._fill_script_names()
+    assert worker.seats[0].script_source != worker.script, \
+        "the runner would never notice the configured text"
+
+
+def test_a_solo_pilot_script_is_not_filled():
+    """`solo_source` strips the account names on purpose — the pilot
+    never friend-teleports. Filling them back in would re-arm them."""
+    worker = _named_party()
+    worker.solo_script = True
+    worker._fill_script_names()
+    assert 'var Main_Account = "QuestingAccountName"' in worker.script

@@ -202,6 +202,10 @@ class _Seat:
         #: See `LiveWorker._unstick`.
         self.unstuck_at = 0.0
         self.steps_seen = None
+        #: whether the LAST unstick look also saw a dialogue box open.
+        #: One box is a conversation; the same box across two looks is a
+        #: wedge. See `LiveWorker.DIALOG_WEDGE`.
+        self.box_seen = False
         #: the spot a desperation quest-teleport was already tried from,
         #: as a `progress` stamp. See `LiveWorker._desperate_hop`.
         self.hop_tried_at = None
@@ -2782,6 +2786,14 @@ class LiveWorker(QThread):
     #: is waiting on changes on the scale of a conversation, not a tick.
     UNSTICK_EVERY = 30.0
 
+    #: how long a wizard may stand still before a WEDGED DIALOGUE BOX is
+    #: cleared for it -- the fast lane, next to `STUCK_AFTER`'s five
+    #: minutes for everything else. A box the script's handling was
+    #: going to clear is gone within seconds; one still up at ninety,
+    #: and up again on the next look, is blocking movement for the whole
+    #: party while the script walks its program against a wall.
+    DIALOG_WEDGE = 90.0
+
     async def _unstick(self, seat):
         """Unwedge a scripted wizard, in the direction its own wait needs.
 
@@ -2832,8 +2844,15 @@ class LiveWorker(QThread):
             problem. The wizard needs moving, and after a second look
             `_desperate_hop` moves it.
 
-        Never before `STUCK_AFTER`, so an ordinary conversation is never
-        raced, and every read is written down either way.
+        The box arm runs from `DIALOG_WEDGE` -- ninety seconds, and only
+        for a box seen open on two consecutive looks. Everything else
+        waits for `STUCK_AFTER`, so an ordinary conversation is never
+        raced, and every read is written down either way. The fast lane
+        is rev ed709013: the script's own dialogue handling logged
+        `Dialogue detected. Clearing...` fifteen times in eight
+        milliseconds while General Khaba's MORE button sat unclicked on
+        all three clients, and wizAi -- whose own clicker works -- stood
+        by for the full five minutes it grants the script first.
         """
         import time
 
@@ -2842,9 +2861,11 @@ class LiveWorker(QThread):
         if seat.progress is None:
             return
         now = time.monotonic()
-        if now - seat.progress_at < self.STUCK_AFTER:
+        idle = now - seat.progress_at
+        if idle < self.DIALOG_WEDGE:
             seat.unstuck_at = 0.0
             seat.steps_seen = None
+            seat.box_seen = False
             return
         if now - seat.unstuck_at < self.UNSTICK_EVERY:
             return
@@ -2858,6 +2879,13 @@ class LiveWorker(QThread):
         parked = (was is not None and steps is not None and steps == was)
 
         open_box = await questing.in_dialogue(seat.client)
+        # Before STUCK_AFTER, the only actionable finding is a dialogue
+        # box that was ALSO open on the previous look -- thirty seconds
+        # apart, so the script's own handling had over a hundred polls
+        # at it first. One look is a conversation; two is a wedge.
+        seen_before, seat.box_seen = seat.box_seen, open_box
+        if idle < self.STUCK_AFTER and not (open_box and seen_before):
+            return
         near = await questing.near_interactable(seat.client)
         at_marker, why = await questing.at_quest_marker(seat.client)
         seat.tel.note_questing(
@@ -4807,6 +4835,59 @@ class LiveWorker(QThread):
         self.seat_named.emit(seat.index, seat.wizard_name)
         self._say(seat, f"this client is {seat.wizard_name}, the "
                         f"{seat.school} wizard")
+        self._fill_script_names()
+
+    def _fill_script_names(self):
+        """Put the party's just-learned names into a placeholder script.
+
+        The preset dialog fills names in when it can, and before the
+        first duel it cannot: the game does not give a wizard's name
+        outside combat, so a run started cold gets its schools filled
+        and its account names left at the placeholder -- and the script
+        silently skips every friend-teleport it has. The run at rev
+        ed709013 logged `script-unconfigured` at 92s and again at 403s,
+        AFTER the first fight had put all three names on the seats; the
+        knowledge arrived and nothing used it. The operator: "the auto
+        run starts after the first combat when the names are set".
+
+        So the moment the last name lands, the fill happens here.
+        Setting `self.script` is the whole trigger: `_sync_script`
+        compares each seat's `script_source` against it every tick and
+        rebuilds the runner on any difference, so the configured text
+        takes over within a tick. That restart is a cost the script's
+        own design already pays constantly -- a deimoslang program that
+        runs off its end restarts by definition.
+
+        Not in solo-pilot mode, where `solo_source` strips the account
+        names on purpose so the script never friend-teleports at all.
+        """
+        from .. import scripts
+
+        if not self.script or self._solo_pilot():
+            return
+        party = [s for s in self.seats if s.client is not None]
+        if len(party) < 2 or not all(s.wizard_name for s in party):
+            return
+        blanks = scripts.unfilled(self.script, len(party))
+        if not any(name in scripts.ACCOUNT_VARS for name, _v in blanks):
+            return
+        source, filled = scripts.configure(
+            self.script, [(s.wizard_name, s.school) for s in party])
+        if not filled:
+            return
+        self.script = source
+        said = ("the party's names are known now — filled "
+                + ", ".join(f"{n}={v}" for n, v in filled[:4])
+                + (" …" if len(filled) > 4 else "")
+                + " into the script, which reloads with its "
+                  "friend-teleports live. Until this moment it was "
+                  "silently skipping them")
+        for seat in self.seats:
+            try:
+                seat.tel.note_questing("script-configured", said)
+            except Exception:
+                pass
+        self._say(party[0], said)
 
     def _stamp_title(self, seat):
         """Write who this is onto the game window itself.
