@@ -47,6 +47,30 @@ NPC_RANGE_PATH = ["WorldView", "NPCRangeWin"]
 #: not. Closing it is the unblocking move: whatever wanted it open can
 #: open it again, and a run that cannot walk is over.
 SERVICES_EXIT_PATH = ["WorldView", "NPCServicesWin", "wndDialogMain", "Exit"]
+
+#: The modal message-box family — the third kind of blocking window,
+#: and the one nothing DETECTED. "Do you wish to be transported?" when
+#: teleporting to a friend inside a dungeon, "your friend is busy",
+#: the zone-load retry prompt: all of them park the wizard exactly like
+#: a dialogue, none of them lives under `wndDialogMain`, and a follower
+#: staring at one read as "no dialogue open" — which is the operator's
+#: "sometimes the bot doesnt realize it's in dialogue and gets stuck
+#: waiting too long". `close_menus` knew these buttons; `in_dialogue`
+#: and `advance_dialogue` did not. The buttons clicked are the same
+#: ones Deimos's own questing clicks in its follower flows
+#: (`src/questing.py:227,627,740`).
+MODAL_BUTTON_PATHS = (
+    ["MessageBoxModalWindow", "messageBoxBG", "messageBoxLayout",
+     "AdjustmentWindow", "Layout", "centerButton"],
+    ["MessageBoxModalWindow", "messageBoxBG", "messageBoxLayout",
+     "AdjustmentWindow", "Layout", "rightButton"],
+    ["MessageBoxModalWindow", "messageBoxBG", "messageBoxLayout",
+     "AdjustmentWindow", "RetryBtn"],
+    ["WorldView", "PlanningPhase", "MessageBoxModalWindow", "messageBoxBG",
+     "messageBoxLayout", "AdjustmentWindow", "Layout", "centerButton"],
+    ["WorldView", "PlanningPhase", "MessageBoxModalWindow", "messageBoxBG",
+     "messageBoxLayout", "AdjustmentWindow", "Layout", "rightButton"],
+)
 #: `src/paths.py:35` -- the quest tracker's goal line, e.g. "Defeat
 #: Krokopatra". The empty string is a real unnamed window in the tree,
 #: not a wildcard; Deimos matches it exactly and so does
@@ -105,18 +129,35 @@ async def _safe(coro_fn, default=False):
 async def in_dialogue(client) -> bool:
     """Is a window up that blocks the wizard until it is dismissed?
 
-    Both kinds, because both block. The ordinary conversation box has a
-    `btnRight` to page through; an NPC with several quests on offer puts
-    up `NPCServicesWin` instead, which has no such button. Only the
-    first was checked, so the second read as "no dialogue open" at a
-    wizard that could not move -- and that is the state a run dies in.
+    All three kinds, because all three block. The ordinary conversation
+    box has a `btnRight` to page through; an NPC with several quests on
+    offer puts up `NPCServicesWin` instead; and the modal message boxes
+    -- the dungeon-teleport confirm above all -- live under
+    `MessageBoxModalWindow` with a confirm button and nothing else.
+    Each of these was, at some point, the one kind not checked, and a
+    wizard parked at the unchecked kind reads as "no dialogue open" --
+    which is the state a run dies in.
     """
     button = await window_from_path(client.root_window, ADVANCE_DIALOG_PATH)
     if button is not None and await _visible(button):
         return True
     exit_button = await window_from_path(client.root_window,
                                          SERVICES_EXIT_PATH)
-    return exit_button is not None and await _visible(exit_button)
+    if exit_button is not None and await _visible(exit_button):
+        return True
+    return await _visible_modal(client) is not None
+
+
+async def _visible_modal(client):
+    """The first visible modal confirm button, or None."""
+    for path in MODAL_BUTTON_PATHS:
+        try:
+            window = await window_from_path(client.root_window, path)
+            if window is not None and await _visible(window):
+                return window
+        except Exception:
+            continue
+    return None
 
 
 async def dialogue_text(client) -> str:
@@ -357,9 +398,26 @@ async def advance_dialogue(client, max_clicks: int = 40,
             button = await window_from_path(client.root_window,
                                             ADVANCE_DIALOG_PATH)
             if button is None or not await _visible(button):
-                # No page to turn. There may still be a quest-picker
-                # holding the wizard in place -- closing that IS the
-                # advance, and it is one click, not a conversation.
+                # No page to turn. A modal confirm may be holding the
+                # wizard instead -- the dungeon-teleport prompt, the
+                # zone-load retry -- and clicking it IS the advance.
+                # Back around the loop afterwards, because dismissing
+                # one can reveal an ordinary dialogue behind it.
+                modal = await _visible_modal(client)
+                if modal is not None:
+                    try:
+                        await client.mouse_handler.click_window(modal)
+                        clicks += 1
+                        tries += 1
+                        await asyncio.sleep(0.3)
+                        continue
+                    except Exception as exc:
+                        reason = (f"found a modal prompt but the click "
+                                  f"failed — {type(exc).__name__}: {exc}")
+                        break
+                # There may still be a quest-picker holding the wizard
+                # in place -- closing that IS the advance too, and it
+                # is one click, not a conversation.
                 closed, why = await _close_services(client)
                 if closed:
                     clicks += 1
@@ -588,16 +646,9 @@ CLOSE_MENU_PATHS = (
     ["WorldView", "ShoppingPetSnackWindow", "buyWindow", "exit"],
     ["WorldView", "wndDialogMain", "btnYes"],
     ["WorldView", "wndDialogMain", "btnRight"],
-    ["MessageBoxModalWindow", "messageBoxBG", "messageBoxLayout",
-     "AdjustmentWindow", "Layout", "centerButton"],
-    ["MessageBoxModalWindow", "messageBoxBG", "messageBoxLayout",
-     "AdjustmentWindow", "Layout", "rightButton"],
-    ["MessageBoxModalWindow", "messageBoxBG", "messageBoxLayout",
-     "AdjustmentWindow", "RetryBtn"],
-    ["WorldView", "PlanningPhase", "MessageBoxModalWindow", "messageBoxBG",
-     "messageBoxLayout", "AdjustmentWindow", "Layout", "centerButton"],
-    ["WorldView", "PlanningPhase", "MessageBoxModalWindow", "messageBoxBG",
-     "messageBoxLayout", "AdjustmentWindow", "Layout", "rightButton"],
+    # The modal family, shared with `in_dialogue`/`advance_dialogue` so
+    # the three can never disagree about what counts as blocking again.
+    *MODAL_BUTTON_PATHS,
     ["WorldView", "PetLevelUpWindow", "wndPetLevelBkg", "btnPetLevelClose"],
     ["WorldView", "ClassPicture", "exit"],
     ["WorldView", "HelpHousingTips2", "toolbar", "exit"],

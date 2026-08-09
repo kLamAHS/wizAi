@@ -13829,3 +13829,67 @@ def test_the_questing_tab_offers_the_pacing_and_passes_it_through(qapp):
     assert "script_step_delay" in src and "script_dialog_delay" in src
     assert "if self.pace_override.isChecked()" in src, \
         "the override must be None when the box is unticked"
+
+
+# -------------------- the third kind of dialogue nothing detected
+#
+# "I think sometimes the bot doesnt realize it's in dialogue and gets
+# stuck waiting too long." The modal message boxes — "Do you wish to be
+# transported?" when teleporting to a friend in a dungeon, "your friend
+# is busy", the zone-load retry — block the wizard exactly like a
+# dialogue and live under `MessageBoxModalWindow`, not `wndDialogMain`.
+# `close_menus` knew their buttons; `in_dialogue` and `advance_dialogue`
+# did not, so a wizard parked at one read as "no dialogue open".
+
+def _modal_root(visible=True):
+    button = _Win("centerButton", visible=visible)
+    return _Win("root", [
+        _Win("MessageBoxModalWindow", [
+            _Win("messageBoxBG", [
+                _Win("messageBoxLayout", [
+                    _Win("AdjustmentWindow", [
+                        _Win("Layout", [button])])])])])]), button
+
+
+def test_a_modal_prompt_counts_as_being_in_dialogue():
+    import asyncio
+
+    from deimos_bridge.questing import in_dialogue
+
+    root, _ = _modal_root(visible=True)
+    assert asyncio.run(in_dialogue(_QuestClient(root)))
+    root, _ = _modal_root(visible=False)
+    assert not asyncio.run(in_dialogue(_QuestClient(root)))
+
+
+def test_advance_dialogue_clicks_a_modal_confirm():
+    """The dungeon-teleport prompt is the follower's commonest wall:
+    the follow lands it at the sigil, the game asks, nothing answered."""
+    import asyncio
+
+    from deimos_bridge.questing import advance_dialogue
+
+    root, button = _modal_root(visible=True)
+    client = _QuestClient(root)
+
+    clicked = []
+    real = client.mouse_handler.click_window
+
+    async def click(window):
+        clicked.append(window)
+        button._visible = False         # the prompt is answered
+        return await real(window)
+
+    client.mouse_handler.click_window = click
+    clicks, why = asyncio.run(advance_dialogue(client, settle=0))
+    assert clicks == 1 and why == ""
+    assert clicked == [button], "it clicked something other than the confirm"
+
+
+def test_the_modal_paths_are_the_same_ones_close_menus_clicks():
+    """One list. The bug was three functions with three private ideas of
+    what counts as a blocking window."""
+    from deimos_bridge.questing import CLOSE_MENU_PATHS, MODAL_BUTTON_PATHS
+
+    for path in MODAL_BUTTON_PATHS:
+        assert path in CLOSE_MENU_PATHS
