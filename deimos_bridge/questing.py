@@ -230,6 +230,27 @@ def is_collect_goal(goal) -> str:
     return text if re.search(r"\bcollect\b", text, re.IGNORECASE) else ""
 
 
+def collect_count(goal):
+    """(what, done, total) for a Collect step, or None.
+
+    "Collect Gemstones in Hall of Champions (0 of 4)" -> the text before
+    the counter, 0, 4. The counter is the only progress signal a Collect
+    step has -- it publishes no quest position (see `is_collect_goal`),
+    so nothing else can tell "picking them up slowly" from "never found
+    them at all".
+    """
+    import re
+
+    text = strip_markup(goal)
+    if not is_collect_goal(text):
+        return None
+    m = re.search(r"\(\s*(\d+)\s+of\s+(\d+)\s*\)", text)
+    if not m:
+        return None
+    what = text[:m.start()].strip().lower()
+    return what, int(m.group(1)), int(m.group(2))
+
+
 def strip_markup(text) -> str:
     """The goal line as a person would read it.
 

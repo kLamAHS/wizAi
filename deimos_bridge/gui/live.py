@@ -197,6 +197,12 @@ class _Seat:
         #: so a cure that is not taking is retried on a cooldown rather
         #: than paging through the quest book every tick.
         self.rearm_tried_at = NEVER
+        #: when a Collect step's counter last went UP, and for which
+        #: collect goal. The only proof a wizard ever reached the
+        #: spawns, because a Collect step has no marker to check
+        #: against. See `LiveWorker._maybe_realm_hop`.
+        self.collect_moved_at = 0.0
+        self.collect_moved_for = ""
         #: when this client's quest hook last DID read a position, and
         #: on which goal. Proof the hook works, which is what separates
         #: "this quest has no marker" from "the arrow is off". See
@@ -380,7 +386,7 @@ class LiveWorker(QThread):
                  coordinate=True, passes=2, barrier=None,
                  follow_leader=True, leader=0, label_windows=True,
                  solo_script=False, script_step_delay=None,
-                 script_dialog_delay=None):
+                 script_dialog_delay=None, script_debug=False):
         super().__init__()
         # Seat 0 is always the arguments this was called with, so the
         # single-wizard signature is untouched; `seats` adds the rest.
@@ -399,6 +405,11 @@ class LiveWorker(QThread):
         self.fights = fights
         self.auto_quest = auto_quest
         self.auto_dialogue = auto_dialogue
+        #: forward the script's own `print` commentary into the run's
+        #: log. A live toggle like the others -- see `_script_logging`.
+        self.script_debug = bool(script_debug)
+        self._stop_capture = None
+        self._logged = {}
         #: between-fights upkeep. An unattended run dies by attrition
         #: long before it runs out of quests, and a policy that lost at
         #: 12% health has told you nothing about the policy.
@@ -520,6 +531,9 @@ class LiveWorker(QThread):
     def stop(self):
         """Ask every seat's loop to finish after the current fight."""
         self._stop = True
+        # The loguru sink outlives this thread otherwise, and a second
+        # run would then have two of them writing the same line twice.
+        self._script_logging(False)
 
     #: what `request` accepts. Every one of these drives the mouse, so
     #: every one is serviced from the one task that owns it. "realm" is
@@ -695,6 +709,10 @@ class LiveWorker(QThread):
                 # meant the "Run script" tick only took effect on a
                 # wizard that also had auto-dialogue on and no Deimos
                 # quester running.
+                # A live toggle like auto-quest's: read every tick, so
+                # the switch works during a run rather than only at
+                # Play live.
+                self._script_logging(self.script_debug)
                 await self._stage(seat, "script", self._sync_script(seat))
                 self._watch_waitfor(seat)
 
@@ -1913,12 +1931,81 @@ class LiveWorker(QThread):
         """
         from .. import scripts
 
+        # The operator's debug switch, applied to whatever text is about
+        # to be compiled -- first build, rebuild and restart alike, so a
+        # toggle cannot be undone by the next reload.
+        try:
+            source = scripts.set_debug(source, self.script_debug)
+        except Exception:
+            pass
         if not getattr(seat, "script_built", False):
             return source, []
         try:
             return scripts.restart_source(source)
         except Exception:
             return source, []
+
+    #: how many times one distinct script line is written down before
+    #: it is thinned. The dispatch prints on every pass, so an
+    #: unthinned capture would be the whole export.
+    LOG_THIN = (1, 2, 5, 20, 100, 500, 2000)
+
+    def _script_logging(self, on):
+        """Start or stop forwarding the script's `print` output.
+
+        Idempotent, and safe to call from a toggle: `capture_prints`
+        answers None when loguru is missing, which simply leaves the
+        feature off rather than failing a run.
+        """
+        from .. import scripts
+
+        if on and self._stop_capture is None:
+            self._stop_capture = scripts.capture_prints(self._note_script_log)
+            if self._stop_capture is None:
+                self._say(self.seats[0],
+                          "script debug output is on, but loguru is not "
+                          "available to capture it")
+            else:
+                self._say(self.seats[0],
+                          "script debug output on — the script's own "
+                          "`print` lines now go to this log, which is how "
+                          "it says which leg of its route it is running")
+        elif not on and self._stop_capture is not None:
+            try:
+                self._stop_capture()
+            except Exception:
+                pass
+            self._stop_capture = None
+
+    def _note_script_log(self, text):
+        """One line of the script's own commentary, thinned by content.
+
+        Thinned rather than dropped: the SAME line repeating is what a
+        wedged route looks like, and the count is the evidence -- so the
+        first, second, fifth... occurrence is written and the ones
+        between are not. Called from loguru's thread, so it only
+        touches telemetry and the status signal, both of which are
+        already used across threads.
+        """
+        text = (text or "").strip()
+        if not text:
+            return
+        n = self._logged.get(text, 0) + 1
+        self._logged[text] = n
+        if len(self._logged) > 400:
+            self._logged.clear()
+        if n not in self.LOG_THIN:
+            return
+        said = text if n == 1 else f"{text} — {n} times"
+        for seat in self.seats:
+            try:
+                seat.tel.note_questing("script-log", said)
+            except Exception:
+                pass
+        try:
+            self.status.emit(said)
+        except Exception:
+            pass
 
     async def _setup_script(self, client, seat=None):
         """Compile the party's script over every hooked client.
@@ -2706,6 +2793,15 @@ class LiveWorker(QThread):
             goal = ""
         if goal and goal != seat.goal:
             seat.goal_at = now
+            # Did a Collect COUNT go up? That is the only evidence a
+            # wizard ever found the collectibles, and without it a
+            # stalled count means "never got there" rather than "the
+            # realm is picked clean". See `_maybe_realm_hop`.
+            was = questing.collect_count(seat.goal)
+            got = questing.collect_count(goal)
+            if got and was and got[0] == was[0] and got[1] > was[1]:
+                seat.collect_moved_at = now
+                seat.collect_moved_for = got[0]
             # In order, and bounded. `_who_is_behind` needs to know that
             # a step was HELD and left, which a single current value
             # cannot say.
@@ -3814,6 +3910,36 @@ class LiveWorker(QThread):
                 # The count is still moving, or has not been watched
                 # long enough to say it is not.
                 return
+            here = questing.collect_count(seat.goal)
+            if here and not (seat.collect_moved_for == here[0]
+                             and seat.collect_moved_at):
+                # ...and it has to have moved AT LEAST ONCE. A crowded
+                # realm is a wizard picking up collectibles slowly; a
+                # count that has never left its starting number is a
+                # wizard that never reached the spawns, and swapping
+                # shards cannot put it there.
+                #
+                # Rev 3cbb6091 is why this is not optional. Konstantin
+                # sat at `(0 of 4)` for 57 minutes at the world portal
+                # -- never one gemstone -- while this rung hopped the
+                # party through seven realms on the claim that he was
+                # "working them and finding nothing". The seventh split
+                # the party across realms, which is strictly worse than
+                # the crowding it was answering. Being WITH the party
+                # is not being AT the spawns; only the count knows.
+                self._say_once(
+                    seat, f"collect-never-started:{seat.name}",
+                    f"{seat.name}'s Collect count has never moved off "
+                    f"{here[1]} of {here[2]} — it has not reached the "
+                    f"collectibles at all, so a quieter realm is not the "
+                    f"answer. Not changing realms",
+                    kind="realm-hop-refused",
+                    detail=(f"{seat.goal!r} has never advanced once. A "
+                            f"crowded realm shows a count that moves and "
+                            f"then stalls; a count still on its starting "
+                            f"number is a wizard that never got to the "
+                            f"spawns, and a shard swap keeps the zone"))
+                return
         if away is None and not self._with_the_party(seat):
             # ...and without a marker, the party IS the check. A realm
             # change keeps the zone and only changes the shard, so it
@@ -3845,8 +3971,8 @@ class LiveWorker(QThread):
                 else (now - seat.goal_at)) / 60.0
         where = (f"{away:,.0f} from its marker, with nothing moving"
                  if away is not None else
-                 "being teleported between the collect spots the whole "
-                 "time, so it is working them and finding nothing")
+                 f"and its count HAS moved before, so this wizard does "
+                 f"reach the spawns — they are just being taken")
         await self._realm_hop_party(
             seat, f"{seat.goal!r} has not advanced in {idle:.0f} min — "
                   f"{where}. Collectibles are shared ground spawns, so a "
@@ -3928,6 +4054,39 @@ class LiveWorker(QThread):
                         + (f" — {why_not}" if why_not else ""))
                 return
             target = fresh[0]
+            # Can EVERY wizard read the list before ANY of them moves?
+            #
+            # A split is the worst state this method can produce --
+            # wizards in different realms cannot see or teleport to each
+            # other -- and rev 3cbb6091 produced one for a reason that
+            # was knowable in advance: Sebastian's realm list would not
+            # read ("the realm list's page number would not read"), the
+            # same failure that had already been logged five times that
+            # run on that client. Two wizards hopped, he could not, and
+            # the party spent the rest of the run apart.
+            #
+            # The scan is what the hop needs anyway, and a client that
+            # cannot scan cannot hop. Checking first turns a split into
+            # a refusal, which costs a realm change and nothing else.
+            cannot = []
+            for one in live:
+                if one is seat:
+                    continue                 # its scan is the one above
+                seen, why_not_one = await realms.scan_realms(one.client)
+                if not seen:
+                    cannot.append((one, why_not_one or "the realm list "
+                                                       "would not read"))
+            if cannot:
+                names = " and ".join(one.name for one, _r in cannot)
+                said = (f"not changing realms — {names} cannot read the "
+                        f"realm list ({cannot[0][1]}), and hopping the "
+                        f"others without {names} would split the party "
+                        f"across realms, which is worse than the crowding "
+                        f"this was answering")
+                for other in live:
+                    other.tel.note_questing("realm-hop-refused", said)
+                self._say(seat, said)
+                return
             self._realms_tried.add(target["name"])
             self._say(seat, f"changing the party to realm {target['name']} "
                             f"— {why}")

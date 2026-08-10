@@ -15194,9 +15194,13 @@ def test_a_collect_step_with_no_marker_at_all_still_hops(monkeypatch):
     # seconds, so the POSITION keeps changing while the count does not.
     seat.progress_at = time.monotonic() - 5.0
     seat.goal_at = time.monotonic() - worker.REALM_HOP_AFTER - 1
+    # It HAS collected before, so it demonstrably reaches the spawns --
+    # the crowding question is the live one.
+    seat.collect_moved_for = "collect gemstones in hall of champions"
+    seat.collect_moved_at = time.monotonic() - 600.0
     asyncio.run(worker._maybe_realm_hop(seat))
     assert fired, "the crowded-realm rung refused a markerless Collect"
-    assert "working them and finding nothing" in fired[0]
+    assert "count HAS moved before" in fired[0]
     assert "crowded realm" in fired[0]
 
 
@@ -16467,6 +16471,8 @@ def test_a_lone_wizard_on_a_collect_step_is_a_regroup_not_a_realm(monkeypatch):
     seat.marker_away = None
     seat.progress_at = time.monotonic() - 5.0
     seat.goal_at = time.monotonic() - worker.REALM_HOP_AFTER - 1
+    seat.collect_moved_for = "collect gemstones in hall of champions"
+    seat.collect_moved_at = time.monotonic() - 600.0
     seat.progress = ("Krokotopia/KT_Hub", (1, 2, 3), goal)
     other.progress = ("Krokotopia/KT_Krokosphinx/KT_ChampHall", (4, 5, 6),
                       "Talk To General Khaba in Hall of Champions")
@@ -16708,3 +16714,278 @@ def test_an_unreadable_goal_does_not_block_the_regroup(monkeypatch):
     worker.seats[0].stranded_since = time.monotonic() - worker.STRANDED_AFTER - 1
     seat, _target = _look(worker, read_zone, monkeypatch)
     assert seat is worker.seats[0]
+
+
+# ------------------ a count that never moved is not a crowded realm
+#
+# Rev 3cbb6091, the regression this fixes. Konstantin sat at
+# `Collect Gemstones in Hall of Champions (0 of 4)` for 57 minutes at
+# the world portal — never one gemstone — while the realm rung hopped
+# the whole party through SEVEN realms (Bartleby, Bernie, Blossom,
+# Centaur, Diego, Drake, Dryad) claiming he was "working them and
+# finding nothing". The seventh split the party across realms.
+#
+# Being WITH the party is not being AT the spawns. The count is the
+# only thing that knows, because a Collect step has no marker.
+
+def test_a_collect_count_that_never_moved_blocks_the_realm_hop(monkeypatch):
+    import asyncio
+    import time
+
+    worker, _read = _zoned_party(["KT_WorldTeleporter"] * 2)
+    worker.script = "###deimos_expertmode"
+    fired = []
+
+    async def record(seat, why):
+        fired.append(why)
+
+    worker._realm_hop_party = record
+    seat = worker.seats[0]
+    seat.goal = "Collect Gemstones in Hall of Champions (0 of 4)"
+    seat.marker_away = None
+    seat.progress_at = time.monotonic() - 5.0
+    seat.goal_at = time.monotonic() - worker.REALM_HOP_AFTER - 1
+
+    asyncio.run(worker._maybe_realm_hop(seat))
+    assert fired == [], "it hopped for a wizard that never reached the spawns"
+    note = [e for e in seat.tel.questing if e["kind"] == "realm-hop-refused"]
+    assert note and "never advanced once" in note[0]["detail"]
+
+    # ...and once the count HAS moved, the same stall is the crowd.
+    seat.collect_moved_for = "collect gemstones in hall of champions"
+    seat.collect_moved_at = time.monotonic() - 600.0
+    asyncio.run(worker._maybe_realm_hop(seat))
+    assert fired, "a proven-reachable wizard was refused"
+    assert "count HAS moved before" in fired[0]
+
+
+def test_the_goal_poll_notices_a_collect_count_going_up():
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    class _XYZ:
+        def __init__(self, x, y, z):
+            self.x, self.y, self.z = x, y, z
+
+    class _Body:
+        async def position(self):
+            return _XYZ(1.0, 2.0, 3.0)
+
+    class _Client:
+        body = _Body()
+        root_window = _Win("root", [])
+
+        async def zone_name(self):
+            return "KT_ChampHall"
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    worker.status = type("S", (), {"emit": staticmethod(lambda *_: None)})()
+    worker.GOAL_POLL = 0.0
+    seat = worker.seats[0]
+    seat.client = _Client()
+
+    from deimos_bridge import questing
+
+    reading = {"goal": "Collect Gemstones in Hall of Champions (0 of 4)"}
+
+    async def read_goal(_c):
+        return reading["goal"]
+
+    original = questing.read_quest_goal
+    questing.read_quest_goal = read_goal
+    try:
+        asyncio.run(worker._read_goal(seat))
+        assert not seat.collect_moved_at, "0 of 4 is not progress"
+
+        reading["goal"] = "Collect Gemstones in Hall of Champions (1 of 4)"
+        asyncio.run(worker._read_goal(seat))
+        assert seat.collect_moved_at, "a gemstone was picked up and missed"
+        assert seat.collect_moved_for == \
+            "collect gemstones in hall of champions"
+
+        # A DIFFERENT collect quest starting at 0 must not inherit it.
+        stamp = seat.collect_moved_at
+        reading["goal"] = "Collect Sunstones in the Oasis (0 of 3)"
+        asyncio.run(worker._read_goal(seat))
+        assert seat.collect_moved_at == stamp
+        assert seat.collect_moved_for != "collect sunstones in the oasis"
+    finally:
+        questing.read_quest_goal = original
+
+
+def test_the_party_does_not_hop_if_one_wizard_cannot_read_the_list(
+        monkeypatch):
+    """A split is the worst state this method can produce, and rev
+    3cbb6091's was knowable in advance: Sebastian's realm list had
+    already failed to read five times that run. The scan is what the
+    hop needs anyway, so checking every client first turns a split into
+    a refusal."""
+    import asyncio
+
+    from deimos_bridge import realms
+
+    worker, calls = _hoppable_party(monkeypatch)
+    good = worker.seats[0]
+
+    async def scan(client):
+        calls["scans"] += 1
+        if client is not good.client:
+            return [], "the realm list's page number would not read"
+        return ([{"page": 1, "slot": 1, "name": "Bravado",
+                  "population": "Perfect"}], "")
+
+    monkeypatch.setattr(realms, "scan_realms", scan)
+    asyncio.run(worker._realm_hop_party(good, "testing"))
+
+    assert calls["hops"] == [], "it split the party across realms"
+    note = [e for e in worker.seats[1].tel.questing
+            if e["kind"] == "realm-hop-refused"]
+    assert note and "would split the party" in note[0]["detail"]
+
+
+def test_the_party_still_hops_when_everybody_can_read_the_list(monkeypatch):
+    import asyncio
+
+    worker, calls = _hoppable_party(monkeypatch)
+    asyncio.run(worker._realm_hop_party(worker.seats[0], "testing"))
+    assert len(calls["hops"]) == 3, "the pre-flight blocked a healthy hop"
+
+
+# ------------------------------------------- the script's own commentary
+#
+# The operator: "instead of having to put the debug flag on, put it in
+# a setting in the gui".
+#
+# The flag was already on. Every preset ships `var DebugMode = True`
+# ("Will show exact steps more in depth. Useful for determining
+# breaks."), and deimoslang's `print` compiles to log_single/log_multi,
+# both of which end in `logger.debug(...)` — loguru, whose default sink
+# is stderr. A GUI run has no console, so the script has been narrating
+# which leg of its route it is on for this entire investigation and not
+# one line reached an export.
+
+def test_the_debug_flag_reads_and_flips_without_moving_a_line():
+    from deimos_bridge import scripts
+
+    src = ("###deimos_expertmode\n"
+           "var DebugMode = True     # Will show exact steps\n"
+           "var Other = False\n"
+           "loop {\n\tsleep 1\n}\n")
+    assert scripts.debug_state(src) is True
+
+    off = scripts.set_debug(src, False)
+    assert scripts.debug_state(off) is False
+    assert off.count("\n") == src.count("\n"), \
+        "a rewrite that shifts lines makes every reported ip wrong"
+    assert "# Will show exact steps" in off, "it ate the author's comment"
+    assert "var Other = False" in off, "it flipped the wrong variable"
+
+    assert scripts.debug_state(scripts.set_debug(off, True)) is True
+    # A script without the var is left exactly alone.
+    assert scripts.debug_state("###deimos_expertmode\nloop {\n}\n") is None
+    assert scripts.set_debug("loop {\n}\n", True) == "loop {\n}\n"
+
+
+def test_every_source_the_worker_builds_carries_the_setting():
+    """First build, rebuild and restart alike — or a toggle would be
+    undone by the next reload."""
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    src = ("###deimos_expertmode\n"
+           "var DebugMode = True\n"
+           "loop {\n\tsleep 1\n}\n")
+
+    worker.script_debug = False
+    first, _skipped = worker._fresh_source(seat, src)
+    assert "var DebugMode = False" in first
+
+    seat.script_built = True
+    worker.script_debug = True
+    again, _skipped = worker._fresh_source(seat, src)
+    assert "var DebugMode = True" in again
+
+
+def test_the_script_log_is_thinned_by_content_not_dropped():
+    """The dispatch prints on every pass, so an unthinned capture would
+    be the whole export — but the SAME line repeating is exactly what a
+    wedged route looks like, and the count is the evidence."""
+    worker, _read = _zoned_party(["KT_Hub", "KT_Hub"])
+    line = "Broken quest detected. p1 tracking_quest [get some bling]"
+    for _ in range(600):
+        worker._note_script_log(line)
+
+    notes = [e for e in worker.seats[0].tel.questing
+             if e["kind"] == "script-log"]
+    assert [n["detail"] for n in notes] == [
+        line, f"{line} — 2 times", f"{line} — 5 times",
+        f"{line} — 20 times", f"{line} — 100 times",
+        f"{line} — 500 times"]
+    # every seat's export can answer the question on its own
+    assert len([e for e in worker.seats[1].tel.questing
+                if e["kind"] == "script-log"]) == len(notes)
+
+    # A different line is its own story, not a continuation of that one.
+    worker._note_script_log("p1 tracking_goal [collect gemstones]")
+    fresh = [e for e in worker.seats[0].tel.questing
+             if e["kind"] == "script-log"][-1]
+    assert fresh["detail"] == "p1 tracking_goal [collect gemstones]"
+
+
+def test_a_blank_script_line_is_not_written_down():
+    worker, _read = _zoned_party(["KT_Hub"])
+    worker._note_script_log("")
+    worker._note_script_log("   ")
+    assert not [e for e in worker.seats[0].tel.questing
+                if e["kind"] == "script-log"]
+
+
+def test_capture_forwards_only_the_vm_and_detaches_cleanly():
+    """loguru is process-wide: a sink that survives the run would
+    double every line of the next one, and one that listened to
+    everything would forward wizAi's own logging back into itself."""
+    import pytest
+
+    loguru = pytest.importorskip("loguru")
+
+    from deimos_bridge import scripts
+
+    seen = []
+    stop = scripts.capture_prints(seen.append)
+    assert stop is not None
+    try:
+        loguru.logger.bind().opt(depth=0).debug("not the vm")
+        vm_logger = loguru.logger.patch(
+            lambda record: record.update(name="src.deimoslang.vm"))
+        vm_logger.debug("Broken quest detected.")
+        assert "Broken quest detected." in seen
+        assert "not the vm" not in seen
+    finally:
+        stop()
+    before = len(seen)
+    vm_logger.debug("after the run")
+    assert len(seen) == before, "the sink outlived the run"
+
+
+def test_the_gui_exposes_the_setting_as_a_live_toggle():
+    import inspect
+
+    from deimos_bridge.gui import app
+
+    src = inspect.getsource(app)
+    assert 'self.script_debug = QCheckBox("Script log")' in src
+    assert '"script_debug": "script_debug"' in src, \
+        "it has to be togglable during a run, like auto-quest"
+    assert "script_debug=self.script_debug.isChecked()" in src, \
+        "and read at Play live"
+
+
+def test_the_worker_reads_the_toggle_every_tick():
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._service_loop)
+    assert "self._script_logging(self.script_debug)" in src
+    stop = inspect.getsource(LiveWorker.stop)
+    assert "self._script_logging(False)" in stop
