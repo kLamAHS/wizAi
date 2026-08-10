@@ -340,6 +340,108 @@ def solo_source(source: str):
     return source, reset
 
 
+def preamble_calls(source: str):
+    """The one-time `call`s a restart should not repeat, by name.
+
+    A deimoslang program is a pile of `block` definitions, then a few
+    top-level statements, then the `loop` it spends the run in. The
+    statements before that loop are the program's SETUP: they run once
+    when the program starts, and the loop is its steady state. Restart
+    the program and they run again -- which is correct for a first
+    start and wrong for every restart after it, because the setup has
+    already been done.
+
+    All six TTS presets have the same two, and the operator watched
+    the second one cost a settings tour every time wizAi reloaded a
+    wedged script::
+
+        call First_Run              # prints the banner
+        call First_Run_Settings     # opens the game menu, sets 800x600,
+                                    # fullscreen off, chat both, ... , OK
+        loop { ... }
+
+    Only top-level calls (no indentation) count -- a `call` inside a
+    block is part of a definition, not a statement, and the presets
+    have thousands of those.
+
+    Nothing here decides anything: `restart_source` applies the rule
+    and this only reports it, so a caller can say what it skipped.
+    """
+    import re
+
+    names = []
+    for line in (source or "").splitlines():
+        if re.match(r"^(loop|while|until)\b.*\{", line):
+            break                        # the steady state starts here
+        found = re.match(r"^call\s+([A-Za-z_]\w*)\s*$", line)
+        if found:
+            names.append(found.group(1))
+    return names
+
+
+def _block_body(source: str, name: str):
+    """The lines of `block <name> { ... }`, or None if it is not there."""
+    import re
+
+    lines = (source or "").splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if re.match(rf"^\s*block\s+{re.escape(name)}\s*\{{", line):
+            start = i
+            break
+    if start is None:
+        return None
+    depth = 0
+    body = []
+    for line in lines[start:]:
+        depth += line.count("{") - line.count("}")
+        body.append(line)
+        if depth <= 0:
+            break
+    return body
+
+
+def restart_source(source: str):
+    """(source, skipped) — the program with its one-time setup removed.
+
+    For RESTARTS only. The first start runs the program as written;
+    every restart after it starts from instruction 0 again, and the
+    setup it re-runs has already been done. In the presets that is a
+    banner and a walk through the game's settings menu -- ~20 clicks
+    and a menu the operator watched open "randomly" for no benefit,
+    once per reload.
+
+    Conservative twice over. A preamble call is only skipped when its
+    block is PURE -- no `var` assignment and no nested `call` -- so a
+    setup step that seeds state the loop reads is left alone, and so
+    is one whose block cannot be found at all. And the calls are
+    COMMENTED, not deleted, so the file keeps its line count and an
+    error still points where the author's line numbers say.
+    """
+    import re
+
+    skipped = []
+    for name in preamble_calls(source):
+        body = _block_body(source, name)
+        if body is None:
+            continue                     # cannot see it, will not touch it
+        inner = "\n".join(body[1:])
+        if re.search(r"\bvar\s+\w", inner) or re.search(r"^\s*call\s",
+                                                        inner, re.MULTILINE):
+            continue                     # it seeds state; let it run
+        # `[ \t\r]*`, not `\s*`: `\s` matches newlines, so a greedy
+        # `\s*$` eats the blank line after the call and the rewrite
+        # silently shortens the program.
+        new, n = re.subn(rf"^call[ \t]+{re.escape(name)}[ \t\r]*$",
+                         f"# wizAi: one-time setup, already done -- "
+                         f"call {name}",
+                         source, count=1, flags=re.MULTILINE)
+        if n:
+            source = new
+            skipped.append(name)
+    return source, skipped
+
+
 def set_pacing(source: str, step=None, dialog=None):
     """(source, changed) — override the script's own pacing settings.
 
@@ -619,6 +721,11 @@ class ScriptRunner:
         self.stale = False
         self._stuck_ip = None
         self._stuck = 0
+        #: the source every restart uses -- the program without its
+        #: one-time setup -- built lazily on the first restart, and the
+        #: names that were left out of it. See `restart_source`.
+        self._restart_source = None
+        self.skipped_setup = []
 
     @property
     def running(self):
@@ -718,11 +825,28 @@ class ScriptRunner:
         """
         if self.killed:
             return False
+        # A restart is not a first start. Whatever the program does
+        # before its main loop has already been done, and re-doing it
+        # costs the run every time -- in the presets, a walk through
+        # the game's settings menu on every reload. Computed once and
+        # kept, because it is the source every restart from here on
+        # will use. See `restart_source`.
+        if self._restart_source is None:
+            try:
+                self._restart_source, self.skipped_setup = \
+                    restart_source(self.source)
+            except Exception:
+                self._restart_source, self.skipped_setup = self.source, []
         try:
-            machine = build_vm(self.clients, self.source)
+            machine = build_vm(self.clients, self._restart_source)
         except Exception as exc:
-            self.last_error = f"{type(exc).__name__}: {exc}"
-            return False
+            # A rewrite that will not compile is worse than the tour.
+            self._restart_source, self.skipped_setup = self.source, []
+            try:
+                machine = build_vm(self.clients, self.source)
+            except Exception:
+                self.last_error = f"{type(exc).__name__}: {exc}"
+                return False
         self.vm = machine
         self.restarts += 1
         self.finished = False

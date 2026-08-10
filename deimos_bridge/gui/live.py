@@ -220,6 +220,10 @@ class _Seat:
         #: the spot a desperation quest-teleport was already tried from,
         #: as a `progress` stamp. See `LiveWorker._desperate_hop`.
         self.hop_tried_at = None
+        #: whether this seat has ever built a script runner. A REBUILD
+        #: is not a first start, so the program's one-time setup is
+        #: trimmed from every build after the first. See `_fresh_source`.
+        self.script_built = False
         #: what `runner` was built from, so the service tick can notice
         #: the operator turning the script on, off, or replacing it
         self.script_source = None
@@ -1237,6 +1241,28 @@ class LiveWorker(QThread):
         if want:
             await self._setup_script(seat.client, seat)
 
+    def _note_reload(self, seat, why, runner=None):
+        """Write a script reload into every export, with its cause.
+
+        The gap the operator found by watching the screen instead of
+        the log: "why does it go through the menu so much... it
+        randomly opens up the settings". Every one of those is the
+        program starting again from instruction 0 and re-running its
+        setup, and a reload was only ever said on the status line --
+        which nobody is reading an hour later. So the exports could
+        not explain the one thing visible from across the room.
+        """
+        detail = f"the script was reloaded and starts again from the top — {why}"
+        skipped = list(getattr(runner, "skipped_setup", None) or ())
+        if skipped:
+            detail += (f". Its one-time setup ({', '.join(skipped)}) is "
+                       f"skipped on a reload — it has already run")
+        for other in self.seats:
+            try:
+                other.tel.note_questing("script-reloaded", detail)
+            except Exception:
+                pass
+
     async def _script_step(self, seat=None):
         """One burst of the script, not one instruction.
 
@@ -1265,9 +1291,13 @@ class LiveWorker(QThread):
             # An instruction had to be cancelled, so the VM is part-way
             # through one. Reloading is the only honest recovery.
             self._say(seat, runner.last_error)
+            why = runner.last_error
             if not runner.restart():
                 self._say(seat, "script stopped — it could not be reloaded")
+                self._note_reload(seat, f"could NOT be reloaded — {why}")
                 seat.runner = None
+                return
+            self._note_reload(seat, why, runner)
             return
         if runner.failures:
             # Thinned rather than reported at exactly the first and
@@ -1762,6 +1792,30 @@ class LiveWorker(QThread):
             seat.quester = None
             self._say(seat, f"using the light questing ({type(exc).__name__})")
 
+    def _fresh_source(self, seat, source):
+        """(source, skipped) — trimmed once this seat has run the script.
+
+        A REBUILD is no more a first start than a restart is. The name
+        fill (`_fill_script_names`) changes the script text the moment
+        the first duel names the party, which rebuilds the runner from
+        scratch -- and rev 613ab86a shows what that cost: Sebastian's
+        instruction counter reset from 7,712 to 2,114 right after
+        `script-configured`, meaning the program began again at
+        instruction 0 and walked the settings menus a second time. The
+        setup had already run minutes earlier.
+
+        Keyed on this seat having built a runner before, so the very
+        first build of a run always executes the program as written.
+        """
+        from .. import scripts
+
+        if not getattr(seat, "script_built", False):
+            return source, []
+        try:
+            return scripts.restart_source(source)
+        except Exception:
+            return source, []
+
     async def _setup_script(self, client, seat=None):
         """Compile the party's script over every hooked client.
 
@@ -1797,8 +1851,10 @@ class LiveWorker(QThread):
                 # they step into its duels.
                 pilot = self.seats[self.leader]
                 source, reset = scripts.solo_source(source)
+                source, _skipped = self._fresh_source(seat, source)
                 seat.runner = scripts.make_runner(
                     [pilot.client or client], source, solo=True)
+                seat.script_built = True
                 self._say(seat,
                           f"script loaded — solo pilot: it drives "
                           f"{pilot.name} alone"
@@ -1807,10 +1863,23 @@ class LiveWorker(QThread):
                              if reset else "")
                           + "; the others follow and fight")
                 return
+            source, skipped_setup = self._fresh_source(seat, source)
             seat.runner = scripts.make_runner(party or [client], source)
+            seat.script_built = True
+            # So a later restart's report agrees with this one, and does
+            # not claim to skip what this build already left out.
+            seat.runner.skipped_setup = list(skipped_setup)
+            if skipped_setup:
+                self._note_reload(
+                    seat, "the script was rebuilt (its text changed)",
+                    seat.runner)
             self._say(seat, "script loaded"
                       + (f" — driving {len(party)} wizard(s)"
-                         if len(party) > 1 else ""))
+                         if len(party) > 1 else "")
+                      + (f"; its one-time setup "
+                         f"({', '.join(skipped_setup)}) is skipped — it "
+                         f"has already run this session" if skipped_setup
+                         else ""))
             names = scripts.mentions_clients(self.script)
             if names > max(1, len(party)):
                 # Not a refusal -- the parts that name p3 and p4 are
@@ -3157,10 +3226,15 @@ class LiveWorker(QThread):
                 f"Restarting it so its route dispatch runs fresh against "
                 f"the party's current quest — the operator's manual reset, "
                 f"automated")
-        if not runner.restart():
+        ok = runner.restart()
+        skipped = list(getattr(runner, "skipped_setup", None) or ())
+        if not ok:
             said = ("tried to restart the looping script and the restart "
                     "failed — it will be retried in "
                     f"{self.SCRIPT_RESTART_EVERY / 60:.0f} min")
+        elif skipped:
+            said += (f". Its one-time setup ({', '.join(skipped)}) is "
+                     f"skipped — it has already run")
         for other in self.seats:
             try:
                 other.tel.note_questing("script-restarted", said)

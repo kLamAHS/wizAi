@@ -15341,3 +15341,188 @@ def test_an_in_zone_marker_is_the_hops_case_not_a_restart():
         "restart": lambda self: restarts.append(True) or True})()
     worker._maybe_restart_script(seat, 6.0, parked=False)
     assert restarts == []
+
+
+# ------------------ a restart is not a first start
+#
+# The operator, watching the screen rather than the log: "why does it go
+# through the menu so much? like the settings. it randomly opens up the
+# settings and clicks through but it doesnt seem to actually do anything
+# beneficial." All six TTS presets end the same way —
+#
+#     call First_Run              # the banner
+#     call First_Run_Settings     # ~20 clicks through the game's menus
+#     loop { ... }                # the steady state
+#
+# — so every reload starts at instruction 0 and re-runs the settings
+# tour that has already been done.
+
+_PREAMBLE = (
+    '###deimos_expertmode\n'
+    'block First_Run {\n'
+    '\tprint "Through the Spiral (Arc 1)"\n'
+    '}\n'
+    'block First_Run_Settings {\n'
+    '\tprint "Auto configuring settings..."\n'
+    "\tclickwindow ['WorldView', 'DeckConfiguration', 'SettingPage']\n"
+    '}\n'
+    'block Seeds_State {\n'
+    '\tvar Created_Party = True\n'
+    '}\n'
+    'block Close_Menus {\n'
+    '\tcall Nested\n'
+    '}\n'
+    'call First_Run\n'
+    'call First_Run_Settings\n'
+    '\n'
+    'loop {\n'
+    '\tcall Close_Menus\n'
+    '}\n')
+
+
+def test_the_preamble_is_the_calls_before_the_main_loop():
+    from deimos_bridge.scripts import preamble_calls
+
+    assert preamble_calls(_PREAMBLE) == ["First_Run", "First_Run_Settings"]
+    # `call Close_Menus` is inside the loop, and the thousands of calls
+    # inside block DEFINITIONS are not statements at all.
+    assert "Close_Menus" not in preamble_calls(_PREAMBLE)
+
+
+def test_a_restart_skips_the_settings_tour():
+    from deimos_bridge.scripts import restart_source
+
+    out, skipped = restart_source(_PREAMBLE)
+    assert skipped == ["First_Run", "First_Run_Settings"]
+    assert "\ncall First_Run_Settings\n" not in out
+    assert "# wizAi: one-time setup" in out
+    # The block itself stays — only the call to it goes, so a script
+    # that reaches it another way is unharmed.
+    assert "block First_Run_Settings {" in out
+
+
+def test_the_rewrite_keeps_the_programs_shape():
+    """Commented, not deleted: an error still points where the author's
+    line numbers say. `\\s*$` would eat the blank line after the call."""
+    from deimos_bridge.scripts import restart_source
+
+    out, _skipped = restart_source(_PREAMBLE)
+    assert len(out.splitlines()) == len(_PREAMBLE.splitlines())
+    assert "\nloop {\n" in out
+
+
+def test_a_setup_call_that_seeds_state_is_left_alone():
+    """The conservative half. A preamble block that assigns a variable
+    the loop reads must still run — skipping it would start the program
+    in a state it never has on a first run."""
+    from deimos_bridge.scripts import restart_source
+
+    source = _PREAMBLE.replace("call First_Run_Settings\n",
+                               "call First_Run_Settings\ncall Seeds_State\n")
+    out, skipped = restart_source(source)
+    assert "Seeds_State" not in skipped
+    assert "\ncall Seeds_State\n" in out
+
+
+def test_a_setup_call_whose_block_is_missing_is_left_alone():
+    from deimos_bridge.scripts import restart_source
+
+    source = _PREAMBLE.replace("call First_Run\n", "call Who_Knows\n", 1)
+    out, skipped = restart_source(source)
+    assert "Who_Knows" not in skipped
+    assert "\ncall Who_Knows\n" in out
+
+
+def test_the_runner_restarts_from_the_trimmed_source(monkeypatch):
+    """The wiring: `restart()` builds its VM from the trimmed program,
+    and says which setup it skipped."""
+    from deimos_bridge import scripts
+
+    built = []
+
+    def fake_build(clients, source):
+        built.append(source)
+        return type("VM", (), {"running": True, "killed": False,
+                               "kill": lambda self: None})()
+
+    monkeypatch.setattr(scripts, "build_vm", fake_build)
+    runner = scripts.ScriptRunner(fake_build([], _PREAMBLE), _PREAMBLE, [])
+    built.clear()
+
+    assert runner.restart() is True
+    assert len(built) == 1
+    assert "\ncall First_Run_Settings\n" not in built[0], \
+        "the reload re-ran the settings tour"
+    assert runner.skipped_setup == ["First_Run", "First_Run_Settings"]
+
+    # ...and the trimmed source is computed once and reused.
+    assert runner.restart() is True
+    assert built[1] == built[0]
+
+
+def test_a_trimmed_source_that_will_not_compile_falls_back(monkeypatch):
+    """A rewrite that breaks the program is worse than the tour."""
+    from deimos_bridge import scripts
+
+    tried = []
+
+    def picky_build(clients, source):
+        tried.append(source)
+        if "# wizAi: one-time setup" in source:
+            raise RuntimeError("nope")
+        return type("VM", (), {"running": True, "killed": False,
+                               "kill": lambda self: None})()
+
+    monkeypatch.setattr(scripts, "build_vm", picky_build)
+    runner = scripts.ScriptRunner(object(), _PREAMBLE, [])
+    tried.clear()
+
+    assert runner.restart() is True, "it gave up instead of falling back"
+    assert tried[-1] == _PREAMBLE, "the fallback did not use the original"
+    assert runner.skipped_setup == []
+
+
+def test_a_reload_lands_in_every_export():
+    """The gap the operator found by watching the screen: a reload was
+    said on the status line and written down nowhere, so the exports
+    could not explain the one thing visible from across the room."""
+    worker, _read = _zoned_party(["KT_Hub"] * 3)
+    runner = type("R", (), {"skipped_setup": ["First_Run_Settings"]})()
+    worker._note_reload(worker.seats[0], "one instruction ran for 180s",
+                        runner)
+    for seat in worker.seats:
+        notes = [e for e in seat.tel.questing
+                 if e["kind"] == "script-reloaded"]
+        assert notes, "a seat's export cannot explain the reload"
+        assert "starts again from the top" in notes[0]["detail"]
+        assert "First_Run_Settings" in notes[0]["detail"]
+
+
+def test_a_rebuild_skips_the_setup_too(monkeypatch):
+    """Rev 613ab86a: `script-configured` fired at 360s, and Sebastian's
+    instruction counter reset from 7,712 to 2,114 — the name fill
+    rebuilt the runner, the program began at instruction 0 and walked
+    the settings menus a second time. A rebuild is no more a first
+    start than a restart is."""
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+
+    first, skipped = worker._fresh_source(seat, _PREAMBLE)
+    assert skipped == [], "the FIRST build must run the program as written"
+    assert first == _PREAMBLE
+
+    seat.script_built = True
+    again, skipped = worker._fresh_source(seat, _PREAMBLE)
+    assert skipped == ["First_Run", "First_Run_Settings"]
+    assert "\ncall First_Run_Settings\n" not in again
+
+
+def test_the_rebuild_path_marks_the_seat_and_reports(monkeypatch):
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._setup_script)
+    assert "self._fresh_source(seat, source)" in src
+    assert "seat.script_built = True" in src
+    assert "skipped_setup" in src, "a trimmed rebuild has to say so"
