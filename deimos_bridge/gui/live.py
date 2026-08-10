@@ -435,6 +435,9 @@ class LiveWorker(QThread):
         #: has already tried. See `_realm_hop_party`.
         self._realm_hopped_at = 0.0
         self._realms_tried = set()
+        #: when a looping script was last forcibly restarted. See
+        #: `_maybe_restart_script`.
+        self._script_restarted_at = 0.0
         #: {seat id: (the step it gave up on, when)}. A catch-up that
         #: gives up has to be REMEMBERED, or `_check_in_step` starts the
         #: identical one on the next tick -- see `_written_off`.
@@ -3096,6 +3099,74 @@ class LiveWorker(QThread):
         # the gentler fixes above are not skipped over on a guess.
         if was is not None and steps is not None:
             await self._desperate_hop(seat, mins, at_marker)
+            self._maybe_restart_script(seat, mins, parked)
+
+    #: how long between forced restarts of a looping script. A restart
+    #: replays the program's opening dispatch, which takes a minute or
+    #: two of walking before its effect is judgeable -- restarting
+    #: faster than this is thrash, not persistence.
+    SCRIPT_RESTART_EVERY = 420.0
+
+    def _maybe_restart_script(self, seat, mins, parked):
+        """The operator's other manual fix, automated: restart the script.
+
+        The run at rev 817b9f20 is the case in full. All three wizards
+        stood in KT_Pyramid/KT_Hall while every quest marker read
+        98,000+ away in the Krokosphinx, and the script looped ~3,100
+        instructions a minute for seven straight minutes. Every rung of
+        the ladder answered correctly -- the desperate hop refused
+        (right: no teleport crosses a zone), nothing was in range for X
+        (right), the realm change stayed quiet (right: wrong zone, not
+        crowded) -- and none of them could help, because the only actor
+        that can cross a zone is the script, and the script was
+        spinning a retry loop it entered from a quest state that no
+        longer exists.
+
+        The operator has already named the fix, from the run where they
+        applied it by hand: "when I reset it they progressed". A
+        restarted deimoslang program re-runs its route dispatch from
+        the top against the CURRENT quest state, and lands on the right
+        leg of its route instead of the one it wandered into. Restarts
+        are a move the script's design tolerates by construction -- a
+        program that runs off its end restarts itself.
+
+        Only for a LOOPING script with an out-of-zone marker. A parked
+        script is waiting on something real (the stuck-instruction
+        reload owns that case), and an in-zone marker is the desperate
+        hop's case -- this rung exists precisely for the wedge the hop
+        must refuse.
+        """
+        import time
+
+        runner = self.seats[0].runner
+        if runner is None or parked:
+            return
+        away = seat.marker_away
+        if away is None or away <= self.MARKER_IN_ZONE:
+            return
+        now = time.monotonic()
+        if now - seat.progress_at < self.STUCK_AFTER + self.UNSTICK_EVERY:
+            return
+        if now - self._script_restarted_at < self.SCRIPT_RESTART_EVERY:
+            return
+        self._script_restarted_at = now
+        said = (f"stuck {mins:.0f} min with the quest marker {away:,.0f} "
+                f"away — another zone — while the script loops. No "
+                f"teleport can cross a zone; the script's own route can, "
+                f"and it is looping on a state that no longer exists. "
+                f"Restarting it so its route dispatch runs fresh against "
+                f"the party's current quest — the operator's manual reset, "
+                f"automated")
+        if not runner.restart():
+            said = ("tried to restart the looping script and the restart "
+                    "failed — it will be retried in "
+                    f"{self.SCRIPT_RESTART_EVERY / 60:.0f} min")
+        for other in self.seats:
+            try:
+                other.tel.note_questing("script-restarted", said)
+            except Exception:
+                pass
+        self._say(seat, said)
 
     async def _desperate_hop(self, seat, mins, at_marker):
         """The operator's own last resort, automated: a quest teleport.
