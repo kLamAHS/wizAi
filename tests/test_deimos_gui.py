@@ -15152,7 +15152,7 @@ def test_a_parked_collect_goal_at_its_marker_triggers_the_hop(monkeypatch):
     seat.progress_at = time.monotonic() - worker.REALM_HOP_AFTER - 1
     seat.marker_away = 500.0
     asyncio.run(worker._maybe_realm_hop(seat))
-    assert fired and "contested" in fired[0]
+    assert fired and "crowded realm" in fired[0]
 
     # A talk goal, however stale, is not a crowded realm.
     fired.clear()
@@ -15163,6 +15163,56 @@ def test_a_parked_collect_goal_at_its_marker_triggers_the_hop(monkeypatch):
     # And a collect goal whose marker is a zone away is lost, not queued.
     seat.goal = "Collect Notebook Pages in Royal Hall (0 of 3)"
     seat.marker_away = 92000.0
+    asyncio.run(worker._maybe_realm_hop(seat))
+    assert fired == []
+
+
+def test_a_collect_step_with_no_marker_at_all_still_hops(monkeypatch):
+    """The bug that made this whole rung unreachable, found by the
+    operator: "there is no quest marker, this is a collect quest still
+    even when you select on the quest". Collect steps publish no quest
+    position — so `marker_away` is None for every one of them, and the
+    rung written for exactly this family refused every case it was
+    built to answer."""
+    import asyncio
+    import time
+
+    worker, _read = _zoned_party(["KT_ChampHall"] * 2)
+    worker.script = "###deimos_expertmode"
+    fired = []
+
+    async def record(seat, why):
+        fired.append(why)
+
+    worker._realm_hop_party = record
+    seat = worker.seats[0]
+    seat.goal = "Collect Gemstones in Hall of Champions (0 of 4)"
+    seat.progress_at = time.monotonic() - worker.REALM_HOP_AFTER - 1
+    seat.marker_away = None                  # what a Collect step reads
+    asyncio.run(worker._maybe_realm_hop(seat))
+    assert fired, "the crowded-realm rung refused a markerless Collect"
+    assert "no marker" in fired[0]
+    assert "crowded realm" in fired[0]
+
+
+def test_a_collect_step_is_not_hopped_before_its_clock(monkeypatch):
+    """Dropping the marker gate must not drop the patience with it: a
+    realm change costs the whole party a zone reload."""
+    import asyncio
+    import time
+
+    worker, _read = _zoned_party(["KT_ChampHall"] * 2)
+    worker.script = "###deimos_expertmode"
+    fired = []
+
+    async def record(seat, why):
+        fired.append(why)
+
+    worker._realm_hop_party = record
+    seat = worker.seats[0]
+    seat.goal = "Collect Gemstones in Hall of Champions (0 of 4)"
+    seat.marker_away = None
+    seat.progress_at = time.monotonic() - worker.REALM_HOP_AFTER + 30
     asyncio.run(worker._maybe_realm_hop(seat))
     assert fired == []
 
@@ -15750,8 +15800,10 @@ def _dead_marker_seat(worker, seat, minutes=3.0):
     import time
 
     # Only fill an EMPTY goal: `_behind_party` seats already carry the
-    # goals their questline placement hangs off.
-    seat.goal = seat.goal or "Collect Gemstones in Hall of Champions (0 of 4)"
+    # goals their questline placement hangs off. NOT a Collect line --
+    # those have no marker by design, which is a different diagnosis
+    # from the switched-off arrow these fixtures are about.
+    seat.goal = seat.goal or "Talk To General Khaba in Hall of Champions"
     seat.marker_away = None
     seat.marker_dead_since = time.monotonic() - minutes * 60.0
     return seat
@@ -15950,7 +16002,7 @@ def test_no_catch_up_is_started_for_a_wizard_nothing_can_drive():
     assert worker._catch_up_state is None, \
         "it paused the party for a catch-up that cannot aim"
     kinds = [e["kind"] for e in laggard.tel.questing]
-    assert "catch-up-refused-marker-dead" in kinds
+    assert "catch-up-refused-no-marker" in kinds
 
 
 def test_a_blinking_marker_still_gets_its_catch_up():
@@ -15985,13 +16037,13 @@ def test_zone_churn_does_not_rearm_a_write_off_while_the_hook_is_dead():
     src_now = time.monotonic()
     # The zone-change path in `_read_goal`, distilled: new zone seen.
     laggard.zone_for_writeoff = "KT_Hub"
-    if not worker._marker_dead(laggard, src_now):
+    if not worker._marker_unusable(laggard, src_now):
         worker._forget_write_off(laggard)
     assert worker._written_off([laggard]), \
         "a zone change cleared a write-off no zone change can fix"
 
     laggard.marker_dead_since = None        # the hook came back
-    if not worker._marker_dead(laggard, src_now):
+    if not worker._marker_unusable(laggard, src_now):
         worker._forget_write_off(laggard)
     assert not worker._written_off([laggard])
 
@@ -16005,7 +16057,7 @@ def test_the_dead_hook_guard_lives_on_the_goal_poll():
     from deimos_bridge.gui.live import LiveWorker
 
     src = inspect.getsource(LiveWorker._read_goal)
-    assert "if not self._marker_dead(seat, now):" in src
+    assert "if not self._marker_unusable(seat, now):" in src
     assert "self._forget_write_off(seat)" in src
 
 
@@ -16249,3 +16301,175 @@ def test_a_stale_runner_is_not_stepped_while_the_hold_is_on():
     stepped = src.index("run_for")
     handled = src.index("if runner.stale:")
     assert stepped < handled, "the guard has to wrap the step, not follow it"
+
+
+# ------------------------- a quest with no marker is not a dead arrow
+#
+# The operator, after the previous round shipped the opposite: "there
+# is no quest marker, this is a collect quest still even when you
+# select on the quest". Right, and the TTS quester says so in its own
+# comments — its Krokotopia #31 handling opens `print "Broken quest
+# detected."` and then hardcodes two XYZ spots with ten X presses at
+# each, because there is no position to teleport to. So a quest
+# position that will not read is only evidence of a dead arrow when
+# the arrow is what could have written it.
+
+def test_a_collect_step_is_recognised_from_the_goal_line():
+    from deimos_bridge.questing import is_collect_goal
+
+    assert is_collect_goal("Collect Gemstones in Hall of Champions (0 of 4)")
+    assert is_collect_goal("<center>Collect 3 Sunstones</center>")
+    assert is_collect_goal("Defeat Charmed Slave and Collect Notebook Pages")
+    assert not is_collect_goal("Talk To General Khaba in Hall of Champions")
+    assert not is_collect_goal("Defeat Krokopatra (0 of 1)")
+    assert not is_collect_goal("")
+    assert not is_collect_goal(None)
+
+
+def test_a_collect_step_is_never_called_a_dead_arrow():
+    """The cure for a dead arrow — a trip through the quest book every
+    five minutes — is not the cure for a step that has no marker by
+    design, and offering it is how a journal ends up on the Quest
+    Finder pseudo-entry."""
+    import time
+
+    worker, _read = _zoned_party(["KT_ChampHall"])
+    seat = worker.seats[0]
+    seat.goal = "Collect Gemstones in Hall of Champions (0 of 4)"
+    seat.marker_dead_since = time.monotonic() - worker.MARKER_DEAD_AFTER - 1
+
+    assert not worker._marker_dead(seat), \
+        "a Collect step was diagnosed as a switched-off quest arrow"
+    why = worker._marker_absent_by_design(seat)
+    assert "Collect step publishes no quest position" in why
+    # ...but nothing can AIM for it either, and that is still true.
+    assert worker._marker_unusable(seat) == why
+
+
+def test_a_hook_that_read_on_another_quest_is_not_switched_off():
+    """The general form, which covers quest families nobody has
+    catalogued: a hook that was writing positions ten minutes ago is
+    not off now, so a later goal with no position is a quest without a
+    marker."""
+    import time
+
+    worker, _read = _zoned_party(["KT_ChampHall"])
+    seat = worker.seats[0]
+    now = time.monotonic()
+    seat.goal = "Photograph the Sphinx"           # not a Collect
+    seat.marker_dead_since = now - worker.MARKER_DEAD_AFTER - 1
+
+    # No history: this really could be the arrow.
+    assert worker._marker_dead(seat)
+
+    seat.marker_ok_goal = "Talk To General Khaba in Hall of Champions"
+    seat.marker_ok_at = now - 120.0
+    assert not worker._marker_dead(seat), \
+        "the hook demonstrably works, so the arrow is not the problem"
+    assert "publishes no marker" in worker._marker_absent_by_design(seat)
+
+    # Stale proof is no proof.
+    seat.marker_ok_at = now - worker.HOOK_ALIVE - 1
+    assert worker._marker_dead(seat)
+
+
+def test_the_goal_poll_remembers_that_the_marker_read():
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._read_goal)
+    assert "seat.marker_ok_at = now" in src
+    assert "seat.marker_ok_goal" in src
+
+
+def test_a_markerless_collect_refuses_the_catch_up_in_its_own_words():
+    """Refusing is right — `hop_once` reads the same absent position —
+    but the REASON decides who owns the fix, so it is quoted rather
+    than guessed at."""
+    import time
+
+    worker = _behind_party()
+    laggard = worker.seats[0]
+    # A Collect line the questline cannot place, so this test changes
+    # only the marker question and leaves `_behind_party`'s placement
+    # (which hangs off the quest NAMES) exactly as it was.
+    laggard.goal = "Collect Widgets in Nowhere (0 of 3)"
+    laggard.marker_away = None
+
+    worker._in_step_since = time.monotonic() - worker.DESYNC_GRACE - 1
+    worker._check_in_step(worker.seats[0])
+
+    assert worker._catch_up_state is None
+    note = [e for e in laggard.tel.questing
+            if e["kind"] == "catch-up-refused-no-marker"]
+    assert note, [e["kind"] for e in laggard.tel.questing]
+    assert "Collect step publishes no quest position" in note[0]["detail"]
+    assert "quest arrow" not in note[0]["detail"], \
+        "it blamed the arrow for a step that never had a marker"
+
+
+def test_a_hop_with_nowhere_to_aim_says_so_once(monkeypatch):
+    """44 minutes of silence at rev 98b4c50c. A marker that will not
+    read for a REASON is worth one line; a marker that merely blinked
+    is still worth none."""
+    import asyncio
+
+    worker, seat = _desperately_wedged(monkeypatch, marker=900.0)
+    hopped = _armed_hop(monkeypatch)
+
+    seat.marker_away = None                       # blink: still silent
+    asyncio.run(worker._unstick(seat))
+    assert not hopped
+    assert [e["kind"] for e in seat.tel.questing] == ["stuck-detail"]
+
+    seat.goal = "Collect Gemstones in Hall of Champions (0 of 4)"
+    seat.unstuck_at = 0.0
+    seat.hop_tried_at = None
+    asyncio.run(worker._unstick(seat))
+    assert not hopped, "it teleported at a step with no position"
+    refused = [e for e in seat.tel.questing
+               if e["kind"] == "desperate-hop-refused"]
+    assert refused and "nowhere to aim" in refused[0]["detail"]
+    assert "Collect step" in refused[0]["detail"]
+
+
+def test_a_lone_wizard_on_a_collect_step_is_a_regroup_not_a_realm(monkeypatch):
+    """A realm change keeps the zone and only changes the shard, so it
+    can only help a wizard already standing at the spawns. Without a
+    marker to check that with, the PARTY is the check.
+
+    It is the state TTS Arc 1's own structure produces: the gemstone
+    spots live in `until NOT p1 tracking_goal ... { if p1 inzone
+    KT_ChampHall { ... } }`, an until-loop whose only body is
+    zone-gated and which contains nothing that would travel there. In
+    the rev fdb719e2 export Konstantin picks that step up in KT_Hub."""
+    import asyncio
+    import time
+
+    worker, _read = _zoned_party(["KT_Hub", "KT_ChampHall"])
+    worker.script = "###deimos_expertmode"
+    fired = []
+
+    async def record(seat, why):
+        fired.append(why)
+
+    worker._realm_hop_party = record
+    seat, other = worker.seats
+    goal = "Collect Gemstones in Hall of Champions (0 of 4)"
+    seat.goal = goal
+    seat.marker_away = None
+    seat.progress_at = time.monotonic() - worker.REALM_HOP_AFTER - 1
+    seat.progress = ("Krokotopia/KT_Hub", (1, 2, 3), goal)
+    other.progress = ("Krokotopia/KT_Krokosphinx/KT_ChampHall", (4, 5, 6),
+                      "Talk To General Khaba in Hall of Champions")
+
+    asyncio.run(worker._maybe_realm_hop(seat))
+    assert fired == [], "it hopped the party for a wizard in the wrong zone"
+    note = [e for e in seat.tel.questing if e["kind"] == "realm-hop-refused"]
+    assert note and "alone in its zone" in note[0]["detail"]
+
+    # Standing with the party, the same stall IS the crowded realm.
+    seat.progress = (other.progress[0], (9, 9, 9), goal)
+    asyncio.run(worker._maybe_realm_hop(seat))
+    assert fired and "crowded realm" in fired[0]
