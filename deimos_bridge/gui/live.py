@@ -174,6 +174,16 @@ class _Seat:
         #: because the coordinates are in that zone's space -- which is
         #: precisely the discriminator `_start_catching_up` needs.
         self.marker_away = None
+        #: since when the quest position has been UNREADABLE while the
+        #: goal line still reads -- the dead-quest-hook signature, and a
+        #: different fact from `marker_away is None` (one bad read).
+        #: Cleared by any successful marker read. See
+        #: `LiveWorker._marker_dead` and `questing.rearm_quest_arrow`.
+        self.marker_dead_since = None
+        #: when a quest-arrow re-arm was last attempted for this seat,
+        #: so a cure that is not taking is retried on a cooldown rather
+        #: than paging through the quest book every tick.
+        self.rearm_tried_at = 0.0
         #: the zone this seat's write-off was recorded in, so arriving
         #: somewhere new can clear it. See `LiveWorker._written_off`.
         self.zone_for_writeoff = None
@@ -751,6 +761,19 @@ class LiveWorker(QThread):
                     # also decided to catch up or regroup.
                     await self._stage(seat, "unwedging a stuck script",
                                       self._unstick(seat), wheel=True)
+
+                if driven or self.auto_quest:
+                    # The one rung that does not need the marker,
+                    # because it exists for the state where the marker
+                    # is DEAD: quest position unreadable for minutes
+                    # while the goal reads fine. Everything below this
+                    # line aims a teleport, and none of them can aim
+                    # until this fires. Gated inside on `_marker_dead`,
+                    # so the stage costs one time check on a healthy
+                    # tick.
+                    await self._stage(seat, "re-arming the quest arrow",
+                                      self._maybe_rearm_quest_arrow(seat),
+                                      wheel=True, limit=90)
 
                 if driven or self.auto_quest:
                     # The rung above the desperate teleport: a Collect
@@ -2642,6 +2665,7 @@ class LiveWorker(QThread):
         # cannot await -- and which must not start a catch-up for a
         # marker no within-zone teleport can reach. See `MARKER_IN_ZONE`.
         seat.marker_away = None
+        marker = None
         try:
             marker, _why = await questing.read_quest_position(seat.client)
             if marker is not None and at is not None:
@@ -2649,6 +2673,18 @@ class LiveWorker(QThread):
                 seat.marker_away = (dx * dx + dy * dy) ** 0.5
         except Exception:
             pass
+        # The dead-hook clock. One failed read is noise -- a zone change
+        # makes several fail in a row -- but a marker that will not read
+        # for minutes WHILE the goal line reads fine is the quest arrow
+        # being off, which starves every teleport on this client at
+        # once: wizAi's hops, the catch-up's, and the script's own
+        # `tp quest`, all of which read the same hook. Keyed on the
+        # MARKER read, not `marker_away`: a marker that read while the
+        # body position did not is still a live hook.
+        if marker is not None or not seat.goal:
+            seat.marker_dead_since = None
+        elif seat.marker_dead_since is None:
+            seat.marker_dead_since = now
 
         self._note_progress(seat, zone, position, now)
         try:
@@ -2660,8 +2696,19 @@ class LiveWorker(QThread):
             # proposition -- see `_written_off`. Kept here rather than in
             # `_check_together`, which only runs when there are two
             # wizards and only every `TOGETHER_POLL` seconds.
+            #
+            # ...unless this seat's quest hook is dead. The write-off
+            # said "nothing can attempt this step", and no zone change
+            # fixes an unwritten hook -- while a script lost enough to
+            # wander (its `tp quest` reads the same dead hook) churns
+            # zones constantly. Rev 98b4c50c: Konstantin's write-off was
+            # cleared by KT_Hub -> KT_WorldTeleporter -> KT_Hub_Sphinx
+            # laps six times in one run, and each clearing re-armed the
+            # identical doomed catch-up: two minutes of the whole party
+            # paused to attempt nothing, six times over.
             seat.zone_for_writeoff = zone
-            self._forget_write_off(seat)
+            if not self._marker_dead(seat, now):
+                self._forget_write_off(seat)
 
     #: how long a position cell is remembered. A wizard back on a spot it
     #: stood on within this window, same zone and same goal, has not
@@ -3298,7 +3345,11 @@ class LiveWorker(QThread):
         away = seat.marker_away
         if away is None:
             # A marker that would not read may read on the next poll.
-            # Refusing permanently over one bad read would be worse.
+            # Refusing permanently over one bad read would be worse --
+            # and a marker that is not blinking but DEAD (the quest
+            # arrow off, `_marker_dead`) is the re-arm rung's case, not
+            # a teleport's: there is nothing to aim at until the hook
+            # is written again.
             return
         if away > self.MARKER_IN_ZONE:
             seat.hop_tried_at = here
@@ -3363,6 +3414,113 @@ class LiveWorker(QThread):
         import time
 
         return time.monotonic() < self._hop_pause_until
+
+    #: how long the quest position must be continuously unreadable --
+    #: goal line reading fine the whole time -- before the hook counts
+    #: as DEAD rather than mid-blink. Zone changes fail several reads in
+    #: a row; nothing transient fails them for two minutes straight.
+    MARKER_DEAD_AFTER = 120.0
+    #: how long between re-arm attempts. Paging through the quest book
+    #: costs ~15 held seconds, and a cure that did not take the first
+    #: time needs the operator's eyes more than it needs a third try.
+    REARM_EVERY = 300.0
+    #: the ceiling on the worker-wide steering hold around a re-arm, and
+    #: the settle after it -- same shape as the desperate hop's, for the
+    #: same reason: the script clicking mid-book is the settings-menu
+    #: fiasco with worse aim.
+    REARM_CEILING = 60.0
+    REARM_SETTLE = 3.0
+
+    def _marker_dead(self, seat, now=None):
+        """Is this seat's quest hook provably dead, not merely blinking?
+
+        True only after `MARKER_DEAD_AFTER` of continuous failed marker
+        reads with a readable goal line -- the signature of the quest
+        arrow being off (`read_quest_position`'s (0,0,0) case). This is
+        the state that starves the whole rescue ladder at once, so the
+        rungs that need a marker check it to explain themselves, and
+        `_maybe_rearm_quest_arrow` checks it to act.
+        """
+        import time
+
+        since = seat.marker_dead_since
+        if since is None:
+            return False
+        if now is None:
+            now = time.monotonic()
+        return now - since >= self.MARKER_DEAD_AFTER
+
+    async def _maybe_rearm_quest_arrow(self, seat):
+        """Cure a dead quest hook by re-selecting the quest in the book.
+
+        Rev 98b4c50c, the whole run: Konstantin's quest position read
+        (0,0,0) for 44 minutes. The desperate hop returned silently
+        (no marker), the realm change refused (no marker), the script
+        restart refused (no marker), and six catch-ups paused the whole
+        party two minutes each to attempt nothing -- because
+        `hop_once` needs the same marker. Meanwhile the script's own
+        `tp quest` (vm.py:1547) read the same dead hook and navmap'd
+        him toward (0,0,0), which is the zone-wandering in the export.
+        Every actor was starved by one unwritten hook, and the only
+        cure is the one the diagnosis line already names: "switch the
+        in-game quest arrow on and pick a quest". This does that.
+
+        Held worker-wide like the desperate hop: the book is open for
+        seconds, and any teleport another task lands mid-click turns
+        the click into a misfire.
+        """
+        import time
+
+        from .. import questing
+
+        now = time.monotonic()
+        if not self._marker_dead(seat, now):
+            return
+        if now - seat.rearm_tried_at < self.REARM_EVERY:
+            return
+        if seat.in_duel:
+            return
+        # Preconditions the cure cannot work under, checked BEFORE the
+        # cooldown is spent -- a refusal is not an attempt.
+        if await questing.in_dialogue(seat.client):
+            return
+        seat.rearm_tried_at = now
+        dead_min = (now - (seat.marker_dead_since or now)) / 60.0
+        self._say(seat,
+                  f"the quest position has been unreadable for "
+                  f"{dead_min:.0f} min while the goal line reads fine — "
+                  f"the quest arrow is off, which starves every teleport "
+                  f"on this wizard including the script's own. Doing what "
+                  f"the diagnosis says: opening the quest book and "
+                  f"re-selecting the quest")
+        self._hop_pause_until = now + self.REARM_CEILING
+        try:
+            ok, why = await questing.rearm_quest_arrow(
+                seat.client, goal=seat.goal or "",
+                name=seat.quest_name or "",
+                on_status=lambda m: self._say(seat, m))
+        finally:
+            self._hop_pause_until = time.monotonic() + self.REARM_SETTLE
+        if ok:
+            seat.tel.note_questing(
+                "quest-arrow-rearmed",
+                f"re-selected the tracked quest in the quest book and the "
+                f"quest position reads again — the arrow had been off for "
+                f"{dead_min:.0f} min, starving every teleport on this "
+                f"wizard (wizAi's and the script's alike)")
+            self._say(seat, "the quest arrow is back on — the quest "
+                            "position reads again")
+        else:
+            seat.tel.note_questing(
+                "quest-arrow-rearm-failed",
+                f"{why} — until the quest arrow is on and a quest is "
+                f"picked, no teleport on this wizard can aim: not the "
+                f"script's, not the catch-up's, not the desperate hop. "
+                f"Next attempt in {self.REARM_EVERY / 60:.0f} min")
+            self._say(seat,
+                      f"could not re-arm the quest arrow: {why}. This "
+                      f"wizard needs the arrow switched on by hand — "
+                      f"quest book, pick the quest")
 
     #: how long a COLLECT goal may sit unchanged, at its own marker and
     #: out of combat, before the realm is judged crowded rather than the
@@ -4180,6 +4338,28 @@ class LiveWorker(QThread):
             # one budget burns out on the wizard nothing can drive.
             near = []
             for one in group:
+                if self._marker_dead(one):
+                    # A catch-up drives the laggard with `hop_once`,
+                    # and `hop_once` aims at the same quest position
+                    # that will not read -- so this catch-up would
+                    # pause the whole party to attempt nothing, give up
+                    # at CATCH_UP_IDLE, and repeat. Rev 98b4c50c did
+                    # exactly that six times over one run. The re-arm
+                    # rung owns the cure; until it lands there is
+                    # nothing here to drive.
+                    self._say_once(
+                        one, f"marker-dead:{one.name}",
+                        f"{one.name} is behind and its quest position "
+                        f"will not read — the quest arrow is off, so "
+                        f"nothing can drive it through the step. Not "
+                        f"pausing the party for a catch-up that cannot "
+                        f"aim; the quest-arrow re-arm is the fix",
+                        kind="catch-up-refused-marker-dead",
+                        detail=(f"{one.name}'s quest position has been "
+                                f"unreadable for minutes — a catch-up's "
+                                f"hop needs it, so starting one would "
+                                f"pause everyone to attempt nothing"))
+                    continue
                 away = self._marker_out_of_reach([one])
                 if away is None:
                     near.append(one)

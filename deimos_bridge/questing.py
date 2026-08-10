@@ -980,6 +980,253 @@ async def hop_once(client, settle: float = 1.2, on_status=None) -> bool:
     return await in_battle(client)
 
 
+# --------------------------------------------------------------------------
+# the quest book: re-arming a dead quest arrow
+# --------------------------------------------------------------------------
+#: `src/paths.py:185-187` -- the quest page of the big book. Q opens the
+#: book straight to it, four quests per page as `wndQuestInfo{0..3}`,
+#: and clicking an entry's goal text SELECTS that quest. Selection is
+#: the point: the quest-position hook lives in the code that renders
+#: the quest helper arrow, so a wizard whose arrow is off never runs
+#: it and the hook's export stays (0,0,0) forever -- which starves
+#: wizAi's teleports AND the script's own `tp quest` at once. Picking
+#: the quest in the book is the operator's manual cure ("switch the
+#: in-game quest arrow on and pick a quest"), and it is the same move
+#: Deimos's `select_quest_from_questbook` makes (`src/utils.py:795`).
+QUEST_BOOK_LIST_PATH = ["WorldView", "DeckConfiguration", "wndQuestList"]
+QUEST_BOOK_ALL_SORT_PATH = ["WorldView", "DeckConfiguration", "wndQuestList",
+                            "QuestLogAllButton"]
+#: within one `wndQuestInfo{n}` entry, the clickable goal line --
+#: Deimos's click target, kept identical so a game UI change breaks
+#: both in the same visible way.
+QUEST_BOOK_ENTRY_GOAL = ["questInfoWindow", "wndQuestInfo", "txtGoal"]
+QUEST_BOOK_SLOTS = 4
+#: how long the receipt poll waits for the hook to be written after the
+#: book closes. The arrow's render loop runs every frame once a quest
+#: is selected, so a cure that worked shows up in the first second or
+#: two; eight covers a slow frame after a zone load.
+REARM_PROOF_WAIT = 8.0
+
+
+def keycode_q():
+    """wizwalker's `Keycode.Q`, or None if unavailable.
+
+    Q toggles the quest journal -- the book, open to the quest page.
+    The same key closes it, which is how Deimos's own
+    `select_quest_from_questbook` gets back out.
+    """
+    try:
+        from wizwalker import Keycode
+        return Keycode.Q
+    except Exception:
+        return None
+
+
+def _rearm_tokens(text):
+    """The words that identify a quest, order-free and counter-free.
+
+    "(0 of 4)" is stripped before tokenizing: the HUD tracker and the
+    book render the collect counter at different moments, and a match
+    that requires the counts to agree fails exactly when another wizard
+    just picked something up.
+    """
+    import re
+
+    text = re.sub(r"\(\s*\d+\s+of\s+\d+\s*\)", " ", (text or "").lower())
+    return set(re.findall(r"[a-z0-9']+", text))
+
+
+async def _subtree_text(window, depth: int = 6, limit: int = 40) -> str:
+    """Every readable text under a window, joined.
+
+    The quest-book entry keeps its quest name and its goal line in
+    different leaves depending on quest kind, so the match reads all of
+    the entry rather than betting on one path.
+    """
+    texts = []
+
+    async def walk(win, left):
+        if left < 0 or len(texts) >= limit:
+            return
+        try:
+            text = strip_markup(await win.maybe_text())
+        except Exception:
+            text = ""
+        if text:
+            texts.append(text)
+        try:
+            kids = await win.children()
+        except Exception:
+            return
+        for kid in kids:
+            await walk(kid, left - 1)
+
+    await walk(window, depth)
+    return " ".join(texts)
+
+
+async def rearm_quest_arrow(client, goal: str = "", name: str = "",
+                            on_status=None):
+    """(ok, reason). Re-select the tracked quest so the hook gets written.
+
+    The cure for the one stuck state nothing else on the ladder can
+    touch: `read_quest_position` returning (0,0,0) because the quest
+    arrow is off. Every rescue that MOVES the wizard needs the marker
+    -- the desperate hop, the realm change, the catch-up's `hop_once`,
+    and the script's own `tp quest` all read the same dead export -- so
+    at rev 98b4c50c Konstantin spent a 44-minute run wandering wherever
+    navmap pathing toward (0,0,0) took him while every rung watched.
+
+    The move: open the quest book with Q, find the entry matching the
+    tracked quest (by the HUD goal line or the quest name, both read
+    fine without the hook), click its goal text -- selection turns the
+    helper arrow onto that quest -- close the book, and poll the quest
+    position for the receipt. Only a MATCHED entry is ever clicked:
+    clicking the wrong one would re-track a side quest, which is worse
+    than the disease.
+    """
+    def say(message):
+        if on_status:
+            on_status(message)
+
+    want = [t for t in (_rearm_tokens(goal), _rearm_tokens(name)) if t]
+    if not want:
+        return False, ("neither the goal line nor the quest name is "
+                       "readable, so there is nothing to match a quest "
+                       "book entry against")
+
+    if await in_battle(client):
+        return False, "in a fight — the book cannot open"
+    if await in_dialogue(client):
+        return False, ("a dialogue is open — it blocks the book, and "
+                       "clearing it is the dialogue rung's job")
+    if not await wait_until_ready(client, timeout=8.0):
+        return False, "still on a loading screen"
+
+    key = keycode_q()
+    if key is None:
+        return False, "wizwalker did not provide a keycode for Q"
+
+    async def book_visible():
+        book = await window_from_path(client.root_window,
+                                      QUEST_BOOK_LIST_PATH)
+        return book is not None and await _visible(book)
+
+    for _attempt in range(6):
+        if await book_visible():
+            break
+        try:
+            await client.send_key(key, 0.1)
+        except Exception as exc:
+            return False, (f"could not press Q to open the quest book "
+                           f"({type(exc).__name__}: {exc})")
+        await asyncio.sleep(0.4)
+    else:
+        return False, "the quest book did not open after six Q presses"
+
+    async def close_book():
+        # Q toggles the book shut; ESC is the second input path, the
+        # same fallback order `advance_dialogue` uses. A book left open
+        # blocks movement and can read as a loading screen, so the
+        # close is verified rather than assumed.
+        for _attempt in range(6):
+            if not await book_visible():
+                return True
+            try:
+                await client.send_key(key, 0.1)
+            except Exception:
+                break
+            await asyncio.sleep(0.4)
+        if await book_visible():
+            from .realms import keycode_esc
+            esc = keycode_esc()
+            if esc is not None:
+                try:
+                    await client.send_key(esc, 0.1)
+                except Exception:
+                    pass
+                await asyncio.sleep(0.4)
+        return not await book_visible()
+
+    async def entries():
+        """[(slot, entry window, its text)] for the visible entries."""
+        got = []
+        for slot in range(QUEST_BOOK_SLOTS):
+            entry = await window_from_path(
+                client.root_window,
+                QUEST_BOOK_LIST_PATH + [f"wndQuestInfo{slot}"])
+            if entry is None or not await _visible(entry):
+                continue
+            got.append((slot, entry, await _subtree_text(entry)))
+        return got
+
+    def matched(text):
+        have = _rearm_tokens(text)
+        return any(t <= have for t in want)
+
+    try:
+        async with client.mouse_handler:
+            seen = await entries()
+            hit = [(s, e, t) for (s, e, t) in seen if matched(t)]
+            if not hit:
+                # The book opens on whatever view the player last had.
+                # The All sort is the one listing guaranteed to contain
+                # the tracked quest, so one re-sort before giving up.
+                sort = await window_from_path(client.root_window,
+                                              QUEST_BOOK_ALL_SORT_PATH)
+                if sort is not None and await _visible(sort):
+                    try:
+                        await client.mouse_handler.click_window(sort)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.4)
+                    seen = await entries()
+                    hit = [(s, e, t) for (s, e, t) in seen if matched(t)]
+            if not hit:
+                listing = " · ".join(t for (_s, _e, t) in seen) or "nothing"
+                return False, (f"no visible quest book entry matched the "
+                               f"tracked quest — the page showed: "
+                               f"{listing[:200]}")
+            slot, entry, text = hit[0]
+            button = await window_from_path(entry, QUEST_BOOK_ENTRY_GOAL)
+            if button is None:
+                return False, (f"the matching entry (slot {slot}) has no "
+                               f"clickable goal line — the book's layout "
+                               f"has changed")
+            say(f"quest book open — re-selecting \"{text[:60]}\" so the "
+                f"quest arrow comes back on")
+            # Several presses with visibility checks, exactly as
+            # Deimos's helper clicks it: the first click can land on
+            # the book's own focus change and do nothing.
+            for _press in range(5):
+                if await _visible(button):
+                    try:
+                        await client.mouse_handler.click_window(button)
+                    except Exception:
+                        pass
+                await asyncio.sleep(0.1)
+    finally:
+        closed = await close_book()
+
+    if not closed:
+        return False, ("clicked the quest, but the book would not close "
+                       "on Q or ESC — leaving it is a wizard that cannot "
+                       "move, so this attempt is reported rather than "
+                       "trusted")
+
+    waited = 0.0
+    while waited < REARM_PROOF_WAIT:
+        position, _why = await read_quest_position(client)
+        if position is not None:
+            return True, ""
+        await asyncio.sleep(0.5)
+        waited += 0.5
+    return False, (f"re-selected the quest in the book, but the quest "
+                   f"position still does not read after "
+                   f"{REARM_PROOF_WAIT:.0f}s — the arrow may be switched "
+                   f"off in the game's own settings")
+
+
 async def hop_to_next_fight(client, max_hops: int = 25, settle: float = 1.2,
                             on_status=None, should_stop=None) -> bool:
     """Teleport toward the quest until a fight starts.

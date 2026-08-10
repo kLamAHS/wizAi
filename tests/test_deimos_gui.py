@@ -15526,3 +15526,500 @@ def test_the_rebuild_path_marks_the_seat_and_reports(monkeypatch):
     assert "self._fresh_source(seat, source)" in src
     assert "seat.script_built = True" in src
     assert "skipped_setup" in src, "a trimmed rebuild has to say so"
+
+
+# ------------------------------------------- re-arming a dead quest arrow
+#
+# Rev 98b4c50c: Konstantin's quest position read (0,0,0) — the quest
+# hook never written, the in-game quest arrow off — for an entire
+# 44-minute run. Every rescue that aims a teleport reads that hook, so
+# the desperate hop returned silently, the realm change and the script
+# restart refused, and six catch-ups paused the whole party two minutes
+# each to attempt nothing; meanwhile the script's own `tp quest`
+# (vm.py:1547) navmap'd him toward (0,0,0), which is the KT_Hub ->
+# KT_WorldTeleporter -> KT_Hub_Sphinx wandering in the export. One
+# unwritten hook starved every actor at once, and the only cure is the
+# operator's manual one — "switch the in-game quest arrow on and pick a
+# quest". `questing.rearm_quest_arrow` is that, automated the way
+# Deimos's own `select_quest_from_questbook` does it: Q for the book,
+# click the tracked quest's entry, Q to close, then DEMAND the receipt
+# (the position reading again) rather than assuming the click took.
+
+class _QuestBook:
+    """A client whose quest book opens on Q, and whose quest hook gets
+    written the moment a listed quest's goal line is clicked."""
+
+    def __init__(self, listing=None, all_listing=None, q_works=True,
+                 arrow_recovers=True):
+        self.listing = list(listing if listing is not None
+                            else ["Collect Gemstones in Hall of "
+                                  "Champions (0 of 4)"])
+        self.all_listing = list(all_listing or self.listing)
+        self.book_open = False
+        self.keys = []
+        self.clicked = []
+        self.armed = False
+        self._q_works = q_works
+        self._arrow_recovers = arrow_recovers
+
+        book = self
+
+        def slot_text(slot):
+            return (book.listing[slot]
+                    if slot < len(book.listing) else "")
+
+        entries = []
+        for slot in range(4):
+            entries.append(_RWin(f"wndQuestInfo{slot}", [
+                _RWin("questInfoWindow", [
+                    _RWin("wndQuestInfo", [
+                        _RWin("txtGoal", text=lambda s=slot: slot_text(s)),
+                    ]),
+                ]),
+            ], visible=lambda s=slot: bool(slot_text(s))))
+        self.root_window = _RWin("root", [
+            _RWin("WorldView", [
+                _RWin("DeckConfiguration", [
+                    _RWin("wndQuestList",
+                          [_RWin("QuestLogAllButton")] + entries,
+                          visible=lambda: book.book_open),
+                ]),
+            ]),
+        ])
+
+        class _M:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def click_window(self, win):
+                name = await win.name()
+                book.clicked.append(name)
+                if name == "QuestLogAllButton":
+                    book.listing = list(book.all_listing)
+                elif name == "txtGoal" and book._arrow_recovers:
+                    book.armed = True
+
+        self.mouse_handler = _M()
+
+        class _P:
+            def __init__(self, x, y, z):
+                self.x, self.y, self.z = x, y, z
+
+        class _Q:
+            async def position(self):
+                return (_P(1500.0, -230.0, 12.0) if book.armed
+                        else _P(0.0, 0.0, 0.0))
+
+        self.quest_position = _Q()
+
+    async def send_key(self, key, seconds=0):
+        self.keys.append(key)
+        if key == "Q" and self._q_works:
+            self.book_open = not self.book_open
+
+    async def is_loading(self):
+        return False
+
+    async def in_battle(self):
+        return False
+
+
+def _fast_rearm(monkeypatch):
+    from deimos_bridge import questing
+
+    monkeypatch.setattr(questing, "keycode_q", lambda: "Q")
+    monkeypatch.setattr(questing, "REARM_PROOF_WAIT", 0.6)
+    return questing
+
+
+def test_rearm_reselects_the_tracked_quest_and_gets_the_receipt(monkeypatch):
+    """The happy path, receipt and all: book open, matching entry
+    clicked, book closed, and the quest position READS afterwards —
+    the one receipt that means the hook is actually written again."""
+    import asyncio
+
+    questing = _fast_rearm(monkeypatch)
+    book = _QuestBook()
+    ok, why = asyncio.run(questing.rearm_quest_arrow(
+        book, goal="Collect Gemstones in Hall of Champions (0 of 4)"))
+    assert ok, why
+    assert "txtGoal" in book.clicked
+    assert not book.book_open, "the book was left open — it blocks movement"
+
+
+def test_rearm_never_clicks_a_quest_that_does_not_match(monkeypatch):
+    """Clicking the wrong entry re-tracks a SIDE quest — worse than the
+    disease. No match means no click, a loud reason naming what the
+    page showed, and a closed book."""
+    import asyncio
+
+    questing = _fast_rearm(monkeypatch)
+    book = _QuestBook(listing=["Smiths in Krokotopia (0 of 1)",
+                               "A Pyramid Scheme"],
+                      all_listing=["Smiths in Krokotopia (0 of 1)",
+                                   "A Pyramid Scheme"])
+    ok, why = asyncio.run(questing.rearm_quest_arrow(
+        book, goal="Collect Gemstones in Hall of Champions (0 of 4)"))
+    assert not ok
+    assert "txtGoal" not in book.clicked
+    assert "Pyramid Scheme" in why, "the reason must name what was seen"
+    assert not book.book_open
+
+
+def test_rearm_tries_the_all_sort_before_giving_up(monkeypatch):
+    """The book opens on whatever view the player last had. If the
+    tracked quest is not on it, the All sort is the one listing
+    guaranteed to contain it — one re-sort, then the verdict."""
+    import asyncio
+
+    questing = _fast_rearm(monkeypatch)
+    book = _QuestBook(
+        listing=["A Pyramid Scheme"],
+        all_listing=["Collect Gemstones in Hall of Champions (0 of 4)"])
+    ok, why = asyncio.run(questing.rearm_quest_arrow(
+        book, goal="Collect Gemstones in Hall of Champions"))
+    assert ok, why
+    assert book.clicked[0] == "QuestLogAllButton"
+    assert "txtGoal" in book.clicked
+
+
+def test_rearm_matches_across_a_moved_collect_counter(monkeypatch):
+    """The HUD tracker and the book render the collect counter at
+    different moments; "(0 of 4)" against "(1 of 4)" must still match
+    or the cure fails exactly when a party member picks something up."""
+    import asyncio
+
+    questing = _fast_rearm(monkeypatch)
+    book = _QuestBook(listing=["Collect Gemstones in Hall of "
+                               "Champions (1 of 4)"])
+    ok, why = asyncio.run(questing.rearm_quest_arrow(
+        book, goal="Collect Gemstones in Hall of Champions (0 of 4)"))
+    assert ok, why
+
+
+def test_rearm_reports_a_click_whose_receipt_never_came(monkeypatch):
+    """A click that landed and a hook that got written are different
+    facts. If the position still reads (0,0,0) after the book closes,
+    the report says so — fire-and-forget is the failure mode this
+    whole audit exists to remove."""
+    import asyncio
+
+    questing = _fast_rearm(monkeypatch)
+    book = _QuestBook(arrow_recovers=False)
+    ok, why = asyncio.run(questing.rearm_quest_arrow(
+        book, goal="Collect Gemstones in Hall of Champions"))
+    assert not ok
+    assert "txtGoal" in book.clicked, "it did try"
+    assert "still does not read" in why
+
+
+def test_rearm_gives_up_loudly_when_the_book_will_not_open(monkeypatch):
+    import asyncio
+
+    from deimos_bridge import realms
+
+    questing = _fast_rearm(monkeypatch)
+    monkeypatch.setattr(realms, "keycode_esc", lambda: "ESC")
+    book = _QuestBook(q_works=False)
+    ok, why = asyncio.run(questing.rearm_quest_arrow(
+        book, goal="Collect Gemstones in Hall of Champions"))
+    assert not ok
+    assert "did not open" in why
+    assert book.clicked == []
+
+
+def test_rearm_refuses_when_there_is_nothing_to_match_against(monkeypatch):
+    """No goal and no name means any click would be a guess at which
+    quest to track. Guessing is how a side quest gets tracked."""
+    import asyncio
+
+    questing = _fast_rearm(monkeypatch)
+    book = _QuestBook()
+    ok, why = asyncio.run(questing.rearm_quest_arrow(book))
+    assert not ok
+    assert "nothing to match" in why
+    assert book.keys == [], "it opened the book with nothing to look for"
+
+
+# --------------------------------- the dead-hook clock and the live rungs
+
+def _dead_marker_seat(worker, seat, minutes=3.0):
+    import time
+
+    # Only fill an EMPTY goal: `_behind_party` seats already carry the
+    # goals their questline placement hangs off.
+    seat.goal = seat.goal or "Collect Gemstones in Hall of Champions (0 of 4)"
+    seat.marker_away = None
+    seat.marker_dead_since = time.monotonic() - minutes * 60.0
+    return seat
+
+
+def test_one_failed_marker_read_is_not_a_dead_hook():
+    """Zone changes fail several reads in a row. The dead verdict needs
+    `MARKER_DEAD_AFTER` of CONTINUOUS failure, or every door would
+    trigger a trip through the quest book."""
+    import time
+
+    worker, _read = _zoned_party(["KT_ChampHall"])
+    seat = worker.seats[0]
+    assert not worker._marker_dead(seat)
+    seat.marker_dead_since = time.monotonic() - 5.0
+    assert not worker._marker_dead(seat), "a blink was called dead"
+    seat.marker_dead_since = time.monotonic() - worker.MARKER_DEAD_AFTER - 1
+    assert worker._marker_dead(seat)
+
+
+def test_the_dead_clock_starts_and_clears_on_the_goal_poll():
+    """`_read_goal` is where the marker is read, so it is where the
+    clock lives: a failed read with a readable goal starts it, any
+    successful read clears it, and a wizard with no goal at all (fresh
+    out of quests) is not "dead", it is between quests."""
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    class _XYZ:
+        def __init__(self, x, y, z):
+            self.x, self.y, self.z = x, y, z
+
+    marker = {"value": None}
+
+    class _Body:
+        async def position(self):
+            return _XYZ(100.0, 200.0, 0.0)
+
+    class _Client:
+        body = _Body()
+        root_window = _Win("root", [])
+
+        async def zone_name(self):
+            return "KT_ChampHall"
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    worker.status = type("S", (), {"emit": staticmethod(lambda *_: None)})()
+    worker.GOAL_POLL = 0.0
+    seat = worker.seats[0]
+    seat.client = _Client()
+    seat.goal = "Collect Gemstones (0 of 4)"
+
+    from deimos_bridge import questing
+
+    async def read_goal(_c):
+        return seat.goal
+
+    async def read_position(_c):
+        if marker["value"] is None:
+            return None, "the quest position reads as (0,0,0)"
+        return marker["value"], ""
+
+    original_goal = questing.read_quest_goal
+    original_pos = questing.read_quest_position
+    questing.read_quest_goal = read_goal
+    questing.read_quest_position = read_position
+    try:
+        asyncio.run(worker._read_goal(seat))
+        assert seat.marker_dead_since is not None, "the clock never started"
+        first = seat.marker_dead_since
+        asyncio.run(worker._read_goal(seat))
+        assert seat.marker_dead_since == first, \
+            "the clock restarted instead of running"
+
+        marker["value"] = _XYZ(1500.0, -230.0, 12.0)
+        asyncio.run(worker._read_goal(seat))
+        assert seat.marker_dead_since is None, "a good read did not clear it"
+    finally:
+        questing.read_quest_goal = original_goal
+        questing.read_quest_position = original_pos
+
+
+def test_a_dead_hook_triggers_the_rearm_and_writes_the_receipt(monkeypatch):
+    import asyncio
+    import time
+
+    from deimos_bridge import questing
+
+    worker, _read = _zoned_party(["KT_ChampHall"])
+    seat = _dead_marker_seat(worker, worker.seats[0])
+    calls = []
+
+    async def rearm(_c, goal="", name="", on_status=None):
+        calls.append(goal)
+        return True, ""
+
+    async def no_dialogue(_c):
+        return False
+
+    monkeypatch.setattr(questing, "rearm_quest_arrow", rearm)
+    monkeypatch.setattr(questing, "in_dialogue", no_dialogue)
+    asyncio.run(worker._maybe_rearm_quest_arrow(seat))
+    assert calls == [seat.goal]
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert "quest-arrow-rearmed" in kinds
+    # The hold is released to a short settle, not left at the ceiling:
+    # the wizard has not MOVED, so the script can have it back.
+    assert worker._hop_pause_until <= time.monotonic() + worker.REARM_SETTLE
+
+
+def test_a_failed_rearm_is_reported_with_the_manual_cure(monkeypatch):
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, _read = _zoned_party(["KT_ChampHall"])
+    seat = _dead_marker_seat(worker, worker.seats[0])
+
+    async def rearm(_c, goal="", name="", on_status=None):
+        return False, "the quest book did not open after six Q presses"
+
+    async def no_dialogue(_c):
+        return False
+
+    monkeypatch.setattr(questing, "rearm_quest_arrow", rearm)
+    monkeypatch.setattr(questing, "in_dialogue", no_dialogue)
+    asyncio.run(worker._maybe_rearm_quest_arrow(seat))
+    note = [e for e in seat.tel.questing
+            if e["kind"] == "quest-arrow-rearm-failed"]
+    assert note and "did not open" in note[0]["detail"]
+    assert "no teleport on this wizard can aim" in note[0]["detail"]
+
+
+def test_the_rearm_is_throttled_not_hammered(monkeypatch):
+    """Paging through the quest book costs ~15 held seconds. A cure
+    that did not take the first time needs the operator more than it
+    needs a third try thirty seconds later."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, _read = _zoned_party(["KT_ChampHall"])
+    seat = _dead_marker_seat(worker, worker.seats[0])
+    calls = []
+
+    async def rearm(_c, goal="", name="", on_status=None):
+        calls.append(goal)
+        return False, "no visible quest book entry matched"
+
+    async def no_dialogue(_c):
+        return False
+
+    monkeypatch.setattr(questing, "rearm_quest_arrow", rearm)
+    monkeypatch.setattr(questing, "in_dialogue", no_dialogue)
+    asyncio.run(worker._maybe_rearm_quest_arrow(seat))
+    asyncio.run(worker._maybe_rearm_quest_arrow(seat))
+    assert len(calls) == 1, "the second attempt ignored REARM_EVERY"
+
+
+def test_a_healthy_marker_never_opens_the_quest_book(monkeypatch):
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, _read = _zoned_party(["KT_ChampHall"])
+    seat = worker.seats[0]
+    seat.goal = "Collect Gemstones (0 of 4)"
+    seat.marker_away = 640.0
+    calls = []
+
+    async def rearm(_c, **kw):
+        calls.append(True)
+        return True, ""
+
+    monkeypatch.setattr(questing, "rearm_quest_arrow", rearm)
+    asyncio.run(worker._maybe_rearm_quest_arrow(seat))
+    assert calls == []
+
+
+def test_no_catch_up_is_started_for_a_wizard_nothing_can_drive():
+    """Rev 98b4c50c, six times over: catch-up started, the whole party
+    paused, `hop_once` read the same dead hook Konstantin's script
+    reads, nobody attempted anything, and 90 seconds later it gave up
+    — "has not moved or fought for 90s, so nothing is attempting this
+    step". The catch-up's own tool needs the marker, so a dead marker
+    is a refusal at the door, not a two-minute discovery."""
+    import time
+
+    worker = _behind_party()
+    laggard = _dead_marker_seat(worker, worker.seats[0])
+
+    worker._in_step_since = time.monotonic() - worker.DESYNC_GRACE - 1
+    worker._check_in_step(worker.seats[0])
+
+    assert worker._catch_up_state is None, \
+        "it paused the party for a catch-up that cannot aim"
+    kinds = [e["kind"] for e in laggard.tel.questing]
+    assert "catch-up-refused-marker-dead" in kinds
+
+
+def test_a_blinking_marker_still_gets_its_catch_up():
+    """The refusal is for a DEAD hook, not a bad poll — the older rule
+    stands: no evidence is not evidence of another zone (or of a dead
+    hook), and one failed read must not cost the run its catch-up."""
+    import time
+
+    worker = _behind_party()
+    worker.seats[0].marker_away = None
+    worker.seats[0].marker_dead_since = time.monotonic() - 5.0
+
+    worker._in_step_since = time.monotonic() - worker.DESYNC_GRACE - 1
+    worker._check_in_step(worker.seats[0])
+    assert worker._catch_up_state is not None
+
+
+def test_zone_churn_does_not_rearm_a_write_off_while_the_hook_is_dead():
+    """`_forget_write_off` exists because the party ARRIVING somewhere
+    new makes a written-off step attemptable. A script lost enough to
+    wander (its `tp quest` reads the same dead hook) churns zones
+    constantly, and rev 98b4c50c's KT_Hub -> KT_WorldTeleporter ->
+    KT_Hub_Sphinx laps re-armed the identical doomed catch-up six
+    times. No zone change writes a quest hook."""
+    import time
+
+    worker = _behind_party()
+    laggard = _make_it_give_up(worker)
+    assert worker._written_off([laggard])
+
+    _dead_marker_seat(worker, laggard)
+    src_now = time.monotonic()
+    # The zone-change path in `_read_goal`, distilled: new zone seen.
+    laggard.zone_for_writeoff = "KT_Hub"
+    if not worker._marker_dead(laggard, src_now):
+        worker._forget_write_off(laggard)
+    assert worker._written_off([laggard]), \
+        "a zone change cleared a write-off no zone change can fix"
+
+    laggard.marker_dead_since = None        # the hook came back
+    if not worker._marker_dead(laggard, src_now):
+        worker._forget_write_off(laggard)
+    assert not worker._written_off([laggard])
+
+
+def test_the_dead_hook_guard_lives_on_the_goal_poll():
+    """The distilled test above proves the logic; this pins WHERE it
+    runs — the same per-seat poll that owns the zone-change clearing,
+    so a solo laggard is covered without `_check_together`."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._read_goal)
+    assert "if not self._marker_dead(seat, now):" in src
+    assert "self._forget_write_off(seat)" in src
+
+
+def test_the_rearm_rung_runs_before_every_rung_that_needs_the_marker():
+    """The service loop's ordering IS the design: the one rung that
+    works without a marker has to run before the hops, realm changes
+    and catch-up drives that starve without one."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._service_loop)
+    rearm = src.index("_maybe_rearm_quest_arrow")
+    assert src.index("_unstick") < rearm, \
+        "unstick first: it is diagnosis, and cheap"
+    assert rearm < src.index("_maybe_realm_hop")
+    assert rearm < src.index("_catch_up(")
