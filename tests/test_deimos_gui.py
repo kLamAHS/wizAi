@@ -14861,3 +14861,373 @@ def test_the_mouse_is_still_tried_first(monkeypatch):
     clicks, why = asyncio.run(advance_dialogue(client, settle=0.05, poll=0.01))
     assert clicks >= 1 and why == ""
     assert client.keys == [], "pressed a key at a box the mouse was clearing"
+
+
+# ---------------------------- changing realms, with receipts
+#
+# The scan-and-pick is a Deimos community contribution (shared after two
+# days of error-free farming); wizAi adds the receipts — page turns
+# verified by the page number, the slot's name checked before Go To
+# Realm, the hop confirmed by the loading screen actually starting —
+# because this stack has already paid for every fire-and-forget click
+# it vendored.
+
+class _RWin:
+    """A window whose text and visibility can be live closures."""
+
+    def __init__(self, name, children=(), visible=True, text=""):
+        self._name = name
+        self._children = list(children)
+        self._visible = visible
+        self._text = text
+
+    async def name(self):
+        return self._name
+
+    async def children(self):
+        return list(self._children)
+
+    async def is_visible(self):
+        v = self._visible
+        return bool(v() if callable(v) else v)
+
+    async def maybe_text(self):
+        t = self._text
+        return t() if callable(t) else t
+
+
+class _RealmBook:
+    """A client with a working spellbook realm list, two pages."""
+
+    def __init__(self, pages=None, next_works=True, go_loads=True,
+                 esc_works=True):
+        self.pages = pages or {
+            1: [("Avalon", "Full"), ("Bravado", "Perfect")],
+            2: [("Centaur", "Perfect")],
+        }
+        self.page = 1
+        self.book_open = False
+        self.keys = []
+        self.hopped = []
+        self.selected = None
+        self._loading_left = 0
+        self._next_works = next_works
+        self._go_loads = go_loads
+        self._esc_works = esc_works
+
+        book = self
+
+        def page_text():
+            return f"<center>{book.page} / {len(book.pages)}</center>"
+
+        def slot_text(slot, which):
+            row = book.pages.get(book.page, [])
+            if slot >= len(row):
+                return ""
+            return f"<center>{row[slot][0 if which == 'name' else 1]}</center>"
+
+        slots = []
+        for slot in range(7):
+            slots.append(_RWin(f"btnRealm{slot}", [
+                _RWin(f"txtRealm{slot}Name",
+                      text=lambda s=slot: slot_text(s, "name")),
+                _RWin(f"txtRealm{slot}Population",
+                      text=lambda s=slot: slot_text(s, "pop")),
+            ]))
+        self.root_window = _RWin("root", [
+            _RWin("WorldView", [
+                _RWin("DeckConfiguration", [
+                    _RWin("Close_Button", visible=lambda: book.book_open),
+                    _RWin("RealmsButton"),
+                    _RWin("txtRealmPage", text=page_text),
+                    _RWin("btnRealmRight"),
+                    _RWin("btnRealmLeft"),
+                    _RWin("btnGoToRealm"),
+                ] + slots, visible=lambda: book.book_open),
+            ]),
+        ])
+
+        class _M:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def click_window(self, win):
+                await book._clicked(await win.name())
+
+        self.mouse_handler = _M()
+
+    async def _clicked(self, name):
+        if name == "btnRealmRight" and self._next_works:
+            self.page = min(self.page + 1, len(self.pages))
+        elif name == "btnRealmLeft":
+            self.page = max(self.page - 1, 1)
+        elif name.startswith("btnRealm") and name[8:].isdigit():
+            self.selected = int(name[8:])
+        elif name == "btnGoToRealm":
+            self.hopped.append((self.page, self.selected))
+            if self._go_loads:
+                self._loading_left = 3
+        elif name == "Close_Button":
+            self.book_open = False
+
+    async def send_key(self, key, seconds=0):
+        self.keys.append(key)
+        if key == "ESC" and self._esc_works:
+            self.book_open = not self.book_open
+
+    async def is_loading(self):
+        if self._loading_left > 0:
+            self._loading_left -= 1
+            return True
+        return False
+
+
+def _fast_realms(monkeypatch):
+    from deimos_bridge import realms
+
+    monkeypatch.setattr(realms, "keycode_esc", lambda: "ESC")
+    monkeypatch.setattr(realms, "PAGE_TURN_WAIT", 0.3)
+    monkeypatch.setattr(realms, "HOP_TAKE_WAIT", 0.3)
+    return realms
+
+
+def test_the_scan_reads_every_page_and_perfect_filters(monkeypatch):
+    import asyncio
+
+    realms = _fast_realms(monkeypatch)
+    client = _RealmBook()
+    listed, why = asyncio.run(realms.scan_realms(client))
+    assert why == ""
+    assert [(r["page"], r["slot"], r["name"], r["population"])
+            for r in listed] == [
+        (1, 0, "Avalon", "Full"), (1, 1, "Bravado", "Perfect"),
+        (2, 0, "Centaur", "Perfect")]
+    quiet = realms.perfect(listed)
+    assert [r["name"] for r in quiet] == ["Bravado", "Centaur"]
+    assert not client.book_open, "the scan left the spellbook open"
+
+
+def test_a_page_turn_that_does_not_land_is_reported_not_looped(monkeypatch):
+    import asyncio
+
+    realms = _fast_realms(monkeypatch)
+    client = _RealmBook(next_works=False)
+    listed, why = asyncio.run(realms.scan_realms(client))
+    assert [r["name"] for r in listed] == ["Avalon", "Bravado"], \
+        "the broken page turn should still return page 1's realms"
+    assert "stayed at 1" in why
+
+
+def test_a_hop_lands_and_is_confirmed_by_the_loading_screen(monkeypatch):
+    import asyncio
+
+    realms = _fast_realms(monkeypatch)
+    client = _RealmBook()
+    ok, why = asyncio.run(realms.hop_to_realm(client, 2, 0,
+                                              expect_name="Centaur"))
+    assert ok, why
+    assert client.hopped == [(2, 0)]
+
+
+def test_a_hop_refuses_when_the_list_moved(monkeypatch):
+    """Page 2 slot 0 is only meaningful while it still shows the realm
+    that was picked. Hopping blind lands the party somewhere random."""
+    import asyncio
+
+    realms = _fast_realms(monkeypatch)
+    client = _RealmBook()
+    ok, why = asyncio.run(realms.hop_to_realm(client, 2, 0,
+                                              expect_name="Bravado"))
+    assert not ok
+    assert "the list moved" in why
+    assert client.hopped == [], "it hopped anyway"
+
+
+def test_a_go_click_with_no_loading_screen_is_not_a_hop(monkeypatch):
+    import asyncio
+
+    realms = _fast_realms(monkeypatch)
+    client = _RealmBook(go_loads=False)
+    ok, why = asyncio.run(realms.hop_to_realm(client, 2, 0,
+                                              expect_name="Centaur"))
+    assert not ok
+    assert "did not take" in why
+
+
+def test_a_book_that_will_not_open_is_a_reason_not_a_crash(monkeypatch):
+    import asyncio
+
+    realms = _fast_realms(monkeypatch)
+    client = _RealmBook(esc_works=False)
+    listed, why = asyncio.run(realms.scan_realms(client))
+    assert listed == []
+    assert "did not open" in why
+
+
+# ------------------------------ the party hops together, or says so
+
+def _hoppable_party(monkeypatch, hop_results=None):
+    """A worker whose realm scan finds one Perfect realm."""
+    from deimos_bridge import realms
+
+    worker, _read = _zoned_party(["KT_Hub"] * 3)
+    worker.script = "###deimos_expertmode"
+    calls = {"hops": [], "scans": 0}
+
+    async def scan(client):
+        calls["scans"] += 1
+        return ([{"page": 1, "slot": 1, "name": "Bravado",
+                  "population": "Perfect"}], "")
+
+    results = list(hop_results or [])
+
+    async def hop(client, page, slot, expect_name=""):
+        calls["hops"].append((client, page, slot, expect_name))
+        return results.pop(0) if results else (True, "")
+
+    monkeypatch.setattr(realms, "scan_realms", scan)
+    monkeypatch.setattr(realms, "hop_to_realm", hop)
+    return worker, calls
+
+
+def test_the_whole_party_hops_to_one_realm(monkeypatch):
+    import asyncio
+
+    worker, calls = _hoppable_party(monkeypatch)
+    asyncio.run(worker._realm_hop_party(worker.seats[0], "testing"))
+    assert len(calls["hops"]) == 3, "every hooked wizard must hop"
+    assert {h[3] for h in calls["hops"]} == {"Bravado"}, \
+        "the party hopped to different realms"
+    for seat in worker.seats:
+        kinds = [e["kind"] for e in seat.tel.questing]
+        assert "realm-hop" in kinds
+
+    # The cooldown collapses the broadcast queue's other copies.
+    asyncio.run(worker._realm_hop_party(worker.seats[1], "testing"))
+    assert len(calls["hops"]) == 3, "the cooldown did not hold"
+
+
+def test_a_wizard_that_cannot_follow_is_a_loud_split(monkeypatch):
+    import asyncio
+
+    worker, calls = _hoppable_party(
+        monkeypatch,
+        hop_results=[(True, ""), (False, "no loading screen"),
+                     (False, "no loading screen"), (True, "")])
+    asyncio.run(worker._realm_hop_party(worker.seats[0], "testing"))
+    split = [e for e in worker.seats[0].tel.questing
+             if e["kind"] == "realm-split"]
+    assert split and "SPLIT ACROSS REALMS" in split[0]["detail"]
+    assert "w1" in split[0]["detail"]
+
+
+def test_no_realm_change_while_anybody_is_fighting(monkeypatch):
+    import asyncio
+
+    worker, calls = _hoppable_party(monkeypatch)
+    worker.seats[2].in_duel = True
+    asyncio.run(worker._realm_hop_party(worker.seats[0], "testing"))
+    assert calls["hops"] == []
+    assert worker._realm_hopped_at == 0.0, \
+        "a refused hop must not burn the cooldown"
+
+
+def test_a_parked_collect_goal_at_its_marker_triggers_the_hop(monkeypatch):
+    import asyncio
+    import time
+
+    worker, _read = _zoned_party(["KT_Hub"] * 2)
+    worker.script = "###deimos_expertmode"
+    fired = []
+
+    async def record(seat, why):
+        fired.append(why)
+
+    worker._realm_hop_party = record
+    seat = worker.seats[0]
+    seat.goal = "Defeat Charmed Slave and Collect Notebook Pages (0 of 3)"
+    seat.progress_at = time.monotonic() - worker.REALM_HOP_AFTER - 1
+    seat.marker_away = 500.0
+    asyncio.run(worker._maybe_realm_hop(seat))
+    assert fired and "contested" in fired[0]
+
+    # A talk goal, however stale, is not a crowded realm.
+    fired.clear()
+    seat.goal = "Talk To General Khaba in Hall of Champions"
+    asyncio.run(worker._maybe_realm_hop(seat))
+    assert fired == []
+
+    # And a collect goal whose marker is a zone away is lost, not queued.
+    seat.goal = "Collect Notebook Pages in Royal Hall (0 of 3)"
+    seat.marker_away = 92000.0
+    asyncio.run(worker._maybe_realm_hop(seat))
+    assert fired == []
+
+
+def test_a_cut_off_realm_change_says_where_everybody_is(monkeypatch):
+    """The stage deadline can cancel the hop mid-party. Without the
+    handler, the hopped seats are in the new realm, the rest never
+    attempted, no split report runs, and the cooldown — stamped for a
+    hop that half-happened — refuses the operator's retry press."""
+    import asyncio
+    import time
+
+    import pytest
+
+    worker, calls = _hoppable_party(monkeypatch)
+    from deimos_bridge import realms
+
+    async def hop(client, page, slot, expect_name=""):
+        calls["hops"].append(client)
+        if len(calls["hops"]) >= 2:
+            raise asyncio.CancelledError()     # the deadline strikes
+        return True, ""
+
+    monkeypatch.setattr(realms, "hop_to_realm", hop)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(worker._realm_hop_party(worker.seats[0], "testing"))
+
+    notes = [e for e in worker.seats[2].tel.questing
+             if e["kind"] == "realm-cut-off"]
+    assert notes and "CUT OFF mid-party" in notes[0]["detail"]
+    assert "w0" in notes[0]["detail"], "who landed must be named"
+    # The retry window opens in about a minute, not a full cooldown.
+    reopens = worker.REALM_HOP_COOLDOWN - (time.monotonic()
+                                           - worker._realm_hopped_at)
+    assert reopens <= 61, f"the retry is blocked for {reopens:.0f}s"
+
+
+def test_everyone_failing_is_not_reported_as_a_split(monkeypatch):
+    """Nobody moved, so the party is still together — and all-fail is
+    exactly what hopping to the realm the party is ALREADY on looks
+    like (no loading screen comes). A false SPLIT report sends the
+    operator chasing a state that does not exist."""
+    import asyncio
+
+    worker, calls = _hoppable_party(
+        monkeypatch, hop_results=[(False, "no loading screen")] * 6)
+    asyncio.run(worker._realm_hop_party(worker.seats[0], "testing"))
+    kinds = [e["kind"] for e in worker.seats[0].tel.questing]
+    assert "realm-split" not in kinds, "nobody moved; that is not a split"
+    failed = [e for e in worker.seats[0].tel.questing
+              if e["kind"] == "realm-hop-failed"]
+    assert failed and "still together" in failed[0]["detail"]
+
+
+def test_a_landed_hop_restarts_the_crowded_judgement_clock(monkeypatch):
+    import asyncio
+    import time
+
+    worker, calls = _hoppable_party(monkeypatch)
+    stale = time.monotonic() - 1000.0
+    for seat in worker.seats:
+        seat.progress_at = stale
+        seat.cells_seen[(1, 2, 3)] = stale
+    asyncio.run(worker._realm_hop_party(worker.seats[0], "testing"))
+    for seat in worker.seats:
+        assert seat.progress_at > stale + 900, \
+            "the new realm inherited the old realm's stuck clock"
+        assert seat.cells_seen == {}

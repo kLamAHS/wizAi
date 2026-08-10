@@ -2321,7 +2321,8 @@ class MainWindow(QMainWindow):
 
         act = QHBoxLayout()
         for label, action in (("Teleport all to leader", "teleport"),
-                              ("Advance dialogue (all)", "dialogue")):
+                              ("Advance dialogue (all)", "dialogue"),
+                              ("Realm hop (party)", "realm")):
             btn = QPushButton(label)
             btn.clicked.connect(
                 lambda _c, a=action: self._quest_request(a))

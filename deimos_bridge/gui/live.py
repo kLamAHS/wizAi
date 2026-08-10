@@ -431,6 +431,10 @@ class LiveWorker(QThread):
         #: mid-teleport releases the script by itself. See
         #: `_desperate_hop` and `_hop_held`.
         self._hop_pause_until = 0.0
+        #: when the party last changed realm, and which realms this run
+        #: has already tried. See `_realm_hop_party`.
+        self._realm_hopped_at = 0.0
+        self._realms_tried = set()
         #: {seat id: (the step it gave up on, when)}. A catch-up that
         #: gives up has to be REMEMBERED, or `_check_in_step` starts the
         #: identical one on the next tick -- see `_written_off`.
@@ -474,8 +478,10 @@ class LiveWorker(QThread):
         self._stop = True
 
     #: what `request` accepts. Every one of these drives the mouse, so
-    #: every one is serviced from the one task that owns it.
-    ACTIONS = ("teleport", "dialogue", "wisps", "potion")
+    #: every one is serviced from the one task that owns it. "realm" is
+    #: broadcast like the rest and collapses to one party hop via the
+    #: cooldown stamp in `_realm_hop_party`.
+    ACTIONS = ("teleport", "dialogue", "wisps", "potion", "realm")
 
     def request(self, action, seat=None):
         """Queue an action ('teleport' | 'dialogue' | 'wisps' | 'potion').
@@ -687,22 +693,27 @@ class LiveWorker(QThread):
                 self._check_on_questline()
                 self._check_progress(seat)
 
-                catching = self._catching_up()
-                if seat.runner is not None and self._hop_held():
-                    # A desperate quest-teleport is in flight or still
-                    # settling. The script's own tp loop re-teleports
-                    # within a second, aimed at the spot it was stuck on
-                    # -- the operator: "it's possible and even likely
+                if self._hop_held():
+                    # A desperate quest-teleport or a realm change is in
+                    # flight or settling, and both drive clients ACROSS
+                    # seats -- a follower's follow, another seat's quest
+                    # step or the script's own tp loop steering a wizard
+                    # whose spellbook is open undoes the maneuver from a
+                    # different task. The operator's original report of
+                    # the narrow version: "it's possible and even likely
                     # for the bot to teleport away from the quest after
-                    # a desperate tp back to the place it was stuck,
-                    # which is usually 1000ish units away" -- so running
-                    # instructions now undoes the fix before it lands.
+                    # a desperate tp back to the place it was stuck". So
+                    # the hold is worker-wide: nothing below this line
+                    # steers anybody until the deadline lets go.
                     self._say_once(
                         seat, "script-held-hop",
-                        "script held for a moment so its own teleport "
-                        "does not drag the wizard back off the quest "
-                        "marker it was just sent to")
-                elif seat.runner is not None and not catching:
+                        "holding this wizard's steering while a teleport "
+                        "or realm change finishes and settles")
+                    await asyncio.sleep(0.5)
+                    continue
+
+                catching = self._catching_up()
+                if seat.runner is not None and not catching:
                     await self._stage(seat, "script step",
                                       self._script_step(seat), wheel=True)
                 elif seat.runner is not None:
@@ -733,6 +744,16 @@ class LiveWorker(QThread):
                     # also decided to catch up or regroup.
                     await self._stage(seat, "unwedging a stuck script",
                                       self._unstick(seat), wheel=True)
+
+                if driven or self.auto_quest:
+                    # The rung above the desperate teleport: a Collect
+                    # goal parked at its own marker for eight minutes is
+                    # a crowded realm, not a wedged wizard. Cheap gates
+                    # first; the stage only costs anything on the tick
+                    # it actually hops.
+                    await self._stage(seat, "changing realms",
+                                      self._maybe_realm_hop(seat),
+                                      wheel=True, limit=360)
 
                 if driven and self._should_catch_up(seat):
                     # The one case where wizAi steers a wizard the script
@@ -1079,6 +1100,12 @@ class LiveWorker(QThread):
 
         seat = self._seat_for(client) if seat is None else seat
         while seat.requests and not self._stop:
+            if self._hop_held():
+                # A teleport or realm change is driving clients across
+                # seats. The press keeps its place in the queue and runs
+                # after the settle window, rather than steering a wizard
+                # whose spellbook is open from a second task.
+                return
             if await questing.in_battle(client):
                 return
             with seat.lock:
@@ -1098,7 +1125,11 @@ class LiveWorker(QThread):
                                     f"{seat.driver} to let go of the wheel")
                 await self._stage(seat, f"the {action} request",
                                   self._do_request(client, action, seat),
-                                  wheel=True)
+                                  wheel=True,
+                                  # A realm change is a scan plus a hop
+                                  # per wizard with 45s load waits; the
+                                  # default deadline cuts it mid-party.
+                                  limit=360 if action == "realm" else None)
             finally:
                 seat.busy = None
 
@@ -1114,6 +1145,9 @@ class LiveWorker(QThread):
             n, why = await questing.advance_dialogue(client)
             self._say(seat, f"advanced {n} dialogue window(s)" if n
                       else (why or "no dialogue open"))
+        elif action == "realm":
+            await self._realm_hop_party(seat, "the operator asked for a "
+                                              "realm change")
         elif action in ("wisps", "potion"):
             await self._upkeep_now(client, action)
 
@@ -3184,6 +3218,200 @@ class LiveWorker(QThread):
         import time
 
         return time.monotonic() < self._hop_pause_until
+
+    #: how long a COLLECT goal may sit unchanged, at its own marker and
+    #: out of combat, before the realm is judged crowded rather than the
+    #: wizard stuck. Deliberately after every gentler fix on the ladder:
+    #: X at 5 min, the desperate teleport at ~5.5, this at 8 -- because
+    #: a realm change is the one move that costs the whole party a zone
+    #: reload.
+    REALM_HOP_AFTER = 480.0
+    #: the least time between realm changes. Also what makes the manual
+    #: button and the broadcast request queue safe: every seat drains
+    #: its own copy of the "realm" action, the first one hops the whole
+    #: party, and the stamp turns the other two into no-ops.
+    REALM_HOP_COOLDOWN = 300.0
+
+    async def _maybe_realm_hop(self, seat):
+        """Change realms when a Collect step is contested, not stuck.
+
+        The distinction the stuck ladder cannot make on its own: a
+        wizard at the right marker, out of combat, with a Collect goal
+        that has not ticked in eight minutes is not wedged -- it is
+        QUEUING. The collectibles respawn on a timer and every other
+        player in a crowded realm takes one. No amount of pressing X or
+        teleporting to the marker fixes a queue; moving to an empty
+        shard does, same zone, same spot. The scan-and-pick is a Deimos
+        community contribution (see `realms.py`); the trigger and the
+        party coordination are wizAi's.
+        """
+        import time
+
+        goal = (seat.goal or "").lower()
+        if "collect" not in goal:
+            return
+        if not (self.script or self.auto_quest):
+            return
+        now = time.monotonic()
+        if seat.progress_at and now - seat.progress_at < self.REALM_HOP_AFTER:
+            return
+        if not seat.progress_at:
+            return
+        away = seat.marker_away
+        if away is None or away > self.MARKER_IN_ZONE:
+            # Not AT the contested spawns -- this is some other stall,
+            # and the rest of the ladder owns it.
+            return
+        idle = (now - seat.progress_at) / 60.0
+        await self._realm_hop_party(
+            seat, f"{seat.goal!r} has not advanced in {idle:.0f} min at its "
+                  f"own marker — the spawns are contested, so a quieter "
+                  f"realm is the move")
+
+    async def _realm_hop_party(self, seat, why):
+        """Move EVERY hooked wizard to one quiet realm, and say so.
+
+        The whole party or nobody, attempted in order and reported per
+        wizard: a party split across realms cannot see or teleport to
+        each other, which is a worse state than any crowded realm -- so
+        a partial hop is the loudest line this method can produce.
+        """
+        import time
+
+        from .. import realms
+
+        now = time.monotonic()
+        if now - self._realm_hopped_at < self.REALM_HOP_COOLDOWN:
+            since = now - self._realm_hopped_at
+            if since > 30.0:
+                # A human pressing the button again, not the broadcast
+                # queue's other copies of one press -- those arrive in
+                # seconds. A press that does nothing silently reads as
+                # a key that is not bound.
+                self._say(seat, f"changed realms {since:.0f}s ago — "
+                                f"waiting out the "
+                                f"{self.REALM_HOP_COOLDOWN:.0f}s cooldown")
+            return
+        live = [s for s in self.seats if s.client is not None]
+        if not live:
+            return
+        if any(s.in_duel for s in live):
+            self._say(seat, "not changing realms while somebody is in a duel")
+            return
+        # Claimed before the first await, so the broadcast request queue
+        # and a concurrent auto-trigger collapse to one hop.
+        self._realm_hopped_at = now
+        # Nothing may steer wizards whose spellbooks are open, for as
+        # long as the WORST case runs: a scan plus three hops with
+        # retries and 45s load waits. This must outlast the stage
+        # deadline below, not the other way around.
+        self._hop_pause_until = now + 420.0
+        landed = []
+        try:
+            listed, why_not = await realms.scan_realms(seat.client)
+            quiet = realms.perfect(listed)
+            fresh = [r for r in quiet if r["name"] not in self._realms_tried]
+            if not fresh and quiet:
+                # Every quiet realm has been tried this run; start over
+                # rather than never hopping again.
+                self._realms_tried.clear()
+                fresh = quiet
+            if not fresh:
+                self._say(seat, "no Perfect-population realm is listed to "
+                                "hop to" + (f" — {why_not}" if why_not else ""))
+                for other in live:
+                    other.tel.note_questing(
+                        "realm-hop-refused",
+                        "wanted a quieter realm and the list offered none"
+                        + (f" — {why_not}" if why_not else ""))
+                return
+            target = fresh[0]
+            self._realms_tried.add(target["name"])
+            self._say(seat, f"changing the party to realm {target['name']} "
+                            f"— {why}")
+            stranded = []
+            for one in live:
+                ok, reason = await realms.hop_to_realm(
+                    one.client, target["page"], target["slot"],
+                    expect_name=target["name"])
+                if not ok:
+                    # Once more before calling it stranded -- the first
+                    # failure is usually the book or a click, not the
+                    # realm.
+                    ok, reason = await realms.hop_to_realm(
+                        one.client, target["page"], target["slot"],
+                        expect_name=target["name"])
+                one.tel.note_questing(
+                    "realm-hop",
+                    f"to {target['name']} — {why}" if ok else
+                    f"to {target['name']} FAILED: {reason}")
+                if ok:
+                    landed.append(one)
+                else:
+                    stranded.append((one, reason))
+            if stranded and not landed:
+                # NOBODY moved, so the party is still together -- this
+                # is not a split, and calling it one sends the operator
+                # chasing a state that does not exist. Either every Go
+                # click died, or the party is ALREADY in the picked
+                # realm: the scan cannot read which realm the party is
+                # in, and a hop to your own realm shows no loading
+                # screen, which is exactly the receipt that failed. The
+                # realm stays on the tried list either way, so the next
+                # attempt picks a different one.
+                said = (f"nobody hopped — every wizard's change to "
+                        f"{target['name']} reported '{stranded[0][1]}'. "
+                        f"The party is still together, and may already BE "
+                        f"on {target['name']}; the next attempt will pick "
+                        f"a different realm")
+                for other in live:
+                    other.tel.note_questing("realm-hop-failed", said)
+                self._say(seat, said)
+            elif stranded:
+                names = " and ".join(s.name for s, _r in stranded)
+                said = (f"PARTY SPLIT ACROSS REALMS — {names} could not "
+                        f"follow to {target['name']} "
+                        f"({stranded[0][1]}). Wizards in different realms "
+                        f"cannot see or teleport to each other; press "
+                        f"Realm hop again or move {names} by hand")
+                for other in live:
+                    other.tel.note_questing("realm-split", said)
+                self._say(stranded[0][0], said)
+            else:
+                self._say(seat, f"the whole party is on {target['name']}")
+                for one in live:
+                    # The crowded-judgement clock starts over: the new
+                    # realm earns its own REALM_HOP_AFTER before being
+                    # called contested, not the old realm's leftovers --
+                    # and the zone genuinely did reload, so a fresh
+                    # progress stamp is the truth, not a fudge.
+                    one.progress_at = time.monotonic()
+                    one.cells_seen.clear()
+        except asyncio.CancelledError:
+            # The stage deadline cut the maneuver mid-party. Without
+            # this, the seats already hopped are in the new realm, the
+            # rest never attempted, the split report below the loop
+            # never runs, and the operator's retry press is refused by
+            # a cooldown stamped for a hop that half-happened. Say
+            # exactly where everybody is (sync calls only -- this
+            # coroutine is being cancelled), and open the retry window.
+            went = ", ".join(s.name for s in landed) or "nobody"
+            left = [s.name for s in live if s not in landed]
+            said = (f"the realm change was CUT OFF mid-party — {went} "
+                    f"hopped and {', '.join(left) if left else 'nobody'} "
+                    f"did not. If anyone moved, the party is split across "
+                    f"realms; press Realm hop again in a minute")
+            for other in live:
+                try:
+                    other.tel.note_questing("realm-cut-off", said)
+                except Exception:
+                    pass
+            self._say(seat, said)
+            self._realm_hopped_at = (time.monotonic()
+                                     - self.REALM_HOP_COOLDOWN + 60.0)
+            raise
+        finally:
+            self._hop_pause_until = time.monotonic() + self.HOP_SETTLE
 
     #: how many fruitless presses of X from one spot before wizAi stops
     #: offering. One is worth making -- `waitfordialog` polls forever
