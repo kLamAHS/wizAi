@@ -14734,3 +14734,130 @@ def test_the_recast_reresolves_its_handles():
     assert went
     assert ("pick", "Imp") in calls and ("resolve", 1) in calls
     assert ("cast", "fresh-target", handler.RETRY_CAST_TIME) in calls
+
+
+# ------------- the keyboard is a second way through a wedged dialogue
+#
+# Stack audit F1, at the point it actually bites wizAi: the script's own
+# clearing is `times 20 { sendkey X }` — X starts a conversation, it does
+# not advance a MORE page — and wizAi's backstop clears the box by
+# CLICKING, the same mouse path that dies silently when the mouseless
+# hook is down. The keyboard is a different hook, so a box the mouse
+# cannot turn but the spacebar can is exactly this failure. The spacebar
+# is a LAST RESORT — only after two dead clicks — so a single racy click
+# cannot double-advance past a choice.
+
+class _KeyboardDialogue:
+    """A dialogue the MOUSE cannot advance but the SPACEBAR can."""
+
+    def __init__(self, pages=("page one", "page two")):
+        self._pages = list(pages)
+        self._i = 0
+        self.keys = []
+        self._text = _Win("txtMessage", text=self._pages[0])
+        self._button = _Win("btnRight")
+        self._dialog = _Win("wndDialogMain",
+                            [self._button, _Win("txtArea", [self._text])])
+        self.root_window = _Win("root", [_Win("WorldView", [self._dialog])])
+
+        class _Mute:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def click_window(self, win): pass      # the dead mouse
+        self.mouse_handler = _Mute()
+
+    async def send_key(self, key, seconds=0):
+        self.keys.append(key)
+        self._i += 1
+        if self._i >= len(self._pages):
+            self._dialog._visible = False
+            self._button._visible = False
+        else:
+            self._text._text = self._pages[self._i]
+
+
+def _armed_spacebar(monkeypatch):
+    from deimos_bridge import questing
+    monkeypatch.setattr(questing, "keycode_spacebar", lambda: "SPACE")
+
+
+def test_the_spacebar_clears_a_box_the_mouse_cannot(monkeypatch):
+    import asyncio
+
+    from deimos_bridge.questing import advance_dialogue
+
+    _armed_spacebar(monkeypatch)
+    client = _KeyboardDialogue(pages=["page one", "page two"])
+    clicks, why = asyncio.run(advance_dialogue(client, settle=0.05, poll=0.01))
+    assert why == "", why
+    assert clicks >= 1, "the keyboard fallback never advanced the box"
+    assert client.keys == ["SPACE", "SPACE"], client.keys
+
+
+def test_a_box_neither_input_can_move_is_reported_as_wedged(monkeypatch):
+    import asyncio
+
+    from deimos_bridge import questing
+    from deimos_bridge.questing import advance_dialogue
+
+    _armed_spacebar(monkeypatch)
+
+    async def dead_key(_c, seconds=0.1):
+        return True                      # the press "succeeds" but does nothing
+
+    monkeypatch.setattr(questing, "_press_spacebar", dead_key)
+
+    root, _btn = _dialogue_root()
+    client = _QuestClient(root)
+
+    class _Mute(_Mouse):
+        async def click_window(self, window):
+            self.clicks.append(window)   # never closes, never changes text
+
+    client.mouse_handler = _Mute()
+    clicks, why = asyncio.run(advance_dialogue(client, settle=0.02, poll=0.01))
+    assert clicks == 0
+    assert "spacebar" in why and "mouse and keyboard both" in why
+
+
+def test_the_mouse_is_still_tried_first(monkeypatch):
+    """The spacebar is a FALLBACK — a box the MOUSE clears normally
+    (each click turns the page) must never also eat a keypress."""
+    import asyncio
+
+    from deimos_bridge.questing import advance_dialogue
+
+    _armed_spacebar(monkeypatch)
+
+    class _WorkingMouseDialogue:
+        def __init__(self):
+            self._pages = ["page one", "page two"]
+            self._i = 0
+            self.keys = []
+            self._text = _Win("txtMessage", text=self._pages[0])
+            self._button = _Win("btnRight")
+            self._dialog = _Win("wndDialogMain",
+                                [self._button, _Win("txtArea", [self._text])])
+            self.root_window = _Win("root",
+                                    [_Win("WorldView", [self._dialog])])
+            outer = self
+
+            class _Mouse:
+                async def __aenter__(self): return self
+                async def __aexit__(self, *a): return False
+                async def click_window(self, win):
+                    outer._i += 1                  # the mouse works
+                    if outer._i >= len(outer._pages):
+                        outer._dialog._visible = False
+                        outer._button._visible = False
+                    else:
+                        outer._text._text = outer._pages[outer._i]
+            self.mouse_handler = _Mouse()
+
+        async def send_key(self, key, seconds=0):
+            self.keys.append(key)
+
+    client = _WorkingMouseDialogue()
+    clicks, why = asyncio.run(advance_dialogue(client, settle=0.05, poll=0.01))
+    assert clicks >= 1 and why == ""
+    assert client.keys == [], "pressed a key at a box the mouse was clearing"
