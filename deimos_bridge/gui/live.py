@@ -41,6 +41,19 @@ import threading as _threading
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+#: "this has never happened", for stamps compared against a cooldown.
+#:
+#: Zero is a LIE here, and an expensive one. `time.monotonic()` counts
+#: from BOOT, not from the start of the process, so on a machine that
+#: has just been turned on -- which is exactly when somebody launches
+#: the game and starts a run -- `now - 0.0` is a small number and every
+#: `now - stamp < COOLDOWN` test reads as "just did that". The first
+#: seven minutes of uptime could not restart a script, the first five
+#: could not change realm or re-arm a quest arrow, and nothing said so.
+#: Minus infinity is the honest value: never, so any cooldown has
+#: already elapsed.
+NEVER = float("-inf")
+
 
 class SeatConfig:
     """One wizard's half of a run: what it plays and what it plays with.
@@ -168,7 +181,7 @@ class _Seat:
         #: when this seat was last dragged to the party's sigil, so one
         #: split episode gets one drag per wizard rather than one per
         #: check. See `LiveWorker.SIGIL_ACT`.
-        self.sigil_moved_at = 0.0
+        self.sigil_moved_at = NEVER
         #: flat distance to this wizard's quest marker, or None. A marker
         #: in another zone reads as a six-figure nonsense distance,
         #: because the coordinates are in that zone's space -- which is
@@ -183,7 +196,7 @@ class _Seat:
         #: when a quest-arrow re-arm was last attempted for this seat,
         #: so a cure that is not taking is retried on a cooldown rather
         #: than paging through the quest book every tick.
-        self.rearm_tried_at = 0.0
+        self.rearm_tried_at = NEVER
         #: when this client's quest hook last DID read a position, and
         #: on which goal. Proof the hook works, which is what separates
         #: "this quest has no marker" from "the arrow is off". See
@@ -220,7 +233,7 @@ class _Seat:
         #: script's instruction count then. A count that has not moved
         #: between two looks means the script is inside `wait_for_coro`.
         #: See `LiveWorker._unstick`.
-        self.unstuck_at = 0.0
+        self.unstuck_at = NEVER
         self.steps_seen = None
         #: the dialogue box's TEXT at the last unstick look, or None when
         #: no box was open. Same text across two looks = the script's own
@@ -453,16 +466,16 @@ class LiveWorker(QThread):
         self._hop_pause_until = 0.0
         #: when the party last changed realm, and which realms this run
         #: has already tried. See `_realm_hop_party`.
-        self._realm_hopped_at = 0.0
+        self._realm_hopped_at = NEVER
         self._realms_tried = set()
         #: when a looping script was last forcibly restarted. See
         #: `_maybe_restart_script`.
-        self._script_restarted_at = 0.0
+        self._script_restarted_at = NEVER
         #: the stale-reload backoff: the last reload's failure
         #: signature and time, the hold now in force, and whether this
         #: stale episode has already escalated it. See `_script_step`.
         self._reload_sig = ""
-        self._reload_at = 0.0
+        self._reload_at = NEVER
         self._reload_hold_until = 0.0
         self._reload_cool = 0.0
         self._reload_held = False
@@ -3186,7 +3199,7 @@ class LiveWorker(QThread):
         now = time.monotonic()
         idle = now - seat.progress_at
         if idle < self.DIALOG_WEDGE:
-            seat.unstuck_at = 0.0
+            seat.unstuck_at = NEVER
             seat.steps_seen = None
             seat.box_text = None
             return
@@ -3322,11 +3335,28 @@ class LiveWorker(QThread):
         are a move the script's design tolerates by construction -- a
         program that runs off its end restarts itself.
 
-        Only for a LOOPING script with an out-of-zone marker. A parked
-        script is waiting on something real (the stuck-instruction
-        reload owns that case), and an in-zone marker is the desperate
-        hop's case -- this rung exists precisely for the wedge the hop
-        must refuse.
+        Only for a LOOPING script. A parked script is waiting on
+        something real (the stuck-instruction reload owns that case),
+        and an in-zone marker is the desperate hop's case -- this rung
+        exists precisely for the wedge the hop must refuse.
+
+        It fires for a marker that reads ANOTHER zone, and equally for
+        a step that has no marker to read at all -- which is the state
+        rev 116b5866 spent its last five minutes in, and the second
+        time in three rounds that a markerless Collect made the only
+        rung that could help unreachable. All three wizards stood in
+        `KT_WorldTeleporter`, the world portal, while the script ran
+        15,785 instructions without moving anybody. p1 was on `Get Some
+        Bling`, and the quester's handling of it is::
+
+            until NOT p1 tracking_goal "collect gemstones in hall of champions" {
+                if p1 inzone Krokotopia/KT_Krokosphinx/KT_ChampHall {
+
+        an until-loop whose only body is zone-gated, containing nothing
+        that would TRAVEL to that zone. Standing anywhere else, it spins
+        until the goal changes, and the goal cannot change because the
+        body never runs. No teleport rung can leave a loop -- only the
+        instruction pointer can, and only a restart moves it.
         """
         import time
 
@@ -3334,7 +3364,13 @@ class LiveWorker(QThread):
         if runner is None or parked:
             return
         away = seat.marker_away
-        if away is None or away <= self.MARKER_IN_ZONE:
+        blind = self._marker_unusable(seat) if away is None else ""
+        if away is not None and away <= self.MARKER_IN_ZONE:
+            # In this zone: the desperate hop's case, not this one.
+            return
+        if away is None and not blind:
+            # One failed read. It may read on the next poll, and
+            # restarting a whole program over a blink is thrash.
             return
         now = time.monotonic()
         if now - seat.progress_at < self.STUCK_AFTER + self.UNSTICK_EVERY:
@@ -3342,10 +3378,11 @@ class LiveWorker(QThread):
         if now - self._script_restarted_at < self.SCRIPT_RESTART_EVERY:
             return
         self._script_restarted_at = now
-        said = (f"stuck {mins:.0f} min with the quest marker {away:,.0f} "
-                f"away — another zone — while the script loops. No "
-                f"teleport can cross a zone; the script's own route can, "
-                f"and it is looping on a state that no longer exists. "
+        stuck_at = (f"the quest marker {away:,.0f} away — another zone"
+                    if away is not None else f"nothing to aim at — {blind}")
+        said = (f"stuck {mins:.0f} min with {stuck_at} — while the script "
+                f"loops. No teleport can help from here; the script's own "
+                f"route can, and it is looping on a state it cannot leave. "
                 f"Restarting it so its route dispatch runs fresh against "
                 f"the party's current quest — the operator's manual reset, "
                 f"automated")
@@ -3726,8 +3763,6 @@ class LiveWorker(QThread):
         if not (self.script or self.auto_quest):
             return
         now = time.monotonic()
-        if seat.progress_at and now - seat.progress_at < self.REALM_HOP_AFTER:
-            return
         if not seat.progress_at:
             return
         away = seat.marker_away
@@ -3737,6 +3772,48 @@ class LiveWorker(QThread):
             # journey. Some other stall, and the rest of the ladder
             # owns it.
             return
+        # Frozen, or working? The two failures this rung has to tell
+        # apart look OPPOSITE on the ground, and the clock the first
+        # version used could only see one of them.
+        #
+        # A crowded realm MOVES: the quester teleports between its
+        # hardcoded spots every few seconds and presses X at each, so
+        # the wizard's position keeps changing while the COUNT stays at
+        # (0 of 4). The clock that catches that is the goal's, not the
+        # position's -- and `progress_at` resets on every one of those
+        # teleports, so a stillness gate never fires for the very case
+        # this rung exists for.
+        #
+        # A wizard in the wrong zone is STILL: the quester's
+        # `if p1 inzone ...` body never runs, nothing teleports it
+        # anywhere, and a realm change -- which keeps the zone and only
+        # swaps the shard -- cannot put it where the collectibles are.
+        # That one belongs to the script restart.
+        frozen = now - seat.progress_at >= self.REALM_HOP_AFTER
+        if away is not None:
+            # A marker in this zone is the original, validated case:
+            # standing at the spawns with nothing happening.
+            if not frozen:
+                return
+        else:
+            if frozen:
+                self._say_once(
+                    seat, f"collect-frozen:{seat.name}",
+                    f"{seat.name}'s Collect step has not moved and neither "
+                    f"has {seat.name} — a realm change only swaps the "
+                    f"shard, so it cannot help a wizard that is not "
+                    f"working the spots. Leaving this to the script",
+                    kind="realm-hop-refused",
+                    detail=(f"{seat.goal!r} is not advancing, but nothing "
+                            f"is teleporting this wizard between the "
+                            f"collect spots either — that is a script "
+                            f"that cannot act from where it is standing, "
+                            f"not a contested realm"))
+                return
+            if not seat.goal_at or now - seat.goal_at < self.REALM_HOP_AFTER:
+                # The count is still moving, or has not been watched
+                # long enough to say it is not.
+                return
         if away is None and not self._with_the_party(seat):
             # ...and without a marker, the party IS the check. A realm
             # change keeps the zone and only changes the shard, so it
@@ -3764,10 +3841,12 @@ class LiveWorker(QThread):
                         f"zone and only changes the shard, so it cannot "
                         f"help a wizard that is not at the spawns"))
             return
-        idle = (now - seat.progress_at) / 60.0
-        where = (f"{away:,.0f} from its marker" if away is not None
-                 else "standing still, and a Collect step has no marker "
-                      "to be away from")
+        idle = ((now - seat.progress_at) if away is not None
+                else (now - seat.goal_at)) / 60.0
+        where = (f"{away:,.0f} from its marker, with nothing moving"
+                 if away is not None else
+                 "being teleported between the collect spots the whole "
+                 "time, so it is working them and finding nothing")
         await self._realm_hop_party(
             seat, f"{seat.goal!r} has not advanced in {idle:.0f} min — "
                   f"{where}. Collectibles are shared ground spawns, so a "
