@@ -490,6 +490,10 @@ class LiveWorker(QThread):
         self._reload_hold_until = 0.0
         self._reload_cool = 0.0
         self._reload_held = False
+        #: consecutive catch-ups ended by "a different wizard is
+        #: behind now", and when the last was. See `CATCH_UP_CHURN`.
+        self._churn = 0
+        self._churn_at = NEVER
         #: {seat id: (the step it gave up on, when)}. A catch-up that
         #: gives up has to be REMEMBERED, or `_check_in_step` starts the
         #: identical one on the next tick -- see `_written_off`.
@@ -1949,6 +1953,13 @@ class LiveWorker(QThread):
     #: it is thinned. The dispatch prints on every pass, so an
     #: unthinned capture would be the whole export.
     LOG_THIN = (1, 2, 5, 20, 100, 500, 2000)
+    #: ...and a hard ceiling on how many of those markers the questing
+    #: timeline may hold, whatever the script says. Thinning by CONTENT
+    #: bounds nothing when every line is different -- a dispatch that
+    #: prints a new zone name each pass would still write one marker
+    #: apiece and evict the heartbeats it was meant to sit beside. The
+    #: full stream is in `script_log` and loses nothing.
+    LOG_MARKERS = 200
 
     def _script_logging(self, on):
         """Start or stop forwarding the script's `print` output.
@@ -1990,11 +2001,44 @@ class LiveWorker(QThread):
         text = (text or "").strip()
         if not text:
             return
+        # EVERY line, in order, into its own stream. The operator asked
+        # for all of it, and the sequence is the diagnosis: a thinned
+        # sample says a leg ran often, the full stream says which legs
+        # it alternates between -- the difference between a route stuck
+        # in one place and a route cycling and matching nothing.
+        for seat in self.seats:
+            try:
+                seat.tel.note_script(text)
+            except Exception:
+                pass
+        # ...and a thinned marker in the questing timeline, so the
+        # narrative the operator actually reads still shows that the
+        # script was talking, and how much. `questing` is capped at
+        # 2000 entries; unthinned this would evict every heartbeat and
+        # stuck-detail within minutes of a chatty quester.
         n = self._logged.get(text, 0) + 1
         self._logged[text] = n
         if len(self._logged) > 400:
             self._logged.clear()
+        try:
+            self.status.emit(text)
+        except Exception:
+            pass
         if n not in self.LOG_THIN:
+            return
+        self._markers = getattr(self, "_markers", 0) + 1
+        if self._markers > self.LOG_MARKERS:
+            if self._markers == self.LOG_MARKERS + 1:
+                for seat in self.seats:
+                    try:
+                        seat.tel.note_questing(
+                            "script-log",
+                            f"the script has printed {self.LOG_MARKERS} "
+                            f"distinct lines — the rest are in the "
+                            f"script_log stream only, so this timeline "
+                            f"keeps room for the run's own events")
+                    except Exception:
+                        pass
             return
         said = text if n == 1 else f"{text} — {n} times"
         for seat in self.seats:
@@ -2002,10 +2046,6 @@ class LiveWorker(QThread):
                 seat.tel.note_questing("script-log", said)
             except Exception:
                 pass
-        try:
-            self.status.emit(said)
-        except Exception:
-            pass
 
     async def _setup_script(self, client, seat=None):
         """Compile the party's script over every hooked client.
@@ -4984,10 +5024,29 @@ class LiveWorker(QThread):
         # twice in a minute -- into KT_AltarOfKings, then KT_Hub --
         # and the party finished at the world portal with his step
         # untouched.
+        #
+        # ...unless its own step is not reachable from where it stands
+        # either. Rev cfeb9a85 is the cost of the rule without that
+        # exception: Konstantin spent FORTY-TWO minutes alone inside
+        # `KT_ChampHall_T3`, a dungeon instance the party had left, on
+        # `Defeat Odji Sokkwi in Hall of Champions` -- whose marker read
+        # 100,242 away, another zone. Every rung declined, and each was
+        # right on its own terms: the catch-up refused (no teleport
+        # crosses a zone), the desperate hop refused (same), the script
+        # restart fired and changed nothing, and this refused because
+        # his step differed. Nothing in the program could move him.
+        #
+        # The refusal protects a wizard whose objective is HERE. A
+        # wizard whose objective is provably in another zone has nothing
+        # to protect: it cannot finish its step from this spot however
+        # long it stands there, and joining the party at least puts it
+        # where the script is operating -- and out of a dead instance.
         mine = (seat.goal or "").strip()
         theirs = {(s.goal or "").strip()
                   for s in live if s is not seat and (s.goal or "").strip()}
-        if mine and theirs and mine not in theirs:
+        away = seat.marker_away
+        adrift = away is not None and away > self.MARKER_IN_ZONE
+        if mine and theirs and mine not in theirs and not adrift:
             self._say_once(
                 seat, f"different-step:{seat.name}",
                 f"{seat.name} is in {zones[seat]} and the others are in "
@@ -5003,6 +5062,22 @@ class LiveWorker(QThread):
                         f"never advanced a quest"))
             seat.stranded_since = None
             return None, None
+        if mine and theirs and mine not in theirs and adrift:
+            # Fetched anyway, and said so: this is the exception above,
+            # and it should be legible in the export rather than look
+            # like the refusal failing to fire.
+            self._say_once(
+                seat, f"stranded-adrift:{seat.name}",
+                f"{seat.name} is on a different step AND its objective is "
+                f"{away:,.0f} away — another zone — so it cannot finish "
+                f"that step from {zones[seat]} however long it waits. "
+                f"Bringing it back to the party, which is the only move "
+                f"left that crosses a zone",
+                kind="rejoin-adrift",
+                detail=(f"{seat.name} is on {mine!r} with its marker "
+                        f"{away:,.0f} away. Every rung that could move it "
+                        f"refuses an out-of-zone objective, so standing "
+                        f"still is not protecting anything"))
 
         # Did it LEAVE the majority's zone, or never get there? A wizard
         # that fell behind and a wizard that walked on ahead are the
@@ -5421,6 +5496,25 @@ class LiveWorker(QThread):
         if not seats:
             return
         now = time.monotonic()
+        # A placement that keeps changing its mind cannot support
+        # pausing the party. See the churn counter in
+        # `_check_caught_up`: three answers in a minute is not three
+        # laggards, it is one unstable reading, and each restart costs
+        # the script another pause.
+        if (self._churn >= self.CATCH_UP_CHURN
+                and now - self._churn_at < self.CATCH_UP_CHURN_REST):
+            self._say_once(
+                seats[0], "catch-up-churn",
+                f"the answer to 'who is behind' has changed "
+                f"{self._churn} times in a row — the party is spread "
+                f"across different content and the placement cannot "
+                f"settle. Letting the script run rather than pausing it "
+                f"again for a reading that will change",
+                kind="catch-up-churn",
+                detail=(f"{self._churn} catch-ups in a row ended because a "
+                        f"DIFFERENT wizard was behind. Resting for "
+                        f"{self.CATCH_UP_CHURN_REST / 60:.0f} min"))
+            return
         self._catch_up_state = {
             "seats": seats, "gap": gap, "started": now, "moved": now,
             "goals": {id(s): s.goal for s in seats}, "why": why,
@@ -5469,6 +5563,15 @@ class LiveWorker(QThread):
     #: real guard; this is the floor under it, so two readings that
     #: alternate cannot thrash the party between them.
     CATCH_UP_COOLDOWN = 120.0
+    #: how many times running the "who is behind" answer may change
+    #: before catch-ups rest, and the window that counts as "running".
+    #: Three inside a minute at rev cfeb9a85, each pausing the script.
+    CATCH_UP_CHURN = 3
+    CATCH_UP_CHURN_WINDOW = 90.0
+    #: ...and how long they rest for. Long enough that the script gets
+    #: a real run at the problem, short enough that a party which
+    #: genuinely settles is caught up before it drifts further.
+    CATCH_UP_CHURN_REST = 300.0
 
     def _step_key(self, seat):
         """What step this wizard is on, for "have we tried this already".
@@ -5593,6 +5696,9 @@ class LiveWorker(QThread):
         started = {id(s) for s in seats}
         if not behind:
             names = " and ".join(s.name for s in seats)
+            # A catch-up that actually finished is evidence the
+            # placement CAN settle, so the churn count starts over.
+            self._churn = 0
             self._stop_catching_up(
                 "catch-up-done",
                 f"{names} back with the party — the script has its "
@@ -5601,6 +5707,25 @@ class LiveWorker(QThread):
         if not behind <= started:
             # Somebody NEW is behind, so this catch-up is answering the
             # wrong question and a fresh one should start from the top.
+            #
+            # ...and if that keeps happening, stop starting them. Rev
+            # cfeb9a85's last seven minutes are six catch-ups, three of
+            # them ended by this branch within fourteen seconds of
+            # starting -- 4025.7, 4049.8, 4063.4 -- each naming a
+            # different wizard as the one behind (Phönix 13, then
+            # Sebastian 11, then both 11). The party was genuinely
+            # spread across mainline and Arena side content, so the
+            # placement had no stable answer, and every restart paused
+            # the script again. A reading that changes its mind three
+            # times in a minute is not a laggard to rescue; it is a
+            # measurement that cannot support pausing anybody.
+            import time as _time
+
+            now_churn = _time.monotonic()
+            if now_churn - self._churn_at > self.CATCH_UP_CHURN_WINDOW:
+                self._churn = 0
+            self._churn += 1
+            self._churn_at = now_churn
             self._stop_catching_up(
                 "catch-up-done",
                 "a different wizard is behind now — starting again rather "

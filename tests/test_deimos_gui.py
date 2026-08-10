@@ -16906,10 +16906,44 @@ def test_every_source_the_worker_builds_carries_the_setting():
     assert "var DebugMode = True" in again
 
 
-def test_the_script_log_is_thinned_by_content_not_dropped():
-    """The dispatch prints on every pass, so an unthinned capture would
-    be the whole export — but the SAME line repeating is exactly what a
-    wedged route looks like, and the count is the evidence."""
+def test_every_script_line_is_kept_whole_and_in_order():
+    """The operator: "can we put all of that in the output log". All of
+    it — because the SEQUENCE is the diagnosis. A thinned sample says a
+    leg ran often; the full stream says which legs it alternates
+    between, which is the difference between a route stuck in one place
+    and a route cycling and matching nothing."""
+    worker, _read = _zoned_party(["KT_Hub", "KT_Hub"])
+    legs = ["Broken quest detected. p1 tracking_quest [get some bling]",
+            "p1 tracking_goal [collect gemstones in hall of champions]",
+            "Train button not visible. Trying different menu positions..."]
+    for i in range(300):
+        worker._note_script_log(legs[i % len(legs)])
+
+    for seat in worker.seats:
+        stream = seat.tel.script_log
+        assert len(stream) == 300, "lines went missing from the stream"
+        assert [e["detail"] for e in stream[:3]] == legs, "order lost"
+        assert all("at" in e for e in stream), "no timestamp to line up on"
+    assert worker.seats[0].tel.summary()["script_log_lines"] == 300
+
+
+def test_the_full_stream_cannot_evict_the_questing_log():
+    """`questing` is capped at 2000. A quester prints thousands of
+    lines an hour, so putting them there would leave no heartbeat, no
+    stuck-detail and no realm note to read them against."""
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    seat.tel.note_questing("heartbeat", "the entry that must survive")
+    for i in range(5000):
+        worker._note_script_log(f"line {i}")
+
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert "heartbeat" in kinds, "the script log evicted the diagnostics"
+    assert len(seat.tel.script_log) == 5000
+    assert len(seat.tel.questing) < seat.tel.QUESTING_LOG
+
+
+def test_the_questing_timeline_still_shows_the_script_was_talking():
     worker, _read = _zoned_party(["KT_Hub", "KT_Hub"])
     line = "Broken quest detected. p1 tracking_quest [get some bling]"
     for _ in range(600):
@@ -16930,6 +16964,8 @@ def test_the_script_log_is_thinned_by_content_not_dropped():
     fresh = [e for e in worker.seats[0].tel.questing
              if e["kind"] == "script-log"][-1]
     assert fresh["detail"] == "p1 tracking_goal [collect gemstones]"
+    # ...and the stream kept all 601 regardless of the thinning above.
+    assert len(worker.seats[0].tel.script_log) == 601
 
 
 def test_a_blank_script_line_is_not_written_down():
@@ -16938,6 +16974,7 @@ def test_a_blank_script_line_is_not_written_down():
     worker._note_script_log("   ")
     assert not [e for e in worker.seats[0].tel.questing
                 if e["kind"] == "script-log"]
+    assert not worker.seats[0].tel.script_log
 
 
 def test_capture_forwards_only_the_vm_and_detaches_cleanly():
@@ -16989,3 +17026,158 @@ def test_the_worker_reads_the_toggle_every_tick():
     assert "self._script_logging(self.script_debug)" in src
     stop = inspect.getsource(LiveWorker.stop)
     assert "self._script_logging(False)" in stop
+
+
+def test_the_timeline_markers_are_capped_even_when_every_line_differs():
+    """Thinning by CONTENT bounds nothing when no line repeats: a
+    dispatch printing a new zone name each pass would write one marker
+    apiece and evict the heartbeats it was meant to sit beside."""
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    seat.tel.note_questing("heartbeat", "the entry that must survive")
+    for i in range(5000):
+        worker._note_script_log(f"a different line every time {i}")
+
+    markers = [e for e in seat.tel.questing if e["kind"] == "script-log"]
+    assert len(markers) == worker.LOG_MARKERS + 1, len(markers)
+    assert "script_log stream only" in markers[-1]["detail"]
+    assert "heartbeat" in [e["kind"] for e in seat.tel.questing]
+    # ...and not one line was actually lost.
+    assert len(seat.tel.script_log) == 5000
+
+
+def test_a_wizard_adrift_in_another_zone_is_fetched_anyway(monkeypatch):
+    """Rev cfeb9a85: Konstantin spent FORTY-TWO minutes alone inside
+    KT_ChampHall_T3 — a dungeon instance the party had left — on
+    `Defeat Odji Sokkwi in Hall of Champions`, whose marker read
+    100,242 away. Every rung declined and each was right on its own
+    terms: catch-up out of zone, desperate hop out of zone, script
+    restart fired and changed nothing, and the regroup refused because
+    his step differed. Nothing in the program could move him.
+
+    The refusal protects a wizard whose objective is HERE. One whose
+    objective is provably in another zone has nothing to protect."""
+    import time
+
+    worker, read_zone = _zoned_party(
+        ["Krokotopia/KT_Krokosphinx/Interiors/KT_ChampHall_T3",
+         "Krokotopia/KT_Hub", "Krokotopia/KT_Hub"])
+    odd, a, b = worker.seats
+    odd.goal = "Defeat Odji Sokkwi in Hall of Champions"
+    a.goal = b.goal = "Talk To Ako in Grand Arena"
+    odd.marker_away = 100242.0            # another zone entirely
+
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+    odd.stranded_since = time.monotonic() - worker.STRANDED_AFTER - 1
+    seat, target = _look(worker, read_zone, monkeypatch)
+    assert seat is odd, "it left him in a dead instance for want of a rule"
+    assert target in (a, b)
+    note = [e for e in odd.tel.questing if e["kind"] == "rejoin-adrift"]
+    assert note and "100,242 away" in note[0]["detail"]
+
+
+def test_a_different_step_in_THIS_zone_is_still_refused(monkeypatch):
+    """The gemstone case the refusal was written for must survive: his
+    objective was where he stood, and dragging him off it was the harm."""
+    import time
+
+    worker, read_zone = _zoned_party(
+        ["Krokotopia/KT_Krokosphinx/KT_ChampHall",
+         "Krokotopia/KT_Hub", "Krokotopia/KT_Hub"])
+    odd, a, b = worker.seats
+    odd.goal = "Collect Gemstones in Hall of Champions (0 of 4)"
+    a.goal = b.goal = "Talk To General Khaba in Hall of Champions"
+    odd.marker_away = None               # a Collect step has no marker
+
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+    odd.stranded_since = time.monotonic() - worker.STRANDED_AFTER - 1
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+    assert [e for e in odd.tel.questing if e["kind"] == "rejoin-refused"]
+
+
+# ---------------- a placement that cannot settle must not pause the party
+#
+# Rev cfeb9a85's last seven minutes: six catch-ups, three of them ended
+# within fourteen seconds of starting — 4025.7, 4049.8, 4063.4 — each
+# naming a DIFFERENT wizard as the one behind (Phönix 13 quests, then
+# Sebastian 11, then both 11). The party was genuinely spread across
+# mainline and Arena side content, so "who is behind" had no stable
+# answer, and every restart paused the script again.
+
+def _churning(worker):
+    """Drive the "a different wizard is behind" branch once."""
+    import time
+
+    laggard = worker.seats[0]
+    now = time.monotonic()
+    worker._catch_up_state = {
+        "seats": [laggard], "gap": 1, "started": now, "moved": now,
+        "goals": {id(laggard): laggard.goal}, "why": "",
+    }
+    for seat in worker.seats:
+        seat.progress = ("KT_ChampHall", (1, 2, 3), seat.goal)
+        seat.progress_at = now
+        seat.in_duel = False
+    # somebody ELSE is the one behind now
+    worker.seats[1].quest_name = "Give em Another Round"
+    worker.seats[0].quest_name = "Back to Winthrop"
+    worker._check_caught_up()
+
+
+def test_three_changes_of_mind_stop_the_catch_ups():
+    import time
+
+    worker = _behind_party()
+    for _ in range(3):
+        _churning(worker)
+        worker.seats[1].quest_name, worker.seats[0].quest_name = (
+            worker.seats[0].quest_name, worker.seats[1].quest_name)
+    assert worker._churn >= worker.CATCH_UP_CHURN, worker._churn
+
+    worker._catch_up_state = None
+    worker._start_catching_up([worker.seats[0]], 1, "questline")
+    assert worker._catch_up_state is None, \
+        "it paused the party again for a reading that keeps changing"
+    note = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "catch-up-churn"]
+    assert note and "DIFFERENT wizard" in note[0]["detail"]
+
+
+def test_the_rest_expires_and_catch_ups_resume():
+    import time
+
+    worker = _behind_party()
+    worker._churn = worker.CATCH_UP_CHURN
+    worker._churn_at = time.monotonic() - worker.CATCH_UP_CHURN_REST - 1
+    worker._start_catching_up([worker.seats[0]], 1, "questline")
+    assert worker._catch_up_state is not None, "the rest never ended"
+
+
+def test_a_catch_up_that_finished_clears_the_churn():
+    """One real rescue is evidence the placement CAN settle."""
+    import time
+
+    worker = _behind_party()
+    worker._churn = 5
+    # everybody on the same quest -> nobody behind -> "done"
+    for seat in worker.seats:
+        seat.quest_name = "Back to Winthrop"
+        seat.goal = "goal for Back to Winthrop"
+    now = time.monotonic()
+    worker._catch_up_state = {
+        "seats": [worker.seats[0]], "gap": 1, "started": now, "moved": now,
+        "goals": {}, "why": "",
+    }
+    worker._check_caught_up()
+    assert worker._churn == 0
+    assert worker._catch_up_state is None
+
+
+def test_one_change_of_mind_is_not_churn():
+    worker = _behind_party()
+    _churning(worker)
+    assert worker._churn == 1
+    worker._catch_up_state = None
+    worker._start_catching_up([worker.seats[0]], 1, "questline")
+    assert worker._catch_up_state is not None, \
+        "a single retarget must still be allowed to start again"

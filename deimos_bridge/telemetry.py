@@ -639,6 +639,7 @@ class Telemetry:
         self.fights = []
         #: what happened between the fights -- see `note_questing`
         self.questing = []
+        self.script_log = []
         self.started_at = None
         self._fight = 0
         self._pending = None       # RoundRecord awaiting its actual damage
@@ -915,6 +916,18 @@ class Telemetry:
     #: was it doing for those twenty minutes" afterwards -- a cap that
     #: throws the beginning away cannot.
     QUESTING_LOG = 2000
+    #: ...and the script's own commentary, kept WHOLE and kept apart.
+    #:
+    #: Apart, because it would otherwise evict the log it is meant to
+    #: explain: a quester prints on every pass of its dispatch, which is
+    #: thousands of lines an hour against `QUESTING_LOG`'s 2000, so
+    #: within minutes there would be no heartbeat, no stuck-detail and
+    #: no realm note left to read it against. Whole, because the
+    #: operator asked for all of it -- and because the SEQUENCE is the
+    #: diagnosis. A thinned sample says a leg ran often; the full stream
+    #: says which legs it alternates between, which is the difference
+    #: between "stuck in one place" and "cycling and matching nothing".
+    SCRIPT_LOG = 20000
 
     def clock(self):
         """Seconds since this run's first timed event.
@@ -952,6 +965,20 @@ class Telemetry:
             "detail": detail,
         })
         del self.questing[:-self.QUESTING_LOG]
+
+    def note_script(self, text):
+        """One line the running script printed, verbatim and in order.
+
+        Its own stream rather than a `questing` entry -- see
+        `SCRIPT_LOG`. Timestamped the same way, so the two line up
+        against each other and against the other wizards' exports.
+        """
+        self.script_log.append({
+            "at": round(self.clock(), 1),
+            "fight": len(self.fights),
+            "detail": text,
+        })
+        del self.script_log[:-self.SCRIPT_LOG]
 
     def questing_counts(self):
         """{kind: n} over the whole log, for the summary.
@@ -1593,6 +1620,7 @@ class Telemetry:
             "hand_visibility": self.hand_visibility(),
             "hidden_cards": self.hidden_cards(),
             "questing": self.questing_counts(),
+            "script_log_lines": len(self.script_log),
             # Where a round's seconds went. "It is very slow" was a
             # report the exports could not answer at all: rounds carried
             # no time in them, so a 46-second round and a 12-second one
@@ -1610,6 +1638,9 @@ class Telemetry:
             # minutes, and until this existed the export could not tell
             # the two apart.
             "questing": list(self.questing),
+            # The script's own `print` output, every line of it. Kept
+            # out of `questing` so it cannot evict the log it explains.
+            "script_log": list(self.script_log),
         }
         with open(path, "w") as f:
             json.dump(payload, f, indent=2, default=str)
