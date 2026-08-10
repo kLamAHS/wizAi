@@ -1237,6 +1237,28 @@ class LiveWorker(QThread):
         if want:
             await self._setup_script(seat.client, seat)
 
+    def _note_reload(self, seat, why, runner=None):
+        """Write a script reload into every export, with its cause.
+
+        The gap the operator found by watching the screen instead of
+        the log: "why does it go through the menu so much... it
+        randomly opens up the settings". Every one of those is the
+        program starting again from instruction 0 and re-running its
+        setup, and a reload was only ever said on the status line --
+        which nobody is reading an hour later. So the exports could
+        not explain the one thing visible from across the room.
+        """
+        detail = f"the script was reloaded and starts again from the top — {why}"
+        skipped = list(getattr(runner, "skipped_setup", None) or ())
+        if skipped:
+            detail += (f". Its one-time setup ({', '.join(skipped)}) is "
+                       f"skipped on a reload — it has already run")
+        for other in self.seats:
+            try:
+                other.tel.note_questing("script-reloaded", detail)
+            except Exception:
+                pass
+
     async def _script_step(self, seat=None):
         """One burst of the script, not one instruction.
 
@@ -1265,9 +1287,13 @@ class LiveWorker(QThread):
             # An instruction had to be cancelled, so the VM is part-way
             # through one. Reloading is the only honest recovery.
             self._say(seat, runner.last_error)
+            why = runner.last_error
             if not runner.restart():
                 self._say(seat, "script stopped — it could not be reloaded")
+                self._note_reload(seat, f"could NOT be reloaded — {why}")
                 seat.runner = None
+                return
+            self._note_reload(seat, why, runner)
             return
         if runner.failures:
             # Thinned rather than reported at exactly the first and
@@ -3157,10 +3183,15 @@ class LiveWorker(QThread):
                 f"Restarting it so its route dispatch runs fresh against "
                 f"the party's current quest — the operator's manual reset, "
                 f"automated")
-        if not runner.restart():
+        ok = runner.restart()
+        skipped = list(getattr(runner, "skipped_setup", None) or ())
+        if not ok:
             said = ("tried to restart the looping script and the restart "
                     "failed — it will be retried in "
                     f"{self.SCRIPT_RESTART_EVERY / 60:.0f} min")
+        elif skipped:
+            said += (f". Its one-time setup ({', '.join(skipped)}) is "
+                     f"skipped — it has already run")
         for other in self.seats:
             try:
                 other.tel.note_questing("script-restarted", said)
