@@ -17093,3 +17093,91 @@ def test_a_different_step_in_THIS_zone_is_still_refused(monkeypatch):
     odd.stranded_since = time.monotonic() - worker.STRANDED_AFTER - 1
     assert _look(worker, read_zone, monkeypatch) == (None, None)
     assert [e for e in odd.tel.questing if e["kind"] == "rejoin-refused"]
+
+
+# ---------------- a placement that cannot settle must not pause the party
+#
+# Rev cfeb9a85's last seven minutes: six catch-ups, three of them ended
+# within fourteen seconds of starting — 4025.7, 4049.8, 4063.4 — each
+# naming a DIFFERENT wizard as the one behind (Phönix 13 quests, then
+# Sebastian 11, then both 11). The party was genuinely spread across
+# mainline and Arena side content, so "who is behind" had no stable
+# answer, and every restart paused the script again.
+
+def _churning(worker):
+    """Drive the "a different wizard is behind" branch once."""
+    import time
+
+    laggard = worker.seats[0]
+    now = time.monotonic()
+    worker._catch_up_state = {
+        "seats": [laggard], "gap": 1, "started": now, "moved": now,
+        "goals": {id(laggard): laggard.goal}, "why": "",
+    }
+    for seat in worker.seats:
+        seat.progress = ("KT_ChampHall", (1, 2, 3), seat.goal)
+        seat.progress_at = now
+        seat.in_duel = False
+    # somebody ELSE is the one behind now
+    worker.seats[1].quest_name = "Give em Another Round"
+    worker.seats[0].quest_name = "Back to Winthrop"
+    worker._check_caught_up()
+
+
+def test_three_changes_of_mind_stop_the_catch_ups():
+    import time
+
+    worker = _behind_party()
+    for _ in range(3):
+        _churning(worker)
+        worker.seats[1].quest_name, worker.seats[0].quest_name = (
+            worker.seats[0].quest_name, worker.seats[1].quest_name)
+    assert worker._churn >= worker.CATCH_UP_CHURN, worker._churn
+
+    worker._catch_up_state = None
+    worker._start_catching_up([worker.seats[0]], 1, "questline")
+    assert worker._catch_up_state is None, \
+        "it paused the party again for a reading that keeps changing"
+    note = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "catch-up-churn"]
+    assert note and "DIFFERENT wizard" in note[0]["detail"]
+
+
+def test_the_rest_expires_and_catch_ups_resume():
+    import time
+
+    worker = _behind_party()
+    worker._churn = worker.CATCH_UP_CHURN
+    worker._churn_at = time.monotonic() - worker.CATCH_UP_CHURN_REST - 1
+    worker._start_catching_up([worker.seats[0]], 1, "questline")
+    assert worker._catch_up_state is not None, "the rest never ended"
+
+
+def test_a_catch_up_that_finished_clears_the_churn():
+    """One real rescue is evidence the placement CAN settle."""
+    import time
+
+    worker = _behind_party()
+    worker._churn = 5
+    # everybody on the same quest -> nobody behind -> "done"
+    for seat in worker.seats:
+        seat.quest_name = "Back to Winthrop"
+        seat.goal = "goal for Back to Winthrop"
+    now = time.monotonic()
+    worker._catch_up_state = {
+        "seats": [worker.seats[0]], "gap": 1, "started": now, "moved": now,
+        "goals": {}, "why": "",
+    }
+    worker._check_caught_up()
+    assert worker._churn == 0
+    assert worker._catch_up_state is None
+
+
+def test_one_change_of_mind_is_not_churn():
+    worker = _behind_party()
+    _churning(worker)
+    assert worker._churn == 1
+    worker._catch_up_state = None
+    worker._start_catching_up([worker.seats[0]], 1, "questline")
+    assert worker._catch_up_state is not None, \
+        "a single retarget must still be allowed to start again"
