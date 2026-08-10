@@ -14387,10 +14387,38 @@ def test_an_ordinary_conversation_is_never_raced(monkeypatch):
     import time
 
     worker, seat = _wedged(dialogue=True, monkeypatch=monkeypatch)
-    seat.progress_at = time.monotonic() - worker.DIALOG_WEDGE + 30
+    seat.progress_at = time.monotonic() - worker.DIALOG_WEDGE + 10
     asyncio.run(worker._unstick(seat))
     assert seat.tel.questing == []
-    assert seat.box_seen is False
+    assert seat.box_text is None
+
+
+def test_a_conversation_being_advanced_is_left_alone(monkeypatch):
+    """The receipt in action: a page the script IS advancing reads
+    differently on every look, and however slow the pages turn, a box
+    whose text keeps changing is a conversation — not a wedge."""
+    import asyncio
+    import time
+
+    from deimos_bridge import questing
+
+    worker, seat = _wedged(dialogue=True, monkeypatch=monkeypatch)
+    seat.progress_at = time.monotonic() - worker.DIALOG_WEDGE - 1
+    pages = iter(["page one", "page two", "page two"])
+
+    async def turning(_c):
+        return next(pages)
+
+    monkeypatch.setattr(questing, "dialogue_text", turning)
+    asyncio.run(worker._unstick(seat))              # sees "page one"
+    seat.unstuck_at = 0.0
+    asyncio.run(worker._unstick(seat))              # "page two" — advancing
+    assert seat.tel.questing == [], \
+        "a box whose text changed between looks was called a wedge"
+    seat.unstuck_at = 0.0
+    asyncio.run(worker._unstick(seat))              # "page two" again — dead
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert kinds == ["stuck-detail", "unstuck-dialogue"]
 
 
 # ------------------------- the first duel's names go into the script
@@ -14456,3 +14484,106 @@ def test_a_solo_pilot_script_is_not_filled():
     worker.solo_script = True
     worker._fill_script_names()
     assert 'var Main_Account = "QuestingAccountName"' in worker.script
+
+
+# ---------------------- movement that goes nowhere is not progress
+#
+# The stack audit's F6: every backstop hangs off the stuck clock, and
+# the clock reset on ANY position change — so a script retry loop that
+# teleports a wizard between two spots reset it forever. The heartbeats
+# said "moving" while the operator watched a wizard standing still, and
+# the backstops built for exactly that wedge were the one thing the
+# wedge switched off.
+
+def test_bouncing_between_two_spots_does_not_reset_the_stuck_clock():
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    seat.goal = "Talk To Rami in Hall of Champions"
+    a, b = (10, 10, 0), (30, 10, 0)
+    worker._note_progress(seat, "KT_Hub", a, 100.0)
+    worker._note_progress(seat, "KT_Hub", b, 105.0)   # first visit: real move
+    settled = seat.progress_at
+    for i, cell in enumerate([a, b, a, b]):
+        worker._note_progress(seat, "KT_Hub", cell, 115.0 + i * 10)
+    assert seat.progress_at == settled, \
+        "a two-spot teleport loop kept resetting the stuck clock"
+
+
+def test_a_genuinely_new_spot_still_resets_it():
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    seat.goal = "Talk To Rami in Hall of Champions"
+    worker._note_progress(seat, "KT_Hub", (10, 10, 0), 100.0)
+    worker._note_progress(seat, "KT_Hub", (30, 10, 0), 110.0)   # bounce arm
+    worker._note_progress(seat, "KT_Hub", (99, 99, 0), 120.0)   # real move
+    assert seat.progress_at == 120.0
+
+
+def test_a_zone_or_goal_change_is_always_progress():
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    seat.goal = "Talk To Rami in Hall of Champions"
+    a = (10, 10, 0)
+    worker._note_progress(seat, "KT_Hub", a, 100.0)
+    seat.goal = "Talk To General Khaba in Hall of Champions"
+    worker._note_progress(seat, "KT_Hub", a, 110.0)
+    assert seat.progress_at == 110.0, "a quest turn-in on the spot is progress"
+
+
+def test_an_old_cell_revisited_after_the_window_is_progress():
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    seat.goal = "g"
+    a, b = (10, 10, 0), (30, 10, 0)
+    worker._note_progress(seat, "KT_Hub", a, 100.0)
+    worker._note_progress(seat, "KT_Hub", b, 110.0)
+    later = 110.0 + worker.OSCILLATION_WINDOW + 1
+    worker._note_progress(seat, "KT_Hub", a, later)
+    assert seat.progress_at == later, \
+        "coming back somewhere after three minutes is a route, not a bounce"
+
+
+# ------------------------------ a name that will not read has an age
+#
+# The audit's F3: `maybe_text` returns "" for a zero length, a mid-write
+# pointer or a decode failure, so blank reads are routine and keeping
+# the previous value is right — for a while. Kept forever it becomes
+# invention, and rev 30e83468's Sebastian was held two quests behind by
+# a name that had stopped reading.
+
+def test_a_blank_name_read_keeps_the_previous_value_for_a_while():
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    worker._note_name(seat, "Eye of Krok", 100.0)
+    worker._note_name(seat, "", 100.0 + worker.NAME_MAX_AGE - 1)
+    assert seat.quest_name == "Eye of Krok"
+
+
+def test_a_name_that_has_not_read_in_five_minutes_is_unknown():
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    worker._note_name(seat, "Eye of Krok", 100.0)
+    worker._note_name(seat, "", 100.0 + worker.NAME_MAX_AGE + 1)
+    assert seat.quest_name == "", \
+        "a five-minute-dead read still placed this wizard on the line"
+
+
+def test_a_hand_set_name_with_no_read_stamp_is_never_aged_out():
+    """Every test fixture sets quest_name directly; a name without a
+    read timestamp has no age to exceed."""
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    seat.quest_name = "Eye of Krok"
+    worker._note_name(seat, "", 1e9)
+    assert seat.quest_name == "Eye of Krok"
+
+
+def test_the_goal_poll_skips_a_loading_client():
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._read_goal)
+    assert "is_loading" in src
+    assert src.index("is_loading") < src.index("read_quest_goal"), \
+        "the loading gate must come before the reads it protects"

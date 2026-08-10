@@ -202,10 +202,17 @@ class _Seat:
         #: See `LiveWorker._unstick`.
         self.unstuck_at = 0.0
         self.steps_seen = None
-        #: whether the LAST unstick look also saw a dialogue box open.
-        #: One box is a conversation; the same box across two looks is a
-        #: wedge. See `LiveWorker.DIALOG_WEDGE`.
-        self.box_seen = False
+        #: the dialogue box's TEXT at the last unstick look, or None when
+        #: no box was open. Same text across two looks = the script's own
+        #: clearing is provably not advancing it. See `DIALOG_WEDGE`.
+        self.box_text = None
+        #: position cells this wizard has stood in recently, cell -> last
+        #: seen. A script retry loop that teleports a wizard between two
+        #: spots is not movement. See `LiveWorker._note_progress`.
+        self.cells_seen = {}
+        #: when the quest NAME last actually read. A blank read keeps the
+        #: previous value, and this bounds how long. See `_note_name`.
+        self.name_read_at = 0.0
         #: the spot a desperation quest-teleport was already tried from,
         #: as a `progress` stamp. See `LiveWorker._desperate_hop`.
         self.hop_tried_at = None
@@ -2470,6 +2477,16 @@ class LiveWorker(QThread):
             return
         seat.goal_read = now
         try:
+            if await seat.client.is_loading():
+                # Nothing below reads true mid-load: window text comes
+                # back blank, positions come back in the OLD zone's
+                # space, and every blank feeds a keep-the-previous-value
+                # rule somewhere. A load lasts seconds; skipping the
+                # poll costs one `GOAL_POLL` and poisons nothing.
+                return
+        except Exception:
+            pass
+        try:
             goal = await questing.read_quest_goal(seat.client)
         except Exception:
             goal = ""
@@ -2493,8 +2510,7 @@ class LiveWorker(QThread):
             name = await questing.read_quest_name(seat.client)
         except Exception:
             name = ""
-        if name:
-            seat.quest_name = name
+        self._note_name(seat, name, now)
 
         zone = position = None
         try:
@@ -2524,11 +2540,7 @@ class LiveWorker(QThread):
         except Exception:
             pass
 
-        where = (zone, position, seat.goal)
-        if where != seat.progress:
-            seat.progress = where
-            seat.progress_at = now
-            seat.said_stuck = ""
+        self._note_progress(seat, zone, position, now)
         try:
             self.seat_quest.emit(seat.index, self._quest_row(seat, zone, now))
         except Exception:
@@ -2540,6 +2552,78 @@ class LiveWorker(QThread):
             # wizards and only every `TOGETHER_POLL` seconds.
             seat.zone_for_writeoff = zone
             self._forget_write_off(seat)
+
+    #: how long a position cell is remembered. A wizard back on a spot it
+    #: stood on within this window, same zone and same goal, has not
+    #: gone anywhere -- it has bounced.
+    OSCILLATION_WINDOW = 180.0
+    #: how long a quest name that will not read is kept before it counts
+    #: as unknown. Keeping the previous value on a blank read is right
+    #: (a blank is not evidence of change) -- for a while. Past this,
+    #: the kept value is invention: rev 30e83468's Sebastian was held
+    #: two quests behind by a name that had stopped reading.
+    NAME_MAX_AGE = 300.0
+
+    def _note_progress(self, seat, zone, position, now):
+        """Advance the progress clock -- unless the movement is a bounce.
+
+        The stuck clock is what every backstop hangs off (`_unstick`,
+        `_check_progress`, `_desperate_hop`), and it reset on ANY
+        position change. A script retry loop that TELEPORTS the wizard
+        between two spots therefore reset it forever: the heartbeats
+        said "moving" while the operator watched a wizard standing
+        still, and the backstops built for exactly that wedge were the
+        one thing the wedge switched off. The stack audit named it
+        starvation (F6).
+
+        A bounce is a return to a cell this wizard already stood in
+        within `OSCILLATION_WINDOW`, in the same zone and on the same
+        goal. Real progress -- a new cell, a new zone, a new goal --
+        still resets the clock on sight, and `seat.progress` (the spot
+        stamp the press-X and hop memories key on) deliberately stays
+        on the first cell of a bounce pair: the pair is one situation,
+        not two fresh chances.
+        """
+        where = (zone, position, seat.goal)
+        if where != seat.progress:
+            bounce = (seat.progress is not None
+                      and position is not None
+                      and zone == seat.progress[0]
+                      and seat.goal == seat.progress[2]
+                      and now - seat.cells_seen.get(position, -1e9)
+                      < self.OSCILLATION_WINDOW)
+            if not bounce:
+                seat.progress = where
+                seat.progress_at = now
+                seat.said_stuck = ""
+        if position is not None:
+            seat.cells_seen[position] = now
+            if len(seat.cells_seen) > 32:
+                cut = now - self.OSCILLATION_WINDOW
+                for cell, at in list(seat.cells_seen.items()):
+                    if at < cut:
+                        del seat.cells_seen[cell]
+
+    def _note_name(self, seat, name, now):
+        """Keep the freshest quest name, and stop keeping a dead one.
+
+        A blank read keeps the previous value -- a blank is not
+        evidence the wizard changed quest, and reads DO blank
+        transiently (`maybe_text` returns "" for a zero length, a
+        mid-write pointer or a decode failure; the audit's F3). But
+        kept forever, the previous value becomes invention. Past
+        `NAME_MAX_AGE` without one successful read, the honest answer
+        is "unknown": placement falls to the goal line, which the same
+        poll reads fresh, and `_places` treats an unplaced wizard by
+        refusing to move anyone -- the safe direction.
+        """
+        if name:
+            seat.quest_name = name
+            seat.name_read_at = now
+            return
+        if (seat.quest_name and seat.name_read_at
+                and now - seat.name_read_at > self.NAME_MAX_AGE):
+            seat.quest_name = ""
 
     def _quest_row(self, seat, zone, now):
         """One wizard's questing state, as the Questing tab shows it.
@@ -2786,13 +2870,17 @@ class LiveWorker(QThread):
     #: is waiting on changes on the scale of a conversation, not a tick.
     UNSTICK_EVERY = 30.0
 
-    #: how long a wizard may stand still before a WEDGED DIALOGUE BOX is
-    #: cleared for it -- the fast lane, next to `STUCK_AFTER`'s five
-    #: minutes for everything else. A box the script's handling was
-    #: going to clear is gone within seconds; one still up at ninety,
-    #: and up again on the next look, is blocking movement for the whole
-    #: party while the script walks its program against a wall.
-    DIALOG_WEDGE = 90.0
+    #: how long a wizard may stand still before a WEDGED DIALOGUE BOX
+    #: comes under observation -- the fast lane, next to `STUCK_AFTER`'s
+    #: five minutes for everything else. Action needs more than time: the
+    #: box must show the SAME TEXT on two looks `UNSTICK_EVERY` apart.
+    #: That is the receipt the stack audit found missing everywhere --
+    #: rev ed709013's script "cleared" a box fifteen times in eight
+    #: milliseconds and never moved it, and text-unchanged-for-30s is
+    #: the proof clicks are dying that no click reports on its own. A
+    #: conversation being actively advanced changes text every page and
+    #: is never touched, however fast this threshold.
+    DIALOG_WEDGE = 25.0
 
     async def _unstick(self, seat):
         """Unwedge a scripted wizard, in the direction its own wait needs.
@@ -2844,15 +2932,17 @@ class LiveWorker(QThread):
             problem. The wizard needs moving, and after a second look
             `_desperate_hop` moves it.
 
-        The box arm runs from `DIALOG_WEDGE` -- ninety seconds, and only
-        for a box seen open on two consecutive looks. Everything else
-        waits for `STUCK_AFTER`, so an ordinary conversation is never
-        raced, and every read is written down either way. The fast lane
-        is rev ed709013: the script's own dialogue handling logged
-        `Dialogue detected. Clearing...` fifteen times in eight
-        milliseconds while General Khaba's MORE button sat unclicked on
-        all three clients, and wizAi -- whose own clicker works -- stood
-        by for the full five minutes it grants the script first.
+        The box arm runs from `DIALOG_WEDGE`, and acts only on a box
+        showing the SAME TEXT on two looks -- the receipt that proves
+        the script's clicks are dying rather than merely slow.
+        Everything else waits for `STUCK_AFTER`, so an ordinary
+        conversation is never raced, and every read is written down
+        either way. The fast lane is rev ed709013: the script's own
+        dialogue handling logged `Dialogue detected. Clearing...`
+        fifteen times in eight milliseconds while General Khaba's MORE
+        button sat unclicked on all three clients, and wizAi -- whose
+        own clicker works -- stood by for the full five minutes it
+        granted the script first.
         """
         import time
 
@@ -2865,7 +2955,7 @@ class LiveWorker(QThread):
         if idle < self.DIALOG_WEDGE:
             seat.unstuck_at = 0.0
             seat.steps_seen = None
-            seat.box_seen = False
+            seat.box_text = None
             return
         if now - seat.unstuck_at < self.UNSTICK_EVERY:
             return
@@ -2880,11 +2970,24 @@ class LiveWorker(QThread):
 
         open_box = await questing.in_dialogue(seat.client)
         # Before STUCK_AFTER, the only actionable finding is a dialogue
-        # box that was ALSO open on the previous look -- thirty seconds
-        # apart, so the script's own handling had over a hundred polls
-        # at it first. One look is a conversation; two is a wedge.
-        seen_before, seat.box_seen = seat.box_seen, open_box
-        if idle < self.STUCK_AFTER and not (open_box and seen_before):
+        # box showing the SAME TEXT as the previous look, thirty seconds
+        # apart. The text is the receipt: the script's own handling had
+        # over a hundred polls at the box in that window, and a page it
+        # was actually advancing would read differently by now. A page
+        # that reads the same is a click that is dying in flight -- the
+        # failure `click_window` itself never reports. Unreadable text
+        # ("" both times) still counts: two looks at a box nothing
+        # could read or move is the same wedge with worse lighting.
+        text = None
+        if open_box:
+            try:
+                text = (await questing.dialogue_text(seat.client)) or ""
+            except Exception:
+                text = ""
+        stalled = open_box and seat.box_text is not None \
+            and text == seat.box_text
+        seat.box_text = text
+        if idle < self.STUCK_AFTER and not stalled:
             return
         near = await questing.near_interactable(seat.client)
         at_marker, why = await questing.at_quest_marker(seat.client)
