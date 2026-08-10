@@ -15496,3 +15496,33 @@ def test_a_reload_lands_in_every_export():
         assert notes, "a seat's export cannot explain the reload"
         assert "starts again from the top" in notes[0]["detail"]
         assert "First_Run_Settings" in notes[0]["detail"]
+
+
+def test_a_rebuild_skips_the_setup_too(monkeypatch):
+    """Rev 613ab86a: `script-configured` fired at 360s, and Sebastian's
+    instruction counter reset from 7,712 to 2,114 — the name fill
+    rebuilt the runner, the program began at instruction 0 and walked
+    the settings menus a second time. A rebuild is no more a first
+    start than a restart is."""
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+
+    first, skipped = worker._fresh_source(seat, _PREAMBLE)
+    assert skipped == [], "the FIRST build must run the program as written"
+    assert first == _PREAMBLE
+
+    seat.script_built = True
+    again, skipped = worker._fresh_source(seat, _PREAMBLE)
+    assert skipped == ["First_Run", "First_Run_Settings"]
+    assert "\ncall First_Run_Settings\n" not in again
+
+
+def test_the_rebuild_path_marks_the_seat_and_reports(monkeypatch):
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._setup_script)
+    assert "self._fresh_source(seat, source)" in src
+    assert "seat.script_built = True" in src
+    assert "skipped_setup" in src, "a trimmed rebuild has to say so"
