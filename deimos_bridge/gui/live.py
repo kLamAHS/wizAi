@@ -1949,6 +1949,13 @@ class LiveWorker(QThread):
     #: it is thinned. The dispatch prints on every pass, so an
     #: unthinned capture would be the whole export.
     LOG_THIN = (1, 2, 5, 20, 100, 500, 2000)
+    #: ...and a hard ceiling on how many of those markers the questing
+    #: timeline may hold, whatever the script says. Thinning by CONTENT
+    #: bounds nothing when every line is different -- a dispatch that
+    #: prints a new zone name each pass would still write one marker
+    #: apiece and evict the heartbeats it was meant to sit beside. The
+    #: full stream is in `script_log` and loses nothing.
+    LOG_MARKERS = 200
 
     def _script_logging(self, on):
         """Start or stop forwarding the script's `print` output.
@@ -1990,11 +1997,44 @@ class LiveWorker(QThread):
         text = (text or "").strip()
         if not text:
             return
+        # EVERY line, in order, into its own stream. The operator asked
+        # for all of it, and the sequence is the diagnosis: a thinned
+        # sample says a leg ran often, the full stream says which legs
+        # it alternates between -- the difference between a route stuck
+        # in one place and a route cycling and matching nothing.
+        for seat in self.seats:
+            try:
+                seat.tel.note_script(text)
+            except Exception:
+                pass
+        # ...and a thinned marker in the questing timeline, so the
+        # narrative the operator actually reads still shows that the
+        # script was talking, and how much. `questing` is capped at
+        # 2000 entries; unthinned this would evict every heartbeat and
+        # stuck-detail within minutes of a chatty quester.
         n = self._logged.get(text, 0) + 1
         self._logged[text] = n
         if len(self._logged) > 400:
             self._logged.clear()
+        try:
+            self.status.emit(text)
+        except Exception:
+            pass
         if n not in self.LOG_THIN:
+            return
+        self._markers = getattr(self, "_markers", 0) + 1
+        if self._markers > self.LOG_MARKERS:
+            if self._markers == self.LOG_MARKERS + 1:
+                for seat in self.seats:
+                    try:
+                        seat.tel.note_questing(
+                            "script-log",
+                            f"the script has printed {self.LOG_MARKERS} "
+                            f"distinct lines — the rest are in the "
+                            f"script_log stream only, so this timeline "
+                            f"keeps room for the run's own events")
+                    except Exception:
+                        pass
             return
         said = text if n == 1 else f"{text} — {n} times"
         for seat in self.seats:
@@ -2002,10 +2042,6 @@ class LiveWorker(QThread):
                 seat.tel.note_questing("script-log", said)
             except Exception:
                 pass
-        try:
-            self.status.emit(said)
-        except Exception:
-            pass
 
     async def _setup_script(self, client, seat=None):
         """Compile the party's script over every hooked client.

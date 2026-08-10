@@ -16906,10 +16906,44 @@ def test_every_source_the_worker_builds_carries_the_setting():
     assert "var DebugMode = True" in again
 
 
-def test_the_script_log_is_thinned_by_content_not_dropped():
-    """The dispatch prints on every pass, so an unthinned capture would
-    be the whole export — but the SAME line repeating is exactly what a
-    wedged route looks like, and the count is the evidence."""
+def test_every_script_line_is_kept_whole_and_in_order():
+    """The operator: "can we put all of that in the output log". All of
+    it — because the SEQUENCE is the diagnosis. A thinned sample says a
+    leg ran often; the full stream says which legs it alternates
+    between, which is the difference between a route stuck in one place
+    and a route cycling and matching nothing."""
+    worker, _read = _zoned_party(["KT_Hub", "KT_Hub"])
+    legs = ["Broken quest detected. p1 tracking_quest [get some bling]",
+            "p1 tracking_goal [collect gemstones in hall of champions]",
+            "Train button not visible. Trying different menu positions..."]
+    for i in range(300):
+        worker._note_script_log(legs[i % len(legs)])
+
+    for seat in worker.seats:
+        stream = seat.tel.script_log
+        assert len(stream) == 300, "lines went missing from the stream"
+        assert [e["detail"] for e in stream[:3]] == legs, "order lost"
+        assert all("at" in e for e in stream), "no timestamp to line up on"
+    assert worker.seats[0].tel.summary()["script_log_lines"] == 300
+
+
+def test_the_full_stream_cannot_evict_the_questing_log():
+    """`questing` is capped at 2000. A quester prints thousands of
+    lines an hour, so putting them there would leave no heartbeat, no
+    stuck-detail and no realm note to read them against."""
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    seat.tel.note_questing("heartbeat", "the entry that must survive")
+    for i in range(5000):
+        worker._note_script_log(f"line {i}")
+
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert "heartbeat" in kinds, "the script log evicted the diagnostics"
+    assert len(seat.tel.script_log) == 5000
+    assert len(seat.tel.questing) < seat.tel.QUESTING_LOG
+
+
+def test_the_questing_timeline_still_shows_the_script_was_talking():
     worker, _read = _zoned_party(["KT_Hub", "KT_Hub"])
     line = "Broken quest detected. p1 tracking_quest [get some bling]"
     for _ in range(600):
@@ -16930,6 +16964,8 @@ def test_the_script_log_is_thinned_by_content_not_dropped():
     fresh = [e for e in worker.seats[0].tel.questing
              if e["kind"] == "script-log"][-1]
     assert fresh["detail"] == "p1 tracking_goal [collect gemstones]"
+    # ...and the stream kept all 601 regardless of the thinning above.
+    assert len(worker.seats[0].tel.script_log) == 601
 
 
 def test_a_blank_script_line_is_not_written_down():
@@ -16938,6 +16974,7 @@ def test_a_blank_script_line_is_not_written_down():
     worker._note_script_log("   ")
     assert not [e for e in worker.seats[0].tel.questing
                 if e["kind"] == "script-log"]
+    assert not worker.seats[0].tel.script_log
 
 
 def test_capture_forwards_only_the_vm_and_detaches_cleanly():
@@ -16989,3 +17026,21 @@ def test_the_worker_reads_the_toggle_every_tick():
     assert "self._script_logging(self.script_debug)" in src
     stop = inspect.getsource(LiveWorker.stop)
     assert "self._script_logging(False)" in stop
+
+
+def test_the_timeline_markers_are_capped_even_when_every_line_differs():
+    """Thinning by CONTENT bounds nothing when no line repeats: a
+    dispatch printing a new zone name each pass would write one marker
+    apiece and evict the heartbeats it was meant to sit beside."""
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    seat.tel.note_questing("heartbeat", "the entry that must survive")
+    for i in range(5000):
+        worker._note_script_log(f"a different line every time {i}")
+
+    markers = [e for e in seat.tel.questing if e["kind"] == "script-log"]
+    assert len(markers) == worker.LOG_MARKERS + 1, len(markers)
+    assert "script_log stream only" in markers[-1]["detail"]
+    assert "heartbeat" in [e["kind"] for e in seat.tel.questing]
+    # ...and not one line was actually lost.
+    assert len(seat.tel.script_log) == 5000
