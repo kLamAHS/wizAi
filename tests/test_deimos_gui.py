@@ -14587,3 +14587,150 @@ def test_the_goal_poll_skips_a_loading_client():
     assert "is_loading" in src
     assert src.index("is_loading") < src.index("read_quest_goal"), \
         "the loading gate must come before the reads it protects"
+
+
+# ------------------- the split party is put back on one sigil
+#
+# The audit's F5. `_check_same_sigil` named the two-doors condition and
+# left the fix to the script's own friend-teleport — and rev 1dcf4193
+# is twenty minutes of that teleport not coming.
+
+def test_the_odd_wizard_is_dragged_to_the_partys_sigil(monkeypatch):
+    import time
+
+    worker = _sigil_party([(0, 0), (100, 0), (5000, 0)])
+    dragged = []
+
+    class _Client:
+        async def teleport(self, pos):
+            dragged.append((pos.x, pos.y))
+
+    worker.seats[2].client = _Client()
+    for seat in worker.seats:
+        seat.apart_since = time.monotonic() - worker.SIGIL_ACT - 1
+    _look_at_sigils(worker, monkeypatch)
+    assert dragged == [(0.0, 0.0)], \
+        "the odd wizard was not moved to the majority's sigil"
+    kinds = [e["kind"] for e in worker.seats[2].tel.questing]
+    assert "sigil-regroup" in kinds
+
+    _look_at_sigils(worker, monkeypatch)
+    assert len(dragged) == 1, "one split episode earns one drag, not one per check"
+
+
+def test_the_report_alone_gets_the_first_ninety_seconds(monkeypatch):
+    """The gap between SPLIT_AFTER and SIGIL_ACT is the script's window:
+    a friend-teleport regroup that is coming lands well inside it."""
+    import time
+
+    worker = _sigil_party([(0, 0), (100, 0), (5000, 0)])
+    dragged = []
+
+    class _Client:
+        async def teleport(self, pos):
+            dragged.append(pos)
+
+    worker.seats[2].client = _Client()
+    for seat in worker.seats:
+        seat.apart_since = time.monotonic() - worker.SPLIT_AFTER - 1
+    said = _look_at_sigils(worker, monkeypatch)
+    assert said, "the report itself must still fire"
+    assert dragged == [], "it dragged before the script had its window"
+
+
+def test_a_drag_that_fails_says_so(monkeypatch):
+    import time
+
+    worker = _sigil_party([(0, 0), (100, 0), (5000, 0)])
+    for seat in worker.seats:
+        seat.apart_since = time.monotonic() - worker.SIGIL_ACT - 1
+    _look_at_sigils(worker, monkeypatch)      # seat 2's client is object()
+    notes = [e for e in worker.seats[2].tel.questing
+             if e["kind"] == "sigil-regroup"]
+    assert notes and "could not" in notes[0]["detail"]
+
+
+# ---------------------- a cast that died reading the board is retried
+#
+# The audit's F7, live in rev ed709013: "the cast of Imp did not go
+# through (ValueError: Couldn't find health child) — passed instead".
+# Targeting finds an enemy's health bar as a UI WINDOW, and while the
+# round redraws the child is briefly not there. The board is fine; the
+# read of it died. The recovery is the same card again, not a pass.
+
+def _redraw_handler():
+    from deimos_bridge.live_backend import WizAiCombatHandler
+
+    handler = WizAiCombatHandler.__new__(WizAiCombatHandler)
+    return handler
+
+
+def test_the_redraw_race_is_recognised_by_its_words():
+    handler = _redraw_handler()
+    assert handler._redraw_race(ValueError("Couldn't find health child"))
+    assert handler._redraw_race(ValueError("Couldn't find name child"))
+    assert handler._redraw_race(RuntimeError(
+        "This combat member is no longer valid; you most likely need "
+        "to reget members"))
+    assert not handler._redraw_race(RuntimeError("the card was still in hand"))
+    assert not handler._redraw_race(ValueError("some other read"))
+
+
+def test_a_redraw_death_retries_the_same_card_before_the_runner_up():
+    import inspect
+
+    from deimos_bridge.live_backend import WizAiCombatHandler
+
+    src = inspect.getsource(WizAiCombatHandler._handle_round)
+    assert "_redraw_race(exc)" in src
+    assert src.index("_redraw_race(exc)") < src.index("report_failed_cast"), \
+        "the retry must come before the round is written off"
+    assert src.index("_redraw_race(exc)") < src.index("_try_the_next_best"), \
+        "the SAME card outranks the runner-up when the board did not move"
+
+
+def test_the_recast_reresolves_its_handles():
+    """The stale handles are exactly what a redraw invalidates, so the
+    retry must pick the card and target fresh rather than reusing the
+    ones that just died."""
+    import asyncio
+
+    handler = _redraw_handler()
+    handler.REDRAW_SETTLE = 0.0
+    calls = []
+
+    class _Card:
+        async def cast(self, target, sleep_time=None):
+            calls.append(("cast", target, sleep_time))
+
+    class _Backend:
+        cards = {"Imp": object()}
+
+    handler.backend = _Backend()
+    handler._pick_card = lambda read, name: (calls.append(("pick", name))
+                                             or _Card())
+
+    async def resolve(read, index, spec, ally=""):
+        calls.append(("resolve", index))
+        return "fresh-target"
+
+    async def in_hand():
+        return 3
+
+    async def left(held):
+        calls.append(("left", held))
+        return True
+
+    handler._resolve_target = resolve
+    handler._cards_in_hand = in_hand
+    handler._card_left_the_hand = left
+
+    class _Decision:
+        card_name = "Imp"
+        target_index = 1
+        ally_name = ""
+
+    went = asyncio.run(handler._recast_after_redraw(object(), _Decision()))
+    assert went
+    assert ("pick", "Imp") in calls and ("resolve", 1) in calls
+    assert ("cast", "fresh-target", handler.RETRY_CAST_TIME) in calls

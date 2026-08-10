@@ -165,6 +165,10 @@ class _Seat:
         #: that is not the prompt the rest of the party is standing at.
         #: See `LiveWorker._check_same_sigil`.
         self.apart_since = None
+        #: when this seat was last dragged to the party's sigil, so one
+        #: split episode gets one drag per wizard rather than one per
+        #: check. See `LiveWorker.SIGIL_ACT`.
+        self.sigil_moved_at = 0.0
         #: flat distance to this wizard's quest marker, or None. A marker
         #: in another zone reads as a six-figure nonsense distance,
         #: because the coordinates are in that zone's space -- which is
@@ -4096,6 +4100,13 @@ class LiveWorker(QThread):
     #: ...and for how long, before it is said. Wizards reach a sigil at
     #: different times and one still walking is not a split party.
     SPLIT_AFTER = 45.0
+    #: ...and for how long before wizAi stops narrating and drags the
+    #: odd wizards to the majority's sigil itself. The gap between this
+    #: and `SPLIT_AFTER` is the script's window: a friend-teleport
+    #: regroup that is coming lands well inside it, and one that has
+    #: not come by now is not coming — rev 1dcf4193 waited twenty
+    #: minutes for it.
+    SIGIL_ACT = 90.0
 
     async def _check_same_sigil(self):
         """Everyone at a prompt, same zone, nowhere near each other.
@@ -4110,13 +4121,16 @@ class LiveWorker(QThread):
         the zone agrees, the goal agrees, and every wizard is doing
         something.
 
-        Reported, not fixed. What puts the party back on one sigil is
-        the script's own friend teleport -- which is exactly what was
-        broken for this run (`Deimos/src/utils.py`, `_same_wizard`) --
-        and dragging wizards between sigils from out here would fight
-        the script for the wheel at the one moment it is about to work.
-        So this says the sentence the operator needed and leaves the
-        driving alone.
+        Reported at `SPLIT_AFTER`, and now FIXED at `SIGIL_ACT`: the
+        odd wizards are teleported to the majority's sigil. The first
+        version only reported, reasoning that the script's own friend
+        teleport was about to fix it and dragging wizards would fight
+        it for the wheel -- and rev 1dcf4193 is twenty minutes of that
+        teleport not coming. The report still gets the first minute
+        and a half to itself, so a script regroup that IS coming has
+        room to land; past that, the same within-zone body write the
+        VM's own `teleport client N` uses puts the party on one sigil,
+        once per wizard per episode.
         """
         import time
 
@@ -4204,6 +4218,32 @@ class LiveWorker(QThread):
                     seat.tel.note_questing("split-sigil", detail)
                 except Exception:
                     pass
+
+        # The fix, after the report has stood long enough for the
+        # script's own regroup to have come if it was coming.
+        if held < self.SIGIL_ACT:
+            return
+        for seat in odd:
+            if now - seat.sigil_moved_at < self.SIGIL_ACT:
+                continue                 # one drag per wizard per episode
+            seat.sigil_moved_at = now
+            try:
+                await seat.client.teleport(where[best])
+                moved = (f"teleported {seat.name} to the sigil "
+                         f"{with_them} {'are' if len(near) > 1 else 'is'} "
+                         f"standing on — {held:.0f}s at the wrong one and "
+                         f"the script's own regroup never came")
+                self._say(seat, moved)
+                for other in live:
+                    try:
+                        other.tel.note_questing("sigil-regroup", moved)
+                    except Exception:
+                        pass
+            except Exception as exc:
+                seat.tel.note_questing(
+                    "sigil-regroup",
+                    f"tried to teleport {seat.name} to the party's sigil "
+                    f"and could not — {type(exc).__name__}: {exc}")
 
     def _should_catch_up(self, seat):
         """Should this wizard abandon its own errand and go help?
