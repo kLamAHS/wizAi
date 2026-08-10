@@ -15194,9 +15194,13 @@ def test_a_collect_step_with_no_marker_at_all_still_hops(monkeypatch):
     # seconds, so the POSITION keeps changing while the count does not.
     seat.progress_at = time.monotonic() - 5.0
     seat.goal_at = time.monotonic() - worker.REALM_HOP_AFTER - 1
+    # It HAS collected before, so it demonstrably reaches the spawns --
+    # the crowding question is the live one.
+    seat.collect_moved_for = "collect gemstones in hall of champions"
+    seat.collect_moved_at = time.monotonic() - 600.0
     asyncio.run(worker._maybe_realm_hop(seat))
     assert fired, "the crowded-realm rung refused a markerless Collect"
-    assert "working them and finding nothing" in fired[0]
+    assert "count HAS moved before" in fired[0]
     assert "crowded realm" in fired[0]
 
 
@@ -16467,6 +16471,8 @@ def test_a_lone_wizard_on_a_collect_step_is_a_regroup_not_a_realm(monkeypatch):
     seat.marker_away = None
     seat.progress_at = time.monotonic() - 5.0
     seat.goal_at = time.monotonic() - worker.REALM_HOP_AFTER - 1
+    seat.collect_moved_for = "collect gemstones in hall of champions"
+    seat.collect_moved_at = time.monotonic() - 600.0
     seat.progress = ("Krokotopia/KT_Hub", (1, 2, 3), goal)
     other.progress = ("Krokotopia/KT_Krokosphinx/KT_ChampHall", (4, 5, 6),
                       "Talk To General Khaba in Hall of Champions")
@@ -16708,3 +16714,139 @@ def test_an_unreadable_goal_does_not_block_the_regroup(monkeypatch):
     worker.seats[0].stranded_since = time.monotonic() - worker.STRANDED_AFTER - 1
     seat, _target = _look(worker, read_zone, monkeypatch)
     assert seat is worker.seats[0]
+
+
+# ------------------ a count that never moved is not a crowded realm
+#
+# Rev 3cbb6091, the regression this fixes. Konstantin sat at
+# `Collect Gemstones in Hall of Champions (0 of 4)` for 57 minutes at
+# the world portal — never one gemstone — while the realm rung hopped
+# the whole party through SEVEN realms (Bartleby, Bernie, Blossom,
+# Centaur, Diego, Drake, Dryad) claiming he was "working them and
+# finding nothing". The seventh split the party across realms.
+#
+# Being WITH the party is not being AT the spawns. The count is the
+# only thing that knows, because a Collect step has no marker.
+
+def test_a_collect_count_that_never_moved_blocks_the_realm_hop(monkeypatch):
+    import asyncio
+    import time
+
+    worker, _read = _zoned_party(["KT_WorldTeleporter"] * 2)
+    worker.script = "###deimos_expertmode"
+    fired = []
+
+    async def record(seat, why):
+        fired.append(why)
+
+    worker._realm_hop_party = record
+    seat = worker.seats[0]
+    seat.goal = "Collect Gemstones in Hall of Champions (0 of 4)"
+    seat.marker_away = None
+    seat.progress_at = time.monotonic() - 5.0
+    seat.goal_at = time.monotonic() - worker.REALM_HOP_AFTER - 1
+
+    asyncio.run(worker._maybe_realm_hop(seat))
+    assert fired == [], "it hopped for a wizard that never reached the spawns"
+    note = [e for e in seat.tel.questing if e["kind"] == "realm-hop-refused"]
+    assert note and "never advanced once" in note[0]["detail"]
+
+    # ...and once the count HAS moved, the same stall is the crowd.
+    seat.collect_moved_for = "collect gemstones in hall of champions"
+    seat.collect_moved_at = time.monotonic() - 600.0
+    asyncio.run(worker._maybe_realm_hop(seat))
+    assert fired, "a proven-reachable wizard was refused"
+    assert "count HAS moved before" in fired[0]
+
+
+def test_the_goal_poll_notices_a_collect_count_going_up():
+    import asyncio
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    class _XYZ:
+        def __init__(self, x, y, z):
+            self.x, self.y, self.z = x, y, z
+
+    class _Body:
+        async def position(self):
+            return _XYZ(1.0, 2.0, 3.0)
+
+    class _Client:
+        body = _Body()
+        root_window = _Win("root", [])
+
+        async def zone_name(self):
+            return "KT_ChampHall"
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    worker.status = type("S", (), {"emit": staticmethod(lambda *_: None)})()
+    worker.GOAL_POLL = 0.0
+    seat = worker.seats[0]
+    seat.client = _Client()
+
+    from deimos_bridge import questing
+
+    reading = {"goal": "Collect Gemstones in Hall of Champions (0 of 4)"}
+
+    async def read_goal(_c):
+        return reading["goal"]
+
+    original = questing.read_quest_goal
+    questing.read_quest_goal = read_goal
+    try:
+        asyncio.run(worker._read_goal(seat))
+        assert not seat.collect_moved_at, "0 of 4 is not progress"
+
+        reading["goal"] = "Collect Gemstones in Hall of Champions (1 of 4)"
+        asyncio.run(worker._read_goal(seat))
+        assert seat.collect_moved_at, "a gemstone was picked up and missed"
+        assert seat.collect_moved_for == \
+            "collect gemstones in hall of champions"
+
+        # A DIFFERENT collect quest starting at 0 must not inherit it.
+        stamp = seat.collect_moved_at
+        reading["goal"] = "Collect Sunstones in the Oasis (0 of 3)"
+        asyncio.run(worker._read_goal(seat))
+        assert seat.collect_moved_at == stamp
+        assert seat.collect_moved_for != "collect sunstones in the oasis"
+    finally:
+        questing.read_quest_goal = original
+
+
+def test_the_party_does_not_hop_if_one_wizard_cannot_read_the_list(
+        monkeypatch):
+    """A split is the worst state this method can produce, and rev
+    3cbb6091's was knowable in advance: Sebastian's realm list had
+    already failed to read five times that run. The scan is what the
+    hop needs anyway, so checking every client first turns a split into
+    a refusal."""
+    import asyncio
+
+    from deimos_bridge import realms
+
+    worker, calls = _hoppable_party(monkeypatch)
+    good = worker.seats[0]
+
+    async def scan(client):
+        calls["scans"] += 1
+        if client is not good.client:
+            return [], "the realm list's page number would not read"
+        return ([{"page": 1, "slot": 1, "name": "Bravado",
+                  "population": "Perfect"}], "")
+
+    monkeypatch.setattr(realms, "scan_realms", scan)
+    asyncio.run(worker._realm_hop_party(good, "testing"))
+
+    assert calls["hops"] == [], "it split the party across realms"
+    note = [e for e in worker.seats[1].tel.questing
+            if e["kind"] == "realm-hop-refused"]
+    assert note and "would split the party" in note[0]["detail"]
+
+
+def test_the_party_still_hops_when_everybody_can_read_the_list(monkeypatch):
+    import asyncio
+
+    worker, calls = _hoppable_party(monkeypatch)
+    asyncio.run(worker._realm_hop_party(worker.seats[0], "testing"))
+    assert len(calls["hops"]) == 3, "the pre-flight blocked a healthy hop"

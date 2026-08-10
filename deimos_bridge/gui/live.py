@@ -197,6 +197,12 @@ class _Seat:
         #: so a cure that is not taking is retried on a cooldown rather
         #: than paging through the quest book every tick.
         self.rearm_tried_at = NEVER
+        #: when a Collect step's counter last went UP, and for which
+        #: collect goal. The only proof a wizard ever reached the
+        #: spawns, because a Collect step has no marker to check
+        #: against. See `LiveWorker._maybe_realm_hop`.
+        self.collect_moved_at = 0.0
+        self.collect_moved_for = ""
         #: when this client's quest hook last DID read a position, and
         #: on which goal. Proof the hook works, which is what separates
         #: "this quest has no marker" from "the arrow is off". See
@@ -2706,6 +2712,15 @@ class LiveWorker(QThread):
             goal = ""
         if goal and goal != seat.goal:
             seat.goal_at = now
+            # Did a Collect COUNT go up? That is the only evidence a
+            # wizard ever found the collectibles, and without it a
+            # stalled count means "never got there" rather than "the
+            # realm is picked clean". See `_maybe_realm_hop`.
+            was = questing.collect_count(seat.goal)
+            got = questing.collect_count(goal)
+            if got and was and got[0] == was[0] and got[1] > was[1]:
+                seat.collect_moved_at = now
+                seat.collect_moved_for = got[0]
             # In order, and bounded. `_who_is_behind` needs to know that
             # a step was HELD and left, which a single current value
             # cannot say.
@@ -3814,6 +3829,36 @@ class LiveWorker(QThread):
                 # The count is still moving, or has not been watched
                 # long enough to say it is not.
                 return
+            here = questing.collect_count(seat.goal)
+            if here and not (seat.collect_moved_for == here[0]
+                             and seat.collect_moved_at):
+                # ...and it has to have moved AT LEAST ONCE. A crowded
+                # realm is a wizard picking up collectibles slowly; a
+                # count that has never left its starting number is a
+                # wizard that never reached the spawns, and swapping
+                # shards cannot put it there.
+                #
+                # Rev 3cbb6091 is why this is not optional. Konstantin
+                # sat at `(0 of 4)` for 57 minutes at the world portal
+                # -- never one gemstone -- while this rung hopped the
+                # party through seven realms on the claim that he was
+                # "working them and finding nothing". The seventh split
+                # the party across realms, which is strictly worse than
+                # the crowding it was answering. Being WITH the party
+                # is not being AT the spawns; only the count knows.
+                self._say_once(
+                    seat, f"collect-never-started:{seat.name}",
+                    f"{seat.name}'s Collect count has never moved off "
+                    f"{here[1]} of {here[2]} — it has not reached the "
+                    f"collectibles at all, so a quieter realm is not the "
+                    f"answer. Not changing realms",
+                    kind="realm-hop-refused",
+                    detail=(f"{seat.goal!r} has never advanced once. A "
+                            f"crowded realm shows a count that moves and "
+                            f"then stalls; a count still on its starting "
+                            f"number is a wizard that never got to the "
+                            f"spawns, and a shard swap keeps the zone"))
+                return
         if away is None and not self._with_the_party(seat):
             # ...and without a marker, the party IS the check. A realm
             # change keeps the zone and only changes the shard, so it
@@ -3845,8 +3890,8 @@ class LiveWorker(QThread):
                 else (now - seat.goal_at)) / 60.0
         where = (f"{away:,.0f} from its marker, with nothing moving"
                  if away is not None else
-                 "being teleported between the collect spots the whole "
-                 "time, so it is working them and finding nothing")
+                 f"and its count HAS moved before, so this wizard does "
+                 f"reach the spawns — they are just being taken")
         await self._realm_hop_party(
             seat, f"{seat.goal!r} has not advanced in {idle:.0f} min — "
                   f"{where}. Collectibles are shared ground spawns, so a "
@@ -3928,6 +3973,39 @@ class LiveWorker(QThread):
                         + (f" — {why_not}" if why_not else ""))
                 return
             target = fresh[0]
+            # Can EVERY wizard read the list before ANY of them moves?
+            #
+            # A split is the worst state this method can produce --
+            # wizards in different realms cannot see or teleport to each
+            # other -- and rev 3cbb6091 produced one for a reason that
+            # was knowable in advance: Sebastian's realm list would not
+            # read ("the realm list's page number would not read"), the
+            # same failure that had already been logged five times that
+            # run on that client. Two wizards hopped, he could not, and
+            # the party spent the rest of the run apart.
+            #
+            # The scan is what the hop needs anyway, and a client that
+            # cannot scan cannot hop. Checking first turns a split into
+            # a refusal, which costs a realm change and nothing else.
+            cannot = []
+            for one in live:
+                if one is seat:
+                    continue                 # its scan is the one above
+                seen, why_not_one = await realms.scan_realms(one.client)
+                if not seen:
+                    cannot.append((one, why_not_one or "the realm list "
+                                                       "would not read"))
+            if cannot:
+                names = " and ".join(one.name for one, _r in cannot)
+                said = (f"not changing realms — {names} cannot read the "
+                        f"realm list ({cannot[0][1]}), and hopping the "
+                        f"others without {names} would split the party "
+                        f"across realms, which is worse than the crowding "
+                        f"this was answering")
+                for other in live:
+                    other.tel.note_questing("realm-hop-refused", said)
+                self._say(seat, said)
+                return
             self._realms_tried.add(target["name"])
             self._say(seat, f"changing the party to realm {target['name']} "
                             f"— {why}")
