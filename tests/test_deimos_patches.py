@@ -8,6 +8,7 @@ has a guard here that fails loudly if the thing it fixed comes back.
 Each test names the upstream shape it replaced, so re-applying the patch
 after a Deimos bump is a matter of reading the failure.
 """
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -489,3 +490,197 @@ def test_the_literal_key_guard_answers_the_key_itself():
         == "The Sphinx's Riddle"
     assert run(probe._lang_name(_Client(), "Unknown_999")) == "Unknown_999"
     assert run(probe._lang_name(_Client(), None)) == ""
+
+
+# ------------------------------------------------- the shipped quester presets
+#
+# These are vendored data, and they get updated from upstream like any
+# other vendored thing — so the fixes applied to them need the same
+# guard the code patches have.
+SCRIPTS = sorted((ROOT / "deimos_bridge" / "data" / "scripts").glob("*.txt"))
+_LOOP = re.compile(r"^\t*(until|while)\b.*\{\s*$")
+_GATE = re.compile(r"^\t*if\s+p\d\s+inzone\b.*\{\s*$")
+
+
+def _block_end(lines, i):
+    depth = 0
+    for j in range(i, len(lines)):
+        depth += lines[j].count("{") - lines[j].count("}")
+        if depth <= 0 and j > i:
+            return j
+    return None
+
+
+def _own_level(lines, start, end, indent):
+    out, depth = [], 0
+    for k in range(start + 1, end):
+        ln = lines[k]
+        if depth == 0 and ln.strip() \
+                and len(ln) - len(ln.lstrip("\t")) == indent:
+            out.append(k)
+        depth += ln.count("{") - ln.count("}")
+    return out
+
+
+def _spinning_loops(text):
+    """[(line, header)] for loops that can never make progress.
+
+    The shape: a loop whose ENTIRE body is `if pN inzone Z { ... }` with
+    no else. Nothing in it travels to Z, so a wizard standing anywhere
+    else spins it until the run ends.
+    """
+    lines = text.split("\n")
+    found = []
+    for i, ln in enumerate(lines):
+        if not _LOOP.match(ln):
+            continue
+        end = _block_end(lines, i)
+        if end is None:
+            continue
+        indent = len(ln) - len(ln.lstrip("\t"))
+        ks = _own_level(lines, i, end, indent + 1)
+        gates = [k for k in ks if _GATE.match(lines[k])]
+        other = [k for k in ks if not _GATE.match(lines[k])
+                 and not lines[k].strip().startswith("if DebugMode")]
+        if len(gates) != 1 or other:
+            continue
+        chain_end = _block_end(lines, gates[0])
+        gi = len(lines[gates[0]]) - len(lines[gates[0]].lstrip("\t"))
+        if chain_end is None:
+            continue
+        if any(lines[k].strip().startswith("} else")
+               and len(lines[k]) - len(lines[k].lstrip("\t")) == gi
+               for k in range(gates[0], chain_end + 1)):
+            continue
+        found.append((i + 1, ln.strip()))
+    return found
+
+
+def test_the_presets_are_shipped():
+    assert len(SCRIPTS) == 6, [p.name for p in SCRIPTS]
+
+
+def test_no_preset_has_a_loop_that_cannot_make_progress():
+    """The failure the operator watched for three runs: "it's just
+    standing around the world portal".
+
+    TTS Arc 1 handles Krokotopia #31 with::
+
+        until NOT p1 tracking_goal "collect gemstones in hall of champions" {
+            if p1 inzone Krokotopia/KT_Krokosphinx/KT_ChampHall {
+                p1 tp XYZ(-15546.16, 5727.71, 0.0)
+
+    Nothing in that loop travels to the Hall of Champions. Solo it never
+    needed to -- the step before it ENDS there, so the guard is free --
+    but three wizards hold three quest states while one instruction
+    pointer serves them, so p1 reaches its own leg standing anywhere.
+    In the wrong zone the guard is false, the teleport to the gems is
+    never issued, and the goal cannot change because the body never
+    runs: 15,785 instructions, nobody moving.
+
+    The author's own fix is seventy lines above it, on `minion
+    massacre`::
+
+        if p1 inzone Krokotopia/KT_Krokosphinx/KT_ChampHall {
+            ...
+        } else {
+            break
+        }
+
+    Breaking out lets the enclosing dispatch run again, and re-enter
+    when the wizard IS there. `break` jumps to `_loop_label_stack[-1]`
+    (`ir.py:406`), the innermost loop, so it leaves the stuck loop and
+    nothing else.
+    """
+    offenders = {p.name: _spinning_loops(p.read_text(encoding="utf-8"))
+                 for p in SCRIPTS}
+    offenders = {k: v for k, v in offenders.items() if v}
+    assert not offenders, "\n".join(
+        f"{name} line {ln}: {head}"
+        for name, hits in offenders.items() for ln, head in hits[:5])
+
+
+def test_every_preset_still_parses():
+    """The guard on the guard: an edit that fixes a spin and breaks the
+    compiler has made the run worse, and nothing else here would say
+    so. deimoslang's parser needs no wizwalker, so this is checkable."""
+    import sys
+
+    sys.path.insert(0, str(ROOT / "Deimos"))
+    from src.deimoslang.parser import Parser
+    from src.deimoslang.tokenizer import Tokenizer
+
+    for path in SCRIPTS:
+        text = path.read_text(encoding="utf-8")
+        program = Parser(Tokenizer().tokenize(text)).parse()
+        assert program, f"{path.name} parsed to nothing"
+
+
+_NOT_ANY = re.compile(r"^(\}\s*)?(el)?if\s+NOT\s+any\b.*\{\s*$")
+
+
+def _dead_sameany(text):
+    """[(line, stmt)] for `sameany` that provably acts on nobody.
+
+    `sameany` resolves to `VM._any_player_client` (`vm.py:343`), which
+    every `any` evaluation RESETS and then fills only with the clients
+    that MATCHED (`vm.py:770-779` for `window_visible`). So inside the
+    true branch of `if NOT any ...` -- taken precisely when nothing
+    matched -- the list is empty and the action runs on no client at
+    all.
+    """
+    lines = text.split("\n")
+    found = []
+    for i, ln in enumerate(lines):
+        if not _NOT_ANY.match(ln.strip()):
+            continue
+        depth = 0
+        for j in range(i, len(lines)):
+            depth += lines[j].count("{") - lines[j].count("}")
+            if depth <= 0 and j > i:
+                break
+        for k in range(i + 1, j):
+            if lines[k].strip().startswith("sameany"):
+                found.append((k + 1, lines[k].strip()))
+    return found
+
+
+def test_no_preset_acts_on_nobody():
+    """The setup tour the operator asked about — "it randomly opens up
+    the settings and clicks through but it doesnt seem to actually do
+    anything beneficial" — did not, because it could not::
+
+        times 300 {
+            if NOT any windowvisible [... 'SettingPage', 'QuitButton'] {
+                sameany sendkey ESC, .1
+            } else { break }
+            sleep .1
+        }
+
+    The branch is taken when NO client has the settings page open, so
+    `_any_player_client` is empty and ESC goes to nobody; the loop then
+    runs all 300 iterations and the `times 4` around it spends two
+    minutes achieving nothing. The same shape made the training-menu
+    recovery ("Trying different menu positions...", three attempts of
+    blind clicks) entirely inert.
+
+    `mass` is what the author meant: nothing matched, so act on all of
+    them. `sameany` after a POSITIVE `any` is correct and is left
+    alone -- Arc 1 still has hundreds of those.
+    """
+    offenders = {p.name: _dead_sameany(p.read_text(encoding="utf-8"))
+                 for p in SCRIPTS}
+    offenders = {k: v for k, v in offenders.items() if v}
+    assert not offenders, "\n".join(
+        f"{name} line {ln}: {stmt}"
+        for name, hits in offenders.items() for ln, stmt in hits[:5])
+
+
+def test_the_correct_sameany_usages_were_not_touched():
+    """A blanket replace would have broken every place `sameany` is
+    right: acting on exactly the clients a positive `any` just
+    matched."""
+    arc1 = (ROOT / "deimos_bridge" / "data" / "scripts"
+            / "TTS Arc 1.txt").read_text(encoding="utf-8")
+    assert arc1.count("sameany") > 500, \
+        "the positive-any usages went missing with the dead ones"
