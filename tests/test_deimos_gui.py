@@ -15231,3 +15231,113 @@ def test_a_landed_hop_restarts_the_crowded_judgement_clock(monkeypatch):
         assert seat.progress_at > stale + 900, \
             "the new realm inherited the old realm's stuck clock"
         assert seat.cells_seen == {}
+
+
+# ------------------ the operator's manual reset, as the last rung
+#
+# Rev 817b9f20, the wedge in full: all three wizards in KT_Pyramid/
+# KT_Hall, every quest marker 98,000+ away in the Krokosphinx, the
+# script looping ~3,100 instructions a minute for seven minutes. Every
+# rung answered correctly — hop refused, nothing in range, realm change
+# quiet — and none could help, because only the script can cross a
+# zone, and the script was looping on a quest state that no longer
+# exists. The operator's own fix, from the run where they applied it by
+# hand: "when I reset it they progressed."
+
+def test_a_looping_script_far_from_every_marker_is_restarted(monkeypatch):
+    import asyncio
+    import time
+
+    from deimos_bridge import questing
+
+    worker, seat = _wedged(dialogue=False, monkeypatch=monkeypatch)
+    seat.progress_at = (time.monotonic() - worker.STUCK_AFTER
+                        - worker.UNSTICK_EVERY - 1)
+    seat.marker_away = 98673.0
+    restarts = []
+
+    class _R:
+        running = True
+
+        def __init__(self):
+            self._n = 1000
+
+        @property
+        def steps(self):
+            self._n += 500                 # the loop, climbing
+            return self._n
+
+        def restart(self):
+            restarts.append(True)
+            return True
+
+    worker.seats[0].runner = _R()
+
+    async def nothing_near(_c):
+        return False
+
+    monkeypatch.setattr(questing, "near_interactable", nothing_near)
+    asyncio.run(worker._unstick(seat))     # first look: no baseline
+    assert restarts == []
+    seat.unstuck_at = 0.0
+    asyncio.run(worker._unstick(seat))     # climbing, marker a zone away
+    assert restarts == [True]
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert "script-restarted" in kinds
+    assert "desperate-hop-refused" in kinds, \
+        "the hop's refusal should still say why a hop cannot help"
+
+    seat.unstuck_at = 0.0
+    asyncio.run(worker._unstick(seat))     # the cooldown holds
+    assert restarts == [True]
+
+
+def test_a_parked_script_is_never_force_restarted(monkeypatch):
+    """Parked means the script is WAITING on something real; the
+    stuck-instruction reload owns that case. Restarting a wait from
+    here would throw away a condition that might be about to come."""
+    import asyncio
+    import time
+
+    from deimos_bridge import questing
+
+    worker, seat = _wedged(dialogue=False, monkeypatch=monkeypatch)
+    seat.progress_at = (time.monotonic() - worker.STUCK_AFTER
+                        - worker.UNSTICK_EVERY - 1)
+    seat.marker_away = 98673.0
+    restarts = []
+
+    class _R:
+        running = True
+        steps = 11582                      # parked: never moves
+
+        def restart(self):
+            restarts.append(True)
+            return True
+
+    worker.seats[0].runner = _R()
+
+    async def nothing_near(_c):
+        return False
+
+    monkeypatch.setattr(questing, "near_interactable", nothing_near)
+    asyncio.run(worker._unstick(seat))
+    seat.unstuck_at = 0.0
+    asyncio.run(worker._unstick(seat))
+    assert restarts == []
+
+
+def test_an_in_zone_marker_is_the_hops_case_not_a_restart():
+    import time
+
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    seat.progress_at = (time.monotonic() - worker.STUCK_AFTER
+                        - worker.UNSTICK_EVERY - 1)
+    seat.marker_away = 500.0               # reachable: the hop's domain
+    restarts = []
+    worker.seats[0].runner = type("R", (), {
+        "running": True, "steps": 1,
+        "restart": lambda self: restarts.append(True) or True})()
+    worker._maybe_restart_script(seat, 6.0, parked=False)
+    assert restarts == []
