@@ -130,6 +130,85 @@ def mentions_clients(source: str) -> int:
     return max(found) if found else 0
 
 
+def debug_state(source: str):
+    """True/False as the script's own `var DebugMode` has it, or None.
+
+    The presets ship `var DebugMode = True` on line 10, described there
+    as "Will show exact steps more in depth. Useful for determining
+    breaks." -- which is exactly the question a stuck run asks.
+    """
+    import re
+
+    m = re.search(r"^\s*var\s+DebugMode\s*=\s*(True|False)\b", source or "",
+                  re.MULTILINE)
+    return None if not m else (m.group(1) == "True")
+
+
+def set_debug(source: str, on: bool) -> str:
+    """The script with `var DebugMode` forced on or off.
+
+    Line-count preserving, like `restart_source`, because the stuck
+    instruction pointer is reported as a number and a rewrite that
+    shifts lines makes every previous export's numbers wrong.
+    """
+    import re
+
+    want = "True" if on else "False"
+
+    def swap(m):
+        return f"{m.group(1)}{want}{m.group(3)}"
+
+    return re.sub(r"^(\s*var\s+DebugMode\s*=\s*)(True|False)(\b.*)$",
+                  swap, source or "", count=1, flags=re.MULTILINE)
+
+
+#: loguru records from the deimoslang VM, and nothing else.
+VM_LOGGERS = ("src.deimoslang", "deimoslang")
+
+
+def capture_prints(on_message):
+    """Route the script's `print` output to `on_message`. Returns a
+    callable that stops it, or None if it could not be attached.
+
+    deimoslang's `print` compiles to `log_single`/`log_multi`, and both
+    end in `logger.debug(...)` -- loguru (`vm.py:30`). loguru's default
+    sink is stderr, so on a GUI run the script's own commentary went to
+    a console nobody was reading: `DebugMode` has shipped **True** in
+    every preset this whole time and not one line of it ever reached an
+    export. The scripts' `print`s name the dispatch leg they are on
+    ("Broken quest detected. p1 tracking_quest [get some bling]"), which
+    is the one thing a wizard stuck in a route cannot otherwise say.
+    """
+    try:
+        from loguru import logger
+    except Exception:
+        return None
+
+    def only_the_vm(record):
+        name = record.get("name") or ""
+        return any(name.startswith(p) for p in VM_LOGGERS)
+
+    def sink(message):
+        try:
+            on_message(message.record["message"])
+        except Exception:
+            pass
+
+    try:
+        handle = logger.add(sink, level="DEBUG", filter=only_the_vm,
+                            format="{message}", enqueue=False)
+    except Exception:
+        return None
+
+    def stop():
+        try:
+            logger.remove(handle)
+        except Exception:
+            pass
+
+    return stop
+
+
 def unconfigured(source: str):
     """[(name, value)] for variables still at the script's own placeholder.
 

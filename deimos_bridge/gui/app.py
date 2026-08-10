@@ -1502,6 +1502,21 @@ class MainWindow(QMainWindow):
             "teleporting to the leader, so they lag on Talk/Collect steps "
             "by design: they are combat support. Read at Play live.")
         script_row.addWidget(self.solo_script)
+        self.script_debug = QCheckBox("Script log")
+        self.script_debug.setToolTip(
+            "Forward the script's own `print` commentary into the run "
+            "log and the export.\n\n"
+            "deimoslang scripts announce which leg of their route they "
+            "are on (\"Broken quest detected. p1 tracking_quest [get "
+            "some bling]\"), which is the one thing a wizard stuck in a "
+            "route cannot otherwise say. Those prints end in loguru, "
+            "whose default sink is a console the GUI has none of — so "
+            "the presets have shipped DebugMode ON this whole time with "
+            "nobody able to read a word of it.\n\n"
+            "Repeated lines are thinned rather than dropped: the same "
+            "line over and over IS the diagnosis, and the count is the "
+            "evidence.")
+        script_row.addWidget(self.script_debug)
         self.script_lab = _label("no script", PALETTE["muted"])
         script_row.addWidget(self.script_lab)
         script_row.addStretch()
@@ -1538,7 +1553,8 @@ class MainWindow(QMainWindow):
                     "collect_wisps": "collect_wisps",
                     "use_potions": "use_potions",
                     "buy_potions": "buy_potions",
-                    "follow_leader": "follow_leader"}
+                    "follow_leader": "follow_leader",
+                    "script_debug": "script_debug"}
 
     def _wire_live_toggles(self):
         for box_name, attr in self.LIVE_TOGGLES.items():
@@ -2546,6 +2562,7 @@ class MainWindow(QMainWindow):
                                agent=self.agents[0],
                                auto_quest=self.auto_quest.isChecked(),
                                auto_dialogue=self.auto_dialogue.isChecked(),
+                               script_debug=self.script_debug.isChecked(),
                                collect_wisps=self.collect_wisps.isChecked(),
                                use_potions=self.use_potions.isChecked(),
                                buy_potions=self.buy_potions.isChecked(),

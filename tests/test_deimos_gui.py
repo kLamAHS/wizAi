@@ -16850,3 +16850,142 @@ def test_the_party_still_hops_when_everybody_can_read_the_list(monkeypatch):
     worker, calls = _hoppable_party(monkeypatch)
     asyncio.run(worker._realm_hop_party(worker.seats[0], "testing"))
     assert len(calls["hops"]) == 3, "the pre-flight blocked a healthy hop"
+
+
+# ------------------------------------------- the script's own commentary
+#
+# The operator: "instead of having to put the debug flag on, put it in
+# a setting in the gui".
+#
+# The flag was already on. Every preset ships `var DebugMode = True`
+# ("Will show exact steps more in depth. Useful for determining
+# breaks."), and deimoslang's `print` compiles to log_single/log_multi,
+# both of which end in `logger.debug(...)` — loguru, whose default sink
+# is stderr. A GUI run has no console, so the script has been narrating
+# which leg of its route it is on for this entire investigation and not
+# one line reached an export.
+
+def test_the_debug_flag_reads_and_flips_without_moving_a_line():
+    from deimos_bridge import scripts
+
+    src = ("###deimos_expertmode\n"
+           "var DebugMode = True     # Will show exact steps\n"
+           "var Other = False\n"
+           "loop {\n\tsleep 1\n}\n")
+    assert scripts.debug_state(src) is True
+
+    off = scripts.set_debug(src, False)
+    assert scripts.debug_state(off) is False
+    assert off.count("\n") == src.count("\n"), \
+        "a rewrite that shifts lines makes every reported ip wrong"
+    assert "# Will show exact steps" in off, "it ate the author's comment"
+    assert "var Other = False" in off, "it flipped the wrong variable"
+
+    assert scripts.debug_state(scripts.set_debug(off, True)) is True
+    # A script without the var is left exactly alone.
+    assert scripts.debug_state("###deimos_expertmode\nloop {\n}\n") is None
+    assert scripts.set_debug("loop {\n}\n", True) == "loop {\n}\n"
+
+
+def test_every_source_the_worker_builds_carries_the_setting():
+    """First build, rebuild and restart alike — or a toggle would be
+    undone by the next reload."""
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    src = ("###deimos_expertmode\n"
+           "var DebugMode = True\n"
+           "loop {\n\tsleep 1\n}\n")
+
+    worker.script_debug = False
+    first, _skipped = worker._fresh_source(seat, src)
+    assert "var DebugMode = False" in first
+
+    seat.script_built = True
+    worker.script_debug = True
+    again, _skipped = worker._fresh_source(seat, src)
+    assert "var DebugMode = True" in again
+
+
+def test_the_script_log_is_thinned_by_content_not_dropped():
+    """The dispatch prints on every pass, so an unthinned capture would
+    be the whole export — but the SAME line repeating is exactly what a
+    wedged route looks like, and the count is the evidence."""
+    worker, _read = _zoned_party(["KT_Hub", "KT_Hub"])
+    line = "Broken quest detected. p1 tracking_quest [get some bling]"
+    for _ in range(600):
+        worker._note_script_log(line)
+
+    notes = [e for e in worker.seats[0].tel.questing
+             if e["kind"] == "script-log"]
+    assert [n["detail"] for n in notes] == [
+        line, f"{line} — 2 times", f"{line} — 5 times",
+        f"{line} — 20 times", f"{line} — 100 times",
+        f"{line} — 500 times"]
+    # every seat's export can answer the question on its own
+    assert len([e for e in worker.seats[1].tel.questing
+                if e["kind"] == "script-log"]) == len(notes)
+
+    # A different line is its own story, not a continuation of that one.
+    worker._note_script_log("p1 tracking_goal [collect gemstones]")
+    fresh = [e for e in worker.seats[0].tel.questing
+             if e["kind"] == "script-log"][-1]
+    assert fresh["detail"] == "p1 tracking_goal [collect gemstones]"
+
+
+def test_a_blank_script_line_is_not_written_down():
+    worker, _read = _zoned_party(["KT_Hub"])
+    worker._note_script_log("")
+    worker._note_script_log("   ")
+    assert not [e for e in worker.seats[0].tel.questing
+                if e["kind"] == "script-log"]
+
+
+def test_capture_forwards_only_the_vm_and_detaches_cleanly():
+    """loguru is process-wide: a sink that survives the run would
+    double every line of the next one, and one that listened to
+    everything would forward wizAi's own logging back into itself."""
+    import pytest
+
+    loguru = pytest.importorskip("loguru")
+
+    from deimos_bridge import scripts
+
+    seen = []
+    stop = scripts.capture_prints(seen.append)
+    assert stop is not None
+    try:
+        loguru.logger.bind().opt(depth=0).debug("not the vm")
+        vm_logger = loguru.logger.patch(
+            lambda record: record.update(name="src.deimoslang.vm"))
+        vm_logger.debug("Broken quest detected.")
+        assert "Broken quest detected." in seen
+        assert "not the vm" not in seen
+    finally:
+        stop()
+    before = len(seen)
+    vm_logger.debug("after the run")
+    assert len(seen) == before, "the sink outlived the run"
+
+
+def test_the_gui_exposes_the_setting_as_a_live_toggle():
+    import inspect
+
+    from deimos_bridge.gui import app
+
+    src = inspect.getsource(app)
+    assert 'self.script_debug = QCheckBox("Script log")' in src
+    assert '"script_debug": "script_debug"' in src, \
+        "it has to be togglable during a run, like auto-quest"
+    assert "script_debug=self.script_debug.isChecked()" in src, \
+        "and read at Play live"
+
+
+def test_the_worker_reads_the_toggle_every_tick():
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._service_loop)
+    assert "self._script_logging(self.script_debug)" in src
+    stop = inspect.getsource(LiveWorker.stop)
+    assert "self._script_logging(False)" in stop

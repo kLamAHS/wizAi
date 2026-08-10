@@ -386,7 +386,7 @@ class LiveWorker(QThread):
                  coordinate=True, passes=2, barrier=None,
                  follow_leader=True, leader=0, label_windows=True,
                  solo_script=False, script_step_delay=None,
-                 script_dialog_delay=None):
+                 script_dialog_delay=None, script_debug=False):
         super().__init__()
         # Seat 0 is always the arguments this was called with, so the
         # single-wizard signature is untouched; `seats` adds the rest.
@@ -405,6 +405,11 @@ class LiveWorker(QThread):
         self.fights = fights
         self.auto_quest = auto_quest
         self.auto_dialogue = auto_dialogue
+        #: forward the script's own `print` commentary into the run's
+        #: log. A live toggle like the others -- see `_script_logging`.
+        self.script_debug = bool(script_debug)
+        self._stop_capture = None
+        self._logged = {}
         #: between-fights upkeep. An unattended run dies by attrition
         #: long before it runs out of quests, and a policy that lost at
         #: 12% health has told you nothing about the policy.
@@ -526,6 +531,9 @@ class LiveWorker(QThread):
     def stop(self):
         """Ask every seat's loop to finish after the current fight."""
         self._stop = True
+        # The loguru sink outlives this thread otherwise, and a second
+        # run would then have two of them writing the same line twice.
+        self._script_logging(False)
 
     #: what `request` accepts. Every one of these drives the mouse, so
     #: every one is serviced from the one task that owns it. "realm" is
@@ -701,6 +709,10 @@ class LiveWorker(QThread):
                 # meant the "Run script" tick only took effect on a
                 # wizard that also had auto-dialogue on and no Deimos
                 # quester running.
+                # A live toggle like auto-quest's: read every tick, so
+                # the switch works during a run rather than only at
+                # Play live.
+                self._script_logging(self.script_debug)
                 await self._stage(seat, "script", self._sync_script(seat))
                 self._watch_waitfor(seat)
 
@@ -1919,12 +1931,81 @@ class LiveWorker(QThread):
         """
         from .. import scripts
 
+        # The operator's debug switch, applied to whatever text is about
+        # to be compiled -- first build, rebuild and restart alike, so a
+        # toggle cannot be undone by the next reload.
+        try:
+            source = scripts.set_debug(source, self.script_debug)
+        except Exception:
+            pass
         if not getattr(seat, "script_built", False):
             return source, []
         try:
             return scripts.restart_source(source)
         except Exception:
             return source, []
+
+    #: how many times one distinct script line is written down before
+    #: it is thinned. The dispatch prints on every pass, so an
+    #: unthinned capture would be the whole export.
+    LOG_THIN = (1, 2, 5, 20, 100, 500, 2000)
+
+    def _script_logging(self, on):
+        """Start or stop forwarding the script's `print` output.
+
+        Idempotent, and safe to call from a toggle: `capture_prints`
+        answers None when loguru is missing, which simply leaves the
+        feature off rather than failing a run.
+        """
+        from .. import scripts
+
+        if on and self._stop_capture is None:
+            self._stop_capture = scripts.capture_prints(self._note_script_log)
+            if self._stop_capture is None:
+                self._say(self.seats[0],
+                          "script debug output is on, but loguru is not "
+                          "available to capture it")
+            else:
+                self._say(self.seats[0],
+                          "script debug output on — the script's own "
+                          "`print` lines now go to this log, which is how "
+                          "it says which leg of its route it is running")
+        elif not on and self._stop_capture is not None:
+            try:
+                self._stop_capture()
+            except Exception:
+                pass
+            self._stop_capture = None
+
+    def _note_script_log(self, text):
+        """One line of the script's own commentary, thinned by content.
+
+        Thinned rather than dropped: the SAME line repeating is what a
+        wedged route looks like, and the count is the evidence -- so the
+        first, second, fifth... occurrence is written and the ones
+        between are not. Called from loguru's thread, so it only
+        touches telemetry and the status signal, both of which are
+        already used across threads.
+        """
+        text = (text or "").strip()
+        if not text:
+            return
+        n = self._logged.get(text, 0) + 1
+        self._logged[text] = n
+        if len(self._logged) > 400:
+            self._logged.clear()
+        if n not in self.LOG_THIN:
+            return
+        said = text if n == 1 else f"{text} — {n} times"
+        for seat in self.seats:
+            try:
+                seat.tel.note_questing("script-log", said)
+            except Exception:
+                pass
+        try:
+            self.status.emit(said)
+        except Exception:
+            pass
 
     async def _setup_script(self, client, seat=None):
         """Compile the party's script over every hooked client.
