@@ -165,6 +165,10 @@ class _Seat:
         #: that is not the prompt the rest of the party is standing at.
         #: See `LiveWorker._check_same_sigil`.
         self.apart_since = None
+        #: when this seat was last dragged to the party's sigil, so one
+        #: split episode gets one drag per wizard rather than one per
+        #: check. See `LiveWorker.SIGIL_ACT`.
+        self.sigil_moved_at = 0.0
         #: flat distance to this wizard's quest marker, or None. A marker
         #: in another zone reads as a six-figure nonsense distance,
         #: because the coordinates are in that zone's space -- which is
@@ -202,6 +206,17 @@ class _Seat:
         #: See `LiveWorker._unstick`.
         self.unstuck_at = 0.0
         self.steps_seen = None
+        #: the dialogue box's TEXT at the last unstick look, or None when
+        #: no box was open. Same text across two looks = the script's own
+        #: clearing is provably not advancing it. See `DIALOG_WEDGE`.
+        self.box_text = None
+        #: position cells this wizard has stood in recently, cell -> last
+        #: seen. A script retry loop that teleports a wizard between two
+        #: spots is not movement. See `LiveWorker._note_progress`.
+        self.cells_seen = {}
+        #: when the quest NAME last actually read. A blank read keeps the
+        #: previous value, and this bounds how long. See `_note_name`.
+        self.name_read_at = 0.0
         #: the spot a desperation quest-teleport was already tried from,
         #: as a `progress` stamp. See `LiveWorker._desperate_hop`.
         self.hop_tried_at = None
@@ -416,6 +431,10 @@ class LiveWorker(QThread):
         #: mid-teleport releases the script by itself. See
         #: `_desperate_hop` and `_hop_held`.
         self._hop_pause_until = 0.0
+        #: when the party last changed realm, and which realms this run
+        #: has already tried. See `_realm_hop_party`.
+        self._realm_hopped_at = 0.0
+        self._realms_tried = set()
         #: {seat id: (the step it gave up on, when)}. A catch-up that
         #: gives up has to be REMEMBERED, or `_check_in_step` starts the
         #: identical one on the next tick -- see `_written_off`.
@@ -459,8 +478,10 @@ class LiveWorker(QThread):
         self._stop = True
 
     #: what `request` accepts. Every one of these drives the mouse, so
-    #: every one is serviced from the one task that owns it.
-    ACTIONS = ("teleport", "dialogue", "wisps", "potion")
+    #: every one is serviced from the one task that owns it. "realm" is
+    #: broadcast like the rest and collapses to one party hop via the
+    #: cooldown stamp in `_realm_hop_party`.
+    ACTIONS = ("teleport", "dialogue", "wisps", "potion", "realm")
 
     def request(self, action, seat=None):
         """Queue an action ('teleport' | 'dialogue' | 'wisps' | 'potion').
@@ -672,22 +693,27 @@ class LiveWorker(QThread):
                 self._check_on_questline()
                 self._check_progress(seat)
 
-                catching = self._catching_up()
-                if seat.runner is not None and self._hop_held():
-                    # A desperate quest-teleport is in flight or still
-                    # settling. The script's own tp loop re-teleports
-                    # within a second, aimed at the spot it was stuck on
-                    # -- the operator: "it's possible and even likely
+                if self._hop_held():
+                    # A desperate quest-teleport or a realm change is in
+                    # flight or settling, and both drive clients ACROSS
+                    # seats -- a follower's follow, another seat's quest
+                    # step or the script's own tp loop steering a wizard
+                    # whose spellbook is open undoes the maneuver from a
+                    # different task. The operator's original report of
+                    # the narrow version: "it's possible and even likely
                     # for the bot to teleport away from the quest after
-                    # a desperate tp back to the place it was stuck,
-                    # which is usually 1000ish units away" -- so running
-                    # instructions now undoes the fix before it lands.
+                    # a desperate tp back to the place it was stuck". So
+                    # the hold is worker-wide: nothing below this line
+                    # steers anybody until the deadline lets go.
                     self._say_once(
                         seat, "script-held-hop",
-                        "script held for a moment so its own teleport "
-                        "does not drag the wizard back off the quest "
-                        "marker it was just sent to")
-                elif seat.runner is not None and not catching:
+                        "holding this wizard's steering while a teleport "
+                        "or realm change finishes and settles")
+                    await asyncio.sleep(0.5)
+                    continue
+
+                catching = self._catching_up()
+                if seat.runner is not None and not catching:
                     await self._stage(seat, "script step",
                                       self._script_step(seat), wheel=True)
                 elif seat.runner is not None:
@@ -718,6 +744,16 @@ class LiveWorker(QThread):
                     # also decided to catch up or regroup.
                     await self._stage(seat, "unwedging a stuck script",
                                       self._unstick(seat), wheel=True)
+
+                if driven or self.auto_quest:
+                    # The rung above the desperate teleport: a Collect
+                    # goal parked at its own marker for eight minutes is
+                    # a crowded realm, not a wedged wizard. Cheap gates
+                    # first; the stage only costs anything on the tick
+                    # it actually hops.
+                    await self._stage(seat, "changing realms",
+                                      self._maybe_realm_hop(seat),
+                                      wheel=True, limit=360)
 
                 if driven and self._should_catch_up(seat):
                     # The one case where wizAi steers a wizard the script
@@ -1064,6 +1100,12 @@ class LiveWorker(QThread):
 
         seat = self._seat_for(client) if seat is None else seat
         while seat.requests and not self._stop:
+            if self._hop_held():
+                # A teleport or realm change is driving clients across
+                # seats. The press keeps its place in the queue and runs
+                # after the settle window, rather than steering a wizard
+                # whose spellbook is open from a second task.
+                return
             if await questing.in_battle(client):
                 return
             with seat.lock:
@@ -1083,7 +1125,11 @@ class LiveWorker(QThread):
                                     f"{seat.driver} to let go of the wheel")
                 await self._stage(seat, f"the {action} request",
                                   self._do_request(client, action, seat),
-                                  wheel=True)
+                                  wheel=True,
+                                  # A realm change is a scan plus a hop
+                                  # per wizard with 45s load waits; the
+                                  # default deadline cuts it mid-party.
+                                  limit=360 if action == "realm" else None)
             finally:
                 seat.busy = None
 
@@ -1099,6 +1145,9 @@ class LiveWorker(QThread):
             n, why = await questing.advance_dialogue(client)
             self._say(seat, f"advanced {n} dialogue window(s)" if n
                       else (why or "no dialogue open"))
+        elif action == "realm":
+            await self._realm_hop_party(seat, "the operator asked for a "
+                                              "realm change")
         elif action in ("wisps", "potion"):
             await self._upkeep_now(client, action)
 
@@ -2466,6 +2515,16 @@ class LiveWorker(QThread):
             return
         seat.goal_read = now
         try:
+            if await seat.client.is_loading():
+                # Nothing below reads true mid-load: window text comes
+                # back blank, positions come back in the OLD zone's
+                # space, and every blank feeds a keep-the-previous-value
+                # rule somewhere. A load lasts seconds; skipping the
+                # poll costs one `GOAL_POLL` and poisons nothing.
+                return
+        except Exception:
+            pass
+        try:
             goal = await questing.read_quest_goal(seat.client)
         except Exception:
             goal = ""
@@ -2489,8 +2548,7 @@ class LiveWorker(QThread):
             name = await questing.read_quest_name(seat.client)
         except Exception:
             name = ""
-        if name:
-            seat.quest_name = name
+        self._note_name(seat, name, now)
 
         zone = position = None
         try:
@@ -2520,11 +2578,7 @@ class LiveWorker(QThread):
         except Exception:
             pass
 
-        where = (zone, position, seat.goal)
-        if where != seat.progress:
-            seat.progress = where
-            seat.progress_at = now
-            seat.said_stuck = ""
+        self._note_progress(seat, zone, position, now)
         try:
             self.seat_quest.emit(seat.index, self._quest_row(seat, zone, now))
         except Exception:
@@ -2536,6 +2590,78 @@ class LiveWorker(QThread):
             # wizards and only every `TOGETHER_POLL` seconds.
             seat.zone_for_writeoff = zone
             self._forget_write_off(seat)
+
+    #: how long a position cell is remembered. A wizard back on a spot it
+    #: stood on within this window, same zone and same goal, has not
+    #: gone anywhere -- it has bounced.
+    OSCILLATION_WINDOW = 180.0
+    #: how long a quest name that will not read is kept before it counts
+    #: as unknown. Keeping the previous value on a blank read is right
+    #: (a blank is not evidence of change) -- for a while. Past this,
+    #: the kept value is invention: rev 30e83468's Sebastian was held
+    #: two quests behind by a name that had stopped reading.
+    NAME_MAX_AGE = 300.0
+
+    def _note_progress(self, seat, zone, position, now):
+        """Advance the progress clock -- unless the movement is a bounce.
+
+        The stuck clock is what every backstop hangs off (`_unstick`,
+        `_check_progress`, `_desperate_hop`), and it reset on ANY
+        position change. A script retry loop that TELEPORTS the wizard
+        between two spots therefore reset it forever: the heartbeats
+        said "moving" while the operator watched a wizard standing
+        still, and the backstops built for exactly that wedge were the
+        one thing the wedge switched off. The stack audit named it
+        starvation (F6).
+
+        A bounce is a return to a cell this wizard already stood in
+        within `OSCILLATION_WINDOW`, in the same zone and on the same
+        goal. Real progress -- a new cell, a new zone, a new goal --
+        still resets the clock on sight, and `seat.progress` (the spot
+        stamp the press-X and hop memories key on) deliberately stays
+        on the first cell of a bounce pair: the pair is one situation,
+        not two fresh chances.
+        """
+        where = (zone, position, seat.goal)
+        if where != seat.progress:
+            bounce = (seat.progress is not None
+                      and position is not None
+                      and zone == seat.progress[0]
+                      and seat.goal == seat.progress[2]
+                      and now - seat.cells_seen.get(position, -1e9)
+                      < self.OSCILLATION_WINDOW)
+            if not bounce:
+                seat.progress = where
+                seat.progress_at = now
+                seat.said_stuck = ""
+        if position is not None:
+            seat.cells_seen[position] = now
+            if len(seat.cells_seen) > 32:
+                cut = now - self.OSCILLATION_WINDOW
+                for cell, at in list(seat.cells_seen.items()):
+                    if at < cut:
+                        del seat.cells_seen[cell]
+
+    def _note_name(self, seat, name, now):
+        """Keep the freshest quest name, and stop keeping a dead one.
+
+        A blank read keeps the previous value -- a blank is not
+        evidence the wizard changed quest, and reads DO blank
+        transiently (`maybe_text` returns "" for a zero length, a
+        mid-write pointer or a decode failure; the audit's F3). But
+        kept forever, the previous value becomes invention. Past
+        `NAME_MAX_AGE` without one successful read, the honest answer
+        is "unknown": placement falls to the goal line, which the same
+        poll reads fresh, and `_places` treats an unplaced wizard by
+        refusing to move anyone -- the safe direction.
+        """
+        if name:
+            seat.quest_name = name
+            seat.name_read_at = now
+            return
+        if (seat.quest_name and seat.name_read_at
+                and now - seat.name_read_at > self.NAME_MAX_AGE):
+            seat.quest_name = ""
 
     def _quest_row(self, seat, zone, now):
         """One wizard's questing state, as the Questing tab shows it.
@@ -2782,6 +2908,18 @@ class LiveWorker(QThread):
     #: is waiting on changes on the scale of a conversation, not a tick.
     UNSTICK_EVERY = 30.0
 
+    #: how long a wizard may stand still before a WEDGED DIALOGUE BOX
+    #: comes under observation -- the fast lane, next to `STUCK_AFTER`'s
+    #: five minutes for everything else. Action needs more than time: the
+    #: box must show the SAME TEXT on two looks `UNSTICK_EVERY` apart.
+    #: That is the receipt the stack audit found missing everywhere --
+    #: rev ed709013's script "cleared" a box fifteen times in eight
+    #: milliseconds and never moved it, and text-unchanged-for-30s is
+    #: the proof clicks are dying that no click reports on its own. A
+    #: conversation being actively advanced changes text every page and
+    #: is never touched, however fast this threshold.
+    DIALOG_WEDGE = 25.0
+
     async def _unstick(self, seat):
         """Unwedge a scripted wizard, in the direction its own wait needs.
 
@@ -2832,8 +2970,17 @@ class LiveWorker(QThread):
             problem. The wizard needs moving, and after a second look
             `_desperate_hop` moves it.
 
-        Never before `STUCK_AFTER`, so an ordinary conversation is never
-        raced, and every read is written down either way.
+        The box arm runs from `DIALOG_WEDGE`, and acts only on a box
+        showing the SAME TEXT on two looks -- the receipt that proves
+        the script's clicks are dying rather than merely slow.
+        Everything else waits for `STUCK_AFTER`, so an ordinary
+        conversation is never raced, and every read is written down
+        either way. The fast lane is rev ed709013: the script's own
+        dialogue handling logged `Dialogue detected. Clearing...`
+        fifteen times in eight milliseconds while General Khaba's MORE
+        button sat unclicked on all three clients, and wizAi -- whose
+        own clicker works -- stood by for the full five minutes it
+        granted the script first.
         """
         import time
 
@@ -2842,9 +2989,11 @@ class LiveWorker(QThread):
         if seat.progress is None:
             return
         now = time.monotonic()
-        if now - seat.progress_at < self.STUCK_AFTER:
+        idle = now - seat.progress_at
+        if idle < self.DIALOG_WEDGE:
             seat.unstuck_at = 0.0
             seat.steps_seen = None
+            seat.box_text = None
             return
         if now - seat.unstuck_at < self.UNSTICK_EVERY:
             return
@@ -2858,6 +3007,26 @@ class LiveWorker(QThread):
         parked = (was is not None and steps is not None and steps == was)
 
         open_box = await questing.in_dialogue(seat.client)
+        # Before STUCK_AFTER, the only actionable finding is a dialogue
+        # box showing the SAME TEXT as the previous look, thirty seconds
+        # apart. The text is the receipt: the script's own handling had
+        # over a hundred polls at the box in that window, and a page it
+        # was actually advancing would read differently by now. A page
+        # that reads the same is a click that is dying in flight -- the
+        # failure `click_window` itself never reports. Unreadable text
+        # ("" both times) still counts: two looks at a box nothing
+        # could read or move is the same wedge with worse lighting.
+        text = None
+        if open_box:
+            try:
+                text = (await questing.dialogue_text(seat.client)) or ""
+            except Exception:
+                text = ""
+        stalled = open_box and seat.box_text is not None \
+            and text == seat.box_text
+        seat.box_text = text
+        if idle < self.STUCK_AFTER and not stalled:
+            return
         near = await questing.near_interactable(seat.client)
         at_marker, why = await questing.at_quest_marker(seat.client)
         seat.tel.note_questing(
@@ -3049,6 +3218,200 @@ class LiveWorker(QThread):
         import time
 
         return time.monotonic() < self._hop_pause_until
+
+    #: how long a COLLECT goal may sit unchanged, at its own marker and
+    #: out of combat, before the realm is judged crowded rather than the
+    #: wizard stuck. Deliberately after every gentler fix on the ladder:
+    #: X at 5 min, the desperate teleport at ~5.5, this at 8 -- because
+    #: a realm change is the one move that costs the whole party a zone
+    #: reload.
+    REALM_HOP_AFTER = 480.0
+    #: the least time between realm changes. Also what makes the manual
+    #: button and the broadcast request queue safe: every seat drains
+    #: its own copy of the "realm" action, the first one hops the whole
+    #: party, and the stamp turns the other two into no-ops.
+    REALM_HOP_COOLDOWN = 300.0
+
+    async def _maybe_realm_hop(self, seat):
+        """Change realms when a Collect step is contested, not stuck.
+
+        The distinction the stuck ladder cannot make on its own: a
+        wizard at the right marker, out of combat, with a Collect goal
+        that has not ticked in eight minutes is not wedged -- it is
+        QUEUING. The collectibles respawn on a timer and every other
+        player in a crowded realm takes one. No amount of pressing X or
+        teleporting to the marker fixes a queue; moving to an empty
+        shard does, same zone, same spot. The scan-and-pick is a Deimos
+        community contribution (see `realms.py`); the trigger and the
+        party coordination are wizAi's.
+        """
+        import time
+
+        goal = (seat.goal or "").lower()
+        if "collect" not in goal:
+            return
+        if not (self.script or self.auto_quest):
+            return
+        now = time.monotonic()
+        if seat.progress_at and now - seat.progress_at < self.REALM_HOP_AFTER:
+            return
+        if not seat.progress_at:
+            return
+        away = seat.marker_away
+        if away is None or away > self.MARKER_IN_ZONE:
+            # Not AT the contested spawns -- this is some other stall,
+            # and the rest of the ladder owns it.
+            return
+        idle = (now - seat.progress_at) / 60.0
+        await self._realm_hop_party(
+            seat, f"{seat.goal!r} has not advanced in {idle:.0f} min at its "
+                  f"own marker — the spawns are contested, so a quieter "
+                  f"realm is the move")
+
+    async def _realm_hop_party(self, seat, why):
+        """Move EVERY hooked wizard to one quiet realm, and say so.
+
+        The whole party or nobody, attempted in order and reported per
+        wizard: a party split across realms cannot see or teleport to
+        each other, which is a worse state than any crowded realm -- so
+        a partial hop is the loudest line this method can produce.
+        """
+        import time
+
+        from .. import realms
+
+        now = time.monotonic()
+        if now - self._realm_hopped_at < self.REALM_HOP_COOLDOWN:
+            since = now - self._realm_hopped_at
+            if since > 30.0:
+                # A human pressing the button again, not the broadcast
+                # queue's other copies of one press -- those arrive in
+                # seconds. A press that does nothing silently reads as
+                # a key that is not bound.
+                self._say(seat, f"changed realms {since:.0f}s ago — "
+                                f"waiting out the "
+                                f"{self.REALM_HOP_COOLDOWN:.0f}s cooldown")
+            return
+        live = [s for s in self.seats if s.client is not None]
+        if not live:
+            return
+        if any(s.in_duel for s in live):
+            self._say(seat, "not changing realms while somebody is in a duel")
+            return
+        # Claimed before the first await, so the broadcast request queue
+        # and a concurrent auto-trigger collapse to one hop.
+        self._realm_hopped_at = now
+        # Nothing may steer wizards whose spellbooks are open, for as
+        # long as the WORST case runs: a scan plus three hops with
+        # retries and 45s load waits. This must outlast the stage
+        # deadline below, not the other way around.
+        self._hop_pause_until = now + 420.0
+        landed = []
+        try:
+            listed, why_not = await realms.scan_realms(seat.client)
+            quiet = realms.perfect(listed)
+            fresh = [r for r in quiet if r["name"] not in self._realms_tried]
+            if not fresh and quiet:
+                # Every quiet realm has been tried this run; start over
+                # rather than never hopping again.
+                self._realms_tried.clear()
+                fresh = quiet
+            if not fresh:
+                self._say(seat, "no Perfect-population realm is listed to "
+                                "hop to" + (f" — {why_not}" if why_not else ""))
+                for other in live:
+                    other.tel.note_questing(
+                        "realm-hop-refused",
+                        "wanted a quieter realm and the list offered none"
+                        + (f" — {why_not}" if why_not else ""))
+                return
+            target = fresh[0]
+            self._realms_tried.add(target["name"])
+            self._say(seat, f"changing the party to realm {target['name']} "
+                            f"— {why}")
+            stranded = []
+            for one in live:
+                ok, reason = await realms.hop_to_realm(
+                    one.client, target["page"], target["slot"],
+                    expect_name=target["name"])
+                if not ok:
+                    # Once more before calling it stranded -- the first
+                    # failure is usually the book or a click, not the
+                    # realm.
+                    ok, reason = await realms.hop_to_realm(
+                        one.client, target["page"], target["slot"],
+                        expect_name=target["name"])
+                one.tel.note_questing(
+                    "realm-hop",
+                    f"to {target['name']} — {why}" if ok else
+                    f"to {target['name']} FAILED: {reason}")
+                if ok:
+                    landed.append(one)
+                else:
+                    stranded.append((one, reason))
+            if stranded and not landed:
+                # NOBODY moved, so the party is still together -- this
+                # is not a split, and calling it one sends the operator
+                # chasing a state that does not exist. Either every Go
+                # click died, or the party is ALREADY in the picked
+                # realm: the scan cannot read which realm the party is
+                # in, and a hop to your own realm shows no loading
+                # screen, which is exactly the receipt that failed. The
+                # realm stays on the tried list either way, so the next
+                # attempt picks a different one.
+                said = (f"nobody hopped — every wizard's change to "
+                        f"{target['name']} reported '{stranded[0][1]}'. "
+                        f"The party is still together, and may already BE "
+                        f"on {target['name']}; the next attempt will pick "
+                        f"a different realm")
+                for other in live:
+                    other.tel.note_questing("realm-hop-failed", said)
+                self._say(seat, said)
+            elif stranded:
+                names = " and ".join(s.name for s, _r in stranded)
+                said = (f"PARTY SPLIT ACROSS REALMS — {names} could not "
+                        f"follow to {target['name']} "
+                        f"({stranded[0][1]}). Wizards in different realms "
+                        f"cannot see or teleport to each other; press "
+                        f"Realm hop again or move {names} by hand")
+                for other in live:
+                    other.tel.note_questing("realm-split", said)
+                self._say(stranded[0][0], said)
+            else:
+                self._say(seat, f"the whole party is on {target['name']}")
+                for one in live:
+                    # The crowded-judgement clock starts over: the new
+                    # realm earns its own REALM_HOP_AFTER before being
+                    # called contested, not the old realm's leftovers --
+                    # and the zone genuinely did reload, so a fresh
+                    # progress stamp is the truth, not a fudge.
+                    one.progress_at = time.monotonic()
+                    one.cells_seen.clear()
+        except asyncio.CancelledError:
+            # The stage deadline cut the maneuver mid-party. Without
+            # this, the seats already hopped are in the new realm, the
+            # rest never attempted, the split report below the loop
+            # never runs, and the operator's retry press is refused by
+            # a cooldown stamped for a hop that half-happened. Say
+            # exactly where everybody is (sync calls only -- this
+            # coroutine is being cancelled), and open the retry window.
+            went = ", ".join(s.name for s in landed) or "nobody"
+            left = [s.name for s in live if s not in landed]
+            said = (f"the realm change was CUT OFF mid-party — {went} "
+                    f"hopped and {', '.join(left) if left else 'nobody'} "
+                    f"did not. If anyone moved, the party is split across "
+                    f"realms; press Realm hop again in a minute")
+            for other in live:
+                try:
+                    other.tel.note_questing("realm-cut-off", said)
+                except Exception:
+                    pass
+            self._say(seat, said)
+            self._realm_hopped_at = (time.monotonic()
+                                     - self.REALM_HOP_COOLDOWN + 60.0)
+            raise
+        finally:
+            self._hop_pause_until = time.monotonic() + self.HOP_SETTLE
 
     #: how many fruitless presses of X from one spot before wizAi stops
     #: offering. One is worth making -- `waitfordialog` polls forever
@@ -3965,6 +4328,13 @@ class LiveWorker(QThread):
     #: ...and for how long, before it is said. Wizards reach a sigil at
     #: different times and one still walking is not a split party.
     SPLIT_AFTER = 45.0
+    #: ...and for how long before wizAi stops narrating and drags the
+    #: odd wizards to the majority's sigil itself. The gap between this
+    #: and `SPLIT_AFTER` is the script's window: a friend-teleport
+    #: regroup that is coming lands well inside it, and one that has
+    #: not come by now is not coming — rev 1dcf4193 waited twenty
+    #: minutes for it.
+    SIGIL_ACT = 90.0
 
     async def _check_same_sigil(self):
         """Everyone at a prompt, same zone, nowhere near each other.
@@ -3979,13 +4349,16 @@ class LiveWorker(QThread):
         the zone agrees, the goal agrees, and every wizard is doing
         something.
 
-        Reported, not fixed. What puts the party back on one sigil is
-        the script's own friend teleport -- which is exactly what was
-        broken for this run (`Deimos/src/utils.py`, `_same_wizard`) --
-        and dragging wizards between sigils from out here would fight
-        the script for the wheel at the one moment it is about to work.
-        So this says the sentence the operator needed and leaves the
-        driving alone.
+        Reported at `SPLIT_AFTER`, and now FIXED at `SIGIL_ACT`: the
+        odd wizards are teleported to the majority's sigil. The first
+        version only reported, reasoning that the script's own friend
+        teleport was about to fix it and dragging wizards would fight
+        it for the wheel -- and rev 1dcf4193 is twenty minutes of that
+        teleport not coming. The report still gets the first minute
+        and a half to itself, so a script regroup that IS coming has
+        room to land; past that, the same within-zone body write the
+        VM's own `teleport client N` uses puts the party on one sigil,
+        once per wizard per episode.
         """
         import time
 
@@ -4073,6 +4446,32 @@ class LiveWorker(QThread):
                     seat.tel.note_questing("split-sigil", detail)
                 except Exception:
                     pass
+
+        # The fix, after the report has stood long enough for the
+        # script's own regroup to have come if it was coming.
+        if held < self.SIGIL_ACT:
+            return
+        for seat in odd:
+            if now - seat.sigil_moved_at < self.SIGIL_ACT:
+                continue                 # one drag per wizard per episode
+            seat.sigil_moved_at = now
+            try:
+                await seat.client.teleport(where[best])
+                moved = (f"teleported {seat.name} to the sigil "
+                         f"{with_them} {'are' if len(near) > 1 else 'is'} "
+                         f"standing on — {held:.0f}s at the wrong one and "
+                         f"the script's own regroup never came")
+                self._say(seat, moved)
+                for other in live:
+                    try:
+                        other.tel.note_questing("sigil-regroup", moved)
+                    except Exception:
+                        pass
+            except Exception as exc:
+                seat.tel.note_questing(
+                    "sigil-regroup",
+                    f"tried to teleport {seat.name} to the party's sigil "
+                    f"and could not — {type(exc).__name__}: {exc}")
 
     def _should_catch_up(self, seat):
         """Should this wizard abandon its own errand and go help?
@@ -4807,6 +5206,59 @@ class LiveWorker(QThread):
         self.seat_named.emit(seat.index, seat.wizard_name)
         self._say(seat, f"this client is {seat.wizard_name}, the "
                         f"{seat.school} wizard")
+        self._fill_script_names()
+
+    def _fill_script_names(self):
+        """Put the party's just-learned names into a placeholder script.
+
+        The preset dialog fills names in when it can, and before the
+        first duel it cannot: the game does not give a wizard's name
+        outside combat, so a run started cold gets its schools filled
+        and its account names left at the placeholder -- and the script
+        silently skips every friend-teleport it has. The run at rev
+        ed709013 logged `script-unconfigured` at 92s and again at 403s,
+        AFTER the first fight had put all three names on the seats; the
+        knowledge arrived and nothing used it. The operator: "the auto
+        run starts after the first combat when the names are set".
+
+        So the moment the last name lands, the fill happens here.
+        Setting `self.script` is the whole trigger: `_sync_script`
+        compares each seat's `script_source` against it every tick and
+        rebuilds the runner on any difference, so the configured text
+        takes over within a tick. That restart is a cost the script's
+        own design already pays constantly -- a deimoslang program that
+        runs off its end restarts by definition.
+
+        Not in solo-pilot mode, where `solo_source` strips the account
+        names on purpose so the script never friend-teleports at all.
+        """
+        from .. import scripts
+
+        if not self.script or self._solo_pilot():
+            return
+        party = [s for s in self.seats if s.client is not None]
+        if len(party) < 2 or not all(s.wizard_name for s in party):
+            return
+        blanks = scripts.unfilled(self.script, len(party))
+        if not any(name in scripts.ACCOUNT_VARS for name, _v in blanks):
+            return
+        source, filled = scripts.configure(
+            self.script, [(s.wizard_name, s.school) for s in party])
+        if not filled:
+            return
+        self.script = source
+        said = ("the party's names are known now — filled "
+                + ", ".join(f"{n}={v}" for n, v in filled[:4])
+                + (" …" if len(filled) > 4 else "")
+                + " into the script, which reloads with its "
+                  "friend-teleports live. Until this moment it was "
+                  "silently skipping them")
+        for seat in self.seats:
+            try:
+                seat.tel.note_questing("script-configured", said)
+            except Exception:
+                pass
+        self._say(party[0], said)
 
     def _stamp_title(self, seat):
         """Write who this is onto the game window itself.

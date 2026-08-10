@@ -454,11 +454,24 @@ async def advance_dialogue(client, max_clicks: int = 40,
             # forty windows advanced. Which is what the operator saw.
             stalls += 1
             if stalls >= 2:
+                # The mouse has provably failed twice. Last resort: the
+                # keyboard, a DIFFERENT hook -- a dead mouseless cursor
+                # and a dead keypress do not fail together. A page that
+                # the spacebar turns was a dead click, not a wedged box.
+                # Only here, not on the first stall, so a single racy
+                # click cannot double-advance past a choice.
+                before_key = await dialogue_text(client)
+                if await _press_spacebar(client):
+                    if await _dialogue_moved(client, before_key, settle,
+                                             poll, button) != STALLED:
+                        clicks += 1
+                        stalls = 0
+                        continue
                 reason = (f"the dialogue is open and the advance button "
-                          f"is there, but {stalls} clicks left the same "
-                          f"text on screen — the click is not reaching "
-                          f"the game (is another window over it, or is "
-                          f"mouseless input not hooked?)")
+                          f"is there, but two clicks and the spacebar all "
+                          f"left the same text on screen — the input is "
+                          f"not reaching the game, mouse and keyboard "
+                          f"both (is another window over it?)")
                 break
     return clicks, reason
 
@@ -594,6 +607,36 @@ def keycode_x():
         return Keycode.X
     except Exception:
         return None
+
+
+def keycode_spacebar():
+    """wizwalker's `Keycode.SPACEBAR`, or None if unavailable.
+
+    The keyboard advance for dialogue, and a SECOND input path when the
+    mouse click at the advance button does not land. A dead mouseless
+    cursor hook and a dead keyboard press do not fail together -- they
+    are different hooks -- so a box that survives both is genuinely
+    wedged, and one the mouse could not turn but the keyboard could is
+    exactly the failure the script's own `times 20 { sendkey X }` hits
+    (X starts a conversation; it does not advance a MORE page).
+    """
+    try:
+        from wizwalker import Keycode
+        return Keycode.SPACEBAR
+    except Exception:
+        return None
+
+
+async def _press_spacebar(client, seconds: float = 0.1) -> bool:
+    """Send the dialogue-advance key. True only if it went without error."""
+    key = keycode_spacebar()
+    if key is None:
+        return False
+    try:
+        await client.send_key(key, seconds)
+        return True
+    except Exception:
+        return False
 
 
 async def press_x(client, seconds: float = 0.1):

@@ -1082,6 +1082,29 @@ class WizAiBackend:
                 f"again with a longer pause between selecting the card and "
                 f"clicking the target")
 
+    def report_redraw_retry(self, card_name, exc):
+        """The cast died reading the board's UI; casting again after it
+        settles.
+
+        The stack audit's F7. Targeting finds an enemy's health bar as
+        a UI WINDOW under its combatant control, and while the round
+        redraws -- a mob joining, a death animation, the planning phase
+        closing -- the child is briefly not there. wizwalker waits five
+        seconds and throws `ValueError: Couldn't find health child`;
+        the board underneath is fine, and a second look after the
+        redraw finds it. Rev ed709013 passed a round to exactly this.
+
+        Same channel as `report_slow_cast`, because it is the same
+        kind of statement: a retry in progress, and nothing has failed
+        yet.
+        """
+        if self.on_slow_cast:
+            self.on_slow_cast(
+                f"the cast of {card_name} died reading the board "
+                f"({type(exc).__name__}: {exc}) — that is the round's "
+                f"redraw, not the board. Waiting for it to settle and "
+                f"casting the same card again")
+
     def report_round_timing(self, waited, planned, acted):
         """What the round that just went out cost, in seconds.
 
@@ -1385,6 +1408,18 @@ class WizAiCombatHandler:
                             f"{self.RETRY_CAST_TIME:.1f}s"
                             + await self._why_not(read, decision, card))
             except Exception as exc:
+                if self._redraw_race(exc):
+                    # The cast died READING the board, not casting at
+                    # it, and the read that died is a UI child the
+                    # round's own animation removes and puts back. Try
+                    # the same card once more after the redraw settles
+                    # -- on success the round's record, written by
+                    # `decide()` as a cast that was made, is simply
+                    # true, and nothing needs amending.
+                    self.backend.report_redraw_retry(decision.card_name,
+                                                     exc)
+                    if await self._recast_after_redraw(read, decision):
+                        return
                 # A misclick or a board that moved under us costs this
                 # round, not the fight -- but the round has *already*
                 # been recorded, by `decide()`, as a cast that was made.
@@ -1395,6 +1430,45 @@ class WizAiCombatHandler:
                 self.backend.report_failed_cast(decision.card_name, exc)
                 if not await self._try_the_next_best(read, decision):
                     await self.pass_button()
+
+    #: what a mid-round redraw throws, lowercased. The health bar is a
+    #: UI window (stack audit F7): targeting reads it out of the window
+    #: tree, and while the round animates it is briefly not there --
+    #: wizwalker waits five seconds and gives up with these words.
+    REDRAW_RACE = ("health child", "name child", "no longer valid")
+    #: how long the redraw gets to finish before the one retry.
+    REDRAW_SETTLE = 1.5
+
+    def _redraw_race(self, exc) -> bool:
+        text = str(exc).lower()
+        return any(mark in text for mark in self.REDRAW_RACE)
+
+    async def _recast_after_redraw(self, read, decision) -> bool:
+        """One more attempt at the SAME card, after the UI settles.
+
+        Not the runner-up: the board did not move, the read of it did.
+        The card the policy chose is still the right card, so the
+        recovery is to cast it, not to downgrade the round. Fresh card
+        and target handles, because the stale ones are exactly what a
+        redraw invalidates. True when the card left the hand; any
+        failure here falls back to the runner-up path unchanged.
+        """
+        import asyncio
+
+        try:
+            await asyncio.sleep(self.REDRAW_SETTLE)
+            card = self._pick_card(read, decision.card_name)
+            if card is None:
+                return False
+            target = await self._resolve_target(
+                read, decision.target_index,
+                self.backend.cards.get(decision.card_name),
+                ally=getattr(decision, "ally_name", ""))
+            held = await self._cards_in_hand()
+            await card.cast(target, sleep_time=self.RETRY_CAST_TIME)
+            return await self._card_left_the_hand(held)
+        except Exception:
+            return False
 
     async def _try_the_next_best(self, read, decision):
         """The runner-up, once, rather than surrendering the round.

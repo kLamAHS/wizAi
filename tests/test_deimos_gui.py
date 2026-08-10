@@ -14336,3 +14336,898 @@ def test_the_service_loop_consults_the_hold_before_stepping(monkeypatch):
     assert "self._hop_held()" in src
     assert src.index("self._hop_held()") < src.index('"script step"'), \
         "the hold must gate the script step, not follow it"
+
+
+# --------------------------- a wedged dialogue clears on the fast lane
+#
+# Rev ed709013, the run photographed with General Khaba's MORE button up
+# on all three clients. The script's own dialogue handling logged
+# `Dialogue detected. Clearing...` fifteen times in eight milliseconds
+# and the button never got clicked — and wizAi, whose own clicker works,
+# granted the script the full five STUCK_AFTER minutes before touching
+# it. A box open across two looks thirty seconds apart has had over a
+# hundred of the script's own polls at it; that is a wedge, not a
+# conversation.
+
+def test_a_wedged_dialogue_is_cleared_well_before_full_stuck(monkeypatch):
+    import asyncio
+    import time
+
+    worker, seat = _wedged(dialogue=True, monkeypatch=monkeypatch)
+    seat.progress_at = time.monotonic() - worker.DIALOG_WEDGE - 1
+    asyncio.run(worker._unstick(seat))
+    assert seat.tel.questing == [], "one look is a conversation, not a wedge"
+    seat.unstuck_at = 0.0
+    asyncio.run(worker._unstick(seat))
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert kinds == ["stuck-detail", "unstuck-dialogue"]
+
+
+def test_a_box_that_closed_between_looks_is_left_alone(monkeypatch):
+    import asyncio
+    import time
+
+    from deimos_bridge import questing
+
+    worker, seat = _wedged(dialogue=True, monkeypatch=monkeypatch)
+    seat.progress_at = time.monotonic() - worker.DIALOG_WEDGE - 1
+    asyncio.run(worker._unstick(seat))
+
+    async def closed(_c):
+        return False
+
+    monkeypatch.setattr(questing, "in_dialogue", closed)
+    seat.unstuck_at = 0.0
+    asyncio.run(worker._unstick(seat))
+    assert seat.tel.questing == [], "a box that cleared itself needed nothing"
+
+
+def test_an_ordinary_conversation_is_never_raced(monkeypatch):
+    import asyncio
+    import time
+
+    worker, seat = _wedged(dialogue=True, monkeypatch=monkeypatch)
+    seat.progress_at = time.monotonic() - worker.DIALOG_WEDGE + 10
+    asyncio.run(worker._unstick(seat))
+    assert seat.tel.questing == []
+    assert seat.box_text is None
+
+
+def test_a_conversation_being_advanced_is_left_alone(monkeypatch):
+    """The receipt in action: a page the script IS advancing reads
+    differently on every look, and however slow the pages turn, a box
+    whose text keeps changing is a conversation — not a wedge."""
+    import asyncio
+    import time
+
+    from deimos_bridge import questing
+
+    worker, seat = _wedged(dialogue=True, monkeypatch=monkeypatch)
+    seat.progress_at = time.monotonic() - worker.DIALOG_WEDGE - 1
+    pages = iter(["page one", "page two", "page two"])
+
+    async def turning(_c):
+        return next(pages)
+
+    monkeypatch.setattr(questing, "dialogue_text", turning)
+    asyncio.run(worker._unstick(seat))              # sees "page one"
+    seat.unstuck_at = 0.0
+    asyncio.run(worker._unstick(seat))              # "page two" — advancing
+    assert seat.tel.questing == [], \
+        "a box whose text changed between looks was called a wedge"
+    seat.unstuck_at = 0.0
+    asyncio.run(worker._unstick(seat))              # "page two" again — dead
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert kinds == ["stuck-detail", "unstuck-dialogue"]
+
+
+# ------------------------- the first duel's names go into the script
+#
+# Rev ed709013 logged `script-unconfigured` at 92s and again at 403s —
+# the second one AFTER the first fight had put all three wizards' names
+# on the seats. The knowledge arrived and nothing used it, so the script
+# spent the whole run silently skipping its own friend-teleports. The
+# operator: "the auto run starts after the first combat when the names
+# are set for the characters just so you know".
+
+def _named_party():
+    worker, _read = _zoned_party(["KT_Hub"] * 3)
+    worker.script = _QUESTER
+    for seat, (name, school) in zip(worker.seats,
+                                    [("Phönix", "storm"),
+                                     ("Sebastian", "life"),
+                                     ("Konstantin", "ice")]):
+        seat.wizard_name = name
+        seat.school = school
+    return worker
+
+
+def test_the_first_duels_names_fill_the_script():
+    worker = _named_party()
+    worker._fill_script_names()
+    assert 'var Main_Account = "Phönix"' in worker.script
+    assert 'var Questee2 = "Sebastian"' in worker.script
+    assert 'var Questee3 = "Konstantin"' in worker.script
+    kinds = [e["kind"] for e in worker.seats[0].tel.questing]
+    assert "script-configured" in kinds
+    # ...and the guards the script tests itself with stay untouched, so
+    # its own "am I configured" checks now pass.
+    assert 'if NOT Main_Account = "QuestingAccountName"' in worker.script
+
+    worker._fill_script_names()
+    kinds = [e["kind"] for e in worker.seats[0].tel.questing]
+    assert kinds.count("script-configured") == 1, "filled twice"
+
+
+def test_the_fill_waits_for_every_seat_to_have_a_name():
+    worker = _named_party()
+    worker.seats[2].wizard_name = None
+    worker._fill_script_names()
+    assert 'var Main_Account = "QuestingAccountName"' in worker.script, \
+        "filled half the party — the half-done fill is the original bug"
+
+
+def test_the_fill_rebuilds_the_runner_by_changing_the_source():
+    """Setting `self.script` is the whole trigger: `_sync_script`
+    rebuilds on any difference from the seat's `script_source`."""
+    worker = _named_party()
+    worker.seats[0].script_source = worker.script      # runner up to date
+    worker._fill_script_names()
+    assert worker.seats[0].script_source != worker.script, \
+        "the runner would never notice the configured text"
+
+
+def test_a_solo_pilot_script_is_not_filled():
+    """`solo_source` strips the account names on purpose — the pilot
+    never friend-teleports. Filling them back in would re-arm them."""
+    worker = _named_party()
+    worker.solo_script = True
+    worker._fill_script_names()
+    assert 'var Main_Account = "QuestingAccountName"' in worker.script
+
+
+# ---------------------- movement that goes nowhere is not progress
+#
+# The stack audit's F6: every backstop hangs off the stuck clock, and
+# the clock reset on ANY position change — so a script retry loop that
+# teleports a wizard between two spots reset it forever. The heartbeats
+# said "moving" while the operator watched a wizard standing still, and
+# the backstops built for exactly that wedge were the one thing the
+# wedge switched off.
+
+def test_bouncing_between_two_spots_does_not_reset_the_stuck_clock():
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    seat.goal = "Talk To Rami in Hall of Champions"
+    a, b = (10, 10, 0), (30, 10, 0)
+    worker._note_progress(seat, "KT_Hub", a, 100.0)
+    worker._note_progress(seat, "KT_Hub", b, 105.0)   # first visit: real move
+    settled = seat.progress_at
+    for i, cell in enumerate([a, b, a, b]):
+        worker._note_progress(seat, "KT_Hub", cell, 115.0 + i * 10)
+    assert seat.progress_at == settled, \
+        "a two-spot teleport loop kept resetting the stuck clock"
+
+
+def test_a_genuinely_new_spot_still_resets_it():
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    seat.goal = "Talk To Rami in Hall of Champions"
+    worker._note_progress(seat, "KT_Hub", (10, 10, 0), 100.0)
+    worker._note_progress(seat, "KT_Hub", (30, 10, 0), 110.0)   # bounce arm
+    worker._note_progress(seat, "KT_Hub", (99, 99, 0), 120.0)   # real move
+    assert seat.progress_at == 120.0
+
+
+def test_a_zone_or_goal_change_is_always_progress():
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    seat.goal = "Talk To Rami in Hall of Champions"
+    a = (10, 10, 0)
+    worker._note_progress(seat, "KT_Hub", a, 100.0)
+    seat.goal = "Talk To General Khaba in Hall of Champions"
+    worker._note_progress(seat, "KT_Hub", a, 110.0)
+    assert seat.progress_at == 110.0, "a quest turn-in on the spot is progress"
+
+
+def test_an_old_cell_revisited_after_the_window_is_progress():
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    seat.goal = "g"
+    a, b = (10, 10, 0), (30, 10, 0)
+    worker._note_progress(seat, "KT_Hub", a, 100.0)
+    worker._note_progress(seat, "KT_Hub", b, 110.0)
+    later = 110.0 + worker.OSCILLATION_WINDOW + 1
+    worker._note_progress(seat, "KT_Hub", a, later)
+    assert seat.progress_at == later, \
+        "coming back somewhere after three minutes is a route, not a bounce"
+
+
+# ------------------------------ a name that will not read has an age
+#
+# The audit's F3: `maybe_text` returns "" for a zero length, a mid-write
+# pointer or a decode failure, so blank reads are routine and keeping
+# the previous value is right — for a while. Kept forever it becomes
+# invention, and rev 30e83468's Sebastian was held two quests behind by
+# a name that had stopped reading.
+
+def test_a_blank_name_read_keeps_the_previous_value_for_a_while():
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    worker._note_name(seat, "Eye of Krok", 100.0)
+    worker._note_name(seat, "", 100.0 + worker.NAME_MAX_AGE - 1)
+    assert seat.quest_name == "Eye of Krok"
+
+
+def test_a_name_that_has_not_read_in_five_minutes_is_unknown():
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    worker._note_name(seat, "Eye of Krok", 100.0)
+    worker._note_name(seat, "", 100.0 + worker.NAME_MAX_AGE + 1)
+    assert seat.quest_name == "", \
+        "a five-minute-dead read still placed this wizard on the line"
+
+
+def test_a_hand_set_name_with_no_read_stamp_is_never_aged_out():
+    """Every test fixture sets quest_name directly; a name without a
+    read timestamp has no age to exceed."""
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    seat.quest_name = "Eye of Krok"
+    worker._note_name(seat, "", 1e9)
+    assert seat.quest_name == "Eye of Krok"
+
+
+def test_the_goal_poll_skips_a_loading_client():
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._read_goal)
+    assert "is_loading" in src
+    assert src.index("is_loading") < src.index("read_quest_goal"), \
+        "the loading gate must come before the reads it protects"
+
+
+# ------------------- the split party is put back on one sigil
+#
+# The audit's F5. `_check_same_sigil` named the two-doors condition and
+# left the fix to the script's own friend-teleport — and rev 1dcf4193
+# is twenty minutes of that teleport not coming.
+
+def test_the_odd_wizard_is_dragged_to_the_partys_sigil(monkeypatch):
+    import time
+
+    worker = _sigil_party([(0, 0), (100, 0), (5000, 0)])
+    dragged = []
+
+    class _Client:
+        async def teleport(self, pos):
+            dragged.append((pos.x, pos.y))
+
+    worker.seats[2].client = _Client()
+    for seat in worker.seats:
+        seat.apart_since = time.monotonic() - worker.SIGIL_ACT - 1
+    _look_at_sigils(worker, monkeypatch)
+    assert dragged == [(0.0, 0.0)], \
+        "the odd wizard was not moved to the majority's sigil"
+    kinds = [e["kind"] for e in worker.seats[2].tel.questing]
+    assert "sigil-regroup" in kinds
+
+    _look_at_sigils(worker, monkeypatch)
+    assert len(dragged) == 1, "one split episode earns one drag, not one per check"
+
+
+def test_the_report_alone_gets_the_first_ninety_seconds(monkeypatch):
+    """The gap between SPLIT_AFTER and SIGIL_ACT is the script's window:
+    a friend-teleport regroup that is coming lands well inside it."""
+    import time
+
+    worker = _sigil_party([(0, 0), (100, 0), (5000, 0)])
+    dragged = []
+
+    class _Client:
+        async def teleport(self, pos):
+            dragged.append(pos)
+
+    worker.seats[2].client = _Client()
+    for seat in worker.seats:
+        seat.apart_since = time.monotonic() - worker.SPLIT_AFTER - 1
+    said = _look_at_sigils(worker, monkeypatch)
+    assert said, "the report itself must still fire"
+    assert dragged == [], "it dragged before the script had its window"
+
+
+def test_a_drag_that_fails_says_so(monkeypatch):
+    import time
+
+    worker = _sigil_party([(0, 0), (100, 0), (5000, 0)])
+    for seat in worker.seats:
+        seat.apart_since = time.monotonic() - worker.SIGIL_ACT - 1
+    _look_at_sigils(worker, monkeypatch)      # seat 2's client is object()
+    notes = [e for e in worker.seats[2].tel.questing
+             if e["kind"] == "sigil-regroup"]
+    assert notes and "could not" in notes[0]["detail"]
+
+
+# ---------------------- a cast that died reading the board is retried
+#
+# The audit's F7, live in rev ed709013: "the cast of Imp did not go
+# through (ValueError: Couldn't find health child) — passed instead".
+# Targeting finds an enemy's health bar as a UI WINDOW, and while the
+# round redraws the child is briefly not there. The board is fine; the
+# read of it died. The recovery is the same card again, not a pass.
+
+def _redraw_handler():
+    from deimos_bridge.live_backend import WizAiCombatHandler
+
+    handler = WizAiCombatHandler.__new__(WizAiCombatHandler)
+    return handler
+
+
+def test_the_redraw_race_is_recognised_by_its_words():
+    handler = _redraw_handler()
+    assert handler._redraw_race(ValueError("Couldn't find health child"))
+    assert handler._redraw_race(ValueError("Couldn't find name child"))
+    assert handler._redraw_race(RuntimeError(
+        "This combat member is no longer valid; you most likely need "
+        "to reget members"))
+    assert not handler._redraw_race(RuntimeError("the card was still in hand"))
+    assert not handler._redraw_race(ValueError("some other read"))
+
+
+def test_a_redraw_death_retries_the_same_card_before_the_runner_up():
+    import inspect
+
+    from deimos_bridge.live_backend import WizAiCombatHandler
+
+    src = inspect.getsource(WizAiCombatHandler._handle_round)
+    assert "_redraw_race(exc)" in src
+    assert src.index("_redraw_race(exc)") < src.index("report_failed_cast"), \
+        "the retry must come before the round is written off"
+    assert src.index("_redraw_race(exc)") < src.index("_try_the_next_best"), \
+        "the SAME card outranks the runner-up when the board did not move"
+
+
+def test_the_recast_reresolves_its_handles():
+    """The stale handles are exactly what a redraw invalidates, so the
+    retry must pick the card and target fresh rather than reusing the
+    ones that just died."""
+    import asyncio
+
+    handler = _redraw_handler()
+    handler.REDRAW_SETTLE = 0.0
+    calls = []
+
+    class _Card:
+        async def cast(self, target, sleep_time=None):
+            calls.append(("cast", target, sleep_time))
+
+    class _Backend:
+        cards = {"Imp": object()}
+
+    handler.backend = _Backend()
+    handler._pick_card = lambda read, name: (calls.append(("pick", name))
+                                             or _Card())
+
+    async def resolve(read, index, spec, ally=""):
+        calls.append(("resolve", index))
+        return "fresh-target"
+
+    async def in_hand():
+        return 3
+
+    async def left(held):
+        calls.append(("left", held))
+        return True
+
+    handler._resolve_target = resolve
+    handler._cards_in_hand = in_hand
+    handler._card_left_the_hand = left
+
+    class _Decision:
+        card_name = "Imp"
+        target_index = 1
+        ally_name = ""
+
+    went = asyncio.run(handler._recast_after_redraw(object(), _Decision()))
+    assert went
+    assert ("pick", "Imp") in calls and ("resolve", 1) in calls
+    assert ("cast", "fresh-target", handler.RETRY_CAST_TIME) in calls
+
+
+# ------------- the keyboard is a second way through a wedged dialogue
+#
+# Stack audit F1, at the point it actually bites wizAi: the script's own
+# clearing is `times 20 { sendkey X }` — X starts a conversation, it does
+# not advance a MORE page — and wizAi's backstop clears the box by
+# CLICKING, the same mouse path that dies silently when the mouseless
+# hook is down. The keyboard is a different hook, so a box the mouse
+# cannot turn but the spacebar can is exactly this failure. The spacebar
+# is a LAST RESORT — only after two dead clicks — so a single racy click
+# cannot double-advance past a choice.
+
+class _KeyboardDialogue:
+    """A dialogue the MOUSE cannot advance but the SPACEBAR can."""
+
+    def __init__(self, pages=("page one", "page two")):
+        self._pages = list(pages)
+        self._i = 0
+        self.keys = []
+        self._text = _Win("txtMessage", text=self._pages[0])
+        self._button = _Win("btnRight")
+        self._dialog = _Win("wndDialogMain",
+                            [self._button, _Win("txtArea", [self._text])])
+        self.root_window = _Win("root", [_Win("WorldView", [self._dialog])])
+
+        class _Mute:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def click_window(self, win): pass      # the dead mouse
+        self.mouse_handler = _Mute()
+
+    async def send_key(self, key, seconds=0):
+        self.keys.append(key)
+        self._i += 1
+        if self._i >= len(self._pages):
+            self._dialog._visible = False
+            self._button._visible = False
+        else:
+            self._text._text = self._pages[self._i]
+
+
+def _armed_spacebar(monkeypatch):
+    from deimos_bridge import questing
+    monkeypatch.setattr(questing, "keycode_spacebar", lambda: "SPACE")
+
+
+def test_the_spacebar_clears_a_box_the_mouse_cannot(monkeypatch):
+    import asyncio
+
+    from deimos_bridge.questing import advance_dialogue
+
+    _armed_spacebar(monkeypatch)
+    client = _KeyboardDialogue(pages=["page one", "page two"])
+    clicks, why = asyncio.run(advance_dialogue(client, settle=0.05, poll=0.01))
+    assert why == "", why
+    assert clicks >= 1, "the keyboard fallback never advanced the box"
+    assert client.keys == ["SPACE", "SPACE"], client.keys
+
+
+def test_a_box_neither_input_can_move_is_reported_as_wedged(monkeypatch):
+    import asyncio
+
+    from deimos_bridge import questing
+    from deimos_bridge.questing import advance_dialogue
+
+    _armed_spacebar(monkeypatch)
+
+    async def dead_key(_c, seconds=0.1):
+        return True                      # the press "succeeds" but does nothing
+
+    monkeypatch.setattr(questing, "_press_spacebar", dead_key)
+
+    root, _btn = _dialogue_root()
+    client = _QuestClient(root)
+
+    class _Mute(_Mouse):
+        async def click_window(self, window):
+            self.clicks.append(window)   # never closes, never changes text
+
+    client.mouse_handler = _Mute()
+    clicks, why = asyncio.run(advance_dialogue(client, settle=0.02, poll=0.01))
+    assert clicks == 0
+    assert "spacebar" in why and "mouse and keyboard both" in why
+
+
+def test_the_mouse_is_still_tried_first(monkeypatch):
+    """The spacebar is a FALLBACK — a box the MOUSE clears normally
+    (each click turns the page) must never also eat a keypress."""
+    import asyncio
+
+    from deimos_bridge.questing import advance_dialogue
+
+    _armed_spacebar(monkeypatch)
+
+    class _WorkingMouseDialogue:
+        def __init__(self):
+            self._pages = ["page one", "page two"]
+            self._i = 0
+            self.keys = []
+            self._text = _Win("txtMessage", text=self._pages[0])
+            self._button = _Win("btnRight")
+            self._dialog = _Win("wndDialogMain",
+                                [self._button, _Win("txtArea", [self._text])])
+            self.root_window = _Win("root",
+                                    [_Win("WorldView", [self._dialog])])
+            outer = self
+
+            class _Mouse:
+                async def __aenter__(self): return self
+                async def __aexit__(self, *a): return False
+                async def click_window(self, win):
+                    outer._i += 1                  # the mouse works
+                    if outer._i >= len(outer._pages):
+                        outer._dialog._visible = False
+                        outer._button._visible = False
+                    else:
+                        outer._text._text = outer._pages[outer._i]
+            self.mouse_handler = _Mouse()
+
+        async def send_key(self, key, seconds=0):
+            self.keys.append(key)
+
+    client = _WorkingMouseDialogue()
+    clicks, why = asyncio.run(advance_dialogue(client, settle=0.05, poll=0.01))
+    assert clicks >= 1 and why == ""
+    assert client.keys == [], "pressed a key at a box the mouse was clearing"
+
+
+# ---------------------------- changing realms, with receipts
+#
+# The scan-and-pick is a Deimos community contribution (shared after two
+# days of error-free farming); wizAi adds the receipts — page turns
+# verified by the page number, the slot's name checked before Go To
+# Realm, the hop confirmed by the loading screen actually starting —
+# because this stack has already paid for every fire-and-forget click
+# it vendored.
+
+class _RWin:
+    """A window whose text and visibility can be live closures."""
+
+    def __init__(self, name, children=(), visible=True, text=""):
+        self._name = name
+        self._children = list(children)
+        self._visible = visible
+        self._text = text
+
+    async def name(self):
+        return self._name
+
+    async def children(self):
+        return list(self._children)
+
+    async def is_visible(self):
+        v = self._visible
+        return bool(v() if callable(v) else v)
+
+    async def maybe_text(self):
+        t = self._text
+        return t() if callable(t) else t
+
+
+class _RealmBook:
+    """A client with a working spellbook realm list, two pages."""
+
+    def __init__(self, pages=None, next_works=True, go_loads=True,
+                 esc_works=True):
+        self.pages = pages or {
+            1: [("Avalon", "Full"), ("Bravado", "Perfect")],
+            2: [("Centaur", "Perfect")],
+        }
+        self.page = 1
+        self.book_open = False
+        self.keys = []
+        self.hopped = []
+        self.selected = None
+        self._loading_left = 0
+        self._next_works = next_works
+        self._go_loads = go_loads
+        self._esc_works = esc_works
+
+        book = self
+
+        def page_text():
+            return f"<center>{book.page} / {len(book.pages)}</center>"
+
+        def slot_text(slot, which):
+            row = book.pages.get(book.page, [])
+            if slot >= len(row):
+                return ""
+            return f"<center>{row[slot][0 if which == 'name' else 1]}</center>"
+
+        slots = []
+        for slot in range(7):
+            slots.append(_RWin(f"btnRealm{slot}", [
+                _RWin(f"txtRealm{slot}Name",
+                      text=lambda s=slot: slot_text(s, "name")),
+                _RWin(f"txtRealm{slot}Population",
+                      text=lambda s=slot: slot_text(s, "pop")),
+            ]))
+        self.root_window = _RWin("root", [
+            _RWin("WorldView", [
+                _RWin("DeckConfiguration", [
+                    _RWin("Close_Button", visible=lambda: book.book_open),
+                    _RWin("RealmsButton"),
+                    _RWin("txtRealmPage", text=page_text),
+                    _RWin("btnRealmRight"),
+                    _RWin("btnRealmLeft"),
+                    _RWin("btnGoToRealm"),
+                ] + slots, visible=lambda: book.book_open),
+            ]),
+        ])
+
+        class _M:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def click_window(self, win):
+                await book._clicked(await win.name())
+
+        self.mouse_handler = _M()
+
+    async def _clicked(self, name):
+        if name == "btnRealmRight" and self._next_works:
+            self.page = min(self.page + 1, len(self.pages))
+        elif name == "btnRealmLeft":
+            self.page = max(self.page - 1, 1)
+        elif name.startswith("btnRealm") and name[8:].isdigit():
+            self.selected = int(name[8:])
+        elif name == "btnGoToRealm":
+            self.hopped.append((self.page, self.selected))
+            if self._go_loads:
+                self._loading_left = 3
+        elif name == "Close_Button":
+            self.book_open = False
+
+    async def send_key(self, key, seconds=0):
+        self.keys.append(key)
+        if key == "ESC" and self._esc_works:
+            self.book_open = not self.book_open
+
+    async def is_loading(self):
+        if self._loading_left > 0:
+            self._loading_left -= 1
+            return True
+        return False
+
+
+def _fast_realms(monkeypatch):
+    from deimos_bridge import realms
+
+    monkeypatch.setattr(realms, "keycode_esc", lambda: "ESC")
+    monkeypatch.setattr(realms, "PAGE_TURN_WAIT", 0.3)
+    monkeypatch.setattr(realms, "HOP_TAKE_WAIT", 0.3)
+    return realms
+
+
+def test_the_scan_reads_every_page_and_perfect_filters(monkeypatch):
+    import asyncio
+
+    realms = _fast_realms(monkeypatch)
+    client = _RealmBook()
+    listed, why = asyncio.run(realms.scan_realms(client))
+    assert why == ""
+    assert [(r["page"], r["slot"], r["name"], r["population"])
+            for r in listed] == [
+        (1, 0, "Avalon", "Full"), (1, 1, "Bravado", "Perfect"),
+        (2, 0, "Centaur", "Perfect")]
+    quiet = realms.perfect(listed)
+    assert [r["name"] for r in quiet] == ["Bravado", "Centaur"]
+    assert not client.book_open, "the scan left the spellbook open"
+
+
+def test_a_page_turn_that_does_not_land_is_reported_not_looped(monkeypatch):
+    import asyncio
+
+    realms = _fast_realms(monkeypatch)
+    client = _RealmBook(next_works=False)
+    listed, why = asyncio.run(realms.scan_realms(client))
+    assert [r["name"] for r in listed] == ["Avalon", "Bravado"], \
+        "the broken page turn should still return page 1's realms"
+    assert "stayed at 1" in why
+
+
+def test_a_hop_lands_and_is_confirmed_by_the_loading_screen(monkeypatch):
+    import asyncio
+
+    realms = _fast_realms(monkeypatch)
+    client = _RealmBook()
+    ok, why = asyncio.run(realms.hop_to_realm(client, 2, 0,
+                                              expect_name="Centaur"))
+    assert ok, why
+    assert client.hopped == [(2, 0)]
+
+
+def test_a_hop_refuses_when_the_list_moved(monkeypatch):
+    """Page 2 slot 0 is only meaningful while it still shows the realm
+    that was picked. Hopping blind lands the party somewhere random."""
+    import asyncio
+
+    realms = _fast_realms(monkeypatch)
+    client = _RealmBook()
+    ok, why = asyncio.run(realms.hop_to_realm(client, 2, 0,
+                                              expect_name="Bravado"))
+    assert not ok
+    assert "the list moved" in why
+    assert client.hopped == [], "it hopped anyway"
+
+
+def test_a_go_click_with_no_loading_screen_is_not_a_hop(monkeypatch):
+    import asyncio
+
+    realms = _fast_realms(monkeypatch)
+    client = _RealmBook(go_loads=False)
+    ok, why = asyncio.run(realms.hop_to_realm(client, 2, 0,
+                                              expect_name="Centaur"))
+    assert not ok
+    assert "did not take" in why
+
+
+def test_a_book_that_will_not_open_is_a_reason_not_a_crash(monkeypatch):
+    import asyncio
+
+    realms = _fast_realms(monkeypatch)
+    client = _RealmBook(esc_works=False)
+    listed, why = asyncio.run(realms.scan_realms(client))
+    assert listed == []
+    assert "did not open" in why
+
+
+# ------------------------------ the party hops together, or says so
+
+def _hoppable_party(monkeypatch, hop_results=None):
+    """A worker whose realm scan finds one Perfect realm."""
+    from deimos_bridge import realms
+
+    worker, _read = _zoned_party(["KT_Hub"] * 3)
+    worker.script = "###deimos_expertmode"
+    calls = {"hops": [], "scans": 0}
+
+    async def scan(client):
+        calls["scans"] += 1
+        return ([{"page": 1, "slot": 1, "name": "Bravado",
+                  "population": "Perfect"}], "")
+
+    results = list(hop_results or [])
+
+    async def hop(client, page, slot, expect_name=""):
+        calls["hops"].append((client, page, slot, expect_name))
+        return results.pop(0) if results else (True, "")
+
+    monkeypatch.setattr(realms, "scan_realms", scan)
+    monkeypatch.setattr(realms, "hop_to_realm", hop)
+    return worker, calls
+
+
+def test_the_whole_party_hops_to_one_realm(monkeypatch):
+    import asyncio
+
+    worker, calls = _hoppable_party(monkeypatch)
+    asyncio.run(worker._realm_hop_party(worker.seats[0], "testing"))
+    assert len(calls["hops"]) == 3, "every hooked wizard must hop"
+    assert {h[3] for h in calls["hops"]} == {"Bravado"}, \
+        "the party hopped to different realms"
+    for seat in worker.seats:
+        kinds = [e["kind"] for e in seat.tel.questing]
+        assert "realm-hop" in kinds
+
+    # The cooldown collapses the broadcast queue's other copies.
+    asyncio.run(worker._realm_hop_party(worker.seats[1], "testing"))
+    assert len(calls["hops"]) == 3, "the cooldown did not hold"
+
+
+def test_a_wizard_that_cannot_follow_is_a_loud_split(monkeypatch):
+    import asyncio
+
+    worker, calls = _hoppable_party(
+        monkeypatch,
+        hop_results=[(True, ""), (False, "no loading screen"),
+                     (False, "no loading screen"), (True, "")])
+    asyncio.run(worker._realm_hop_party(worker.seats[0], "testing"))
+    split = [e for e in worker.seats[0].tel.questing
+             if e["kind"] == "realm-split"]
+    assert split and "SPLIT ACROSS REALMS" in split[0]["detail"]
+    assert "w1" in split[0]["detail"]
+
+
+def test_no_realm_change_while_anybody_is_fighting(monkeypatch):
+    import asyncio
+
+    worker, calls = _hoppable_party(monkeypatch)
+    worker.seats[2].in_duel = True
+    asyncio.run(worker._realm_hop_party(worker.seats[0], "testing"))
+    assert calls["hops"] == []
+    assert worker._realm_hopped_at == 0.0, \
+        "a refused hop must not burn the cooldown"
+
+
+def test_a_parked_collect_goal_at_its_marker_triggers_the_hop(monkeypatch):
+    import asyncio
+    import time
+
+    worker, _read = _zoned_party(["KT_Hub"] * 2)
+    worker.script = "###deimos_expertmode"
+    fired = []
+
+    async def record(seat, why):
+        fired.append(why)
+
+    worker._realm_hop_party = record
+    seat = worker.seats[0]
+    seat.goal = "Defeat Charmed Slave and Collect Notebook Pages (0 of 3)"
+    seat.progress_at = time.monotonic() - worker.REALM_HOP_AFTER - 1
+    seat.marker_away = 500.0
+    asyncio.run(worker._maybe_realm_hop(seat))
+    assert fired and "contested" in fired[0]
+
+    # A talk goal, however stale, is not a crowded realm.
+    fired.clear()
+    seat.goal = "Talk To General Khaba in Hall of Champions"
+    asyncio.run(worker._maybe_realm_hop(seat))
+    assert fired == []
+
+    # And a collect goal whose marker is a zone away is lost, not queued.
+    seat.goal = "Collect Notebook Pages in Royal Hall (0 of 3)"
+    seat.marker_away = 92000.0
+    asyncio.run(worker._maybe_realm_hop(seat))
+    assert fired == []
+
+
+def test_a_cut_off_realm_change_says_where_everybody_is(monkeypatch):
+    """The stage deadline can cancel the hop mid-party. Without the
+    handler, the hopped seats are in the new realm, the rest never
+    attempted, no split report runs, and the cooldown — stamped for a
+    hop that half-happened — refuses the operator's retry press."""
+    import asyncio
+    import time
+
+    import pytest
+
+    worker, calls = _hoppable_party(monkeypatch)
+    from deimos_bridge import realms
+
+    async def hop(client, page, slot, expect_name=""):
+        calls["hops"].append(client)
+        if len(calls["hops"]) >= 2:
+            raise asyncio.CancelledError()     # the deadline strikes
+        return True, ""
+
+    monkeypatch.setattr(realms, "hop_to_realm", hop)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(worker._realm_hop_party(worker.seats[0], "testing"))
+
+    notes = [e for e in worker.seats[2].tel.questing
+             if e["kind"] == "realm-cut-off"]
+    assert notes and "CUT OFF mid-party" in notes[0]["detail"]
+    assert "w0" in notes[0]["detail"], "who landed must be named"
+    # The retry window opens in about a minute, not a full cooldown.
+    reopens = worker.REALM_HOP_COOLDOWN - (time.monotonic()
+                                           - worker._realm_hopped_at)
+    assert reopens <= 61, f"the retry is blocked for {reopens:.0f}s"
+
+
+def test_everyone_failing_is_not_reported_as_a_split(monkeypatch):
+    """Nobody moved, so the party is still together — and all-fail is
+    exactly what hopping to the realm the party is ALREADY on looks
+    like (no loading screen comes). A false SPLIT report sends the
+    operator chasing a state that does not exist."""
+    import asyncio
+
+    worker, calls = _hoppable_party(
+        monkeypatch, hop_results=[(False, "no loading screen")] * 6)
+    asyncio.run(worker._realm_hop_party(worker.seats[0], "testing"))
+    kinds = [e["kind"] for e in worker.seats[0].tel.questing]
+    assert "realm-split" not in kinds, "nobody moved; that is not a split"
+    failed = [e for e in worker.seats[0].tel.questing
+              if e["kind"] == "realm-hop-failed"]
+    assert failed and "still together" in failed[0]["detail"]
+
+
+def test_a_landed_hop_restarts_the_crowded_judgement_clock(monkeypatch):
+    import asyncio
+    import time
+
+    worker, calls = _hoppable_party(monkeypatch)
+    stale = time.monotonic() - 1000.0
+    for seat in worker.seats:
+        seat.progress_at = stale
+        seat.cells_seen[(1, 2, 3)] = stale
+    asyncio.run(worker._realm_hop_party(worker.seats[0], "testing"))
+    for seat in worker.seats:
+        assert seat.progress_at > stale + 900, \
+            "the new realm inherited the old realm's stuck clock"
+        assert seat.cells_seen == {}
