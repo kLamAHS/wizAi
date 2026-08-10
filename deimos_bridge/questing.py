@@ -194,6 +194,42 @@ async def read_quest_goal(client) -> str:
         return ""
 
 
+def is_collect_goal(goal) -> str:
+    """The goal line if this is a Collect step, else "".
+
+    A Collect step is the one quest shape that publishes **no quest
+    position at all**, and it does so by design: the game has no single
+    place to point the arrow, because the collectibles are scattered
+    ground spawns. The operator, after two runs misdiagnosed as a dead
+    quest hook: "there is no quest marker, this is a collect quest
+    still even when you select on the quest".
+
+    The TTS quester agrees in its own words. Its handling for
+    Krokotopia #31 opens `if p1 tracking_quest "get some bling"` with
+    the comment `print "Broken quest detected."`, and then does the
+    only thing that works -- hardcoded coordinates::
+
+        if p1 inzone Krokotopia/KT_Krokosphinx/KT_ChampHall {
+            p1 tp XYZ(-15546.16, 5727.71, 0.0)
+            times 10 { p1 sendkey X, .1 }
+            ...
+            p1 tp XYZ(-20450.05, -9653.53, -9.15e-05)
+
+    So every wizAi rung that aims at a marker is out of the game for
+    these steps, and must say so honestly rather than blaming the
+    arrow: the arrow is on, and there is nothing for it to point at.
+
+    Matched on the word `collect`, which is the game's own phrasing for
+    the whole family and the same test `_maybe_realm_hop` was already
+    keyed on -- the two must never disagree about what a Collect step
+    is, since one of them decides that the other is allowed to run.
+    """
+    import re
+
+    text = strip_markup(goal)
+    return text if re.search(r"\bcollect\b", text, re.IGNORECASE) else ""
+
+
 def strip_markup(text) -> str:
     """The goal line as a person would read it.
 

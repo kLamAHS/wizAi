@@ -184,6 +184,12 @@ class _Seat:
         #: so a cure that is not taking is retried on a cooldown rather
         #: than paging through the quest book every tick.
         self.rearm_tried_at = 0.0
+        #: when this client's quest hook last DID read a position, and
+        #: on which goal. Proof the hook works, which is what separates
+        #: "this quest has no marker" from "the arrow is off". See
+        #: `LiveWorker._marker_absent_by_design`.
+        self.marker_ok_at = 0.0
+        self.marker_ok_goal = ""
         #: the zone this seat's write-off was recorded in, so arriving
         #: somewhere new can clear it. See `LiveWorker._written_off`.
         self.zone_for_writeoff = None
@@ -2747,6 +2753,14 @@ class LiveWorker(QThread):
             seat.marker_dead_since = None
         elif seat.marker_dead_since is None:
             seat.marker_dead_since = now
+        if marker is not None:
+            # ...and remember that it read, and on WHAT. A hook that
+            # wrote a position on another quest minutes ago is not
+            # switched off, so a later goal with no position is a quest
+            # without a marker -- a Collect step, most often. See
+            # `_marker_absent_by_design`.
+            seat.marker_ok_at = now
+            seat.marker_ok_goal = seat.goal or seat.marker_ok_goal
 
         self._note_progress(seat, zone, position, now)
         try:
@@ -2769,7 +2783,7 @@ class LiveWorker(QThread):
             # identical doomed catch-up: two minutes of the whole party
             # paused to attempt nothing, six times over.
             seat.zone_for_writeoff = zone
-            if not self._marker_dead(seat, now):
+            if not self._marker_unusable(seat, now):
                 self._forget_write_off(seat)
 
     #: how long a position cell is remembered. A wizard back on a spot it
@@ -3406,12 +3420,20 @@ class LiveWorker(QThread):
             return
         away = seat.marker_away
         if away is None:
-            # A marker that would not read may read on the next poll.
-            # Refusing permanently over one bad read would be worse --
-            # and a marker that is not blinking but DEAD (the quest
-            # arrow off, `_marker_dead`) is the re-arm rung's case, not
-            # a teleport's: there is nothing to aim at until the hook
-            # is written again.
+            # A marker that would not read may read on the next poll,
+            # and refusing permanently over one bad read would be
+            # worse. A marker that will not read for a REASON is a
+            # different matter: there is nothing for a quest teleport
+            # to aim at, and the wizard being visibly stuck at it is
+            # worth one line rather than silence -- rev 98b4c50c spent
+            # 44 minutes here saying nothing at all.
+            blind = self._marker_unusable(seat)
+            if blind:
+                seat.hop_tried_at = here
+                seat.tel.note_questing(
+                    "desperate-hop-refused",
+                    f"stuck {mins:.0f} min and a quest teleport has "
+                    f"nowhere to aim — {blind}")
             return
         if away > self.MARKER_IN_ZONE:
             seat.hop_tried_at = here
@@ -3493,15 +3515,62 @@ class LiveWorker(QThread):
     REARM_CEILING = 60.0
     REARM_SETTLE = 3.0
 
+    #: how long a marker read stays evidence that this client's quest
+    #: hook WORKS. Fifteen minutes of quests is many steps; a hook that
+    #: was writing positions that recently is not switched off.
+    HOOK_ALIVE = 900.0
+
+    def _marker_absent_by_design(self, seat, now=None):
+        """Why this quest has no marker of its own, or "".
+
+        The distinction the last round got wrong, in the operator's
+        words: "there is no quest marker, this is a collect quest still
+        even when you select on the quest". A quest position that will
+        not read is only evidence of a dead arrow when the arrow is
+        what could have written it. Two things say otherwise, and both
+        are cheap:
+
+        -- the step is a Collect. Those publish no position at all (see
+           `questing.is_collect_goal`), on every client, for everybody.
+        -- this client's hook read a position on some OTHER quest
+           within `HOOK_ALIVE`. A hook that was writing positions ten
+           minutes ago is not switched off now, so it is THIS quest
+           that has nothing to point at.
+
+        Either way the cure for a dead arrow is not the cure for this,
+        and offering it -- a trip through the quest book every five
+        minutes, which is how a journal ends up on the Quest Finder
+        pseudo-entry -- makes the run worse rather than better.
+        """
+        import time
+
+        from .. import questing
+
+        if questing.is_collect_goal(seat.goal):
+            return ("a Collect step publishes no quest position — the "
+                    "game has no single place to point the arrow, so "
+                    "every teleport-to-marker rung is out of the game "
+                    "for this step and the script's hardcoded spots are "
+                    "what finishes it")
+        if now is None:
+            now = time.monotonic()
+        was = seat.marker_ok_goal
+        if (was and was != seat.goal
+                and now - seat.marker_ok_at < self.HOOK_ALIVE):
+            return (f"this wizard's quest hook works — it read a position "
+                    f"on {was!r} {(now - seat.marker_ok_at) / 60:.0f} min "
+                    f"ago — so it is this QUEST that publishes no marker, "
+                    f"not the arrow that is off")
+        return ""
+
     def _marker_dead(self, seat, now=None):
         """Is this seat's quest hook provably dead, not merely blinking?
 
         True only after `MARKER_DEAD_AFTER` of continuous failed marker
         reads with a readable goal line -- the signature of the quest
-        arrow being off (`read_quest_position`'s (0,0,0) case). This is
-        the state that starves the whole rescue ladder at once, so the
-        rungs that need a marker check it to explain themselves, and
-        `_maybe_rearm_quest_arrow` checks it to act.
+        arrow being off (`read_quest_position`'s (0,0,0) case) -- and
+        only when the quest itself is not the reason there is nothing
+        to read. See `_marker_absent_by_design`.
         """
         import time
 
@@ -3510,7 +3579,34 @@ class LiveWorker(QThread):
             return False
         if now is None:
             now = time.monotonic()
-        return now - since >= self.MARKER_DEAD_AFTER
+        if now - since < self.MARKER_DEAD_AFTER:
+            return False
+        return not self._marker_absent_by_design(seat, now)
+
+    def _marker_unusable(self, seat, now=None):
+        """Why nothing can aim a teleport for this wizard, or "".
+
+        The question the rungs that MOVE a wizard actually have --
+        `_desperate_hop`, the catch-up's `hop_once`, the realm change's
+        "am I at the spawns" -- as distinct from the question the cure
+        has (`_marker_dead`). A Collect step and a dead arrow are
+        different problems with different fixes, and both of them mean
+        no teleport can aim.
+        """
+        import time
+
+        if seat.marker_away is not None:
+            return ""
+        if now is None:
+            now = time.monotonic()
+        why = self._marker_absent_by_design(seat, now)
+        if why:
+            return why
+        if self._marker_dead(seat, now):
+            return ("the quest position has not read for minutes while "
+                    "the goal line reads fine — the in-game quest arrow "
+                    "is off, and every teleport on this wizard needs it")
+        return ""
 
     async def _maybe_rearm_quest_arrow(self, seat):
         """Cure a dead quest hook by re-selecting the quest in the book.
@@ -3609,11 +3705,23 @@ class LiveWorker(QThread):
         shard does, same zone, same spot. The scan-and-pick is a Deimos
         community contribution (see `realms.py`); the trigger and the
         party coordination are wizAi's.
+
+        The marker gate this rung shipped with made it **unreachable**,
+        and the operator is the one who found it: "there is no quest
+        marker, this is a collect quest still even when you select on
+        the quest". Collect steps publish no quest position at all --
+        so `marker_away` is None for every one of them, and a rung
+        written for exactly this family refused every case it was
+        built to answer. A marker that positively reads ANOTHER zone
+        still refuses (that is a journey, not a queue); a marker that
+        does not read because the step has none is now what it always
+        was, which is normal for a Collect.
         """
         import time
 
-        goal = (seat.goal or "").lower()
-        if "collect" not in goal:
+        from .. import questing
+
+        if not questing.is_collect_goal(seat.goal):
             return
         if not (self.script or self.auto_quest):
             return
@@ -3623,15 +3731,65 @@ class LiveWorker(QThread):
         if not seat.progress_at:
             return
         away = seat.marker_away
-        if away is None or away > self.MARKER_IN_ZONE:
-            # Not AT the contested spawns -- this is some other stall,
-            # and the rest of the ladder owns it.
+        if away is not None and away > self.MARKER_IN_ZONE:
+            # A marker that reads, in ANOTHER zone: the wizard is not
+            # at the spawns at all and getting there is the script's
+            # journey. Some other stall, and the rest of the ladder
+            # owns it.
+            return
+        if away is None and not self._with_the_party(seat):
+            # ...and without a marker, the party IS the check. A realm
+            # change keeps the zone and only changes the shard, so it
+            # can only help a wizard already standing where the
+            # collectibles are. Being alone in a zone is the other
+            # failure entirely, and it is `_check_together`'s.
+            #
+            # It is the failure the quester's own structure produces,
+            # too. TTS Arc 1 wraps the gemstone spots in
+            # `until NOT p1 tracking_goal ... { if p1 inzone
+            # KT_ChampHall { ... } }` -- an until-loop whose only body
+            # is zone-gated and which contains nothing that would
+            # TRAVEL there. A wizard on that step in the wrong zone
+            # spins the loop for the rest of the run, and hopping the
+            # whole party to a quiet realm would answer a question
+            # nobody asked.
+            self._say_once(
+                seat, f"collect-alone:{seat.name}",
+                f"{seat.name}'s Collect step is not advancing and it is "
+                f"the only wizard in its zone — that is a regroup, not a "
+                f"crowded realm, so no realm change",
+                kind="realm-hop-refused",
+                detail=(f"{seat.goal!r} has not advanced, but this wizard "
+                        f"is alone in its zone. A realm change keeps the "
+                        f"zone and only changes the shard, so it cannot "
+                        f"help a wizard that is not at the spawns"))
             return
         idle = (now - seat.progress_at) / 60.0
+        where = (f"{away:,.0f} from its marker" if away is not None
+                 else "standing still, and a Collect step has no marker "
+                      "to be away from")
         await self._realm_hop_party(
-            seat, f"{seat.goal!r} has not advanced in {idle:.0f} min at its "
-                  f"own marker — the spawns are contested, so a quieter "
-                  f"realm is the move")
+            seat, f"{seat.goal!r} has not advanced in {idle:.0f} min — "
+                  f"{where}. Collectibles are shared ground spawns, so a "
+                  f"count that will not move is a crowded realm rather "
+                  f"than a wedged wizard, and a quieter shard is the move")
+
+    def _with_the_party(self, seat):
+        """Is this wizard in a zone at least one other wizard is in?
+
+        The cheapest "am I where I should be" there is, and it needs no
+        table of zone names: the script put the party somewhere, and a
+        wizard standing with the party is standing where the script
+        aimed. A party of one is always with itself, and a seat whose
+        zone will not read is not called adrift on a failed read.
+        """
+        mine = (seat.progress or (None,))[0]
+        if not mine:
+            return True
+        others = [(s.progress or (None,))[0]
+                  for s in self.seats if s is not seat and s.client is not None]
+        others = [z for z in others if z]
+        return not others or mine in others
 
     async def _realm_hop_party(self, seat, why):
         """Move EVERY hooked wizard to one quiet realm, and say so.
@@ -4400,27 +4558,27 @@ class LiveWorker(QThread):
             # one budget burns out on the wizard nothing can drive.
             near = []
             for one in group:
-                if self._marker_dead(one):
+                blind = self._marker_unusable(one)
+                if blind:
                     # A catch-up drives the laggard with `hop_once`,
-                    # and `hop_once` aims at the same quest position
-                    # that will not read -- so this catch-up would
-                    # pause the whole party to attempt nothing, give up
-                    # at CATCH_UP_IDLE, and repeat. Rev 98b4c50c did
-                    # exactly that six times over one run. The re-arm
-                    # rung owns the cure; until it lands there is
-                    # nothing here to drive.
+                    # and `hop_once` aims at the quest position. No
+                    # position, no catch-up: it would pause the whole
+                    # party to attempt nothing, give up at
+                    # CATCH_UP_IDLE, and repeat -- six times in one run
+                    # at rev 98b4c50c. The REASON decides who owns the
+                    # fix, which is why it is quoted rather than
+                    # guessed at: a Collect step is the script's
+                    # (hardcoded spots, and a crowded realm is the
+                    # realm rung's), a dead arrow is the re-arm's.
                     self._say_once(
-                        one, f"marker-dead:{one.name}",
-                        f"{one.name} is behind and its quest position "
-                        f"will not read — the quest arrow is off, so "
-                        f"nothing can drive it through the step. Not "
-                        f"pausing the party for a catch-up that cannot "
-                        f"aim; the quest-arrow re-arm is the fix",
-                        kind="catch-up-refused-marker-dead",
-                        detail=(f"{one.name}'s quest position has been "
-                                f"unreadable for minutes — a catch-up's "
-                                f"hop needs it, so starting one would "
-                                f"pause everyone to attempt nothing"))
+                        one, f"marker-unusable:{one.name}",
+                        f"{one.name} is behind and nothing can aim a "
+                        f"teleport for it — {blind}. Not pausing the "
+                        f"party for a catch-up that cannot aim",
+                        kind="catch-up-refused-no-marker",
+                        detail=(f"{one.name} is behind on {one.goal!r} and "
+                                f"a catch-up's hop needs a quest position: "
+                                f"{blind}"))
                     continue
                 away = self._marker_out_of_reach([one])
                 if away is None:
