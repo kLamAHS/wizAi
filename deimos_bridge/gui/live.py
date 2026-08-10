@@ -4801,6 +4801,50 @@ class LiveWorker(QThread):
                                          # of them could be the wrong way
         seat = odd[0]
 
+        # Is it even meant to be where they are? This mechanism was
+        # built for the wizard whose TELEPORT did not land -- same
+        # quest, same destination, one client that missed it. A wizard
+        # on a DIFFERENT quest step is not that. Its objective is
+        # somewhere else by definition, and the majority is walking a
+        # later leg of the route; pulling it along destroys the one
+        # thing it needs, which is to be where its own step happens.
+        #
+        # It is also the operator's own correction, applied to the
+        # other mechanism that moves wizards: "Just teleporting back to
+        # a wizard you believe is behind doesn't work because I think
+        # the script then just continues on the same way. They need to
+        # actually quest with the other wizard until they catch up."
+        # Moving a body never advances a quest -- that is why
+        # `_start_catching_up` drives the laggard through its OWN step
+        # rather than dragging it, and this rung must not undo that.
+        #
+        # Rev 116b5866 is the cost. Konstantin was on #31 `Collect
+        # Gemstones in Hall of Champions`, whose spots the quester only
+        # visits `if p1 inzone KT_ChampHall`; the other two were on #32
+        # and being walked elsewhere. This pulled him to the majority
+        # twice in a minute -- into KT_AltarOfKings, then KT_Hub --
+        # and the party finished at the world portal with his step
+        # untouched.
+        mine = (seat.goal or "").strip()
+        theirs = {(s.goal or "").strip()
+                  for s in live if s is not seat and (s.goal or "").strip()}
+        if mine and theirs and mine not in theirs:
+            self._say_once(
+                seat, f"different-step:{seat.name}",
+                f"{seat.name} is in {zones[seat]} and the others are in "
+                f"{best}, but it is on a different quest step "
+                f"({mine!r}) — its objective is not where they are, so "
+                f"pulling it along would take it away from the only "
+                f"place its step can finish",
+                kind="rejoin-refused",
+                detail=(f"{seat.name} is on {mine!r} while the party is on "
+                        f"{' / '.join(sorted(theirs))!r}. A regroup is for "
+                        f"a teleport that did not land, not for a wizard "
+                        f"whose own step is elsewhere — moving a body "
+                        f"never advanced a quest"))
+            seat.stranded_since = None
+            return None, None
+
         # Did it LEAVE the majority's zone, or never get there? A wizard
         # that fell behind and a wizard that walked on ahead are the
         # same shape -- one seat somewhere the others are not -- and

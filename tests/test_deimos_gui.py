@@ -16638,3 +16638,73 @@ def test_a_cooldown_that_never_ran_has_already_elapsed():
         assert now - seat.unstuck_at >= worker.UNSTICK_EVERY
         assert now - seat.sigil_moved_at >= worker.SIGIL_ACT
     assert worker._script_restarted_at == NEVER
+
+
+# --------------------- a regroup is for a missed teleport, not a missed quest
+#
+# The operator's question, which is the whole multi-client story: "why
+# does the script on deimos and single runs work for the collect quest
+# (get some bling which doesnt have a quest marker), but when running
+# the 3 hooks the one account cant do the quest or even teleport to
+# the gems"
+#
+# Solo, the wizard is ALWAYS in the Hall of Champions when that step
+# begins, because the step before it ends there — so the quester's
+# `if p1 inzone KT_ChampHall` guard is free and it never needed a
+# travel step. In a party the wizards are on different steps, the
+# route walks whoever is ahead, and p1 arrives at its own leg standing
+# anywhere at all. wizAi was making that worse: the regroup, built for
+# a wizard whose TELEPORT missed, pulled the one on a different quest
+# to the majority twice in a minute at rev 116b5866.
+
+def test_a_wizard_on_a_different_step_is_not_dragged_to_the_others(
+        monkeypatch):
+    import time
+
+    worker, read_zone = _zoned_party(
+        ["Krokotopia/KT_Krokosphinx/KT_ChampHall",
+         "Krokotopia/KT_Hub", "Krokotopia/KT_Hub"])
+    odd, a, b = worker.seats
+    odd.goal = "Collect Gemstones in Hall of Champions (0 of 4)"
+    a.goal = b.goal = "Talk To General Khaba in Hall of Champions"
+
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+    odd.stranded_since = time.monotonic() - worker.STRANDED_AFTER - 1
+    seat, target = _look(worker, read_zone, monkeypatch)
+    assert (seat, target) == (None, None), \
+        "it dragged a wizard away from the only zone its step can finish in"
+    note = [e for e in odd.tel.questing if e["kind"] == "rejoin-refused"]
+    assert note and "own step is elsewhere" in note[0]["detail"]
+
+
+def test_a_missed_teleport_on_the_same_step_is_still_fetched(monkeypatch):
+    """The mechanism still has to do its job: same quest, same
+    destination, one client that missed the teleport."""
+    import time
+
+    worker, read_zone = _zoned_party(
+        ["Unicorn Way", "Olde Town", "Olde Town"])
+    for one in worker.seats:
+        one.goal = "Talk To Mortis in Nightside"
+
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+    worker.seats[0].stranded_since = time.monotonic() - worker.STRANDED_AFTER - 1
+    seat, target = _look(worker, read_zone, monkeypatch)
+    assert seat is worker.seats[0]
+    assert target in worker.seats[1:], "it must be sent to a wizard, not a name"
+
+
+def test_an_unreadable_goal_does_not_block_the_regroup(monkeypatch):
+    """"Could not read" is not "on a different quest" — the oldest rule
+    in this file, and the refusal above must not break it."""
+    import time
+
+    worker, read_zone = _zoned_party(
+        ["Unicorn Way", "Olde Town", "Olde Town"])
+    worker.seats[0].goal = ""                    # would not read
+    worker.seats[1].goal = worker.seats[2].goal = "Talk To Mortis"
+
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+    worker.seats[0].stranded_since = time.monotonic() - worker.STRANDED_AFTER - 1
+    seat, _target = _look(worker, read_zone, monkeypatch)
+    assert seat is worker.seats[0]
