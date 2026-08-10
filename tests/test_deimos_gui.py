@@ -15131,7 +15131,9 @@ def test_no_realm_change_while_anybody_is_fighting(monkeypatch):
     worker.seats[2].in_duel = True
     asyncio.run(worker._realm_hop_party(worker.seats[0], "testing"))
     assert calls["hops"] == []
-    assert worker._realm_hopped_at == 0.0, \
+    from deimos_bridge.gui.live import NEVER
+
+    assert worker._realm_hopped_at == NEVER, \
         "a refused hop must not burn the cooldown"
 
 
@@ -15187,11 +15189,14 @@ def test_a_collect_step_with_no_marker_at_all_still_hops(monkeypatch):
     worker._realm_hop_party = record
     seat = worker.seats[0]
     seat.goal = "Collect Gemstones in Hall of Champions (0 of 4)"
-    seat.progress_at = time.monotonic() - worker.REALM_HOP_AFTER - 1
     seat.marker_away = None                  # what a Collect step reads
+    # Working the spots: the quester teleports it between them every few
+    # seconds, so the POSITION keeps changing while the count does not.
+    seat.progress_at = time.monotonic() - 5.0
+    seat.goal_at = time.monotonic() - worker.REALM_HOP_AFTER - 1
     asyncio.run(worker._maybe_realm_hop(seat))
     assert fired, "the crowded-realm rung refused a markerless Collect"
-    assert "no marker" in fired[0]
+    assert "working them and finding nothing" in fired[0]
     assert "crowded realm" in fired[0]
 
 
@@ -15212,7 +15217,8 @@ def test_a_collect_step_is_not_hopped_before_its_clock(monkeypatch):
     seat = worker.seats[0]
     seat.goal = "Collect Gemstones in Hall of Champions (0 of 4)"
     seat.marker_away = None
-    seat.progress_at = time.monotonic() - worker.REALM_HOP_AFTER + 30
+    seat.progress_at = time.monotonic() - 5.0
+    seat.goal_at = time.monotonic() - worker.REALM_HOP_AFTER + 30
     asyncio.run(worker._maybe_realm_hop(seat))
     assert fired == []
 
@@ -16459,7 +16465,8 @@ def test_a_lone_wizard_on_a_collect_step_is_a_regroup_not_a_realm(monkeypatch):
     goal = "Collect Gemstones in Hall of Champions (0 of 4)"
     seat.goal = goal
     seat.marker_away = None
-    seat.progress_at = time.monotonic() - worker.REALM_HOP_AFTER - 1
+    seat.progress_at = time.monotonic() - 5.0
+    seat.goal_at = time.monotonic() - worker.REALM_HOP_AFTER - 1
     seat.progress = ("Krokotopia/KT_Hub", (1, 2, 3), goal)
     other.progress = ("Krokotopia/KT_Krokosphinx/KT_ChampHall", (4, 5, 6),
                       "Talk To General Khaba in Hall of Champions")
@@ -16473,3 +16480,161 @@ def test_a_lone_wizard_on_a_collect_step_is_a_regroup_not_a_realm(monkeypatch):
     seat.progress = (other.progress[0], (9, 9, 9), goal)
     asyncio.run(worker._maybe_realm_hop(seat))
     assert fired and "crowded realm" in fired[0]
+
+
+# ----------------------------- the world portal: a loop only a restart leaves
+#
+# Rev 116b5866's last five minutes: all three wizards standing in
+# Krokotopia/KT_WorldTeleporter, the world portal, while the script ran
+# 15,785 instructions and moved nobody. p1 was on `Get Some Bling`, and
+# the quester's handling of it is an until-loop whose only body is
+# `if p1 inzone KT_ChampHall { ... }` — with nothing in it that would
+# travel there. Standing anywhere else it spins forever, because the
+# goal cannot change until the body runs and the body never runs.
+#
+# No teleport rung can leave a loop. Only the instruction pointer can,
+# and only a restart moves it — but `_maybe_restart_script` required a
+# marker to prove "another zone", and a Collect step never has one. The
+# same class of bug as the realm rung, in the rung that mattered.
+
+def test_a_looping_script_on_a_markerless_step_is_restarted(monkeypatch):
+    import asyncio
+    import time
+
+    from deimos_bridge import questing
+
+    worker, seat = _wedged(dialogue=False, monkeypatch=monkeypatch)
+    seat.progress_at = (time.monotonic() - worker.STUCK_AFTER
+                        - worker.UNSTICK_EVERY - 1)
+    seat.goal = "Collect Gemstones in Hall of Champions (0 of 4)"
+    seat.marker_away = None                    # what a Collect step reads
+    seat.marker_dead_since = time.monotonic() - worker.MARKER_DEAD_AFTER - 1
+    restarts = []
+
+    class _R:
+        running = True
+
+        def __init__(self):
+            self._n = 1000
+
+        @property
+        def steps(self):
+            self._n += 500                     # the until-loop, spinning
+            return self._n
+
+        def restart(self):
+            restarts.append(True)
+            return True
+
+    worker.seats[0].runner = _R()
+
+    async def nothing_near(_c):
+        return False
+
+    monkeypatch.setattr(questing, "near_interactable", nothing_near)
+    asyncio.run(worker._unstick(seat))         # first look: no baseline
+    assert restarts == []
+    seat.unstuck_at = 0.0
+    asyncio.run(worker._unstick(seat))
+    assert restarts == [True], \
+        "the one rung that can leave a loop refused a markerless step"
+    note = [e for e in seat.tel.questing if e["kind"] == "script-restarted"]
+    assert note and "nothing to aim at" in note[0]["detail"]
+    assert "Collect step" in note[0]["detail"]
+
+
+def test_one_bad_marker_read_does_not_restart_the_script(monkeypatch):
+    """A blink is not a reason to throw away a running program."""
+    import asyncio
+    import time
+
+    from deimos_bridge import questing
+
+    worker, seat = _wedged(dialogue=False, monkeypatch=monkeypatch)
+    seat.progress_at = (time.monotonic() - worker.STUCK_AFTER
+                        - worker.UNSTICK_EVERY - 1)
+    seat.goal = "Talk To General Khaba in Hall of Champions"
+    seat.marker_away = None
+    seat.marker_dead_since = time.monotonic() - 5.0    # just one bad poll
+    restarts = []
+
+    class _R:
+        running = True
+
+        def __init__(self):
+            self._n = 1000
+
+        @property
+        def steps(self):
+            self._n += 500
+            return self._n
+
+        def restart(self):
+            restarts.append(True)
+            return True
+
+    worker.seats[0].runner = _R()
+
+    async def nothing_near(_c):
+        return False
+
+    monkeypatch.setattr(questing, "near_interactable", nothing_near)
+    asyncio.run(worker._unstick(seat))
+    seat.unstuck_at = 0.0
+    asyncio.run(worker._unstick(seat))
+    assert restarts == []
+
+
+def test_a_frozen_collect_step_is_the_restarts_case_not_the_realms(monkeypatch):
+    """The two failures look OPPOSITE on the ground, and telling them
+    apart is the whole job: a crowded realm MOVES (the quester
+    teleports between its spots while the count stays put), and a
+    wizard the script cannot act on stands perfectly still."""
+    import asyncio
+    import time
+
+    worker, _read = _zoned_party(["KT_WorldTeleporter"] * 3)
+    worker.script = "###deimos_expertmode"
+    fired = []
+
+    async def record(seat, why):
+        fired.append(why)
+
+    worker._realm_hop_party = record
+    seat = worker.seats[0]
+    goal = "Collect Gemstones in Hall of Champions (0 of 4)"
+    seat.goal = goal
+    seat.marker_away = None
+    for one in worker.seats:
+        one.progress = ("Krokotopia/KT_WorldTeleporter", (1, 2, 3), goal)
+    # Frozen: nothing has teleported this wizard anywhere in 8 minutes.
+    seat.progress_at = time.monotonic() - worker.REALM_HOP_AFTER - 1
+    seat.goal_at = time.monotonic() - worker.REALM_HOP_AFTER - 1
+
+    asyncio.run(worker._maybe_realm_hop(seat))
+    assert fired == [], "a shard swap cannot help a wizard nothing is moving"
+    note = [e for e in seat.tel.questing if e["kind"] == "realm-hop-refused"]
+    assert note and "nothing is teleporting this wizard" in note[0]["detail"]
+
+
+# ------------------------------------- monotonic counts from BOOT, not launch
+
+def test_a_cooldown_that_never_ran_has_already_elapsed():
+    """`time.monotonic()` counts from boot, so a 0.0 "never happened"
+    stamp reads as "just did that" for the first minutes of uptime —
+    exactly when somebody turns the machine on, launches the game and
+    starts a run. Measured live at 284s, which is inside every cooldown
+    on the ladder: no script restart (420s), no realm change (300s), no
+    quest-arrow re-arm (300s), and nothing saying why."""
+    from deimos_bridge.gui.live import NEVER
+
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+
+    for now in (5.0, 284.0, 10_000.0):
+        assert now - worker._script_restarted_at >= worker.SCRIPT_RESTART_EVERY
+        assert now - worker._realm_hopped_at >= worker.REALM_HOP_COOLDOWN
+        assert now - seat.rearm_tried_at >= worker.REARM_EVERY
+        assert now - seat.unstuck_at >= worker.UNSTICK_EVERY
+        assert now - seat.sigil_moved_at >= worker.SIGIL_ACT
+    assert worker._script_restarted_at == NEVER
