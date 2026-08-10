@@ -17044,3 +17044,52 @@ def test_the_timeline_markers_are_capped_even_when_every_line_differs():
     assert "heartbeat" in [e["kind"] for e in seat.tel.questing]
     # ...and not one line was actually lost.
     assert len(seat.tel.script_log) == 5000
+
+
+def test_a_wizard_adrift_in_another_zone_is_fetched_anyway(monkeypatch):
+    """Rev cfeb9a85: Konstantin spent FORTY-TWO minutes alone inside
+    KT_ChampHall_T3 — a dungeon instance the party had left — on
+    `Defeat Odji Sokkwi in Hall of Champions`, whose marker read
+    100,242 away. Every rung declined and each was right on its own
+    terms: catch-up out of zone, desperate hop out of zone, script
+    restart fired and changed nothing, and the regroup refused because
+    his step differed. Nothing in the program could move him.
+
+    The refusal protects a wizard whose objective is HERE. One whose
+    objective is provably in another zone has nothing to protect."""
+    import time
+
+    worker, read_zone = _zoned_party(
+        ["Krokotopia/KT_Krokosphinx/Interiors/KT_ChampHall_T3",
+         "Krokotopia/KT_Hub", "Krokotopia/KT_Hub"])
+    odd, a, b = worker.seats
+    odd.goal = "Defeat Odji Sokkwi in Hall of Champions"
+    a.goal = b.goal = "Talk To Ako in Grand Arena"
+    odd.marker_away = 100242.0            # another zone entirely
+
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+    odd.stranded_since = time.monotonic() - worker.STRANDED_AFTER - 1
+    seat, target = _look(worker, read_zone, monkeypatch)
+    assert seat is odd, "it left him in a dead instance for want of a rule"
+    assert target in (a, b)
+    note = [e for e in odd.tel.questing if e["kind"] == "rejoin-adrift"]
+    assert note and "100,242 away" in note[0]["detail"]
+
+
+def test_a_different_step_in_THIS_zone_is_still_refused(monkeypatch):
+    """The gemstone case the refusal was written for must survive: his
+    objective was where he stood, and dragging him off it was the harm."""
+    import time
+
+    worker, read_zone = _zoned_party(
+        ["Krokotopia/KT_Krokosphinx/KT_ChampHall",
+         "Krokotopia/KT_Hub", "Krokotopia/KT_Hub"])
+    odd, a, b = worker.seats
+    odd.goal = "Collect Gemstones in Hall of Champions (0 of 4)"
+    a.goal = b.goal = "Talk To General Khaba in Hall of Champions"
+    odd.marker_away = None               # a Collect step has no marker
+
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+    odd.stranded_since = time.monotonic() - worker.STRANDED_AFTER - 1
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+    assert [e for e in odd.tel.questing if e["kind"] == "rejoin-refused"]

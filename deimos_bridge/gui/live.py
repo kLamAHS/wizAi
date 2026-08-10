@@ -5020,10 +5020,29 @@ class LiveWorker(QThread):
         # twice in a minute -- into KT_AltarOfKings, then KT_Hub --
         # and the party finished at the world portal with his step
         # untouched.
+        #
+        # ...unless its own step is not reachable from where it stands
+        # either. Rev cfeb9a85 is the cost of the rule without that
+        # exception: Konstantin spent FORTY-TWO minutes alone inside
+        # `KT_ChampHall_T3`, a dungeon instance the party had left, on
+        # `Defeat Odji Sokkwi in Hall of Champions` -- whose marker read
+        # 100,242 away, another zone. Every rung declined, and each was
+        # right on its own terms: the catch-up refused (no teleport
+        # crosses a zone), the desperate hop refused (same), the script
+        # restart fired and changed nothing, and this refused because
+        # his step differed. Nothing in the program could move him.
+        #
+        # The refusal protects a wizard whose objective is HERE. A
+        # wizard whose objective is provably in another zone has nothing
+        # to protect: it cannot finish its step from this spot however
+        # long it stands there, and joining the party at least puts it
+        # where the script is operating -- and out of a dead instance.
         mine = (seat.goal or "").strip()
         theirs = {(s.goal or "").strip()
                   for s in live if s is not seat and (s.goal or "").strip()}
-        if mine and theirs and mine not in theirs:
+        away = seat.marker_away
+        adrift = away is not None and away > self.MARKER_IN_ZONE
+        if mine and theirs and mine not in theirs and not adrift:
             self._say_once(
                 seat, f"different-step:{seat.name}",
                 f"{seat.name} is in {zones[seat]} and the others are in "
@@ -5039,6 +5058,22 @@ class LiveWorker(QThread):
                         f"never advanced a quest"))
             seat.stranded_since = None
             return None, None
+        if mine and theirs and mine not in theirs and adrift:
+            # Fetched anyway, and said so: this is the exception above,
+            # and it should be legible in the export rather than look
+            # like the refusal failing to fire.
+            self._say_once(
+                seat, f"stranded-adrift:{seat.name}",
+                f"{seat.name} is on a different step AND its objective is "
+                f"{away:,.0f} away — another zone — so it cannot finish "
+                f"that step from {zones[seat]} however long it waits. "
+                f"Bringing it back to the party, which is the only move "
+                f"left that crosses a zone",
+                kind="rejoin-adrift",
+                detail=(f"{seat.name} is on {mine!r} with its marker "
+                        f"{away:,.0f} away. Every rung that could move it "
+                        f"refuses an out-of-zone objective, so standing "
+                        f"still is not protecting anything"))
 
         # Did it LEAVE the majority's zone, or never get there? A wizard
         # that fell behind and a wizard that walked on ahead are the
