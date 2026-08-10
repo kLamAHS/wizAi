@@ -292,7 +292,18 @@ async def read_quest_name(client) -> str:
             if quest_id != tracked:
                 continue
             key = await quest.name_lang_key()
-            name = await client.cache_handler.get_langcode_name(key)
+            # A key that is not a langcode is answered as itself, the
+            # same guard the VM's `_lang_name` patch applies. The known
+            # literal is "Quest Finder" -- the journal's pseudo-entry --
+            # and reading it as "" hid the one state that explains a
+            # wizard whose quest position never reads: heartbeats said
+            # nothing while the tracker was not on a real quest at all.
+            if "_" not in (key or ""):
+                return strip_markup(key or "").strip()
+            try:
+                name = await client.cache_handler.get_langcode_name(key)
+            except ValueError:
+                return strip_markup(key).strip()
             return strip_markup(name).strip()
     except Exception:
         return ""
@@ -1195,16 +1206,21 @@ async def rearm_quest_arrow(client, goal: str = "", name: str = "",
                                f"has changed")
             say(f"quest book open — re-selecting \"{text[:60]}\" so the "
                 f"quest arrow comes back on")
-            # Several presses with visibility checks, exactly as
-            # Deimos's helper clicks it: the first click can land on
-            # the book's own focus change and do nothing.
-            for _press in range(5):
-                if await _visible(button):
-                    try:
-                        await client.mouse_handler.click_window(button)
-                    except Exception:
-                        pass
-                await asyncio.sleep(0.1)
+            # ONE click, not Deimos's five-press burst. The first click
+            # SELECTS the quest, and selection redraws the book -- so
+            # the four clicks after it land on whatever the redraw put
+            # under that spot, which is a coin-flip at the journal's
+            # own controls. At rev 7d9b6d6b the burst ran at t~250 and
+            # by t~257 some client's tracked quest read as the literal
+            # "Quest Finder" pseudo-entry, which crash-looped the
+            # script's quest checks for the rest of the run. A click
+            # that dies in flight is caught by the receipt below, and
+            # the cooldown owns the retry.
+            try:
+                await client.mouse_handler.click_window(button)
+            except Exception:
+                pass
+            await asyncio.sleep(0.3)
     finally:
         closed = await close_book()
 
@@ -1221,10 +1237,17 @@ async def rearm_quest_arrow(client, goal: str = "", name: str = "",
             return True, ""
         await asyncio.sleep(0.5)
         waited += 0.5
+    # What the tracker is on NOW is the diagnostic that decides the
+    # next move: a real quest name means the arrow is off in the game's
+    # own settings; "Quest Finder" means the journal is on its
+    # pseudo-entry and no quest is tracked at all.
+    now_on = await read_quest_name(client)
     return False, (f"re-selected the quest in the book, but the quest "
                    f"position still does not read after "
                    f"{REARM_PROOF_WAIT:.0f}s — the arrow may be switched "
-                   f"off in the game's own settings")
+                   f"off in the game's own settings"
+                   + (f"; the tracker now reads {now_on!r}" if now_on
+                      else ""))
 
 
 async def hop_to_next_fight(client, max_hops: int = 25, settle: float = 1.2,

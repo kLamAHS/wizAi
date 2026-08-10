@@ -452,6 +452,14 @@ class LiveWorker(QThread):
         #: when a looping script was last forcibly restarted. See
         #: `_maybe_restart_script`.
         self._script_restarted_at = 0.0
+        #: the stale-reload backoff: the last reload's failure
+        #: signature and time, the hold now in force, and whether this
+        #: stale episode has already escalated it. See `_script_step`.
+        self._reload_sig = ""
+        self._reload_at = 0.0
+        self._reload_hold_until = 0.0
+        self._reload_cool = 0.0
+        self._reload_held = False
         #: {seat id: (the step it gave up on, when)}. A catch-up that
         #: gives up has to be REMEMBERED, or `_check_in_step` starts the
         #: identical one on the next tick -- see `_written_off`.
@@ -1286,6 +1294,16 @@ class LiveWorker(QThread):
             except Exception:
                 pass
 
+    #: a reload whose script dies the same way within this much running
+    #: time did not fix anything. The crash-loop cycle at rev 7d9b6d6b
+    #: was ~15s: reload, march ~600 instructions back to the crashing
+    #: quest check, raise 25 times, reload.
+    RELOAD_THRASH = 120.0
+    #: the ceiling on the doubling wait between such reloads. Ten
+    #: minutes still retries -- the operator may fix the state live --
+    #: without eleven reloads per export saying nothing new.
+    RELOAD_COOL_MAX = 600.0
+
     async def _script_step(self, seat=None):
         """One burst of the script, not one instruction.
 
@@ -1297,29 +1315,73 @@ class LiveWorker(QThread):
         runs that loop for `ScriptRunner.SLICE` seconds at a time, which
         keeps the wheel available to a hotkey between bursts.
         """
+        import time
+
         seat = self.seats[0] if seat is None else seat
         runner = seat.runner
         if runner is None:
             return
-        done = await runner.run_for(
-            should_stop=lambda: self._stop or seat.in_upkeep)
-        # Executed something and has more to do: the tick should come
-        # straight back rather than sleeping its usual half second. The
-        # sleep between bursts was half of the operator's "long delay
-        # between actions" -- the other half is the script's own
-        # SpeedDelay -- and the script pausing 0.6s for every 0.5s it
-        # ran doubled the cost of every step the author priced.
-        seat.script_hot = bool(done) and runner.running
+        if not runner.stale:
+            done = await runner.run_for(
+                should_stop=lambda: self._stop or seat.in_upkeep)
+            # Executed something and has more to do: the tick should come
+            # straight back rather than sleeping its usual half second.
+            # The sleep between bursts was half of the operator's "long
+            # delay between actions" -- the other half is the script's
+            # own SpeedDelay -- and the script pausing 0.6s for every
+            # 0.5s it ran doubled the cost of every step the author
+            # priced.
+            seat.script_hot = bool(done) and runner.running
         if runner.stale:
             # An instruction had to be cancelled, so the VM is part-way
-            # through one. Reloading is the only honest recovery.
-            self._say(seat, runner.last_error)
+            # through one. Reloading is the only honest recovery --
+            # ONCE. Rev 7d9b6d6b: one wizard's journal state made a
+            # quest check raise, and reload -> march back -> raise
+            # cycled every 15 seconds, eleven reloads in three minutes,
+            # the party frozen throughout. A reload that dies the same
+            # way it died last time is not a recovery, it is a
+            # metronome -- so an identical failure straight after a
+            # reload backs off, doubling, and the export says which
+            # instruction is doing it.
             why = runner.last_error
+            sig = getattr(runner, "stale_sig", "") or why
+            now = time.monotonic()
+            if now < self._reload_hold_until:
+                return
+            thrashed = (sig and sig == self._reload_sig
+                        and now - self._reload_at < self.RELOAD_THRASH
+                        and not self._reload_held)
+            if thrashed:
+                self._reload_cool = min(max(self._reload_cool * 2, 30.0),
+                                        self.RELOAD_COOL_MAX)
+                self._reload_hold_until = now + self._reload_cool
+                self._reload_held = True
+                said = (f"the script dies the same way straight after "
+                        f"every reload ({why}). Reloading is not fixing "
+                        f"this, so the next reload waits "
+                        f"{self._reload_cool:.0f}s — the state it crashes "
+                        f"on is what needs fixing")
+                for other in self.seats:
+                    try:
+                        other.tel.note_questing("script-reload-backoff",
+                                                said)
+                    except Exception:
+                        pass
+                self._say(seat, said)
+                return
+            self._say(seat, why)
             if not runner.restart():
                 self._say(seat, "script stopped — it could not be reloaded")
                 self._note_reload(seat, f"could NOT be reloaded — {why}")
                 seat.runner = None
                 return
+            if (sig != self._reload_sig
+                    or now - self._reload_at >= self.RELOAD_THRASH):
+                # A different failure, or one the last reload survived a
+                # while before -- the backoff starts over.
+                self._reload_cool = 0.0
+            self._reload_sig, self._reload_at = sig, now
+            self._reload_held = False
             self._note_reload(seat, why, runner)
             return
         if runner.failures:

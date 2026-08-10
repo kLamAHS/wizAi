@@ -433,3 +433,59 @@ def test_a_failed_liveness_query_is_not_a_dead_client():
     assert run(1, 0) is False
     assert run(1, 1) is False
     assert calls, "the patch stopped calling GetExitCodeProcess at all"
+
+
+# ------------------------------------------------- deimoslang lang keys
+def test_a_literal_name_key_cannot_kill_the_program():
+    """Upstream `vm.py` fetched quest names as::
+
+        name: str = await client.cache_handler.get_langcode_name(name_key)
+
+    and `get_langcode_name` mis-splits any key without an underscore:
+    `find("_")` returns -1, so the "file" becomes the key minus its
+    last character and the lookup raises `ValueError: No lang file
+    named Quest Finde`. The journal's Quest Finder pseudo-entry answers
+    exactly that literal key, and at rev 7d9b6d6b one wizard's journal
+    in that state crash-looped the whole party's program every 15
+    seconds -- eleven reloads in three minutes. Upstream even knew:
+    `_fetch_quest_text` special-cased the exact string "Quest Finder",
+    while `_fetch_tracked_quest_text` -- the one every `quest` check
+    runs -- guarded nothing.
+    """
+    src = _source(VM)
+    assert "async def _lang_name" in src, \
+        "the literal-key guard is gone -- a Quest Finder journal kills the run again"
+    assert src.count("await self._lang_name(client, name_key)") == 2, \
+        "both quest-text fetchers must route through the guard"
+    assert 'if name_key == "Quest Finder":' not in src, \
+        "the upstream one-string special case is back instead of the guard"
+
+
+def test_the_literal_key_guard_answers_the_key_itself():
+    """Behavior, not just presence: a key with no underscore never
+    reaches the cache handler, and a lookup that raises falls back to
+    the raw key rather than out of the instruction."""
+    import asyncio
+
+    src = _source(VM)
+    seg = src.split("async def _lang_name", 1)[1]
+    seg = seg.split("async def _fetch_tracked_quest_text", 1)[0]
+    ns = {"SprintyClient": object}
+    exec("class _Probe:\n    async def _lang_name" + seg, ns)
+    probe = ns["_Probe"]()
+
+    class _Cache:
+        async def get_langcode_name(self, key):
+            if key == "QuestTitles_00123":
+                return "The Sphinx's Riddle"
+            raise ValueError(f"No lang file named {key[:key.find('_')]}")
+
+    class _Client:
+        cache_handler = _Cache()
+
+    run = asyncio.run
+    assert run(probe._lang_name(_Client(), "Quest Finder")) == "Quest Finder"
+    assert run(probe._lang_name(_Client(), "QuestTitles_00123")) \
+        == "The Sphinx's Riddle"
+    assert run(probe._lang_name(_Client(), "Unknown_999")) == "Unknown_999"
+    assert run(probe._lang_name(_Client(), None)) == ""
