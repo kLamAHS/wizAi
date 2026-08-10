@@ -719,6 +719,11 @@ class ScriptRunner:
         #: instruction was cancelled part-way, or the program is wedged
         #: on one that throws without advancing. See `STUCK_AT`.
         self.stale = False
+        #: which instruction went stale and how, in a form that stays
+        #: STABLE across the retries ("ip 214: ValueError: ..."), unlike
+        #: `last_error`, whose retry count climbs. The reload backoff
+        #: compares consecutive reloads on this.
+        self.stale_sig = ""
         self._stuck_ip = None
         self._stuck = 0
         #: the source every restart uses -- the program without its
@@ -750,6 +755,7 @@ class ScriptRunner:
         except asyncio.TimeoutError:
             self.failures += 1
             self.stale = True
+            self.stale_sig = f"ip {self._ip()}: step-timeout"
             self.last_error = (
                 f"one instruction ran for {self.STEP_LIMIT:.0f}s without "
                 f"finishing — a 'waitfor…' whose condition never came. "
@@ -766,6 +772,7 @@ class ScriptRunner:
                 self._stuck_ip, self._stuck = here, 1
             if self._stuck >= self.STUCK_AT:
                 self.stale = True
+                self.stale_sig = f"ip {here}: {self.last_error}"
                 self.last_error = (
                     f"stuck on one instruction — it has raised "
                     f"{self._stuck} times without the script moving on "
@@ -851,6 +858,7 @@ class ScriptRunner:
         self.restarts += 1
         self.finished = False
         self.stale = False
+        self.stale_sig = ""
         self.failures = 0
         self._stuck_ip, self._stuck = None, 0
         return True

@@ -16023,3 +16023,229 @@ def test_the_rearm_rung_runs_before_every_rung_that_needs_the_marker():
         "unstick first: it is diagnosis, and cheap"
     assert rearm < src.index("_maybe_realm_hop")
     assert rearm < src.index("_catch_up(")
+
+
+# ------------------------------------- the Quest Finder journal state
+#
+# Rev 7d9b6d6b. At t~250 one client's tracked "quest" became the
+# journal's Quest Finder pseudo-entry, whose name key is the literal
+# string "Quest Finder" -- no underscore, so wizwalker's
+# `get_langcode_name` mis-splits it and raises `ValueError: No lang
+# file named Quest Finde`. The script's `quest` checks have no guard
+# for that (the vendored patch adds one -- see test_deimos_patches),
+# so the program crash-looped: raise 25 times, reload, march back,
+# raise again, every 15 seconds for the rest of the run, all three
+# wizards frozen. Meanwhile wizAi's own `read_quest_name` swallowed
+# the same ValueError into "", so no export could SAY the journal was
+# on the pseudo-entry.
+
+def test_read_quest_name_reports_a_literal_key_instead_of_hiding_it():
+    import asyncio
+
+    from deimos_bridge.questing import read_quest_name
+
+    class _Quest:
+        def __init__(self, key):
+            self._key = key
+
+        async def name_lang_key(self):
+            return self._key
+
+    class _Manager:
+        def __init__(self, quests):
+            self._quests = quests
+
+        async def quest_data(self):
+            return self._quests
+
+    class _Cache:
+        async def get_langcode_name(self, key):
+            if key == "QuestTitles_00123":
+                return "<center>Give em Another Round</center>"
+            raise ValueError(f"No lang file named {key[:key.find('_')]}")
+
+    class _Client:
+        cache_handler = _Cache()
+
+        def __init__(self, key):
+            self._quests = {7: _Quest(key)}
+
+        async def quest_id(self):
+            return 7
+
+        async def quest_manager(self):
+            return _Manager(self._quests)
+
+    assert asyncio.run(read_quest_name(_Client("QuestTitles_00123"))) \
+        == "Give em Another Round"
+    assert asyncio.run(read_quest_name(_Client("Quest Finder"))) \
+        == "Quest Finder", "the pseudo-entry state must be visible"
+    assert asyncio.run(read_quest_name(_Client("Broken_999"))) \
+        == "Broken_999", "a failed lookup answers the key, not silence"
+
+
+def test_the_rearm_clicks_the_entry_exactly_once(monkeypatch):
+    """Deimos's helper presses five times; the first click SELECTS the
+    quest and selection redraws the book, so the four after it land on
+    whatever the redraw put under that spot -- the prime suspect for
+    how a journal ends up on the Quest Finder pseudo-entry. One click;
+    the receipt decides whether it took, and the cooldown owns the
+    retry."""
+    import asyncio
+
+    questing = _fast_rearm(monkeypatch)
+    book = _QuestBook()
+    ok, why = asyncio.run(questing.rearm_quest_arrow(
+        book, goal="Collect Gemstones in Hall of Champions (0 of 4)"))
+    assert ok, why
+    assert book.clicked.count("txtGoal") == 1, book.clicked
+
+
+def test_a_failed_rearm_says_what_the_tracker_is_on_now(monkeypatch):
+    """The diagnostic that decides the next move: a real quest name
+    means the arrow is off in the game's settings; "Quest Finder"
+    means no quest is tracked at all."""
+    import asyncio
+
+    questing = _fast_rearm(monkeypatch)
+    book = _QuestBook(arrow_recovers=False)
+
+    class _Quest:
+        async def name_lang_key(self):
+            return "Quest Finder"
+
+    class _Manager:
+        async def quest_data(self):
+            return {7: _Quest()}
+
+    async def quest_id():
+        return 7
+
+    async def quest_manager():
+        return _Manager()
+
+    book.quest_id = quest_id
+    book.quest_manager = quest_manager
+    ok, why = asyncio.run(questing.rearm_quest_arrow(
+        book, goal="Collect Gemstones in Hall of Champions"))
+    assert not ok
+    assert "the tracker now reads 'Quest Finder'" in why, why
+
+
+# --------------------------------------------- the stale-reload backoff
+
+class _StaleRunner:
+    """A runner wedged on an instruction that raises the same way
+    every time -- the rev 7d9b6d6b shape."""
+
+    def __init__(self, sig="ip 214: ValueError: No lang file named "
+                           "Quest Finde"):
+        self.stale = True
+        self.stale_sig = sig
+        self.last_error = ("stuck on one instruction — it has raised 25 "
+                           "times without the script moving on "
+                           "(ValueError: No lang file named Quest Finde)")
+        self.restarted = 0
+        self.running = True
+        self.steps = 100
+        self.restarts = 0
+        self.failures = 0
+        self.skipped_setup = []
+
+    def restart(self):
+        self.restarted += 1
+        self.stale = False
+        return True
+
+    async def run_for(self, **kw):
+        return 0
+
+
+def _stale_party():
+    worker, _read = _zoned_party(["KT_ChampHall"] * 2)
+    seat = worker.seats[0]
+    seat.runner = _StaleRunner()
+    return worker, seat, seat.runner
+
+
+def test_the_first_stale_reload_is_immediate():
+    import asyncio
+
+    worker, seat, runner = _stale_party()
+    asyncio.run(worker._script_step(seat))
+    assert runner.restarted == 1
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert "script-reloaded" in kinds
+
+
+def test_the_same_death_straight_after_a_reload_backs_off():
+    """Eleven reloads in three minutes, none of which changed anything,
+    is a metronome. The second identical death waits, doubling, and
+    the export says which instruction is doing it."""
+    import asyncio
+    import time
+
+    worker, seat, runner = _stale_party()
+    asyncio.run(worker._script_step(seat))            # reload #1
+    runner.stale = True                               # ...died again
+    asyncio.run(worker._script_step(seat))
+    assert runner.restarted == 1, "it reloaded again instead of backing off"
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert "script-reload-backoff" in kinds
+    note = [e for e in seat.tel.questing
+            if e["kind"] == "script-reload-backoff"][0]
+    assert "Quest Finde" in note["detail"], \
+        "the backoff note must name the crash it is backing off from"
+    assert worker._reload_cool == 30.0
+
+    # While the hold is in force: nothing, silently.
+    before = len(seat.tel.questing)
+    asyncio.run(worker._script_step(seat))
+    assert runner.restarted == 1
+    assert len(seat.tel.questing) == before
+
+    # The hold expiring earns the reload its retry...
+    worker._reload_hold_until = time.monotonic() - 1
+    asyncio.run(worker._script_step(seat))
+    assert runner.restarted == 2
+
+    # ...and dying the same way again doubles the wait.
+    runner.stale = True
+    asyncio.run(worker._script_step(seat))
+    assert runner.restarted == 2
+    assert worker._reload_cool == 60.0
+
+
+def test_a_different_death_reloads_immediately_and_resets_the_backoff():
+    """The backoff is about ONE failure repeating. A new failure is new
+    evidence, and it gets the immediate reload the first one got."""
+    import asyncio
+
+    worker, seat, runner = _stale_party()
+    asyncio.run(worker._script_step(seat))            # reload #1
+    runner.stale = True
+    asyncio.run(worker._script_step(seat))            # backoff armed
+    assert worker._reload_cool == 30.0
+
+    runner.stale = True
+    runner.stale_sig = "ip 981: AttributeError: 'NoneType' has no 'body'"
+    worker._reload_hold_until = 0.0
+    asyncio.run(worker._script_step(seat))
+    assert runner.restarted == 2, "a different failure was held hostage"
+    assert worker._reload_cool == 0.0, \
+        "the old failure's backoff outlived the failure"
+
+
+def test_a_stale_runner_is_not_stepped_while_the_hold_is_on():
+    """`run_for` on a stale VM re-enters the crashing instruction (or
+    worse, a half-cancelled one). While stale, the step is skipped and
+    the stale handling owns the tick."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._script_step)
+    assert "if not runner.stale:" in src
+    stepped = src.index("run_for")
+    handled = src.index("if runner.stale:")
+    assert stepped < handled, "the guard has to wrap the step, not follow it"

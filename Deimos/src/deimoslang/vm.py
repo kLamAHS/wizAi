@@ -364,10 +364,32 @@ class VM:
                 return quest
         raise VMError(f"Unable to fetch the currently tracked quest for client with title {client.title}")
 
+    # wizAi patch: a name key that is not a langcode must not kill the
+    # program. The journal's Quest Finder pseudo-entry answers its
+    # literal label -- "Quest Finder", no underscore -- instead of a
+    # File_Code key, and `get_langcode_name` mis-splits any key without
+    # an underscore: `find("_")` is -1, so the "file" becomes the key
+    # minus its last character and the lookup raises
+    # `ValueError: No lang file named Quest Finde`. `_fetch_quest_text`
+    # below guarded the one known literal; the tracked-quest fetch
+    # guarded nothing, and one wizard's journal in that state
+    # crash-looped the whole party's program every 15 seconds at rev
+    # 7d9b6d6b. A literal key is returned as itself: "quest finder"
+    # matches no dispatch string, so the script moves on instead of
+    # dying.
+    async def _lang_name(self, client: SprintyClient, name_key: str) -> str:
+        name_key = name_key or ""
+        if "_" not in name_key:
+            return name_key
+        try:
+            return await client.cache_handler.get_langcode_name(name_key)
+        except ValueError:
+            return name_key
+
     async def _fetch_tracked_quest_text(self, client: SprintyClient) -> str:
         quest = await self._fetch_tracked_quest(client)
         name_key = await quest.name_lang_key()
-        name: str = await client.cache_handler.get_langcode_name(name_key)
+        name: str = await self._lang_name(client, name_key)
         return name.lower().strip()
 
     async def _fetch_quests(self, client: SprintyClient) -> list[tuple[int, QuestData]]:
@@ -378,11 +400,11 @@ class VM:
         return result
 
     async def _fetch_quest_text(self, client: SprintyClient, quest: QuestData) -> str:
+        # wizAi patch: upstream special-cased the exact string
+        # "Quest Finder"; `_lang_name` covers that and every other
+        # literal key the same way.
         name_key = await quest.name_lang_key()
-        if name_key == "Quest Finder":
-            name = name_key
-        else:
-            name: str = await client.cache_handler.get_langcode_name(name_key)
+        name: str = await self._lang_name(client, name_key)
         return name.lower().strip()
 
     async def _fetch_tracked_goal_text(self, client: SprintyClient) -> str:
