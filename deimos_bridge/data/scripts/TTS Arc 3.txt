@@ -271,7 +271,7 @@ block First_Run_Settings {
 	times 4 {
 		times 300 {
 			if NOT any windowvisible ['WorldView', 'DeckConfiguration', 'SettingPage', 'QuitButton'] {
-				sameany sendkey ESC, .1
+				mass sendkey ESC, .1
 			} else {
 				break
 			}
@@ -421,8 +421,8 @@ block Retrieve_Lost_Quests {
 	block Enter_Sigil {
 		times 5 {
 			if NOT any windowvisible ['WorldView', 'NPCRangeWin', 'imgBackground', 'TeamUpButton'] {
-				sameany minustp XYZ(0,0,1000)
-				sameany plustp XYZ(0,0,1000)
+				mass minustp XYZ(0,0,1000)
+				mass plustp XYZ(0,0,1000)
 				sleep 2
 			} else {
 				break
@@ -2659,12 +2659,12 @@ block Spell_Learner {
 				print "Train button not visible. Trying different menu positions..."
 			}
 			times 20 {
-				sameany click 533, 286
+				mass click 533, 286
 			}
 			if DebugMode = True {
 				print "Attempt 1: Clicking 426,277..."
 			}
-			sameany click 426, 277
+			mass click 426, 277
 			sleep 2
 			if any windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'TrainButton'] {
 				if DebugMode = True {
@@ -2676,13 +2676,13 @@ block Spell_Learner {
 			sleep 1
 			call Any_Dialogue
 			times 10 {
-				sameany sendkey X, .1
+				mass sendkey X, .1
 			}
 			#----#
 			if DebugMode = True {
 				print "Attempt 2: Clicking 418,232..."
 			}
-			sameany click 418, 232
+			mass click 418, 232
 			sleep 2
 			if any windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'TrainButton'] {
 				if DebugMode = True {
@@ -2694,13 +2694,13 @@ block Spell_Learner {
 			sleep 1
 			call Any_Dialogue
 			times 10 {
-				sameany sendkey X, .1
+				mass sendkey X, .1
 			}
 			#----#
 			if DebugMode = True {
 				print "Attempt 3: Clicking 416,189..."
 			}
-			sameany click 416, 189
+			mass click 416, 189
 			sleep 2
 			if any windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'TrainButton'] {
 				if DebugMode = True {
@@ -2712,13 +2712,13 @@ block Spell_Learner {
 			sleep 1
 			call Any_Dialogue
 			times 10 {
-				sameany sendkey X, .1
+				mass sendkey X, .1
 			}
 			#----#
 			if DebugMode = True {
 				print "Attempt 4: Clicking 418,146..."
 			}
-			sameany click 418, 146
+			mass click 418, 146
 			sleep 2
 			if any windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'TrainButton'] {
 				if DebugMode = True {
@@ -2730,13 +2730,13 @@ block Spell_Learner {
 			sleep 1
 			call Any_Dialogue
 			times 10 {
-				sameany sendkey X, .1
+				mass sendkey X, .1
 			}
 			#----#
 			if DebugMode = True {
 				print "Attempt 5: Clicking 418,104..."
 			}
-			sameany click 418, 104
+			mass click 418, 104
 			sleep 2
 			if any windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'TrainButton'] {
 				if DebugMode = True {
@@ -2748,13 +2748,13 @@ block Spell_Learner {
 			sleep 1
 			call Any_Dialogue
 			times 10 {
-				sameany sendkey X, .1
+				mass sendkey X, .1
 			}
 			#----#
 			if DebugMode = True {
 				print "Attempt 6: Clicking 408,63..."
 			}
-			sameany click 408, 63
+			mass click 408, 63
 			sleep 2
 			if any windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'TrainButton'] {
 				if DebugMode = True {
@@ -2766,7 +2766,7 @@ block Spell_Learner {
 			sleep 1
 			call Any_Dialogue
 			times 10 {
-				sameany sendkey X, .1
+				mass sendkey X, .1
 			}
 			#----#
 		}
@@ -2803,64 +2803,64 @@ block Spell_Learner {
 					var TrainedThisPass = False
 					if NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2', 'NameBox', 'Name']	
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2', 'NameBox', 'Name']	
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
@@ -2896,64 +2896,64 @@ block Spell_Learner {
 					var TrainedThisPass = False
 					if NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2', 'NameBox', 'Name']	
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2', 'NameBox', 'Name']	
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
@@ -5174,6 +5174,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(1951.164794921875, -7845.12255859375, -930.9500122070312)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5186,6 +5188,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(3698.9912109375, -919.2833251953125, -15.061981201171875)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5973,6 +5977,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(1951.164794921875, -7845.12255859375, -930.9500122070312)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -5985,6 +5991,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(3698.9912109375, -919.2833251953125, -15.061981201171875)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -6862,6 +6870,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(1951.164794921875, -7845.12255859375, -930.9500122070312)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -6879,6 +6889,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(3698.9912109375, -919.2833251953125, -15.061981201171875)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -7651,6 +7663,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(1951.164794921875, -7845.12255859375, -930.9500122070312)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -7663,6 +7677,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(3698.9912109375, -919.2833251953125, -15.061981201171875)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}

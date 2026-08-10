@@ -271,7 +271,7 @@ block First_Run_Settings {
 	times 4 {
 		times 300 {
 			if NOT any windowvisible ['WorldView', 'DeckConfiguration', 'SettingPage', 'QuitButton'] {
-				sameany sendkey ESC, .1
+				mass sendkey ESC, .1
 			} else {
 				break
 			}
@@ -421,8 +421,8 @@ block Retrieve_Lost_Quests {
 	block Enter_Sigil {
 		times 5 {
 			if NOT any windowvisible ['WorldView', 'NPCRangeWin', 'imgBackground', 'TeamUpButton'] {
-				sameany minustp XYZ(0,0,1000)
-				sameany plustp XYZ(0,0,1000)
+				mass minustp XYZ(0,0,1000)
+				mass plustp XYZ(0,0,1000)
 				sleep 2
 			} else {
 				break
@@ -2659,12 +2659,12 @@ block Spell_Learner {
 				print "Train button not visible. Trying different menu positions..."
 			}
 			times 20 {
-				sameany click 533, 286
+				mass click 533, 286
 			}
 			if DebugMode = True {
 				print "Attempt 1: Clicking 426,277..."
 			}
-			sameany click 426, 277
+			mass click 426, 277
 			sleep 2
 			if any windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'TrainButton'] {
 				if DebugMode = True {
@@ -2676,13 +2676,13 @@ block Spell_Learner {
 			sleep 1
 			call Any_Dialogue
 			times 10 {
-				sameany sendkey X, .1
+				mass sendkey X, .1
 			}
 			#----#
 			if DebugMode = True {
 				print "Attempt 2: Clicking 418,232..."
 			}
-			sameany click 418, 232
+			mass click 418, 232
 			sleep 2
 			if any windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'TrainButton'] {
 				if DebugMode = True {
@@ -2694,13 +2694,13 @@ block Spell_Learner {
 			sleep 1
 			call Any_Dialogue
 			times 10 {
-				sameany sendkey X, .1
+				mass sendkey X, .1
 			}
 			#----#
 			if DebugMode = True {
 				print "Attempt 3: Clicking 416,189..."
 			}
-			sameany click 416, 189
+			mass click 416, 189
 			sleep 2
 			if any windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'TrainButton'] {
 				if DebugMode = True {
@@ -2712,13 +2712,13 @@ block Spell_Learner {
 			sleep 1
 			call Any_Dialogue
 			times 10 {
-				sameany sendkey X, .1
+				mass sendkey X, .1
 			}
 			#----#
 			if DebugMode = True {
 				print "Attempt 4: Clicking 418,146..."
 			}
-			sameany click 418, 146
+			mass click 418, 146
 			sleep 2
 			if any windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'TrainButton'] {
 				if DebugMode = True {
@@ -2730,13 +2730,13 @@ block Spell_Learner {
 			sleep 1
 			call Any_Dialogue
 			times 10 {
-				sameany sendkey X, .1
+				mass sendkey X, .1
 			}
 			#----#
 			if DebugMode = True {
 				print "Attempt 5: Clicking 418,104..."
 			}
-			sameany click 418, 104
+			mass click 418, 104
 			sleep 2
 			if any windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'TrainButton'] {
 				if DebugMode = True {
@@ -2748,13 +2748,13 @@ block Spell_Learner {
 			sleep 1
 			call Any_Dialogue
 			times 10 {
-				sameany sendkey X, .1
+				mass sendkey X, .1
 			}
 			#----#
 			if DebugMode = True {
 				print "Attempt 6: Clicking 408,63..."
 			}
-			sameany click 408, 63
+			mass click 408, 63
 			sleep 2
 			if any windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'TrainButton'] {
 				if DebugMode = True {
@@ -2766,7 +2766,7 @@ block Spell_Learner {
 			sleep 1
 			call Any_Dialogue
 			times 10 {
-				sameany sendkey X, .1
+				mass sendkey X, .1
 			}
 			#----#
 		}
@@ -2803,64 +2803,64 @@ block Spell_Learner {
 					var TrainedThisPass = False
 					if NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2', 'NameBox', 'Name']	
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2', 'NameBox', 'Name']	
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
@@ -2896,64 +2896,64 @@ block Spell_Learner {
 					var TrainedThisPass = False
 					if NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2', 'NameBox', 'Name']	
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2', 'NameBox', 'Name']	
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
 					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9'] {
 						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9'] {
-							sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9']
-							sameany print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9', 'NameBox', 'Name']
+							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9']
+							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9', 'NameBox', 'Name']
 							call Press_Train_Button
 							var TrainedThisPass = True
 						}
@@ -5010,6 +5010,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(13399.3623046875, -176.87875366210938, -800.0)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5020,6 +5022,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(-7291.13037109375, 538.0296630859375, 721.6807250976562)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5032,6 +5036,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(446.5711975097656, -5473.322265625, 299.302001953125)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5057,6 +5063,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(4890.09375, -5861.69873046875, -516.5089111328125)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5069,6 +5077,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(-8690.03125, 20473.8671875, -262.94354248046875)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5083,6 +5093,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(-15162.4345703125, 12459.05859375, -729.5411987304688)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5102,6 +5114,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(16892.49609375, -3159.836669921875, -1293.2440185546875)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5119,6 +5133,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(-1925.0679931640625, 1068.8414306640625, -676.0000610351562)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5127,6 +5143,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 			if p1 inzone Celestia/CL_Z09_Science_Center {
 				p1 tp XYZ(-13142.4150390625, 16634.84375, -846.474365234375)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5137,6 +5155,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(-12097.1328125, 2122.438720703125, -922.0208740234375)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5149,6 +5169,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(-34446.03125, 10240.296875, -674.19091796875)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5163,6 +5185,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(-7599.6201171875, 16091.8740234375, -289.3419189453125)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5382,6 +5406,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(21801.572265625, -4499.6923828125, 7.742767333984375)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5400,6 +5426,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(4247.45947265625, -6047.390625, 2.405548095703125)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5430,6 +5458,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				p1 turncam 4.22
 				sleep 2
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}			
@@ -5440,6 +5470,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(2507.077392578125, -6944.70166015625, 5.313079833984375)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5466,6 +5498,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(3919.41064453125, 5527.4287109375, -20.6580810546875)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 		if p1 tracking_goal "use white smoke brazier in zamunda" {
@@ -5484,6 +5518,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(4153.07861328125, 1510.2679443359375, 278.041259765625)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5617,6 +5653,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(88.25997924804688, 4080.08642578125, 6.112884521484375)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5673,6 +5711,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				times 20 {
 					p1 sendkey X, .1
 				}
+			} else {
+				break
 			}
 		}
 	}
@@ -5694,6 +5734,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				times 20 {
 					p1 sendkey X, .1
 				}
+			} else {
+				break
 			}
 		}
 	}
@@ -5716,6 +5758,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(2418.294677734375, 3445.739990234375, 1.03143310546875)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5730,6 +5774,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(6320.27783203125, 2633.287109375, -1048.3289794921875)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5744,6 +5790,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(260.17718505859375, 7792.4736328125, -1048.594970703125)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5784,6 +5832,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(3141.8330078125, 8280.0791015625, 3.304229736328125)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5802,6 +5852,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1 
 				p1 tp XYZ(5581.69873046875, 962.3099975585938, 6.103515625e-05)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5814,6 +5866,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(-8750.0087890625, 813.1604614257812, 0.0)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5847,6 +5901,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(7660.8759765625, -5281.49755859375, 200.90158081054688)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5861,6 +5917,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(-4718.77490234375, 6674.72314453125, 25.736572265625)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5875,6 +5933,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(-13923.990234375, -170.7483367919922, -97.32035827636719)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5882,6 +5942,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 		until NOT p1 tracking_goal "Catch Vonda Fish in Pitch Black Lake" {
 			if p1 inzone Azteca/AZ_Z08_PitchBlackLake {
 				p1 tp XYZ(-12246.0244140625, -8455.5390625, -347.575927734375)
+			} else {
+				break
 			}
 		}
 	}
@@ -5894,6 +5956,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(3782.692626953125, -4621.2939453125, 1833.9058837890625)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	} 
@@ -5925,6 +5989,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(-2508.299560546875, 3619.86083984375, -429.47265625)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5937,6 +6003,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(-4312.91162109375, -2565.822265625, -976.8231201171875)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5955,6 +6023,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(-2096.97998046875, -1716.98876953125, -540.5764770507812)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5976,6 +6046,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(112.05521392822266, 1682.4483642578125, 2449.203857421875)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -6580,6 +6652,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(13399.3623046875, -176.87875366210938, -800.0)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -6590,6 +6664,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(-7291.13037109375, 538.0296630859375, 721.6807250976562)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -6602,6 +6678,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(446.5711975097656, -5473.322265625, 299.302001953125)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -6627,6 +6705,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(4890.09375, -5861.69873046875, -516.5089111328125)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -6639,6 +6719,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(-8690.03125, 20473.8671875, -262.94354248046875)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -6653,6 +6735,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(-15162.4345703125, 12459.05859375, -729.5411987304688)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -6672,6 +6756,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(16892.49609375, -3159.836669921875, -1293.2440185546875)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -6689,6 +6775,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(-1925.0679931640625, 1068.8414306640625, -676.0000610351562)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -6697,6 +6785,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 			if p2 inzone Celestia/CL_Z09_Science_Center {
 				p2 tp XYZ(-13142.4150390625, 16634.84375, -846.474365234375)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -6707,6 +6797,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(-12097.1328125, 2122.438720703125, -922.0208740234375)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -6719,6 +6811,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(-34446.03125, 10240.296875, -674.19091796875)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -6733,6 +6827,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(-7599.6201171875, 16091.8740234375, -289.3419189453125)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -6947,6 +7043,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(21801.572265625, -4499.6923828125, 7.742767333984375)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -6965,6 +7063,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(4247.45947265625, -6047.390625, 2.405548095703125)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -6995,6 +7095,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				p2 turncam 4.22
 				sleep 2
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}			
@@ -7005,6 +7107,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(2507.077392578125, -6944.70166015625, 5.313079833984375)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -7031,6 +7135,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(3919.41064453125, 5527.4287109375, -20.6580810546875)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 		if p2 tracking_goal "use white smoke brazier in zamunda" {
@@ -7049,6 +7155,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(4153.07861328125, 1510.2679443359375, 278.041259765625)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -7182,6 +7290,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(88.25997924804688, 4080.08642578125, 6.112884521484375)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -7238,6 +7348,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				times 20 {
 					p2 sendkey X, .1
 				}
+			} else {
+				break
 			}
 		}
 	}
@@ -7259,6 +7371,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				times 20 {
 					p2 sendkey X, .1
 				}
+			} else {
+				break
 			}
 		}
 	}
@@ -7281,6 +7395,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(2418.294677734375, 3445.739990234375, 1.03143310546875)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -7310,6 +7426,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(6320.27783203125, 2633.287109375, -1048.3289794921875)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -7324,6 +7442,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(260.17718505859375, 7792.4736328125, -1048.594970703125)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -7364,6 +7484,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(3141.8330078125, 8280.0791015625, 3.304229736328125)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -7382,6 +7504,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2 
 				p2 tp XYZ(5581.69873046875, 962.3099975585938, 6.103515625e-05)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -7394,6 +7518,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(-8750.0087890625, 813.1604614257812, 0.0)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -7412,6 +7538,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(7660.8759765625, -5281.49755859375, 200.90158081054688)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -7426,6 +7554,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(-4718.77490234375, 6674.72314453125, 25.736572265625)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -7440,6 +7570,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(-13923.990234375, -170.7483367919922, -97.32035827636719)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -7447,6 +7579,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 		until NOT p2 tracking_goal "Catch Vonda Fish in Pitch Black Lake" {
 			if p2 inzone Azteca/AZ_Z08_PitchBlackLake {
 				p2 tp XYZ(-12246.0244140625, -8455.5390625, -347.575927734375)
+			} else {
+				break
 			}
 		}
 	}
@@ -7466,6 +7600,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(3782.692626953125, -4621.2939453125, 1833.9058837890625)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	} 
@@ -7497,6 +7633,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(-2508.299560546875, 3619.86083984375, -429.47265625)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -7509,6 +7647,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(-4312.91162109375, -2565.822265625, -976.8231201171875)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -7527,6 +7667,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(-2096.97998046875, -1716.98876953125, -540.5764770507812)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -7548,6 +7690,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(112.05521392822266, 1682.4483642578125, 2449.203857421875)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -8152,6 +8296,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(13399.3623046875, -176.87875366210938, -800.0)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -8162,6 +8308,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(-7291.13037109375, 538.0296630859375, 721.6807250976562)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -8174,6 +8322,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(446.5711975097656, -5473.322265625, 299.302001953125)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -8199,6 +8349,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(4890.09375, -5861.69873046875, -516.5089111328125)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -8211,6 +8363,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(-8690.03125, 20473.8671875, -262.94354248046875)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -8225,6 +8379,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(-15162.4345703125, 12459.05859375, -729.5411987304688)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -8244,6 +8400,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(16892.49609375, -3159.836669921875, -1293.2440185546875)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -8261,6 +8419,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(-1925.0679931640625, 1068.8414306640625, -676.0000610351562)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -8269,6 +8429,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 			if p3 inzone Celestia/CL_Z09_Science_Center {
 				p3 tp XYZ(-13142.4150390625, 16634.84375, -846.474365234375)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -8279,6 +8441,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(-12097.1328125, 2122.438720703125, -922.0208740234375)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -8291,6 +8455,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(-34446.03125, 10240.296875, -674.19091796875)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -8305,6 +8471,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(-7599.6201171875, 16091.8740234375, -289.3419189453125)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -8519,6 +8687,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(21801.572265625, -4499.6923828125, 7.742767333984375)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -8537,6 +8707,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(4247.45947265625, -6047.390625, 2.405548095703125)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -8567,6 +8739,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				p3 turncam 4.22
 				sleep 2
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}			
@@ -8577,6 +8751,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(2507.077392578125, -6944.70166015625, 5.313079833984375)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -8587,6 +8763,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(3919.41064453125, 5527.4287109375, -20.6580810546875)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 		if p3 tracking_goal "use white smoke brazier in zamunda" {
@@ -8605,6 +8783,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(4153.07861328125, 1510.2679443359375, 278.041259765625)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -8764,6 +8944,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(88.25997924804688, 4080.08642578125, 6.112884521484375)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -8835,6 +9017,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				times 20 {
 					p3 sendkey X, .1
 				}
+			} else {
+				break
 			}
 		}
 	}
@@ -8856,6 +9040,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				times 20 {
 					p3 sendkey X, .1
 				}
+			} else {
+				break
 			}
 		}
 	}
@@ -8878,6 +9064,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(2418.294677734375, 3445.739990234375, 1.03143310546875)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -8899,6 +9087,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(6320.27783203125, 2633.287109375, -1048.3289794921875)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -8913,6 +9103,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(260.17718505859375, 7792.4736328125, -1048.594970703125)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -8953,6 +9145,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(3141.8330078125, 8280.0791015625, 3.304229736328125)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -8971,6 +9165,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3 
 				p3 tp XYZ(5581.69873046875, 962.3099975585938, 6.103515625e-05)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -8983,6 +9179,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(-8750.0087890625, 813.1604614257812, 0.0)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -9001,6 +9199,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(7660.8759765625, -5281.49755859375, 200.90158081054688)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -9015,6 +9215,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(-4718.77490234375, 6674.72314453125, 25.736572265625)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -9029,6 +9231,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(-13923.990234375, -170.7483367919922, -97.32035827636719)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -9036,6 +9240,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 		until NOT p3 tracking_goal "Catch Vonda Fish in Pitch Black Lake" {
 			if p3 inzone Azteca/AZ_Z08_PitchBlackLake {
 				p3 tp XYZ(-12246.0244140625, -8455.5390625, -347.575927734375)
+			} else {
+				break
 			}
 		}
 	}
@@ -9048,6 +9254,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(3782.692626953125, -4621.2939453125, 1833.9058837890625)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	} 
@@ -9079,6 +9287,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(-2508.299560546875, 3619.86083984375, -429.47265625)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -9091,6 +9301,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(-4312.91162109375, -2565.822265625, -976.8231201171875)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -9109,6 +9321,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(-2096.97998046875, -1716.98876953125, -540.5764770507812)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -9130,6 +9344,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(112.05521392822266, 1682.4483642578125, 2449.203857421875)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -9724,6 +9940,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(13399.3623046875, -176.87875366210938, -800.0)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -9734,6 +9952,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(-7291.13037109375, 538.0296630859375, 721.6807250976562)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -9746,6 +9966,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(446.5711975097656, -5473.322265625, 299.302001953125)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -9771,6 +9993,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(4890.09375, -5861.69873046875, -516.5089111328125)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -9783,6 +10007,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(-8690.03125, 20473.8671875, -262.94354248046875)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -9797,6 +10023,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(-15162.4345703125, 12459.05859375, -729.5411987304688)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -9816,6 +10044,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(16892.49609375, -3159.836669921875, -1293.2440185546875)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -9833,6 +10063,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(-1925.0679931640625, 1068.8414306640625, -676.0000610351562)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -9841,6 +10073,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 			if p4 inzone Celestia/CL_Z09_Science_Center {
 				p4 tp XYZ(-13142.4150390625, 16634.84375, -846.474365234375)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -9851,6 +10085,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(-12097.1328125, 2122.438720703125, -922.0208740234375)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -9863,6 +10099,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(-34446.03125, 10240.296875, -674.19091796875)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -9877,6 +10115,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(-7599.6201171875, 16091.8740234375, -289.3419189453125)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -10091,6 +10331,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(21801.572265625, -4499.6923828125, 7.742767333984375)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -10109,6 +10351,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(4247.45947265625, -6047.390625, 2.405548095703125)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -10139,6 +10383,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				p4 turncam 4.22
 				sleep 2
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}			
@@ -10149,6 +10395,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(2507.077392578125, -6944.70166015625, 5.313079833984375)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -10159,6 +10407,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(3919.41064453125, 5527.4287109375, -20.6580810546875)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 		if p4 tracking_goal "use white smoke brazier in zamunda" {
@@ -10193,6 +10443,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(4153.07861328125, 1510.2679443359375, 278.041259765625)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -10326,6 +10578,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(88.25997924804688, 4080.08642578125, 6.112884521484375)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -10397,6 +10651,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				times 20 {
 					p4 sendkey X, .1
 				}
+			} else {
+				break
 			}
 		}
 	}
@@ -10418,6 +10674,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				times 20 {
 					p4 sendkey X, .1
 				}
+			} else {
+				break
 			}
 		}
 	}
@@ -10440,6 +10698,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(2418.294677734375, 3445.739990234375, 1.03143310546875)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -10454,6 +10714,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(6320.27783203125, 2633.287109375, -1048.3289794921875)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -10468,6 +10730,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(260.17718505859375, 7792.4736328125, -1048.594970703125)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -10515,6 +10779,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(3141.8330078125, 8280.0791015625, 3.304229736328125)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -10533,6 +10799,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4 
 				p4 tp XYZ(5581.69873046875, 962.3099975585938, 6.103515625e-05)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -10545,6 +10813,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(-8750.0087890625, 813.1604614257812, 0.0)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -10563,6 +10833,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(7660.8759765625, -5281.49755859375, 200.90158081054688)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -10577,6 +10849,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(-4718.77490234375, 6674.72314453125, 25.736572265625)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -10591,6 +10865,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(-13923.990234375, -170.7483367919922, -97.32035827636719)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -10598,6 +10874,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 		until NOT p4 tracking_goal "Catch Vonda Fish in Pitch Black Lake" {
 			if p4 inzone Azteca/AZ_Z08_PitchBlackLake {
 				p4 tp XYZ(-12246.0244140625, -8455.5390625, -347.575927734375)
+			} else {
+				break
 			}
 		}
 	}
@@ -10610,6 +10888,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(3782.692626953125, -4621.2939453125, 1833.9058837890625)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	} 
@@ -10641,6 +10921,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(-2508.299560546875, 3619.86083984375, -429.47265625)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -10653,6 +10935,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(-4312.91162109375, -2565.822265625, -976.8231201171875)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -10671,6 +10955,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(-2096.97998046875, -1716.98876953125, -540.5764770507812)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -10692,6 +10978,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(112.05521392822266, 1682.4483642578125, 2449.203857421875)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
