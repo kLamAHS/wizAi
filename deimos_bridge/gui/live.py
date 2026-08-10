@@ -165,6 +165,21 @@ class _Seat:
         #: was said. See `LiveWorker._check_on_questline`.
         self.off_line_since = None
         self.said_off_line = ""
+        #: the last main-line quest this wizard's tracker held, as
+        #: (world, order, name), and when. The first and best answer to
+        #: "which quest was lost": a wizard on a side quest now was on
+        #: THIS a moment ago, and finishing a quest hands the next one
+        #: over rather than dropping the tracker onto a side quest --
+        #: so a tracker that wandered never got there. See
+        #: `LiveWorker._lost_quest`.
+        self.last_main = None
+        self.last_main_at = NEVER
+        #: when a lost-questline recovery was last attempted, and the
+        #: quest it was attempted for, so a cure that cannot work (the
+        #: quest is not in the book) is not tried every ten minutes
+        #: forever. See `LiveWorker._maybe_recover_questline`.
+        self.recover_tried_at = NEVER
+        self.recover_gave_up = ""
         #: the tracked quest's NAME, which is what `questlist` can place
         #: in a questline. The goal cannot be placed: "Talk to Professor
         #: Winthrop" is the objective of nine Krokotopia quests spanning
@@ -494,6 +509,14 @@ class LiveWorker(QThread):
         #: behind now", and when the last was. See `CATCH_UP_CHURN`.
         self._churn = 0
         self._churn_at = NEVER
+        #: {normalised quest name: (zone, when)} -- where the party was
+        #: standing while somebody tracked that quest. The saved
+        #: location half of lost-quest recovery: naming the quest a
+        #: wizard should be back on is only half an answer if nothing
+        #: can say where it is. Fed by the goal poll, which already
+        #: reads both, and read by `_maybe_recover_questline`. Bounded;
+        #: see `QUEST_ZONE_MEMORY`.
+        self._quest_zone = {}
         #: {seat id: (the step it gave up on, when)}. A catch-up that
         #: gives up has to be REMEMBERED, or `_check_in_step` starts the
         #: identical one on the next tick -- see `_written_off`.
@@ -822,6 +845,17 @@ class LiveWorker(QThread):
                     # tick.
                     await self._stage(seat, "re-arming the quest arrow",
                                       self._maybe_rearm_quest_arrow(seat),
+                                      wheel=True, limit=90)
+
+                if driven or self.auto_quest:
+                    # The other lost-tracker state, and the opposite
+                    # one: the hook is written perfectly and pointed at
+                    # a side quest, so every teleport below aims
+                    # somewhere real and wrong. Gated inside on the
+                    # off-the-line clock, so a healthy tick pays two
+                    # comparisons.
+                    await self._stage(seat, "recovering the main questline",
+                                      self._maybe_recover_questline(seat),
                                       wheel=True, limit=90)
 
                 if driven or self.auto_quest:
@@ -2867,6 +2901,7 @@ class LiveWorker(QThread):
             zone = await seat.client.zone_name()
         except Exception:
             pass
+        self._note_quest_zone(seat, zone, now)
         try:
             at = await seat.client.body.position()
             # Rounded hard: the idle animation moves a wizard by a
@@ -2985,6 +3020,42 @@ class LiveWorker(QThread):
                 for cell, at in list(seat.cells_seen.items()):
                     if at < cut:
                         del seat.cells_seen[cell]
+
+    #: how many quests the zone memory keeps. A world's main line is
+    #: forty-odd quests and a run touches one world; two hundred is
+    #: several worlds' worth and still a few kilobytes.
+    QUEST_ZONE_MEMORY = 200
+
+    def _note_quest_zone(self, seat, zone, now):
+        """Remember where a quest was being worked, keyed by its name.
+
+        The operator's second question -- "and the saved tp location /
+        zone" -- and the cheapest possible answer: the goal poll
+        already reads the tracked quest name and the zone on the same
+        tick, and nothing was keeping the pair.
+
+        It matters because naming the lost quest is only half a cure.
+        `questlist` carries each quest's AREA, which is the wiki's name
+        for it and not a zone id the game will accept, so on its own it
+        tells the operator something and the bot nothing. A zone this
+        party actually stood in while tracking that quest is the other
+        half, and it comes free.
+
+        Written by every seat into one worker-level map on purpose: the
+        wizard that LOST the quest is the one that cannot answer where
+        it was, and its party-mates walking the same line can.
+        """
+        from .. import questlist
+
+        if not zone or not seat.quest_name:
+            return
+        key = questlist.key_for(seat.quest_name)
+        if not key:
+            return
+        self._quest_zone[key] = (zone, now)
+        if len(self._quest_zone) > self.QUEST_ZONE_MEMORY:
+            oldest = min(self._quest_zone, key=lambda k: self._quest_zone[k][1])
+            del self._quest_zone[oldest]
 
     def _note_name(self, seat, name, now):
         """Keep the freshest quest name, and stop keeping a dead one.
@@ -4524,6 +4595,14 @@ class LiveWorker(QThread):
                 # the preset's own Auto_Find_Quest only kicks in after
                 # several full loops.
                 continue
+            if place.on_main:
+                # The last place on the line this wizard actually held,
+                # which is the first answer to "which quest was lost".
+                # Recorded here rather than in the poll because this is
+                # where a `Position` already exists, and only a
+                # main-line one is worth keeping.
+                seat.last_main = (place.world, place.order, place.name)
+                seat.last_main_at = now
             if place.on_main or not place.known:
                 # `known` False is a read that failed or a quest the
                 # list has never heard of -- not evidence of anything.
@@ -4538,6 +4617,10 @@ class LiveWorker(QThread):
                     self._say(seat, f"{seat.name} is back on the main line")
                 seat.off_line_since = None
                 seat.said_off_line = ""
+                # A wizard back on the line has no give-up to honour.
+                # The next loss is a fresh one, and it may be a quest
+                # the book DOES list.
+                seat.recover_gave_up = ""
                 continue
             if seat.off_line_since is None:
                 seat.off_line_since = now
@@ -4560,6 +4643,269 @@ class LiveWorker(QThread):
                 except Exception:
                     pass
             self._say(seat, said)
+
+    def _lost_quest(self, seat, places=None):
+        """([(quest, how it was named)], why) for a wizard off the line.
+
+        The middle third of the operator's question -- "can we tell if
+        the main quest has been lost, and WHICH ONE". Two answers, best
+        first, and neither is enough on its own:
+
+        -- the wizard's OWN last main-line quest. The strongest
+           evidence available: it was on #13 four minutes ago and it is
+           on a side quest now, so #13 is what it left. It is wrong in
+           exactly one way -- the wizard FINISHED #13 while the side
+           quest was selected -- and that case is self-announcing,
+           because a finished quest is not in the book to click.
+        -- the quest the rest of the party is on. A party quests
+           together, so the odd wizard belongs within a step of the
+           others, and `questlist.quest_at` turns their "#13" into a
+           name. This is the answer that exists even for a wizard that
+           was never seen on the line at all.
+
+        Ordered rather than chosen, because the book session that acts
+        on this reads its entries once and can try both for nothing.
+        """
+        from .. import questlist
+
+        if places is None:
+            places = self._places()
+        found = []
+        seen = set()
+
+        def add(place, source):
+            if not place.name or place.name.lower() in seen:
+                return
+            seen.add(place.name.lower())
+            found.append((place, source))
+
+        mine = seat.last_main
+        if mine and mine[2]:
+            # By PLACE, not by name. Seven main-line names are reused
+            # across worlds -- "The Right Combination" is Krokotopia
+            # #55 and Marleybone #39 -- and a by-name lookup answers
+            # with whichever came first in the data, which would hand
+            # the wrong world's area to `_saved_place`. The place this
+            # wizard was actually at has no such ambiguity.
+            here = questlist.quest_at(mine[0], mine[1])
+            add(here if here.name else questlist.Position(
+                    world=mine[0], order=mine[1], name=mine[2],
+                    how="the last main-line quest this wizard held",
+                    questline="main"),
+                f"its own last main-line quest, {mine[0]} #{mine[1]}")
+        others = [p for s, p in zip(self.seats, places)
+                  if s is not seat and p.on_main]
+        if others:
+            lowest = min(others, key=lambda p: p.order)
+            add(questlist.quest_at(lowest.world, lowest.order),
+                f"where the rest of the party is, #{lowest.order}")
+        if not found:
+            return [], ("nothing names a main-line quest for this wizard: "
+                        "it has not been seen on the line, and no other "
+                        "wizard is on it either")
+        return found, "; ".join(source for _p, source in found)
+
+    def _saved_place(self, name, now=None, area=""):
+        """Where a quest was last worked, as a phrase, or "".
+
+        The last third of the operator's question -- "and the saved tp
+        location / zone". Two sources, and the order matters: a zone
+        THIS party actually stood in while tracking the quest beats the
+        list's own area, because the list carries the wiki's prose
+        ("Palace of Fire") and the zone carries the id the game and
+        every teleport in the codebase speak ("KT_PalaceFire").
+
+        `area` is passed in by callers that already hold the quest's
+        `Position`, because seven main-line names are reused across
+        worlds and looking one up by name here would sometimes answer
+        with the other world's area.
+        """
+        import time
+
+        from .. import questlist
+
+        if not name:
+            return ""
+        now = time.monotonic() if now is None else now
+        where = self._quest_zone.get(questlist.key_for(name))
+        if where:
+            return (f"the party was in {where[0]} on it "
+                    f"{(now - where[1]) / 60:.0f} min ago")
+        area = area or questlist.position_of(name).area
+        if area:
+            return f"the quest list puts it in {area}"
+        return ""
+
+    #: how long a wizard may sit off the main line, with the rest of
+    #: the party still ON it, before its tracker is put back. Longer
+    #: than `OFF_QUESTLINE_AFTER` on purpose: saying it costs nothing
+    #: and can be said early, while doing something about it
+    #: interrupts a side quest that may have been picked up on purpose.
+    RECOVER_QUESTLINE_AFTER = 300.0
+    #: the same, with no party-mate on the line to compare against --
+    #: a solo run, or every wizard off it at once. Twenty minutes,
+    #: because "all three are on side quests" is what a preset running
+    #: a side-quest chain for training points looks like, and cutting
+    #: that short would be wizAi fighting the script it is driving.
+    RECOVER_ALONE_AFTER = 1200.0
+    #: between attempts, per wizard. The quest book costs ~15 held
+    #: seconds and the failure this cures is measured in tens of
+    #: minutes, so there is nothing to gain by hurrying it.
+    RECOVER_EVERY = 600.0
+    #: the worker-wide steering hold around a recovery and the settle
+    #: after it, the same shape as the re-arm's and for the same
+    #: reason: the book is open for seconds, and any teleport another
+    #: task lands mid-click turns the click into a misfire.
+    RECOVER_CEILING = 60.0
+    RECOVER_SETTLE = 3.0
+
+    async def _maybe_recover_questline(self, seat):
+        """Put a lost tracker back onto the main questline.
+
+        `_check_on_questline` has been able to SAY this since it was
+        written -- "its tracker is on a side quest, and every `tp
+        quest` goes there until the main one is selected again" -- and
+        that is where it stopped. A diagnosis with no cure attached is
+        the shape of every failure this session has had to come back
+        to, and the operator named the missing half exactly:
+
+            if we know which quest other wizards are supposed to be on
+            in order, and you know for example the laggard can we tell
+            if the main quest has been lost, and which one, and the
+            saved tp location / zone can we have a lost quest recovery
+            bit
+
+        All three pieces existed and none of them were wired to an
+        action. `questlist` orders the line, `_lost_quest` names what
+        the wizard should be on, `_quest_zone` remembers where it was
+        being worked, and the quest book -- already opened and clicked
+        by `rearm_quest_arrow` -- is the one place a quest can be
+        re-selected. This joins them.
+
+        It does NOT move the wizard. Selection is the whole cure: the
+        moment the right quest is tracked, the marker points at the
+        main line again and every mover already in the ladder -- the
+        script's own `tp quest`, the desperate hop, the catch-up, the
+        rejoin -- aims correctly without being told. Adding a teleport
+        to a remembered zone here would be a new way to split the
+        party to fix a problem that no longer exists by then.
+        """
+        import time
+
+        from .. import questing, questlist
+
+        if not questlist.loaded():
+            return
+        # Cheap gates before the placement pass: this runs on every
+        # service tick for every wizard, and on a healthy one it must
+        # cost a couple of comparisons.
+        if seat.client is None or seat.in_duel or seat.off_line_since is None:
+            return
+        now = time.monotonic()
+        if now - seat.recover_tried_at < self.RECOVER_EVERY:
+            return
+        away = now - seat.off_line_since
+        if away < self.RECOVER_QUESTLINE_AFTER:
+            return
+        places = self._places()
+        place = dict(zip((id(s) for s in self.seats), places)).get(id(seat))
+        if place is None or place.on_main or not place.known:
+            return
+        alone = not any(p.on_main for s, p in zip(self.seats, places)
+                        if s is not seat)
+        if alone and away < self.RECOVER_ALONE_AFTER:
+            return
+        candidates, why = self._lost_quest(seat, places)
+        if not candidates:
+            return
+        # A quest that is not in the book is not in the book. Retrying
+        # the identical candidate list every ten minutes for the rest
+        # of the run would page through the journal forever to learn
+        # the same thing; a NEW candidate list is a new question and
+        # gets a new attempt.
+        key = " | ".join(p.name for p, _s in candidates)
+        if seat.recover_gave_up == key:
+            return
+        if await questing.in_dialogue(seat.client):
+            return
+
+        seat.recover_tried_at = now
+        target, source = candidates[0]
+        told = self._saved_place(target.name, now, target.area)
+        self._say(seat,
+                  f"{seat.name} has been off the main questline for "
+                  f"{away / 60:.0f} min on {place.name!r} — putting the "
+                  f"tracker back on {target.describe()} ({source})"
+                  + (f"; {told}" if told else ""))
+        self._hop_pause_until = now + self.RECOVER_CEILING
+        try:
+            ok, why, in_book = await questing.select_quest(
+                seat.client, [p.name for p, _s in candidates],
+                on_status=lambda m: self._say(seat, m))
+        finally:
+            self._hop_pause_until = time.monotonic() + self.RECOVER_SETTLE
+
+        if ok:
+            # `why` is the candidate that took -- which of the two
+            # answers was right is worth having in the export.
+            took = next((p for p, _s in candidates if p.name == why), target)
+            told = self._saved_place(why, now, took.area)
+            seat.recover_gave_up = ""
+            seat.tel.note_questing(
+                "questline-recovered",
+                f"{seat.name} had been off the main questline for "
+                f"{away / 60:.0f} min with its tracker on {place.name!r}. "
+                f"Selected {why!r} in the quest book and the tracker now "
+                f"reads it, so every `tp quest` — the script's and "
+                f"wizAi's — aims at the main line again ({source})"
+                + (f". {told[0].upper()}{told[1:]}" if told else ""))
+            self._say(seat, f"back on the main questline — the tracker "
+                            f"reads {why!r} again")
+            return
+        if in_book is None:
+            # The book was never looked in, because no candidate could
+            # be matched safely -- 69 of the 2,110 main-line quests are
+            # named in one word, and one word picks whatever entry
+            # happens to contain it. Named for the operator and said
+            # ONCE, because the answer will not change while the
+            # candidates do not.
+            seat.recover_gave_up = key
+            seat.tel.note_questing(
+                "questline-recovery-unsafe",
+                f"{seat.name} has been off the main questline for "
+                f"{away / 60:.0f} min and should be on "
+                f"{target.describe()} ({source})"
+                + (f" — {told}" if told else "")
+                + f", but it cannot be selected automatically: {why}. "
+                  f"Selecting it by hand in the quest book puts this "
+                  f"wizard back on the line")
+            self._say(seat, f"cannot select {target.name!r} safely: {why}")
+            return
+        if not in_book:
+            # The one failure retrying cannot fix, and a different fact
+            # worth its own entry: the quest is not merely unselected,
+            # it was never accepted. Nothing in the journal can take
+            # it; somebody has to walk to the NPC that gives it.
+            seat.recover_gave_up = key
+            seat.tel.note_questing(
+                "questline-quest-missing",
+                f"{seat.name} has been off the main questline for "
+                f"{away / 60:.0f} min and the quest it should be on is "
+                f"not in its book: {why}"
+                + (f" — {told}" if told else "")
+                + ". Until it is accepted from its NPC no selection can "
+                  "put this wizard back on the line, so this is not "
+                  "retried")
+            self._say(seat, f"cannot recover the questline: {why}")
+            return
+        seat.tel.note_questing(
+            "questline-recovery-failed",
+            f"tried to put {seat.name} back on {target.describe()} and "
+            f"could not: {why}. Every `tp quest` on this wizard still "
+            f"goes to {place.name!r}. Next attempt in "
+            f"{self.RECOVER_EVERY / 60:.0f} min")
+        self._say(seat, f"could not put the tracker back on the main "
+                        f"questline: {why}")
 
     def _quests_agree(self):
         """(together, why), or (None, why) when the list cannot say.

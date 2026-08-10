@@ -219,3 +219,72 @@ def test_the_loose_match_only_narrows_from_the_goal_side():
     assert all("Flemming" in " ".join(q.get("objectives") or ())
                for q in hits), \
         "a generic 'talk to' objective subset-matched a talk goal"
+
+
+# ------------------------------------------- naming the quest at a place
+# The inverse of `position_of`, and the half that was missing. Every
+# rule so far asked "where is this wizard"; none could ask "what should
+# the wizard at #13 be tracking" -- so `_check_on_questline` could say a
+# tracker had wandered onto a side quest and could do nothing about it.
+
+def test_a_place_in_the_line_names_its_quest():
+    p = questlist.quest_at("Krokotopia", 12)
+    assert p.name == "Gather the Troops"
+    assert p.on_main
+    assert p.order == 12
+    assert p.area, "the area is the fallback answer to 'where is it'"
+
+
+def test_every_main_line_place_names_its_own_quest():
+    index = questlist._load()
+    for (world, order), quest in index.by_place.items():
+        named = questlist.quest_at(world, order)
+        assert named.name == quest["name"]
+        assert (named.world, named.order) == (world, order)
+    assert len(index.by_place) > 2000, len(index.by_place)
+
+
+def test_the_main_line_names_that_are_reused_across_worlds_are_pinned():
+    """`_Index` used to claim the main line was unique and it is not:
+    seven main-line names are reused, so a lookup BY NAME can answer
+    with the wrong world's quest. That is survivable for placing a
+    wizard --
+    a party in Krokotopia is not accidentally in Marleybone -- and not
+    survivable for naming a quest to click, which is why `_lost_quest`
+    goes through `quest_at` instead.
+
+    Pinned rather than tolerated: an eighth collision appearing in a
+    data refresh is something to find here rather than live. Note
+    "Into the Maw!" against "Into the Maw" -- `_norm` drops the
+    punctuation, so counting raw strings misses that one.
+    """
+    index = questlist._load()
+    reused = set()
+    for (world, order) in index.by_place:
+        named = questlist.quest_at(world, order)
+        back = questlist.position_of(named.name)
+        if back.comparable and (back.world, back.order) != (world, order):
+            reused.add(named.name)
+    assert reused == {"Monkey Business", "Throwing Stones",
+                      "The Right Combination", "Mission Impossible",
+                      "Enemy at the Gate", "A Hello to Arms",
+                      "Into the Maw"}, reused
+
+
+def test_a_place_the_list_does_not_have_names_nothing():
+    """A guess here re-tracks the WRONG quest, which is worse than the
+    side quest it would replace."""
+    for world, order in (("Krokotopia", 9999), ("Atlantis", 1),
+                         (None, 3), ("Krokotopia", None)):
+        p = questlist.quest_at(world, order)
+        assert not p.name
+        assert not p.comparable
+        assert p.how, "an empty answer must still say why"
+
+
+def test_only_the_main_line_is_placed():
+    """Side quests have no order, so nothing can sit at a place. The
+    index must not accidentally answer with one."""
+    index = questlist._load()
+    assert all(q.get("questline") == "main"
+               for q in index.by_place.values())

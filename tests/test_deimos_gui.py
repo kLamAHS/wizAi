@@ -16194,6 +16194,663 @@ def test_a_failed_rearm_says_what_the_tracker_is_on_now(monkeypatch):
     assert "the tracker now reads 'Quest Finder'" in why, why
 
 
+# --------------------------------------- putting a lost questline back
+# The operator's ask, and the half every previous round was missing:
+#
+#     if we know which quest other wizards are supposed to be on in
+#     order, and you know for example the laggard can we tell if the
+#     main quest has been lost, and which one, and the saved tp
+#     location/ zone can we have a lost quest recovery bit
+#
+# `_check_on_questline` could already SAY a wizard's tracker had
+# wandered onto a side quest -- and that is where it stopped, a
+# diagnosis with no cure attached. All three pieces of the cure
+# existed: `questlist` orders the line, the party's own position names
+# what the laggard should be on, and the quest book is where a quest
+# gets re-selected. This wires them together.
+
+class _TrackedBook(_QuestBook):
+    """A quest book that also answers which quest the TRACKER is on.
+
+    `select_quest` demands that receipt, because a click that lands on
+    a redrawing book does nothing and does it silently -- so unlike the
+    re-arm's fixture this one has to be able to change its mind about
+    the tracked quest.
+    """
+
+    def __init__(self, listing=None, tracked="", selects=True, **kw):
+        super().__init__(listing=listing, **kw)
+        self.tracked = tracked
+        self._selects = selects
+        book = self
+
+        class _M:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def click_window(self, win):
+                name = await win.name()
+                book.clicked.append(name)
+                if name == "QuestLogAllButton":
+                    book.listing = list(book.all_listing)
+                elif name == "txtGoal":
+                    book.armed = True
+                    if book._selects:
+                        book.tracked = await win.maybe_text()
+
+        self.mouse_handler = _M()
+
+        class _Quest:
+            async def name_lang_key(self):
+                return book.tracked
+
+        class _Manager:
+            async def quest_data(self):
+                return {1: _Quest()}
+
+        self._manager = _Manager()
+
+    async def quest_id(self):
+        return 1
+
+    async def quest_manager(self):
+        return self._manager
+
+
+def _fast_select(monkeypatch):
+    from deimos_bridge import questing
+
+    monkeypatch.setattr(questing, "keycode_q", lambda: "Q")
+    monkeypatch.setattr(questing, "SELECT_PROOF_WAIT", 0.6)
+    return questing
+
+
+def test_selecting_a_quest_by_name_puts_the_tracker_on_it(monkeypatch):
+    """The whole cure. Wizard101's helper arrow follows whichever quest
+    is SELECTED, so clicking the main-line quest in the book aims every
+    `tp quest` -- the script's and wizAi's -- back at the main line."""
+    import asyncio
+
+    questing = _fast_select(monkeypatch)
+    book = _TrackedBook(listing=["Krokotopian Bundle", "Eye of Krok"],
+                        tracked="Krokotopian Bundle")
+    ok, why, in_book = asyncio.run(
+        questing.select_quest(book, ["Eye of Krok"]))
+    assert ok, why
+    assert why == "Eye of Krok"
+    assert in_book
+    assert book.tracked == "Eye of Krok"
+    assert not book.book_open, "the book was left open — it blocks movement"
+
+
+def test_the_second_candidate_is_tried_when_the_first_is_finished(
+        monkeypatch):
+    """The one way "its own last main-line quest" is wrong: the wizard
+    FINISHED it while the side quest was selected, so it is not in the
+    book to click. The party's answer takes over, and the book session
+    is already open -- trying it costs nothing."""
+    import asyncio
+
+    questing = _fast_select(monkeypatch)
+    book = _TrackedBook(listing=["Krokotopian Bundle", "Eye of Krok"],
+                        tracked="Krokotopian Bundle")
+    ok, why, _in = asyncio.run(
+        questing.select_quest(book, ["The Final Rubbing", "Eye of Krok"]))
+    assert ok, why
+    assert why == "Eye of Krok", "should have fallen through to the second"
+    assert book.tracked == "Eye of Krok"
+
+
+def test_a_quest_that_is_not_in_the_book_is_reported_as_such(monkeypatch):
+    """A different failure needing a different response. A quest that
+    is not listed was never ACCEPTED, and no amount of clicking in the
+    journal takes it -- somebody has to walk to the NPC. The caller has
+    to be able to tell that from a click that missed."""
+    import asyncio
+
+    questing = _fast_select(monkeypatch)
+    book = _TrackedBook(listing=["Krokotopian Bundle"],
+                        tracked="Krokotopian Bundle")
+    ok, why, in_book = asyncio.run(
+        questing.select_quest(book, ["Eye of Krok"]))
+    assert not ok
+    assert in_book is False
+    assert "not been accepted" in why, why
+    assert "Krokotopian Bundle" in why, "should show what the book DID list"
+    assert book.tracked == "Krokotopian Bundle", "nothing should be clicked"
+    assert "txtGoal" not in book.clicked
+
+
+def test_two_matching_entries_are_never_guessed_between(monkeypatch):
+    """Clicking the wrong entry re-tracks the wrong quest, which is the
+    disease this is the cure for. An ambiguous match is a refusal."""
+    import asyncio
+
+    questing = _fast_select(monkeypatch)
+    book = _TrackedBook(listing=["Eye of Krok", "Eye of Krok Part Two"],
+                        tracked="Krokotopian Bundle")
+    ok, why, in_book = asyncio.run(
+        questing.select_quest(book, ["Eye of Krok"]))
+    assert not ok
+    assert in_book is True
+    assert "matched 2 quest book entries" in why, why
+    assert "txtGoal" not in book.clicked
+
+
+def test_a_one_word_quest_name_is_never_matched_on(monkeypatch):
+    """One word subset-matches half the book -- an entry's text carries
+    its goal line as well as its name, so "Bling" is in every entry
+    that mentions it. 69 of the 2,110 main-line quests are named in one
+    word, and a wrong click here is the failure being cured.
+
+    `in_book` is None, not False: nothing was looked for, so nothing
+    can be said about what the book holds, and the caller must not
+    write the wizard off over it.
+    """
+    import asyncio
+
+    questing = _fast_select(monkeypatch)
+    book = _TrackedBook(listing=["Bling For The Boss"], tracked="Whatever")
+    ok, why, in_book = asyncio.run(questing.select_quest(book, ["Bling"]))
+    assert not ok
+    assert in_book is None
+    assert "2 words" in why, why
+    assert "'Bling'" in why, "the operator has to be told which quest"
+    assert not book.clicked
+    assert not book.book_open, "the book was never opened at all"
+
+
+def test_a_selection_that_did_not_take_is_not_reported_as_a_cure(
+        monkeypatch):
+    """A click that lands on a redrawing book does nothing, silently.
+    Reporting a cure that did not happen is how a run spends the next
+    ten minutes trusting a dead tracker."""
+    import asyncio
+
+    questing = _fast_select(monkeypatch)
+    book = _TrackedBook(listing=["Krokotopian Bundle", "Eye of Krok"],
+                        tracked="Krokotopian Bundle", selects=False)
+    ok, why, in_book = asyncio.run(
+        questing.select_quest(book, ["Eye of Krok"]))
+    assert not ok
+    assert in_book is True
+    assert "still reads 'Krokotopian Bundle'" in why, why
+    assert not book.book_open, "the book must be shut either way"
+
+
+def test_the_all_sort_is_tried_before_giving_up_on_a_quest(monkeypatch):
+    """The book opens on whatever view the player last left it on. All
+    is the one listing guaranteed to contain every accepted quest."""
+    import asyncio
+
+    questing = _fast_select(monkeypatch)
+    book = _TrackedBook(listing=["Krokotopian Bundle"],
+                        all_listing=["Krokotopian Bundle", "Eye of Krok"],
+                        tracked="Krokotopian Bundle")
+    ok, why, _in = asyncio.run(questing.select_quest(book, ["Eye of Krok"]))
+    assert ok, why
+    assert "QuestLogAllButton" in book.clicked
+    assert book.tracked == "Eye of Krok"
+
+
+def test_the_book_is_never_left_open_by_a_selection(monkeypatch):
+    """A book left open is a wizard that cannot move, and it can read
+    as a loading screen to everything else on the tick."""
+    import asyncio
+
+    questing = _fast_select(monkeypatch)
+    for listing in (["Eye of Krok"], ["Nothing Matching Here At All"]):
+        book = _TrackedBook(listing=listing, tracked="Krokotopian Bundle")
+        asyncio.run(questing.select_quest(book, ["Eye of Krok"]))
+        assert not book.book_open, listing
+
+
+# ---- which quest was lost, and where it was
+
+def _off_the_line(orders=("Gather the Troops", "Gather the Troops"),
+                  side="Krokotopian Bundle"):
+    """A party with one wizard's tracker on a side quest.
+
+    Returns (worker, the seat that wandered). The other seats stay on
+    the main line, which is what makes the odd one out answerable.
+    """
+    from deimos_bridge import questlist
+
+    worker = _party_on_quests(list(orders) + [side])
+    lost = worker.seats[-1]
+    places = [questlist.position_of(n) for n in orders]
+    places.append(questlist.Position(world="Krokotopia", name=side,
+                                     how="by quest name", questline=None))
+    worker._places = lambda: list(places)
+    return worker, lost
+
+
+def test_the_last_main_line_quest_a_wizard_held_is_remembered():
+    """The first and best answer to "which one": it was on #13 four
+    minutes ago and it is on a side quest now, so #13 is what it left.
+    Finishing a quest hands the next one over rather than dropping the
+    tracker onto a side quest, so a tracker that wandered never got
+    there."""
+    worker = _party_on_quests(["Gather the Troops", "Gather the Troops"])
+    worker._check_on_questline()
+    assert worker.seats[0].last_main == ("Krokotopia", 12,
+                                         "Gather the Troops")
+
+
+def test_the_lost_quest_is_named_from_the_wizards_own_history():
+    worker, lost = _off_the_line()
+    lost.last_main = ("Krokotopia", 13, "Payback")
+    found, why = worker._lost_quest(lost)
+    assert [p.name for p, _s in found][0] == "Payback"
+    assert "its own last main-line quest" in why
+
+
+def test_a_wizard_never_seen_on_the_line_is_named_from_the_party():
+    """The half that answers for a wizard wizAi has only ever seen on a
+    side quest: the party is on #12, so that is where it belongs."""
+    worker, lost = _off_the_line()
+    assert lost.last_main is None
+    found, why = worker._lost_quest(lost)
+    assert [p.name for p, _s in found] == ["Gather the Troops"]
+    assert "#12" in why
+
+
+def test_both_answers_are_offered_in_order():
+    """The book session reads its entries once, so trying the second
+    candidate costs nothing -- and one of them is right whenever the
+    other is the finished-it case."""
+    worker, lost = _off_the_line()
+    lost.last_main = ("Krokotopia", 13, "Payback")
+    found, _why = worker._lost_quest(lost)
+    assert [p.name for p, _s in found] == ["Payback", "Gather the Troops"]
+
+
+def test_a_wizard_with_no_answer_at_all_gets_none():
+    """Nothing invented. A guess here re-tracks the WRONG quest, which
+    is worse than the side quest it replaced."""
+    from deimos_bridge import questlist
+
+    worker = _party_on_quests(["Krokotopian Bundle", "Krokotopian Bundle"])
+    side = questlist.Position(world="Krokotopia", name="Krokotopian Bundle",
+                              how="by quest name", questline=None)
+    worker._places = lambda: [side, side]
+    found, why = worker._lost_quest(worker.seats[0])
+    assert found == []
+    assert "no other wizard is on it either" in why
+
+
+def test_where_a_quest_was_being_worked_is_remembered():
+    """The saved-location half. The goal poll already reads the tracked
+    quest name and the zone on the same tick; nothing was keeping the
+    pair."""
+    import time
+
+    worker, _read = _zoned_party(["KT_PalaceOfFire"])
+    seat = worker.seats[0]
+    seat.quest_name = "Eye of Krok"
+    worker._note_quest_zone(seat, "KT_PalaceOfFire", time.monotonic())
+    assert "KT_PalaceOfFire" in worker._saved_place("Eye of Krok")
+    assert "min ago" in worker._saved_place("Eye of Krok")
+
+
+def test_a_zone_this_party_stood_in_beats_the_lists_own_area():
+    """The list carries the wiki's prose ("Palace of Fire"); the zone
+    carries the id the game and every teleport in the codebase speak."""
+    import time
+
+    worker, _read = _zoned_party(["KT_PalaceOfFire"])
+    # With nothing remembered, the list's area is better than silence.
+    assert "Palace of Fire" in worker._saved_place("Eye of Krok")
+    seat = worker.seats[0]
+    seat.quest_name = "Eye of Krok"
+    worker._note_quest_zone(seat, "KT_PalaceOfFire", time.monotonic())
+    assert "KT_PalaceOfFire" in worker._saved_place("Eye of Krok")
+
+
+def test_a_party_mate_can_answer_where_the_lost_wizards_quest_was():
+    """Written into ONE worker-level map by every seat on purpose: the
+    wizard that lost the quest is the one that cannot say where it was,
+    and its party-mates walking the same line can."""
+    import time
+
+    worker, _read = _zoned_party(["KT_PalaceOfFire", "KT_Hub"])
+    now = time.monotonic()
+    worker.seats[0].quest_name = "Eye of Krok"
+    worker._note_quest_zone(worker.seats[0], "KT_PalaceOfFire", now)
+    # The second wizard never tracked it and still gets the answer.
+    assert "KT_PalaceOfFire" in worker._saved_place("Eye of Krok", now)
+
+
+def test_the_zone_memory_does_not_grow_without_end():
+    import time
+
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    for i in range(worker.QUEST_ZONE_MEMORY + 40):
+        seat.quest_name = f"Quest Number {i}"
+        worker._note_quest_zone(seat, "KT_Hub", time.monotonic() + i)
+    assert len(worker._quest_zone) <= worker.QUEST_ZONE_MEMORY
+
+
+# ---- the rung
+
+def _no_dialogue(monkeypatch):
+    from deimos_bridge import questing
+
+    async def no(_c):
+        return False
+
+    monkeypatch.setattr(questing, "in_dialogue", no)
+    return questing
+
+
+def test_a_lost_questline_is_put_back_and_the_receipt_written(monkeypatch):
+    """The rung. Selection is the whole cure: the moment the right
+    quest is tracked, the marker points at the main line again and
+    every mover already in the ladder aims correctly without being
+    told."""
+    import asyncio
+    import time
+
+    questing = _no_dialogue(monkeypatch)
+    worker, lost = _off_the_line()
+    lost.off_line_since = time.monotonic() - 400
+    calls = []
+
+    async def select(_c, names, on_status=None):
+        calls.append(list(names))
+        return True, names[0], True
+
+    monkeypatch.setattr(questing, "select_quest", select)
+    asyncio.run(worker._maybe_recover_questline(lost))
+    assert calls == [["Gather the Troops"]]
+    said = [e for e in lost.tel.questing
+            if e["kind"] == "questline-recovered"]
+    assert said, [e["kind"] for e in lost.tel.questing]
+    assert "Gather the Troops" in said[0]["detail"]
+    assert "Krokotopian Bundle" in said[0]["detail"], "say what it was on"
+    # The hold is released to a short settle: the wizard has not MOVED,
+    # so the script can have it back at once.
+    assert worker._hop_pause_until <= time.monotonic() + worker.RECOVER_SETTLE
+
+
+def test_the_saved_zone_rides_along_with_the_recovery(monkeypatch):
+    """Naming the quest is only half an answer if nothing can say where
+    it is."""
+    import asyncio
+    import time
+
+    questing = _no_dialogue(monkeypatch)
+    worker, lost = _off_the_line()
+    now = time.monotonic()
+    lost.off_line_since = now - 400
+    worker.seats[0].quest_name = "Gather the Troops"
+    worker._note_quest_zone(worker.seats[0], "KT_PalaceOfFire", now)
+
+    async def select(_c, names, on_status=None):
+        return True, names[0], True
+
+    monkeypatch.setattr(questing, "select_quest", select)
+    asyncio.run(worker._maybe_recover_questline(lost))
+    said = [e for e in lost.tel.questing
+            if e["kind"] == "questline-recovered"]
+    assert said and "KT_PalaceOfFire" in said[0]["detail"], said
+
+
+def test_a_deliberate_side_quest_is_given_time_to_finish(monkeypatch):
+    """Saying it at two minutes costs nothing. DOING something about it
+    interrupts a side quest that may have been picked up on purpose, so
+    the cure waits longer than the diagnosis."""
+    import asyncio
+    import time
+
+    questing = _no_dialogue(monkeypatch)
+    worker, lost = _off_the_line()
+    lost.off_line_since = time.monotonic() - 200      # past the diagnosis
+    calls = []
+
+    async def select(_c, names, on_status=None):
+        calls.append(names)
+        return True, names[0], True
+
+    monkeypatch.setattr(questing, "select_quest", select)
+    asyncio.run(worker._maybe_recover_questline(lost))
+    assert calls == [], "acted before RECOVER_QUESTLINE_AFTER"
+
+
+def test_a_whole_party_on_side_quests_is_the_script_not_a_loss(monkeypatch):
+    """All three off the line at once is what a preset running a
+    side-quest chain for training points looks like. Cutting that short
+    would be wizAi fighting the script it is driving, so with nobody on
+    the line to compare against the wait is twenty minutes, not five."""
+    import asyncio
+    import time
+
+    from deimos_bridge import questlist
+
+    questing = _no_dialogue(monkeypatch)
+    worker = _party_on_quests(["Krokotopian Bundle"] * 3)
+    side = questlist.Position(world="Krokotopia", name="Krokotopian Bundle",
+                              how="by quest name", questline=None)
+    worker._places = lambda: [side, side, side]
+    calls = []
+
+    async def select(_c, names, on_status=None):
+        calls.append(names)
+        return True, names[0], True
+
+    monkeypatch.setattr(questing, "select_quest", select)
+    for seat in worker.seats:
+        seat.last_main = ("Krokotopia", 12, "Gather the Troops")
+        seat.off_line_since = time.monotonic() - 600
+    for seat in worker.seats:
+        asyncio.run(worker._maybe_recover_questline(seat))
+    assert calls == [], "ten minutes is not evidence when nobody is on the line"
+    for seat in worker.seats:
+        seat.off_line_since = time.monotonic() - 1400
+        asyncio.run(worker._maybe_recover_questline(seat))
+    assert len(calls) == 3, "twenty minutes is nobody's side quest"
+
+
+def test_a_quest_that_is_not_in_the_book_is_not_retried_forever(monkeypatch):
+    """The one failure retrying cannot fix, and a different fact worth
+    its own entry: the quest was never accepted, so somebody has to
+    walk to the NPC that gives it."""
+    import asyncio
+    import time
+
+    questing = _no_dialogue(monkeypatch)
+    worker, lost = _off_the_line()
+    lost.off_line_since = time.monotonic() - 400
+    calls = []
+
+    async def select(_c, names, on_status=None):
+        calls.append(names)
+        return False, "none of 'Gather the Troops' is in the quest book", False
+
+    monkeypatch.setattr(questing, "select_quest", select)
+    asyncio.run(worker._maybe_recover_questline(lost))
+    said = [e for e in lost.tel.questing
+            if e["kind"] == "questline-quest-missing"]
+    assert said and "not retried" in said[0]["detail"]
+    lost.recover_tried_at = -1e9                  # cooldown out of the way
+    asyncio.run(worker._maybe_recover_questline(lost))
+    assert len(calls) == 1, "paged through the journal to learn the same thing"
+
+
+def test_a_quest_nothing_looked_for_is_not_called_missing(monkeypatch):
+    """A one-word quest name is refused before the book is opened, and
+    saying "the quest has not been accepted" about a quest nothing
+    looked for would be a lie that writes the wizard off. It gets its
+    own entry, names the quest so the operator can click it, and is
+    said once rather than every ten minutes."""
+    import asyncio
+    import time
+
+    questing = _no_dialogue(monkeypatch)
+    worker, lost = _off_the_line()
+    lost.off_line_since = time.monotonic() - 400
+    calls = []
+
+    async def select(_c, names, on_status=None):
+        calls.append(list(names))
+        return False, "no candidate quest name carries 2 words", None
+
+    monkeypatch.setattr(questing, "select_quest", select)
+    asyncio.run(worker._maybe_recover_questline(lost))
+    kinds = [e["kind"] for e in lost.tel.questing]
+    assert "questline-recovery-unsafe" in kinds, kinds
+    assert "questline-quest-missing" not in kinds
+    said = [e for e in lost.tel.questing
+            if e["kind"] == "questline-recovery-unsafe"][0]["detail"]
+    assert "Gather the Troops" in said, "must name the quest to click"
+    assert "by hand" in said
+    lost.recover_tried_at = -1e9
+    asyncio.run(worker._maybe_recover_questline(lost))
+    assert len(calls) == 1, "the answer cannot change while the name does not"
+
+
+def test_a_new_candidate_is_a_new_question(monkeypatch):
+    """A give-up is on a candidate LIST, not on the wizard. The party
+    moving on names a different quest, and that deserves a fresh look."""
+    import asyncio
+    import time
+
+    questing = _no_dialogue(monkeypatch)
+    worker, lost = _off_the_line()
+    lost.off_line_since = time.monotonic() - 400
+    calls = []
+
+    async def select(_c, names, on_status=None):
+        calls.append(list(names))
+        return False, "not in the book", False
+
+    monkeypatch.setattr(questing, "select_quest", select)
+    asyncio.run(worker._maybe_recover_questline(lost))
+    lost.recover_tried_at = -1e9
+    lost.last_main = ("Krokotopia", 13, "Payback")
+    asyncio.run(worker._maybe_recover_questline(lost))
+    assert len(calls) == 2, calls
+    assert calls[1][0] == "Payback"
+
+
+def test_a_selection_that_missed_is_reported_and_retried_later(monkeypatch):
+    import asyncio
+    import time
+
+    questing = _no_dialogue(monkeypatch)
+    worker, lost = _off_the_line()
+    lost.off_line_since = time.monotonic() - 400
+
+    async def select(_c, names, on_status=None):
+        return False, "the quest book did not open after six Q presses", True
+
+    monkeypatch.setattr(questing, "select_quest", select)
+    asyncio.run(worker._maybe_recover_questline(lost))
+    said = [e for e in lost.tel.questing
+            if e["kind"] == "questline-recovery-failed"]
+    assert said and "did not open" in said[0]["detail"]
+    assert "still goes to 'Krokotopian Bundle'" in said[0]["detail"]
+    assert not lost.recover_gave_up, "a UI failure is not a written-off quest"
+
+
+def test_the_recovery_is_throttled(monkeypatch):
+    import asyncio
+    import time
+
+    questing = _no_dialogue(monkeypatch)
+    worker, lost = _off_the_line()
+    lost.off_line_since = time.monotonic() - 400
+    calls = []
+
+    async def select(_c, names, on_status=None):
+        calls.append(names)
+        return False, "the quest book did not open", True
+
+    monkeypatch.setattr(questing, "select_quest", select)
+    asyncio.run(worker._maybe_recover_questline(lost))
+    asyncio.run(worker._maybe_recover_questline(lost))
+    assert len(calls) == 1, "ignored RECOVER_EVERY"
+
+
+def test_a_wizard_on_the_main_line_never_opens_the_book(monkeypatch):
+    import asyncio
+
+    questing = _no_dialogue(monkeypatch)
+    worker = _party_on_quests(["Gather the Troops", "Gather the Troops"])
+    calls = []
+
+    async def select(_c, names, on_status=None):
+        calls.append(names)
+        return True, names[0], True
+
+    monkeypatch.setattr(questing, "select_quest", select)
+    for seat in worker.seats:
+        asyncio.run(worker._maybe_recover_questline(seat))
+    assert calls == []
+
+
+def test_an_unreadable_tracker_never_gets_a_quest_picked_for_it(monkeypatch):
+    """`known` False is a read that failed. Selecting a quest on that
+    evidence would fire on every loading screen, and every wrong
+    selection is exactly the failure being cured."""
+    import asyncio
+    import time
+
+    from deimos_bridge import questlist
+
+    questing = _no_dialogue(monkeypatch)
+    worker = _party_on_quests(["Gather the Troops", "Gather the Troops"])
+    worker._places = lambda: [questlist.position_of("Gather the Troops"),
+                              questlist.Position()]
+    lost = worker.seats[1]
+    lost.off_line_since = time.monotonic() - 900
+    lost.last_main = ("Krokotopia", 12, "Gather the Troops")
+    calls = []
+
+    async def select(_c, names, on_status=None):
+        calls.append(names)
+        return True, names[0], True
+
+    monkeypatch.setattr(questing, "select_quest", select)
+    asyncio.run(worker._maybe_recover_questline(lost))
+    assert calls == []
+
+
+def test_the_recovery_does_not_move_anybody():
+    """Selection is the whole cure. Adding a teleport to a remembered
+    zone here would be a new way to split the party to fix a problem
+    that no longer exists by then -- the marker points at the main line
+    the moment the quest is tracked, and every mover in the ladder aims
+    off the marker."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._maybe_recover_questline)
+    body = src.split('"""')[2]                  # past the docstring
+    for mover in ("teleport", "goto", "_catch_up", "hop_once",
+                  "_desperate_hop", "_realm_hop"):
+        assert mover not in body, f"the recovery reaches for {mover}"
+
+
+def test_the_recovery_runs_before_everything_that_aims_a_teleport():
+    """Ordering, and it is the point: a wizard whose tracker is on a
+    side quest has a marker that reads perfectly and points somewhere
+    real and wrong. Every rung below aims at it."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._service_loop)
+    recover = src.index("_maybe_recover_questline")
+    for later in ("_maybe_realm_hop", "_catch_up(seat)"):
+        assert recover < src.index(later), later
+
+
 # --------------------------------------------- the stale-reload backoff
 
 class _StaleRunner:

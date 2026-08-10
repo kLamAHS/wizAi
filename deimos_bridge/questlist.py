@@ -122,11 +122,29 @@ class _Index:
         self.quests = quests
         self.by_name = {}
         self.by_objective = {}
+        #: (world, order) -> the main-line quest that sits there. The
+        #: inverse of `by_name`, and the half that was missing: every
+        #: rule so far asked "where is this wizard", and none could ask
+        #: "what should the wizard at #13 be tracking". All 2,110
+        #: main-line entries have a distinct (world, order), so this is
+        #: a lookup and not a guess.
+        self.by_place = {}
         for quest in quests:
             name = _norm(quest.get("name"))
-            # First wins. The 17 collisions are all side quests reused
-            # across worlds; the main line is unique.
+            # First wins, and it is not always right: seven main-line
+            # names are reused across worlds ("The Right Combination"
+            # is Krokotopia #55 AND Marleybone #39), so a lookup by
+            # name alone can answer with the wrong world's quest. Good
+            # enough for placing a wizard -- a party in Krokotopia is
+            # not accidentally in Marleybone -- and NOT good enough for
+            # naming a quest to click, which is why `by_place` exists
+            # and `_lost_quest` uses it.
             self.by_name.setdefault(name, quest)
+            if (quest.get("questline") == "main"
+                    and quest.get("questline_order") is not None
+                    and quest.get("world")):
+                self.by_place.setdefault(
+                    (quest["world"], quest["questline_order"]), quest)
             for objective in quest.get("objectives") or ():
                 self.by_objective.setdefault(_norm(objective), []).append(quest)
         # The same objectives as word-sets, for `_loose_lookup`. One
@@ -135,6 +153,17 @@ class _Index:
         self.loose = [(frozenset(key.split()), quests_)
                       for key, quests_ in self.by_objective.items()
                       if len(key.split()) >= 2]
+
+
+def key_for(quest_name) -> str:
+    """The stable key for a quest name, for callers keeping their own map.
+
+    `LiveWorker._quest_zone` remembers where each quest was last being
+    worked, and it has to key the way this module keys or a read misses
+    every write that came through a differently-cased HUD text. One
+    function so the two sides cannot drift.
+    """
+    return _norm(quest_name)
 
 
 def loaded() -> bool:
@@ -216,6 +245,34 @@ def position_of(quest_name) -> Position:
                     name=quest.get("name") or "",
                     area=quest.get("area") or "",
                     how="by quest name",
+                    questline=quest.get("questline"))
+
+
+def quest_at(world, order) -> Position:
+    """The main-line quest sitting at `#order` in `world`'s line.
+
+    The inverse of `position_of`, and the lookup that turns a diagnosis
+    into a cure. `_check_on_questline` could already say "this wizard
+    is on a side quest while the party is on #13"; it could not say
+    what #13 IS, so the only thing it could do about it was write a
+    sentence. Naming the quest is what lets the quest book be opened
+    and the right entry clicked.
+
+    Returns an unplaced `Position` carrying a reason when the list has
+    nothing at that spot -- a world it does not cover, or an order past
+    the end of the line. Callers must not act on an unplaced one: a
+    guess here re-tracks the WRONG quest, which is worse than the side
+    quest it replaced.
+    """
+    index = _load()
+    quest = index.by_place.get((world, order))
+    if quest is None:
+        return Position(how=f"the list has no {world} main #{order}")
+    return Position(world=quest.get("world"),
+                    order=quest.get("questline_order"),
+                    name=quest.get("name") or "",
+                    area=quest.get("area") or "",
+                    how=f"{quest.get('world')} main #{order}, by place",
                     questline=quest.get("questline"))
 
 

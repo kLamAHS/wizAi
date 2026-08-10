@@ -1133,6 +1133,157 @@ async def _subtree_text(window, depth: int = 6, limit: int = 40) -> str:
     return " ".join(texts)
 
 
+class _Book:
+    """The quest journal, driven the one way, for both of its callers.
+
+    Two rules need this UI and they differ only at the edges:
+    `rearm_quest_arrow` re-selects the quest the tracker is ALREADY on
+    so the arrow's hook gets written, and `select_quest` puts the
+    tracker back onto a quest it has wandered off. Which entry to look
+    for and which receipt to demand are the differences; Q, the four
+    slots, the All sort and getting the book shut again are identical,
+    and a second copy of them would be a second place a game UI change
+    has to be found.
+    """
+
+    def __init__(self, client):
+        self.client = client
+        self.key = keycode_q()
+
+    async def visible(self) -> bool:
+        book = await window_from_path(self.client.root_window,
+                                      QUEST_BOOK_LIST_PATH)
+        return book is not None and await _visible(book)
+
+    async def open(self):
+        """(ok, reason). Q toggles the book open to the quest page."""
+        if self.key is None:
+            return False, "wizwalker did not provide a keycode for Q"
+        for _attempt in range(6):
+            if await self.visible():
+                return True, ""
+            try:
+                await self.client.send_key(self.key, 0.1)
+            except Exception as exc:
+                return False, (f"could not press Q to open the quest book "
+                               f"({type(exc).__name__}: {exc})")
+            await asyncio.sleep(0.4)
+        if await self.visible():
+            return True, ""
+        return False, "the quest book did not open after six Q presses"
+
+    async def close(self) -> bool:
+        """Verified, not assumed. A book left open blocks movement and
+        can read as a loading screen, so whoever opened it owns closing
+        it -- Q first, then ESC, the same fallback order
+        `advance_dialogue` uses."""
+        for _attempt in range(6):
+            if not await self.visible():
+                return True
+            try:
+                await self.client.send_key(self.key, 0.1)
+            except Exception:
+                break
+            await asyncio.sleep(0.4)
+        if await self.visible():
+            from .realms import keycode_esc
+            esc = keycode_esc()
+            if esc is not None:
+                try:
+                    await self.client.send_key(esc, 0.1)
+                except Exception:
+                    pass
+                await asyncio.sleep(0.4)
+        return not await self.visible()
+
+    async def entries(self):
+        """[(slot, entry window, its text)] for the visible entries."""
+        got = []
+        for slot in range(QUEST_BOOK_SLOTS):
+            entry = await window_from_path(
+                self.client.root_window,
+                QUEST_BOOK_LIST_PATH + [f"wndQuestInfo{slot}"])
+            if entry is None or not await _visible(entry):
+                continue
+            got.append((slot, entry, await _subtree_text(entry)))
+        return got
+
+    async def show_all(self) -> bool:
+        """Click the All sort. The book opens on whatever view the
+        player last had, and All is the one listing guaranteed to
+        contain every accepted quest."""
+        sort = await window_from_path(self.client.root_window,
+                                      QUEST_BOOK_ALL_SORT_PATH)
+        if sort is None or not await _visible(sort):
+            return False
+        try:
+            await self.client.mouse_handler.click_window(sort)
+        except Exception:
+            return False
+        await asyncio.sleep(0.4)
+        return True
+
+    async def look_for(self, want):
+        """(matching entries, everything seen) for token sets `want`.
+
+        Re-sorts to All and looks again when the first page matched
+        nothing, because the book opens on whatever the player left it
+        on. Returns every match rather than the first: a caller that
+        must not click the wrong quest needs to know there were two.
+        """
+        def hits(seen):
+            return [(s, e, t) for (s, e, t) in seen
+                    if any(w <= _rearm_tokens(t) for w in want)]
+
+        seen = await self.entries()
+        found = hits(seen)
+        if not found and await self.show_all():
+            seen = await self.entries()
+            found = hits(seen)
+        return found, seen
+
+    async def select(self, entry, slot=0):
+        """(ok, reason). ONE click on the entry's goal line.
+
+        One, not Deimos's five-press burst. The first click SELECTS the
+        quest and selection redraws the book, so the four after it land
+        on whatever the redraw put under that spot -- a coin-flip at
+        the journal's own controls. At rev 7d9b6d6b the burst ran at
+        t~250 and by t~257 a client's tracked quest read as the literal
+        "Quest Finder" pseudo-entry, which crash-looped the script's
+        quest checks for the rest of the run. A click that dies in
+        flight is caught by the caller's receipt, and the caller's
+        cooldown owns the retry.
+        """
+        button = await window_from_path(entry, QUEST_BOOK_ENTRY_GOAL)
+        if button is None:
+            return False, (f"the matching entry (slot {slot}) has no "
+                           f"clickable goal line — the book's layout "
+                           f"has changed")
+        try:
+            await self.client.mouse_handler.click_window(button)
+        except Exception:
+            pass
+        await asyncio.sleep(0.3)
+        return True, ""
+
+
+async def _book_openable(client):
+    """"" when the book can be opened right now, else why not.
+
+    The three states that make opening it pointless or harmful, checked
+    before any cooldown is spent -- a refusal is not an attempt.
+    """
+    if await in_battle(client):
+        return "in a fight — the book cannot open"
+    if await in_dialogue(client):
+        return ("a dialogue is open — it blocks the book, and clearing "
+                "it is the dialogue rung's job")
+    if not await wait_until_ready(client, timeout=8.0):
+        return "still on a loading screen"
+    return ""
+
+
 async def rearm_quest_arrow(client, goal: str = "", name: str = "",
                             on_status=None):
     """(ok, reason). Re-select the tracked quest so the hook gets written.
@@ -1163,123 +1314,31 @@ async def rearm_quest_arrow(client, goal: str = "", name: str = "",
                        "readable, so there is nothing to match a quest "
                        "book entry against")
 
-    if await in_battle(client):
-        return False, "in a fight — the book cannot open"
-    if await in_dialogue(client):
-        return False, ("a dialogue is open — it blocks the book, and "
-                       "clearing it is the dialogue rung's job")
-    if not await wait_until_ready(client, timeout=8.0):
-        return False, "still on a loading screen"
+    blocked = await _book_openable(client)
+    if blocked:
+        return False, blocked
 
-    key = keycode_q()
-    if key is None:
-        return False, "wizwalker did not provide a keycode for Q"
-
-    async def book_visible():
-        book = await window_from_path(client.root_window,
-                                      QUEST_BOOK_LIST_PATH)
-        return book is not None and await _visible(book)
-
-    for _attempt in range(6):
-        if await book_visible():
-            break
-        try:
-            await client.send_key(key, 0.1)
-        except Exception as exc:
-            return False, (f"could not press Q to open the quest book "
-                           f"({type(exc).__name__}: {exc})")
-        await asyncio.sleep(0.4)
-    else:
-        return False, "the quest book did not open after six Q presses"
-
-    async def close_book():
-        # Q toggles the book shut; ESC is the second input path, the
-        # same fallback order `advance_dialogue` uses. A book left open
-        # blocks movement and can read as a loading screen, so the
-        # close is verified rather than assumed.
-        for _attempt in range(6):
-            if not await book_visible():
-                return True
-            try:
-                await client.send_key(key, 0.1)
-            except Exception:
-                break
-            await asyncio.sleep(0.4)
-        if await book_visible():
-            from .realms import keycode_esc
-            esc = keycode_esc()
-            if esc is not None:
-                try:
-                    await client.send_key(esc, 0.1)
-                except Exception:
-                    pass
-                await asyncio.sleep(0.4)
-        return not await book_visible()
-
-    async def entries():
-        """[(slot, entry window, its text)] for the visible entries."""
-        got = []
-        for slot in range(QUEST_BOOK_SLOTS):
-            entry = await window_from_path(
-                client.root_window,
-                QUEST_BOOK_LIST_PATH + [f"wndQuestInfo{slot}"])
-            if entry is None or not await _visible(entry):
-                continue
-            got.append((slot, entry, await _subtree_text(entry)))
-        return got
-
-    def matched(text):
-        have = _rearm_tokens(text)
-        return any(t <= have for t in want)
+    book = _Book(client)
+    opened, why = await book.open()
+    if not opened:
+        return False, why
 
     try:
         async with client.mouse_handler:
-            seen = await entries()
-            hit = [(s, e, t) for (s, e, t) in seen if matched(t)]
-            if not hit:
-                # The book opens on whatever view the player last had.
-                # The All sort is the one listing guaranteed to contain
-                # the tracked quest, so one re-sort before giving up.
-                sort = await window_from_path(client.root_window,
-                                              QUEST_BOOK_ALL_SORT_PATH)
-                if sort is not None and await _visible(sort):
-                    try:
-                        await client.mouse_handler.click_window(sort)
-                    except Exception:
-                        pass
-                    await asyncio.sleep(0.4)
-                    seen = await entries()
-                    hit = [(s, e, t) for (s, e, t) in seen if matched(t)]
+            hit, seen = await book.look_for(want)
             if not hit:
                 listing = " · ".join(t for (_s, _e, t) in seen) or "nothing"
                 return False, (f"no visible quest book entry matched the "
                                f"tracked quest — the page showed: "
                                f"{listing[:200]}")
             slot, entry, text = hit[0]
-            button = await window_from_path(entry, QUEST_BOOK_ENTRY_GOAL)
-            if button is None:
-                return False, (f"the matching entry (slot {slot}) has no "
-                               f"clickable goal line — the book's layout "
-                               f"has changed")
             say(f"quest book open — re-selecting \"{text[:60]}\" so the "
                 f"quest arrow comes back on")
-            # ONE click, not Deimos's five-press burst. The first click
-            # SELECTS the quest, and selection redraws the book -- so
-            # the four clicks after it land on whatever the redraw put
-            # under that spot, which is a coin-flip at the journal's
-            # own controls. At rev 7d9b6d6b the burst ran at t~250 and
-            # by t~257 some client's tracked quest read as the literal
-            # "Quest Finder" pseudo-entry, which crash-looped the
-            # script's quest checks for the rest of the run. A click
-            # that dies in flight is caught by the receipt below, and
-            # the cooldown owns the retry.
-            try:
-                await client.mouse_handler.click_window(button)
-            except Exception:
-                pass
-            await asyncio.sleep(0.3)
+            clicked, why = await book.select(entry, slot)
+            if not clicked:
+                return False, why
     finally:
-        closed = await close_book()
+        closed = await book.close()
 
     if not closed:
         return False, ("clicked the quest, but the book would not close "
@@ -1305,6 +1364,159 @@ async def rearm_quest_arrow(client, goal: str = "", name: str = "",
                    f"off in the game's own settings"
                    + (f"; the tracker now reads {now_on!r}" if now_on
                       else ""))
+
+
+#: how long the tracked quest name is polled for after the click. The
+#: name is read out of the quest manager rather than a render hook, so
+#: it updates as soon as selection lands -- but a book that redrew
+#: mid-read blanks it once, which is why this polls at all rather than
+#: reading once.
+SELECT_PROOF_WAIT = 6.0
+#: the fewest words a quest name may carry and still be safe to match
+#: on. A one-word name subset-matches half the book -- "Bling" appears
+#: in the entry text of every quest that mentions it -- and clicking
+#: the wrong entry re-tracks the wrong quest, which is the disease this
+#: is the cure for.
+SELECT_MIN_TOKENS = 2
+
+
+async def select_quest(client, names, on_status=None):
+    """(ok, reason, in_book). Put the tracker back onto a named quest.
+
+    The cure for a LOST main questline, which is a different failure
+    from a dead quest arrow even though both end at the same place.
+    The arrow being off leaves the hook unwritten and every teleport
+    aimed at (0,0,0); the questline being lost leaves the hook written
+    perfectly and every teleport aimed at a side quest. Wizard101's
+    helper arrow follows whichever quest is SELECTED, so a wizard that
+    accepts a side quest -- or has one auto-selected out of a dialogue
+    -- has its arrow, wizAi's teleports and the script's own `tp quest`
+    all pointed at the side quest from that moment, and the party's
+    main-line progress just stops.
+
+    `names` is an ordered list of candidates, best first, because the
+    caller has two answers and neither is certain: the wizard's own
+    last main-line quest, and the quest the rest of the party is on.
+    The book is already open and its entries already read, so trying
+    the second costs nothing.
+
+    `in_book` is the third return because the failures need different
+    responses. True: the quest IS listed and would not select, a UI
+    problem worth retrying. False: it is NOT listed, so it was never
+    accepted -- the wizard has to go and take it from an NPC, which no
+    amount of clicking in the journal achieves, and the caller should
+    say so rather than trying again in ten minutes. None: the book was
+    never looked in, because no candidate was safe to match on, and
+    saying "not in the book" about a quest nothing looked for would be
+    a lie that writes the wizard off.
+
+    Only an UNAMBIGUOUS match is ever clicked. Two entries matching one
+    name means the tokens do not identify a quest here, and clicking
+    either would be a coin-flip on the thing this is meant to fix.
+
+    On success `reason` is the candidate that was selected -- which of
+    the two answers turned out to be the right one is worth reporting.
+    """
+    def say(message):
+        if on_status:
+            on_status(message)
+
+    if isinstance(names, str):
+        names = [names]
+    wanted = []
+    for name in names:
+        tokens = _rearm_tokens(name)
+        if len(tokens) >= SELECT_MIN_TOKENS and (name, tokens) not in wanted:
+            wanted.append((name, tokens))
+    if not wanted:
+        # 69 of the 2,110 main-line quests are named in one word
+        # ("Pieces", "Fallout", "Warbird"), and one word matched
+        # against an entry's whole text -- which carries the goal line
+        # as well as the name -- picks whatever happens to contain it.
+        # Selecting the wrong quest is the failure being cured, so
+        # these are refused and named for the operator instead. `None`
+        # rather than False: nothing was looked for, so nothing can be
+        # said about what the book holds.
+        return False, (f"no candidate quest name carries "
+                       f"{SELECT_MIN_TOKENS} words to match on "
+                       f"({', '.join(repr(n) for n in names) or 'none given'})"
+                       f" — one word matches whatever entry happens to "
+                       f"contain it, and picking the wrong quest is the "
+                       f"failure this is meant to fix"), None
+
+    blocked = await _book_openable(client)
+    if blocked:
+        return False, blocked, None
+
+    book = _Book(client)
+    opened, why = await book.open()
+    if not opened:
+        return False, why, None
+
+    picked = ""
+    try:
+        async with client.mouse_handler:
+            # One pass over the book per candidate, in order. `look_for`
+            # re-sorts to All on a miss, so the second candidate is
+            # looking at the full listing either way.
+            for name, tokens in wanted:
+                hit, seen = await book.look_for([tokens])
+                if not hit:
+                    continue
+                if len(hit) > 1:
+                    where = ", ".join(f"slot {s}" for (s, _e, _t) in hit)
+                    return False, (f"{name!r} matched {len(hit)} quest book "
+                                   f"entries ({where}) — clicking either "
+                                   f"would be a guess at the one thing "
+                                   f"this is meant to fix"), True
+                slot, entry, text = hit[0]
+                say(f"quest book open — selecting {name!r} to put the "
+                    f"tracker back on the main questline")
+                clicked, why = await book.select(entry, slot)
+                if not clicked:
+                    return False, why, True
+                picked = name
+                break
+            else:
+                listing = " · ".join(t for (_s, _e, t) in seen) or "nothing"
+                tried = ", ".join(repr(n) for n, _t in wanted)
+                return False, (f"none of {tried} is in the quest book — "
+                               f"the quest has not been accepted, so it "
+                               f"has to be picked up from its NPC before "
+                               f"anything can track it. The book showed: "
+                               f"{listing[:200]}"), False
+    finally:
+        closed = await book.close()
+
+    if not closed:
+        return False, ("clicked the quest, but the book would not close "
+                       "on Q or ESC — leaving it is a wizard that cannot "
+                       "move, so this attempt is reported rather than "
+                       "trusted"), True
+
+    # The receipt: the tracker reading the quest we clicked. Demanded
+    # rather than assumed, for the same reason `rearm_quest_arrow`
+    # demands its own -- a click that lands on a redrawing book does
+    # nothing, silently, and reporting a cure that did not happen is
+    # how a run spends the next ten minutes trusting a dead tracker.
+    want = _rearm_tokens(picked)
+    waited = 0.0
+    now_on = ""
+    while waited < SELECT_PROOF_WAIT:
+        now_on = await read_quest_name(client)
+        have = _rearm_tokens(now_on)
+        # Either direction. The list and the HUD abbreviate differently
+        # -- the data's "Talk to Dr. Gordon Flemming" against the HUD's
+        # "Talk To Gordon Flemming" -- and a one-directional check here
+        # would report a selection that worked as one that did not.
+        if have and (want <= have or have <= want):
+            return True, picked, True
+        await asyncio.sleep(0.5)
+        waited += 0.5
+    return False, (f"clicked {picked!r} in the quest book, but the tracked "
+                   f"quest still reads "
+                   + (f"{now_on!r}" if now_on else "as nothing")
+                   + f" after {SELECT_PROOF_WAIT:.0f}s"), True
 
 
 async def hop_to_next_fight(client, max_hops: int = 25, settle: float = 1.2,
