@@ -517,6 +517,13 @@ class LiveWorker(QThread):
         #: behind now", and when the last was. See `CATCH_UP_CHURN`.
         self._churn = 0
         self._churn_at = NEVER
+        #: {combat first name: friends-list full name}. What the
+        #: quester's account settings have to be filled with, because
+        #: every teleport that reads them matches the list exactly. See
+        #: `_resolve_party_names`.
+        self._full_names = {}
+        self._names_tried_at = NEVER
+        self._names_done = False
         #: which seat is currently stepping the VM, when it is not the
         #: seat that owns it. Kept only so the handover is said once
         #: rather than every tick. See `_script_seat`.
@@ -862,6 +869,17 @@ class LiveWorker(QThread):
                     # also decided to catch up or regroup.
                     await self._stage(seat, "unwedging a stuck script",
                                       self._unstick(seat), wheel=True)
+
+                if driven:
+                    # Before anything that depends on the script being
+                    # able to regroup the party, because until this runs
+                    # it cannot: its account settings hold a first name
+                    # and every teleport that reads them wants the full
+                    # one. Gated inside on "already known", so a run
+                    # pays for it once.
+                    await self._stage(seat, "reading the party's names",
+                                      self._resolve_party_names(seat),
+                                      wheel=True, limit=90)
 
                 if driven or self.auto_quest:
                     # The one rung that does not need the marker,
@@ -6812,8 +6830,25 @@ class LiveWorker(QThread):
         blanks = scripts.unfilled(self.script, len(party))
         if not any(name in scripts.ACCOUNT_VARS for name, _v in blanks):
             return
+        # The FULL name, or none at all.
+        #
+        # `seat.wizard_name` is a combat read and combat reports a first
+        # name: "Konstantin". The friends list holds "Konstantin Ice",
+        # and the script's `friendtp Main_Account` ends in wizwalker's
+        # `friend_name == name` -- exact. So a short name here does not
+        # half-work, it fails every teleport it enables, and it enables
+        # them: the guards are `if NOT Main_Account = "Questing
+        # AccountName"`, so filling the variable at all switches the
+        # branch on. Rev f32be436 ran three hours that way.
+        #
+        # Passing "" leaves the account var at its placeholder --
+        # `configure` skips an empty value -- so the schools still land
+        # and the friend-teleport branches stay honestly off until
+        # `_resolve_party_names` has read the list.
         source, filled = scripts.configure(
-            self.script, [(s.wizard_name, s.school) for s in party])
+            self.script,
+            [(self._full_names.get(s.wizard_name, ""), s.school)
+             for s in party])
         if not filled:
             return
         self.script = source
@@ -6829,6 +6864,101 @@ class LiveWorker(QThread):
             except Exception:
                 pass
         self._say(party[0], said)
+
+    #: how long between attempts to read the party's full names off a
+    #: friends list. Each attempt opens a window on up to two clients,
+    #: so it is not free -- and it stops entirely once every name is
+    #: known, which is normally the first try.
+    NAME_RESOLVE_EVERY = 120.0
+
+    async def _resolve_party_names(self, seat):
+        """Learn each wizard's name as the FRIENDS LIST spells it.
+
+        The missing half of filling the quester's account settings in.
+        wizAi knew the party's names from the first duel and wrote them
+        straight into the script -- and combat reports a FIRST name
+        while every teleport that consumes those settings matches the
+        friends list exactly:
+
+            p1 friendtp $Questee2   ->  teleport_to_friend_from_list(
+                                            name="Sebastian")
+            wizwalker:  friend_name == name
+
+        The list holds "Sebastian Life". So the fill did not half-work,
+        it turned every one of the script's friend-teleports ON and made
+        each of them unfindable -- worse than the placeholder, which at
+        least left the branch honestly off.
+
+        One read answers for the whole party. Each client's friends list
+        holds the OTHER wizards, so a party of three needs two reads,
+        and the wizard doing the reading gets its own name from
+        somebody else's list.
+
+        Nothing here is required for the run: a name that will not
+        resolve leaves that account setting at its placeholder, which is
+        exactly the state the script is designed to cope with.
+        """
+        import time
+
+        from .. import party, questing, scripts
+
+        if not self.script or self._solo_pilot() or self._names_done:
+            return
+        seats = [s for s in self.seats
+                 if s.client is not None and s.wizard_name]
+        if len(seats) < 2:
+            return
+        if not any(name in scripts.ACCOUNT_VARS
+                   for name, _v in scripts.unfilled(self.script, len(seats))):
+            self._names_done = True
+            return
+        now = time.monotonic()
+        if now - self._names_tried_at < self.NAME_RESOLVE_EVERY:
+            return
+        # One resolver at a time for the whole party: it drives several
+        # clients, and two of them racing would each open a friends list
+        # on the other's wizard mid-read.
+        self._names_tried_at = now
+        if seat.in_duel or await questing.in_dialogue(seat.client):
+            return
+
+        shorts = [s.wizard_name for s in seats]
+        for reader in seats:
+            missing = [s for s in shorts if s not in self._full_names]
+            if not missing:
+                break
+            if reader.in_duel:
+                continue
+            try:
+                got = await party.friends_list_names(reader.client, missing)
+            except Exception as exc:
+                self._say(reader, f"could not read {reader.name}'s friends "
+                                  f"list ({type(exc).__name__}: {exc})")
+                continue
+            self._full_names.update(got)
+
+        known = {s: self._full_names.get(s, "") for s in shorts}
+        if not any(known.values()):
+            self._say(seat,
+                      "none of the party's wizards is on another one's "
+                      "friends list, so the script's account settings "
+                      "cannot be filled in — they have to be friends for "
+                      "its own regroup to work at all")
+            return
+        self._names_done = all(known.values())
+        for other in self.seats:
+            try:
+                other.tel.note_questing(
+                    "party-names-read",
+                    "read the party's full names off the friends list: "
+                    + ", ".join(f"{short} = {full!r}"
+                                for short, full in known.items() if full)
+                    + (" — " + ", ".join(s for s, f in known.items() if not f)
+                       + " is not on any of the others' lists"
+                       if not self._names_done else ""))
+            except Exception:
+                pass
+        self._fill_script_names()
 
     def _stamp_title(self, seat):
         """Write who this is onto the game window itself.

@@ -125,6 +125,88 @@ async def wizard_name(client):
 _FULL_NAMES = {}
 
 
+async def _read_friends_list(client) -> str:
+    """The friends list's raw text, or "". Leaves the window as it found it.
+
+    Opening it and walking away is not free: the friends window blocks
+    movement, and a wizard standing behind one cannot quest, follow or
+    be teleported. This used to leave it open on every call.
+    """
+    try:
+        from .deimos_path import ensure_path
+
+        ensure_path()
+        from wizwalker.extensions.scripting.utils import _maybe_get_named_window
+    except Exception:
+        return ""
+
+    opened = False
+    try:
+        root = client.root_window
+        try:
+            window = await _maybe_get_named_window(root, "NewFriendsListWindow")
+        except ValueError:
+            button = await _maybe_get_named_window(root, "btnFriends")
+            await client.mouse_handler.click_window(button)
+            opened = True
+            window = await _maybe_get_named_window(root, "NewFriendsListWindow")
+        listing = await _maybe_get_named_window(window, "listFriends")
+        return await listing.maybe_text() or ""
+    except Exception:
+        return ""
+    finally:
+        if opened:
+            await _put_the_friends_list_away(client)
+
+
+#: One friends-list row, as wizwalker's `_friend_list_entry` parses it.
+#:
+#: A local copy rather than an import, because the import is the part
+#: that cannot happen off Windows -- `wizwalker.extensions.scripting.
+#: utils` pulls in the memory layer -- and reading a name out of text is
+#: not Windows-specific at all. Keeping it here is what lets the whole
+#: name resolution be tested. `tests/test_deimos_patches.py` compares
+#: the two patterns character for character, so a Deimos bump that
+#: changes the game's markup fails there instead of silently matching
+#: nothing here.
+_ENTRY = (r"<Y;\d+><X;\d+><indent;0><Color;[\w\d]+><left>"
+          r"<icon;FriendsList/Friend_Icon_List_0(?P<icon_list>[12])\."
+          r"dds;\d+;\d+;(?P<icon_index>\d+)></left><Y;(?P<name_y>[-\d]+)>"
+          r"<X;(?P<name_x>[-\d]+)>"
+          r"<indent;\d+><Color;[\d\w]+>(<left>)?<COLOR;[\w\d]+>(?P<name>[\w ]+)")
+
+
+def names_in(text):
+    """Every wizard name the friends list text holds, in order."""
+    import re
+
+    return [m.group("name") for m in re.finditer(_ENTRY, text or "")]
+
+
+async def friends_list_names(client, shorts):
+    """{short name: full name} for every one of `shorts` on this list.
+
+    One read answers for the whole party, which is the point: a
+    three-wizard party needs three full names and each client's list
+    holds the other two, so two reads cover everybody rather than six.
+    """
+    wanted = [s for s in shorts if s]
+    found = {s: _FULL_NAMES[s] for s in wanted if s in _FULL_NAMES}
+    missing = [s for s in wanted if s not in found]
+    if not missing:
+        return found
+
+    for name in names_in(await _read_friends_list(client)):
+        for short in missing:
+            # Prefix, not fuzzy: a duel reports the first name and the
+            # list leads with it, and anything looser would happily
+            # name the wrong friend.
+            if name == short or name.startswith(short + " "):
+                _FULL_NAMES[short] = name
+                found[short] = name
+    return found
+
+
 async def friends_list_name(follower, short_name):
     """The leader's FULL name as the friends list spells it, or "".
 
@@ -135,6 +217,10 @@ async def friends_list_name(follower, short_name):
     list None and/or name Jeffrey", forever, while the friends window
     sat open next to it showing exactly one online friend.
 
+    The same exactness is why the quester script has to be given full
+    names too: `friendtp Main_Account` ends in the same wizwalker call
+    against the same list. See `LiveWorker._resolve_party_names`.
+
     So the list is read and the entry whose name starts with what a duel
     told us is taken. Prefix rather than fuzzy: first names are what the
     duel reports and what the friends list leads with, and anything
@@ -142,34 +228,8 @@ async def friends_list_name(follower, short_name):
     """
     if short_name in _FULL_NAMES:
         return _FULL_NAMES[short_name]
-    try:
-        from .deimos_path import ensure_path
-
-        ensure_path()
-        from wizwalker.extensions.scripting.utils import (
-            _friend_list_entry, _maybe_get_named_window)
-    except Exception:
-        return ""
-
-    try:
-        root = follower.root_window
-        try:
-            window = await _maybe_get_named_window(root, "NewFriendsListWindow")
-        except ValueError:
-            button = await _maybe_get_named_window(root, "btnFriends")
-            await follower.mouse_handler.click_window(button)
-            window = await _maybe_get_named_window(root, "NewFriendsListWindow")
-        listing = await _maybe_get_named_window(window, "listFriends")
-        text = await listing.maybe_text() or ""
-    except Exception:
-        return ""
-
-    for entry in _friend_list_entry.finditer(text):
-        found = entry.group("name")
-        if found == short_name or found.startswith(short_name + " "):
-            _FULL_NAMES[short_name] = found
-            return found
-    return ""
+    return (await friends_list_names(follower, [short_name])).get(
+        short_name, "")
 
 
 async def _put_the_friends_list_away(client):

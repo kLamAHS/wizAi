@@ -14501,7 +14501,7 @@ def test_a_conversation_being_advanced_is_left_alone(monkeypatch):
 # operator: "the auto run starts after the first combat when the names
 # are set for the characters just so you know".
 
-def _named_party():
+def _named_party(full=True):
     worker, _read = _zoned_party(["KT_Hub"] * 3)
     worker.script = _QUESTER
     for seat, (name, school) in zip(worker.seats,
@@ -14510,15 +14510,22 @@ def _named_party():
                                      ("Konstantin", "ice")]):
         seat.wizard_name = name
         seat.school = school
+    if full:
+        # What `_resolve_party_names` reads off a friends list. Without
+        # it the account settings stay at their placeholder on purpose
+        # -- see `test_a_first_name_is_never_written_into_the_script`.
+        worker._full_names = {"Phönix": "Phönix Storm",
+                              "Sebastian": "Sebastian Life",
+                              "Konstantin": "Konstantin Ice"}
     return worker
 
 
 def test_the_first_duels_names_fill_the_script():
     worker = _named_party()
     worker._fill_script_names()
-    assert 'var Main_Account = "Phönix"' in worker.script
-    assert 'var Questee2 = "Sebastian"' in worker.script
-    assert 'var Questee3 = "Konstantin"' in worker.script
+    assert 'var Main_Account = "Phönix Storm"' in worker.script
+    assert 'var Questee2 = "Sebastian Life"' in worker.script
+    assert 'var Questee3 = "Konstantin Ice"' in worker.script
     kinds = [e["kind"] for e in worker.seats[0].tel.questing]
     assert "script-configured" in kinds
     # ...and the guards the script tests itself with stay untouched, so
@@ -14528,6 +14535,319 @@ def test_the_first_duels_names_fill_the_script():
     worker._fill_script_names()
     kinds = [e["kind"] for e in worker.seats[0].tel.questing]
     assert kinds.count("script-configured") == 1, "filled twice"
+
+
+def test_a_first_name_is_never_written_into_the_script():
+    """The fill used to write what a duel reports, which is a FIRST
+    name. Every teleport that reads these settings ends in wizwalker's
+    `friend_name == name` against a list holding "Sebastian Life", so a
+    short name does not half-work — and it is worse than the
+    placeholder, because the script's guards are `if NOT Questee2 =
+    "QuestingAccountName"`, so filling the variable at all switches the
+    branch ON and makes every teleport behind it unfindable. Rev
+    f32be436 ran three hours that way."""
+    worker = _named_party(full=False)
+    worker._fill_script_names()
+    assert 'var Main_Account = "QuestingAccountName"' in worker.script, \
+        "a first name went in, which turns the branch on and cannot match"
+    assert '"Phönix"' not in worker.script
+    # The schools are not name-matched against anything, so they land
+    # either way and `Train_Spells` works from the first duel.
+    assert 'var Main_Account_School = "storm"' in worker.script
+
+
+# ---- reading the full names off a friends list
+# The half that was missing. wizAi knew the party's names from the first
+# duel and wrote them straight into the quester's account settings --
+# and a duel reports a FIRST name while every teleport that consumes
+# those settings matches the friends list exactly.
+
+
+def _friends_text(*names):
+    """A friends list holding these wizards, in the markup wizwalker's
+    own `_friend_list_entry` parses."""
+    out = []
+    for i, name in enumerate(names):
+        out.append(f"<Y;0><X;0><indent;0><Color;ffffffff><left>"
+                   f"<icon;FriendsList/Friend_Icon_List_01.dds;1;1;{i}>"
+                   f"</left><Y;0><X;0><indent;1><Color;ffffffff><left>"
+                   f"<COLOR;ffffffff>{name}")
+    return "".join(out)
+
+
+def _resolving(monkeypatch, lists):
+    """A named party whose clients' friends lists read as given.
+
+    `lists` is [text per seat]. Returns (worker, what each client was
+    asked to read).
+    """
+    from deimos_bridge import party, questing
+
+    worker = _named_party(full=False)
+    party._FULL_NAMES.clear()
+    worker._full_names = {}
+    asked = []
+
+    async def read(client):
+        for seat, text in zip(worker.seats, lists):
+            if seat.client is client:
+                asked.append(seat.index)
+                return text
+        return ""
+
+    async def no_dialogue(_c):
+        return False
+
+    monkeypatch.setattr(party, "_read_friends_list", read)
+    monkeypatch.setattr(questing, "in_dialogue", no_dialogue)
+    return worker, asked
+
+
+def test_the_party_gets_its_full_names_off_the_friends_list(monkeypatch):
+    """Seat 0's list holds the other two; seat 1's holds seat 0. Two
+    reads answer for a party of three, and the wizard doing the reading
+    gets its own name from somebody else's list."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    worker, asked = _resolving(monkeypatch, [
+        _friends_text("Sebastian Life", "Konstantin Ice"),
+        _friends_text("Phönix Storm", "Konstantin Ice"),
+        _friends_text("Phönix Storm", "Sebastian Life"),
+    ])
+    asyncio.run(worker._resolve_party_names(worker.seats[0]))
+    assert worker._full_names == {"Phönix": "Phönix Storm",
+                                  "Sebastian": "Sebastian Life",
+                                  "Konstantin": "Konstantin Ice"}
+    assert asked == [0, 1], "read a third list it did not need"
+    party._FULL_NAMES.clear()
+
+
+def test_the_full_names_go_straight_into_the_script(monkeypatch):
+    import asyncio
+
+    from deimos_bridge import party
+
+    worker, _asked = _resolving(monkeypatch, [
+        _friends_text("Sebastian Life", "Konstantin Ice"),
+        _friends_text("Phönix Storm"),
+        "",
+    ])
+    asyncio.run(worker._resolve_party_names(worker.seats[0]))
+    assert 'var Main_Account = "Phönix Storm"' in worker.script
+    assert 'var Questee2 = "Sebastian Life"' in worker.script
+    assert 'var Questee3 = "Konstantin Ice"' in worker.script
+    kinds = [e["kind"] for e in worker.seats[0].tel.questing]
+    assert "party-names-read" in kinds and "script-configured" in kinds
+    party._FULL_NAMES.clear()
+
+
+def test_a_wizard_nobody_has_added_leaves_its_setting_alone(monkeypatch):
+    """The script copes with an unset account setting by design -- its
+    guards switch that branch off. Writing a name that cannot be found
+    is the thing that does not cope."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    worker, _asked = _resolving(monkeypatch, [
+        _friends_text("Sebastian Life"),
+        _friends_text("Phönix Storm"),
+        _friends_text("Phönix Storm", "Sebastian Life"),
+    ])
+    asyncio.run(worker._resolve_party_names(worker.seats[0]))
+    assert 'var Main_Account = "Phönix Storm"' in worker.script
+    assert 'var Questee2 = "Sebastian Life"' in worker.script
+    assert 'var Questee3 = "QuestingAccountName"' in worker.script
+    said = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "party-names-read"][0]["detail"]
+    assert "Konstantin is not on any of the others' lists" in said
+    party._FULL_NAMES.clear()
+
+
+def test_a_party_that_are_not_friends_at_all_is_said_plainly(monkeypatch):
+    import asyncio
+
+    from deimos_bridge import party
+
+    worker, _asked = _resolving(monkeypatch, ["", "", ""])
+    asyncio.run(worker._resolve_party_names(worker.seats[0]))
+    assert 'var Main_Account = "QuestingAccountName"' in worker.script
+    assert not [e for e in worker.seats[0].tel.questing
+                if e["kind"] == "party-names-read"]
+    party._FULL_NAMES.clear()
+
+
+def test_the_names_are_read_once_not_every_tick(monkeypatch):
+    import asyncio
+
+    from deimos_bridge import party
+
+    worker, asked = _resolving(monkeypatch, [
+        _friends_text("Sebastian Life", "Konstantin Ice"),
+        _friends_text("Phönix Storm"),
+        "",
+    ])
+    for _ in range(4):
+        asyncio.run(worker._resolve_party_names(worker.seats[0]))
+    assert asked == [0, 1], asked
+    assert worker._names_done
+    party._FULL_NAMES.clear()
+
+
+def test_an_unresolved_name_is_retried_on_a_cooldown(monkeypatch):
+    """A wizard that was offline when the list was read comes back."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    worker, asked = _resolving(monkeypatch, [
+        _friends_text("Sebastian Life"), "", ""])
+    asyncio.run(worker._resolve_party_names(worker.seats[0]))
+    assert not worker._names_done
+    asyncio.run(worker._resolve_party_names(worker.seats[0]))
+    assert len(asked) == 3, "ignored NAME_RESOLVE_EVERY"
+    worker._names_tried_at = -1e9
+    asyncio.run(worker._resolve_party_names(worker.seats[0]))
+    assert len(asked) > 3, "never looked again"
+    party._FULL_NAMES.clear()
+
+
+def test_a_solo_pilot_run_never_names_the_script(monkeypatch):
+    """`solo_source` strips the account names on purpose so the script
+    never friend-teleports at all."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    worker, asked = _resolving(monkeypatch, [
+        _friends_text("Sebastian Life", "Konstantin Ice"), "", ""])
+    worker.solo_script = True
+    asyncio.run(worker._resolve_party_names(worker.seats[0]))
+    assert asked == []
+    party._FULL_NAMES.clear()
+
+
+def test_reading_the_list_puts_it_away_again():
+    """A friends window left open blocks movement, and this opens one on
+    up to two clients."""
+    import inspect
+
+    from deimos_bridge import party
+
+    src = inspect.getsource(party._read_friends_list)
+    assert "finally:" in src and "_put_the_friends_list_away" in src
+
+
+def test_the_names_are_read_before_anything_that_needs_them():
+    """Until this runs the script's account settings hold a first name
+    or a placeholder, and its own regroup cannot work either way."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._service_loop)
+    assert src.index("_resolve_party_names") < src.index("_catch_up(seat)")
+
+
+def test_a_school_is_filled_in_the_scripts_own_spelling():
+    """wizAi holds a seat's school lowercase — it is a dropdown value —
+    and the template dispatches on `elif Main_Account_School = "Storm"`.
+    deimoslang's `=` is a plain string comparison, so filling in "storm"
+    is the worst of both: the outer `if NOT ... = "SchoolGoesHere"`
+    guard passes, and every branch inside it fails. The whole dispatch
+    runs and does nothing, silently."""
+    from deimos_bridge import scripts
+
+    source = _QUESTER.replace(
+        'if NOT Main_Account_School = "SchoolGoesHere" { p1 sendkey X }',
+        'if NOT Main_Account_School = "SchoolGoesHere" {\n'
+        '  if Main_Account_School = "Life" { p1 sendkey X }\n'
+        '  } elif Main_Account_School = "Storm" { p1 sendkey X }\n'
+        '}')
+    out, filled = scripts.configure(source, [("Phönix Storm", "storm")])
+    assert 'var Main_Account_School = "Storm"' in out
+    assert ("Main_Account_School", "Storm") in filled
+
+
+def test_the_spelling_is_read_from_the_script_not_guessed():
+    """Not `.capitalize()`. The vocabulary is whatever literals the
+    script compares the variable against, which is the same evidence
+    `unconfigured` reads the placeholders from — so a script that spells
+    its schools some other way gets that spelling."""
+    from deimos_bridge import scripts
+
+    source = ('var S = "SchoolGoesHere"\n'
+              'block B {\n'
+              '  if NOT S = "SchoolGoesHere" {\n'
+              '    if S = "STORM" { p1 sendkey X }\n'
+              '  }\n'
+              '}\n')
+    assert scripts.script_spelling(source, "S", "storm",
+                                   "SchoolGoesHere") == "STORM"
+    # A value the script has no word for is left exactly as given.
+    assert scripts.script_spelling(source, "S", "ice",
+                                   "SchoolGoesHere") == "ice"
+
+
+def test_a_filled_school_is_not_reported_as_a_placeholder_again():
+    """The regression that filling them correctly creates: once "Storm"
+    is on the `var` line, "Storm" is both assigned and compared, and the
+    plain assigned-AND-compared rule calls a configured variable unset
+    forever. A placeholder is what the script tests the ABSENCE of;
+    anything it dispatches ON is vocabulary."""
+    from deimos_bridge import scripts
+
+    source = ('var Main_Account_School = "SchoolGoesHere"\n'
+              'block B {\n'
+              '  if NOT Main_Account_School = "SchoolGoesHere" {\n'
+              '    if Main_Account_School = "Life" { p1 sendkey X }\n'
+              '    } elif Main_Account_School = "Storm" { p1 sendkey X }\n'
+              '  }\n'
+              '}\n')
+    assert [n for n, _v in scripts.unconfigured(source)] \
+        == ["Main_Account_School"]
+    out, _filled = scripts.configure(source, [("Somebody Else", "storm")])
+    assert 'var Main_Account_School = "Storm"' in out
+    assert scripts.unconfigured(out) == [], \
+        "a correctly configured school reads as unset"
+
+
+def test_a_positive_only_guard_is_still_a_placeholder():
+    """The old rule stays as the fallback: a variable with no negative
+    guard at all has only `if X = "unset"` as evidence, and that is
+    still the author saying what unset means."""
+    from deimos_bridge import scripts
+
+    source = ('var X = "FillMeIn"\n'
+              'block B {\n'
+              '  if X = "FillMeIn" { p1 sendkey X }\n'
+              '}\n')
+    assert scripts.unconfigured(source) == [("X", "FillMeIn")]
+
+
+def test_the_real_quester_fills_completely_and_stays_filled():
+    """End to end on the shipped preset, which is the thing that has to
+    work: every account and school setting filled, the guards the script
+    tests itself with untouched, and nothing left reading as unset."""
+    from deimos_bridge import scripts
+
+    presets = [p for title, p in scripts.presets()]
+    if not presets:                       # pragma: no cover - no presets
+        return
+    source = scripts.read_preset(presets[0])
+    before = [n for n, _v in scripts.unfilled(source, 3)]
+    if not any(n in scripts.ACCOUNT_VARS for n in before):
+        return
+    out, filled = scripts.configure(
+        source, [("Phönix Storm", "storm"), ("Sebastian Life", "life"),
+                 ("Konstantin Ice", "ice")])
+    assert [n for n, _v in filled] == before, (before, filled)
+    assert scripts.unfilled(out, 3) == [], \
+        "a fully configured script still reads as unconfigured"
+    assert 'if NOT Main_Account = "QuestingAccountName"' in out, \
+        "the guard the script tests itself with was rewritten"
 
 
 def test_the_fill_waits_for_every_seat_to_have_a_name():

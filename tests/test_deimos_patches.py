@@ -1092,3 +1092,32 @@ def test_the_correct_sameany_usages_were_not_touched():
             / "TTS Arc 1.txt").read_text(encoding="utf-8")
     assert arc1.count("sameany") > 500, \
         "the positive-any usages went missing with the dead ones"
+
+
+# ------------------------------------------- the friends-list row pattern
+def test_the_local_friend_entry_pattern_still_matches_wizwalkers():
+    """`party._ENTRY` is a copy of wizwalker's `_friend_list_entry`,
+    kept locally because the import is the part that cannot happen off
+    Windows -- `wizwalker.extensions.scripting.utils` pulls in the
+    memory layer -- while reading a name out of text is not
+    Windows-specific at all. That copy is what lets the party's
+    name resolution be tested at all.
+
+    A copy can drift, and drifting silently means matching nothing:
+    the account settings would stay at their placeholder forever and
+    the script would go on skipping every friend-teleport it has, which
+    is the failure the whole thing exists to end. So the two patterns
+    are compared character for character, and a Deimos bump that
+    changes the game's markup fails here.
+    """
+    from deimos_bridge import party
+
+    src = _source(UTILS)
+    body = src.split("_friend_list_entry = regex.compile(", 1)[1]
+    body = body.split("\n)", 1)[0]
+    theirs = "".join(re.findall(r'r"([^"]*)"', body))
+    assert theirs, "wizwalker's pattern could not be read at all"
+    assert party._ENTRY == theirs, (
+        "the local copy has drifted from wizwalker's:\n"
+        f"  ours:   {party._ENTRY!r}\n"
+        f"  theirs: {theirs!r}")
