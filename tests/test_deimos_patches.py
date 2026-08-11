@@ -1121,3 +1121,30 @@ def test_the_local_friend_entry_pattern_still_matches_wizwalkers():
         "the local copy has drifted from wizwalker's:\n"
         f"  ours:   {party._ENTRY!r}\n"
         f"  theirs: {theirs!r}")
+
+
+CLIENT = "Deimos/libs/wizwalker/wizwalker/client.py"
+
+
+def test_a_stuck_should_update_flag_no_longer_latches_teleports_off():
+    """`Client._teleport_object` waits for the game's hook to clear
+    `should_update` and RAISED when it did not. The only code that
+    clears the flag sits below that raise, in the
+    `purge_on_after_unuser_fixer` handler — so once the flag stuck,
+    every teleport on that client raised before reaching the one thing
+    that would unstick it, for the rest of the run.
+
+    Rev 35f0fc6e: 1,336 `Timed out waiting for coro should_update` over
+    101 minutes, one every four and a half seconds, all on one wizard,
+    while the party stood on its quest marker getting nowhere."""
+    src = _source(CLIENT)
+    body = src.split("async def _teleport_object", 1)[1]
+    body = body.split("async def _get_je_instruction", 1)[0]
+    pre = body.split("jes = await self._get_je_instruction", 1)[0]
+    assert "except ExceptionalTimeout:" in pre, \
+        "the pre-flight wait raises again — a stuck flag latches every " \
+        "teleport on that client off for the rest of the run"
+    assert "write_should_update(False)" in pre, \
+        "it catches the timeout but never clears the flag it timed out on"
+
+

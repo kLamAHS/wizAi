@@ -801,7 +801,19 @@ class LiveWorker(QThread):
                     await self._stage(seat, "auto-dialogue",
                                       self._auto_dialogue(client), wheel=True)
 
-                await self._read_goal(seat)
+                # Bounded, like everything else in the tick. It is five
+                # memory reads on one client -- the quest name, the goal
+                # line, the zone, the body position, the quest marker --
+                # and any of them can be the one that stops coming back.
+                #
+                # Rev 35f0fc6e: Konstantin's tick stopped coming round
+                # at t=4230 with no `client-not-answering` against it, so
+                # it was not the combat read at the top; it was this,
+                # which was the last bare await left in the loop. His
+                # heartbeats stopped with it, because the loop never got
+                # back to the top to write one.
+                await self._stage(seat, "reading the quest",
+                                  self._read_goal(seat))
                 # Ends any catch-up BEFORE deciding whether to start
                 # one. The other order meant a catch-up started this
                 # tick was judged finished on the same tick, by state
@@ -1093,6 +1105,13 @@ class LiveWorker(QThread):
     #: VM half-way through it. The runner bounds and reloads itself;
     #: this only catches a burst that somehow never returns at all.
     STAGE_LIMITS = {"auto-dialogue": 45.0,
+                    # Five memory reads. Generous against a client
+                    # mid-zone-load, and finite against one that has
+                    # stopped answering -- which is the whole point:
+                    # this runs before the heartbeat can be written
+                    # again, so a read that never returns takes the
+                    # seat's entire tick silently off the air.
+                    "reading the quest": 30.0,
                     "script": 20.0,
                     "script step": 240.0,
                     "following the leader": 60.0,
@@ -1360,6 +1379,35 @@ class LiveWorker(QThread):
             try:
                 seat.tel.note_questing(
                     kind, detail + (f" — {n} times in a row" if n > 1 else ""))
+            except Exception:
+                pass
+
+    def _broadcast_once(self, key, message, kind):
+        """`_say_once`, but written to EVERY seat's export.
+
+        For facts about the party rather than about one wizard -- an
+        instruction that failed for somebody, which any of the three
+        exports should show. Those were written flat, once per seat per
+        occurrence, and rev 35f0fc6e is what that costs: 1,336 identical
+        `should_update` timeouts in each of three exports, 4,008 lines
+        of one sentence, crowding out the entries that would have
+        explained the run around them.
+
+        The count lives on seat 0 so the thinning is the party's and not
+        three independent schedules that drift apart.
+        """
+        owner = self.seats[0]
+        n = owner.stage_errors.get(key, 0) + 1
+        owner.stage_errors[key] = n
+        if self._thinning(n, 20):
+            self._say(owner, message + (f" (still failing after {n} tries)"
+                                        if n > 1 else ""))
+        if not self._thinning(n, self.STUCK_EVERY):
+            return
+        detail = message + (f" — {n} times in a row" if n > 1 else "")
+        for seat in self.seats:
+            try:
+                seat.tel.note_questing(kind, detail)
             except Exception:
                 pass
 
@@ -3476,12 +3524,19 @@ class LiveWorker(QThread):
                         f"({type(exc).__name__}: {exc}) — the others "
                         f"finished it, so the party is a step apart until "
                         f"something puts them back together")
-                for other in self.seats:
-                    try:
-                        other.tel.note_questing("party-task-failed", said)
-                    except Exception:
-                        pass
-                self._say_once(self.seats[0], f"party-task-{what}", said)
+                # Thinned, and every seat's copy with it. Written flat,
+                # this is one entry per failure per wizard: rev 35f0fc6e
+                # has 1,336 identical `ExceptionalTimeout: Timed out
+                # waiting for coro should_update` in EACH of the three
+                # exports -- 4,008 lines saying one thing, which is a
+                # third of the questing log's whole budget spent burying
+                # everything around the failure it was reporting.
+                #
+                # `_broadcast_once` keys on the message rather than the
+                # instruction, so a teleport that starts failing a NEW
+                # way is still said at once.
+                self._broadcast_once(f"party-task-{what}-{said}",
+                                     said, "party-task-failed")
 
         installs = ((scripts.on_waitfor_timeout, "waitfor-hook", gave_up),
                     (scripts.on_teleport_result, "teleport-hook", teleported),
@@ -3693,6 +3748,19 @@ class LiveWorker(QThread):
     #: two of walking before its effect is judgeable -- restarting
     #: faster than this is thrash, not persistence.
     SCRIPT_RESTART_EVERY = 420.0
+    #: how close counts as standing ON the quest marker. The same 750
+    #: the quest-marker check itself uses (`questing.at_quest_marker`),
+    #: so "at the marker" means one thing everywhere.
+    AT_THE_MARKER = 750.0
+    #: how long a wizard may stand ON its marker, script looping and
+    #: nothing changing, before the script is restarted.
+    #:
+    #: Generously long, because arriving at your objective and then
+    #: working is the normal shape of questing -- a dungeon sigil, a
+    #: dialogue chain, a fight all happen standing still on the marker.
+    #: Fifteen minutes of it with the goal, the zone and the position
+    #: all unchanged is not work. Rev 35f0fc6e stood there for 103.
+    ON_MARKER_RESTART = 900.0
 
     def _maybe_restart_script(self, seat, mins, parked):
         """The operator's other manual fix, automated: restart the script.
@@ -3762,8 +3830,24 @@ class LiveWorker(QThread):
             return
         away = seat.marker_away
         blind = self._marker_unusable(seat) if away is None else ""
-        if away is not None and away <= self.MARKER_IN_ZONE:
-            # In this zone: the desperate hop's case, not this one.
+        on_it = away is not None and away <= self.AT_THE_MARKER
+        if away is not None and away <= self.MARKER_IN_ZONE and not on_it:
+            # In this zone but not on top of it: the desperate hop's
+            # case, not this one. It can teleport the last few thousand.
+            return
+        if on_it and mins < self.ON_MARKER_RESTART / 60.0:
+            # ON the marker is the desperate hop's case for a while --
+            # arriving and then working is what a wizard at its
+            # objective is supposed to look like. Past this it is not:
+            # rev 35f0fc6e spent 103 minutes with all three wizards
+            # standing on the Khai Amahte marker in KT_Arena while the
+            # script ran a quarter of a million instructions, and every
+            # rung answered correctly and did nothing. The hop refused
+            # ("teleporting to the spot this wizard is standing on"),
+            # X had nothing in range, the realm change is for Collect
+            # steps, and this returned above because the marker was in
+            # zone. The only actor that can leave a spot the script
+            # keeps walking back to is the script's own route.
             return
         if away is None and not blind:
             # One failed read. It may read on the next poll, and
@@ -3775,8 +3859,13 @@ class LiveWorker(QThread):
         if now - self._script_restarted_at < self.SCRIPT_RESTART_EVERY:
             return
         self._script_restarted_at = now
-        stuck_at = (f"the quest marker {away:,.0f} away — another zone"
-                    if away is not None else f"nothing to aim at — {blind}")
+        if on_it:
+            stuck_at = (f"this wizard standing ON its quest marker "
+                        f"({away:,.0f} away) and nothing changing")
+        elif away is not None:
+            stuck_at = f"the quest marker {away:,.0f} away — another zone"
+        else:
+            stuck_at = f"nothing to aim at — {blind}"
         said = (f"stuck {mins:.0f} min with {stuck_at} — while the script "
                 f"loops. No teleport can help from here; the script's own "
                 f"route can, and it is looping on a state it cannot leave. "
