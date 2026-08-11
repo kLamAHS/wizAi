@@ -16922,6 +16922,335 @@ def test_the_recovery_runs_before_everything_that_aims_a_teleport():
         assert recover < src.index(later), later
 
 
+# ------------------------------------------- the script that stopped executing
+# Rev f32be436, the whole run: the deimoslang instruction pointer froze
+# at 23,324 and stayed there for 110 minutes — 56% of a 3h16m session —
+# while every wizard's heartbeat went on printing "script at 23,324
+# instructions" once a minute.
+#
+# Nothing was broken in a way anything could see. Seat 0's service loop
+# stopped coming round (its client stopped answering the one unbounded
+# read in the tick), and seat 0 is the only seat that steps the party's
+# VM. `ScriptRunner.STEP_LIMIT` could not fire, because it only bounds an
+# instruction that is RUNNING. `_unstick` read the frozen count as
+# "parked", and `_maybe_restart_script` excuses itself from parked
+# scripts on the grounds that the stuck-instruction reload owns them.
+# Every guard was individually right and together they covered nothing.
+
+
+class _LiveRunner:
+    """A runner that is running and whose step count the test drives."""
+
+    def __init__(self, steps=1000):
+        self.steps = steps
+        self.stale = False
+        self.stale_sig = ""
+        self.last_error = ""
+        self.running = True
+        self.restarted = 0
+        self.restarts = 0
+        self.failures = 0
+        self.finished = False
+
+    def restart(self):
+        self.restarted += 1
+        self.stale = False
+        return True
+
+    async def run_for(self, **kw):
+        return 0
+
+
+def _scripted(zones=("KT_Hub", "KT_Hub", "KT_Hub"), steps=1000):
+    """A party running a script, with every seat's loop ticking now."""
+    import time
+
+    worker, _read = _zoned_party(list(zones))
+    worker.script = "###deimos_expertmode"
+    runner = _LiveRunner(steps)
+    worker.seats[0].runner = runner
+    now = time.monotonic()
+    for seat in worker.seats:
+        seat.ticked_at = now
+    return worker, runner
+
+
+def test_a_script_that_stops_executing_is_noticed_and_reloaded():
+    """The headline. An instruction that merely runs long is cut off at
+    `ScriptRunner.STEP_LIMIT`; a step count that stops moving because
+    nothing is CALLING step() had no detector at all."""
+    import time
+
+    worker, runner = _scripted()
+    worker._check_script_alive()                 # first look: start the clock
+    assert not runner.stale
+    worker._steps_at = time.monotonic() - worker.SCRIPT_STALL_AFTER - 1
+    worker._check_script_alive()
+    assert runner.stale, "110 minutes of nothing is still not a stall"
+    said = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "script-stalled"]
+    assert said, [e["kind"] for e in worker.seats[0].tel.questing]
+    assert "not being stepped at all" in said[0]["detail"]
+    # Every seat gets it: the seat that owns the script is the one that
+    # can go quiet, so its export is the one least likely to be read.
+    for seat in worker.seats:
+        assert any(e["kind"] == "script-stalled" for e in seat.tel.questing)
+
+
+def test_a_script_that_is_executing_is_never_called_stalled():
+    import time
+
+    worker, runner = _scripted()
+    for tick in range(5):
+        runner.steps += 40
+        worker._steps_at = time.monotonic() - worker.SCRIPT_STALL_AFTER - 1
+        worker._check_script_alive()
+    assert not runner.stale
+
+
+def test_the_things_that_legitimately_hold_the_script_are_not_stalls():
+    """A catch-up pauses the script by design, a duel and the
+    after-fight chores skip the tick that steps it, and the steering
+    hold stops everything for a few seconds after a teleport. Counting
+    any of those would reload a healthy script every five minutes."""
+    import time
+
+    for hold in ("catch-up", "duel", "upkeep", "hop"):
+        worker, runner = _scripted()
+        if hold == "catch-up":
+            worker._catch_up_state = {"seats": [worker.seats[1]]}
+        elif hold == "duel":
+            for seat in worker.seats:
+                seat.in_duel = True
+        elif hold == "upkeep":
+            for seat in worker.seats:
+                seat.in_upkeep = True
+        else:
+            worker._hop_pause_until = time.monotonic() + 30
+        worker._check_script_alive()
+        worker._steps_at = time.monotonic() - worker.SCRIPT_STALL_AFTER - 1
+        worker._check_script_alive()
+        assert not runner.stale, f"{hold} was counted as a stall"
+
+
+def test_a_frozen_step_count_no_longer_excuses_the_restart_rung():
+    """`_maybe_restart_script` refuses for a parked script because the
+    stuck-instruction reload owns that case. It only owns it while the
+    VM is being stepped — and a VM nobody steps looks exactly like a
+    parked one."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._maybe_restart_script)
+    body = src.split('"""')[2]
+    assert "parked and getattr(runner" in body, \
+        "the parked refusal is unconditional again"
+
+
+# ---- the seat that steps the VM
+
+def test_the_script_moves_to_a_seat_whose_loop_is_still_ticking():
+    """Seat 0 owns the VM and is the only seat that steps it, so seat 0
+    going quiet stops the script for the whole party. It is now a
+    handover rather than a stop."""
+    import time
+
+    worker, runner = _scripted()
+    assert worker._script_seat() is worker.seats[0]
+    worker.seats[0].ticked_at = time.monotonic() - worker.DRIVER_QUIET - 1
+    assert worker._script_seat() is worker.seats[1]
+    said = [e for e in worker.seats[1].tel.questing
+            if e["kind"] == "script-driver-moved"]
+    assert said, "a handover this consequential was silent"
+    assert "steps the party's script" in said[0]["detail"]
+
+
+def test_the_handover_is_said_once_not_every_tick():
+    import time
+
+    worker, runner = _scripted()
+    worker.seats[0].ticked_at = time.monotonic() - worker.DRIVER_QUIET - 1
+    for _ in range(5):
+        worker._script_seat()
+    said = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "script-driver-moved"]
+    assert len(said) == 1, said
+
+
+def test_the_owner_takes_the_script_back_when_it_starts_ticking_again():
+    import time
+
+    worker, runner = _scripted()
+    worker.seats[0].ticked_at = time.monotonic() - worker.DRIVER_QUIET - 1
+    assert worker._script_seat() is worker.seats[1]
+    worker.seats[0].ticked_at = time.monotonic()
+    assert worker._script_seat() is worker.seats[0]
+
+
+def test_a_party_where_nobody_is_ticking_still_names_the_owner():
+    """`None` would read as "there is no script", which unlocks rungs
+    that must not run while one exists."""
+    import time
+
+    worker, runner = _scripted()
+    for seat in worker.seats:
+        seat.ticked_at = time.monotonic() - 10_000
+    assert worker._script_seat() is worker.seats[0]
+
+
+def test_only_the_driving_seat_steps_the_script():
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._service_loop)
+    assert "driving = self._script_seat() is seat" in src
+    assert "if driving and not catching:" in src
+
+
+def test_the_vm_belongs_to_seat_zero_whoever_steps_it():
+    """One program, one instruction pointer. A second seat stepping its
+    own runner would be two programs driving the same four wizards."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._script_step)
+    assert "owner = self.seats[0]" in src
+    assert "runner = owner.runner" in src
+    assert "seat.runner" not in src, \
+        "a driving seat would step its own runner instead of the party's"
+
+
+# ---- the read that could hang
+
+def test_the_combat_read_at_the_top_of_the_tick_is_bounded():
+    """The one unbounded await left in the service loop, and the reason
+    a client that stopped answering took the party's script with it: no
+    heartbeat, no stage timeout and no exception can fire from inside a
+    read that never returns."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, _runner = _scripted()
+    seat = worker.seats[0]
+    seat.in_duel = True
+
+    async def never(_client):
+        await asyncio.Event().wait()
+
+    async def go():
+        real, questing.in_battle = questing.in_battle, never
+        worker.IN_BATTLE_LIMIT = 0.2
+        try:
+            return await worker._read_in_battle(seat, seat.client)
+        finally:
+            questing.in_battle = real
+
+    got = asyncio.run(go())
+    assert got is True, ("a client that stopped answering was reported as "
+                         "out of combat, which sends every rung below to "
+                         "click at a wizard nothing can read")
+
+
+def test_a_client_that_stops_answering_says_so():
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, _runner = _scripted()
+    seat = worker.seats[0]
+
+    async def never(_client):
+        await asyncio.Event().wait()
+
+    async def go():
+        real, questing.in_battle = questing.in_battle, never
+        worker.IN_BATTLE_LIMIT = 0.05
+        try:
+            for _ in range(worker.NOT_ANSWERING_AFTER + 2):
+                await worker._read_in_battle(seat, seat.client)
+        finally:
+            questing.in_battle = real
+
+    asyncio.run(go())
+    said = [e for e in seat.tel.questing if e["kind"] == "client-not-answering"]
+    assert len(said) == 1, said
+    assert "the party's script" in said[0]["detail"]
+
+
+def test_a_working_combat_read_is_not_slowed_down():
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, _runner = _scripted()
+    seat = worker.seats[0]
+
+    async def yes(_client):
+        return True
+
+    async def go():
+        real, questing.in_battle = questing.in_battle, yes
+        try:
+            return await worker._read_in_battle(seat, seat.client)
+        finally:
+            questing.in_battle = real
+
+    assert asyncio.run(go()) is True
+    assert not [e for e in seat.tel.questing
+                if e["kind"] == "client-not-answering"]
+
+
+def test_the_tick_clock_is_stamped_before_the_read_that_can_hang():
+    """Stamped after it, the clock would freeze with the loop and the
+    handover could never fire — the seat would look like it had never
+    ticked at all rather than like one that stopped."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._service_loop)
+    assert src.index("seat.ticked_at = time.monotonic()") \
+        < src.index("await self._read_in_battle("), \
+        "the tick clock is stamped after the read it exists to survive"
+
+
+# ---- naming the quest a laggard actually holds
+
+def test_the_steps_between_a_laggard_and_the_party_are_offered_too():
+    """Rev f32be436: Konstantin's tracker wandered onto 'Trophy Quest'
+    while he was two quests behind. His own last main was finished and
+    out of the book; the party's was two steps further on than anything
+    he could have been given. The quest he was holding was one of the
+    ones in between, and nothing offered it."""
+    worker, lost = _off_the_line()
+    # Party on #12, this wizard last seen on #9 — so #10 and #11 are the
+    # ones it could actually be holding.
+    lost.last_main = ("Krokotopia", 9, "Quarter Master")
+    found, _why = worker._lost_quest(lost)
+    orders = [p.order for p, _s in found]
+    assert orders[:2] == [9, 12], orders
+    assert 10 in orders and 11 in orders, orders
+
+
+def test_the_span_of_candidates_is_bounded():
+    worker, lost = _off_the_line()
+    lost.last_main = ("Krokotopia", 1, "Krokotopia")
+    found, _why = worker._lost_quest(lost)
+    assert len(found) <= worker.SPAN_CANDIDATES, len(found)
+
+
+def test_a_laggard_in_another_world_gets_no_span():
+    """Two positions only compare inside one world's line."""
+    worker, lost = _off_the_line()
+    lost.last_main = ("Marleybone", 3, "A Marleybone Quest")
+    found, _why = worker._lost_quest(lost)
+    assert [p.order for p, _s in found if p.world == "Krokotopia"] == [12]
+
+
 # --------------------------------------------- the stale-reload backoff
 
 class _StaleRunner:

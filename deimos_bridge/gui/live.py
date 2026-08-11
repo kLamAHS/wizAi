@@ -234,6 +234,14 @@ class _Seat:
         #: whether this wizard was in a duel on its last service tick.
         #: Read from the OTHER seats' ticks -- see `CATCH_UP_IDLE`.
         self.in_duel = False
+        #: when this seat's service loop last came round, stamped before
+        #: the one read that can hang. A loop that has stopped ticking
+        #: is invisible from inside itself -- and if it is seat 0's, it
+        #: takes the party's whole script with it. See `_script_seat`.
+        self.ticked_at = 0.0
+        #: consecutive combat reads that had to be cut off. See
+        #: `LiveWorker._read_in_battle`.
+        self.unanswered = 0
         #: {world: the furthest place in that world's line this wizard
         #: has reached}. Quests are finished in order, so a later read
         #: that is EARLIER is a tracker on a side quest or an ambiguous
@@ -509,6 +517,15 @@ class LiveWorker(QThread):
         #: behind now", and when the last was. See `CATCH_UP_CHURN`.
         self._churn = 0
         self._churn_at = NEVER
+        #: which seat is currently stepping the VM, when it is not the
+        #: seat that owns it. Kept only so the handover is said once
+        #: rather than every tick. See `_script_seat`.
+        self._script_driver = None
+        #: the step count and when it last CHANGED, so a script that has
+        #: stopped executing is a fact rather than an inference. See
+        #: `_check_script_alive`.
+        self._steps_seen = None
+        self._steps_at = NEVER
         #: {normalised quest name: (zone, when)} -- where the party was
         #: standing while somebody tracked that quest. The saved
         #: location half of lost-quest recovery: naming the quest a
@@ -694,12 +711,19 @@ class LiveWorker(QThread):
         handler is clicking cards then, and two coroutines driving the
         mouse at once produce misclicks.
         """
-        from .. import questing
+        import time
 
         seat = self._seat_for(client) if seat is None else seat
         while not self._stop:
             try:
-                fighting = await questing.in_battle(client)
+                # FIRST, before the read below, because the read below is
+                # the one that can stop answering. Every other await in
+                # this loop is inside `_stage`, which has a deadline; this
+                # clock is how anything OUTSIDE the loop can tell that
+                # this seat's loop has stopped coming round -- see
+                # `_script_seat`.
+                seat.ticked_at = time.monotonic()
+                fighting = await self._read_in_battle(seat, client)
                 # Kept on the seat, because the question "is anybody in
                 # this catch-up actually fighting" is asked from ANOTHER
                 # seat's tick -- a wizard in a duel never reaches
@@ -780,6 +804,7 @@ class LiveWorker(QThread):
                 self._check_caught_up()
                 self._check_in_step(seat)
                 self._check_on_questline()
+                self._check_script_alive()
                 self._check_progress(seat)
 
                 if self._hop_held():
@@ -802,10 +827,14 @@ class LiveWorker(QThread):
                     continue
 
                 catching = self._catching_up()
-                if seat.runner is not None and not catching:
+                # Whichever seat is CURRENTLY stepping the VM, which is
+                # seat 0 unless seat 0's loop has stopped coming round.
+                # See `_script_seat`.
+                driving = self._script_seat() is seat
+                if driving and not catching:
                     await self._stage(seat, "script step",
                                       self._script_step(seat), wheel=True)
-                elif seat.runner is not None:
+                elif driving:
                     # Paused, not fought with. While the party is out of
                     # step the script's instructions are wrong for every
                     # wizard in it -- the laggard's most of all, since
@@ -1096,6 +1125,121 @@ class LiveWorker(QThread):
     #: wizard clicks the NPC seconds before the other -- so a bare
     #: inequality would cry wolf on every normal handover.
     DESYNC_GRACE = 90.0
+
+    #: how long the combat read at the top of the service tick may take
+    #: before it is cut off. A healthy read is microseconds -- it is a
+    #: memory read -- so ten seconds is not a threshold anybody's client
+    #: crosses while working.
+    #:
+    #: It needs one because it is the ONLY unbounded await left in the
+    #: loop: everything below it goes through `_stage`, which has a
+    #: deadline. Rev f32be436 is what the gap costs. Sebastian's client
+    #: stopped answering at t=5129 and his loop never came round again --
+    #: no heartbeat, no stage timeout, no exception, because none of
+    #: those can fire from inside a read that never returns. His seat
+    #: owns the party's script (`_script_step` runs from seat 0 alone),
+    #: so the instruction pointer froze at 23,324 and stayed there for
+    #: 110 minutes, 56% of the run, while the other two wizards' logs
+    #: went on reporting "script at 23,324 instructions" once a minute.
+    IN_BATTLE_LIMIT = 10.0
+    #: consecutive cut-off combat reads before the client is called
+    #: unresponsive out loud. One is a hiccup; three in a row is a client
+    #: that has stopped answering, which is a different fact and the one
+    #: that explains everything downstream of it.
+    NOT_ANSWERING_AFTER = 3
+
+    async def _read_in_battle(self, seat, client):
+        """Is this wizard in a duel? Bounded, and never raises.
+
+        On a read that will not come back, the answer is the LAST one:
+        a client that has stopped answering has not necessarily left its
+        duel, and saying "out of combat" would send every rung below
+        here to click at a wizard nothing can read.
+        """
+        from .. import questing
+
+        try:
+            got = bool(await asyncio.wait_for(questing.in_battle(client),
+                                              self.IN_BATTLE_LIMIT))
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            seat.unanswered += 1
+            if seat.unanswered == self.NOT_ANSWERING_AFTER:
+                said = (f"{seat.name}'s client has not answered a combat "
+                        f"read in {self.NOT_ANSWERING_AFTER} tries "
+                        f"({self.IN_BATTLE_LIMIT:.0f}s each). Its own tick "
+                        f"cannot run while a read is outstanding, so "
+                        f"everything wizAi does for this wizard is on hold "
+                        f"— including the party's script if this is the "
+                        f"seat driving it")
+                seat.tel.note_questing("client-not-answering", said)
+                self._say(seat, said)
+            return bool(seat.in_duel)
+        except Exception:
+            return False
+        # Reset on a read that came back, so a client that recovers and
+        # then stops again is reported the second time too. Kept out of
+        # the `except` above on purpose: a client answering once between
+        # two hangs has not recovered, and the counter only clears on a
+        # read that actually returned.
+        seat.unanswered = 0
+        return got
+
+    #: how long a seat's service loop may go without coming round before
+    #: another seat takes the script off it. Three ticks' worth of the
+    #: slowest stage, and well under the five minutes `_check_progress`
+    #: needs to notice anything at all.
+    DRIVER_QUIET = 90.0
+
+    def _script_seat(self):
+        """The seat whose loop steps the party's one VM, or None.
+
+        Seat 0 by design: one program, one instruction pointer, one
+        stepper. The failure that makes this a function rather than a
+        constant is rev f32be436 -- seat 0's loop stopped coming round
+        and took the whole party's script with it, because no other
+        seat's loop is allowed to step the VM.
+
+        So the seat is chosen rather than assumed. Seat 0 keeps it while
+        its loop is ticking; when it goes quiet past `DRIVER_QUIET`, the
+        first seat that IS ticking picks the script up. Nothing about the
+        VM moves -- it is still seat 0's `runner`, still driving `p1`..
+        `p4` -- only which task calls `step()` on it.
+        """
+        import time
+
+        owner = self.seats[0]
+        if owner.runner is None:
+            return None
+        now = time.monotonic()
+        if owner.ticked_at and now - owner.ticked_at <= self.DRIVER_QUIET:
+            return owner
+        for seat in self.seats[1:]:
+            if seat.client is None or not seat.ticked_at:
+                continue
+            if now - seat.ticked_at <= self.DRIVER_QUIET:
+                if self._script_driver is not seat:
+                    self._script_driver = seat
+                    quiet = (now - owner.ticked_at) / 60.0 if owner.ticked_at \
+                        else 0.0
+                    said = (f"{owner.name}'s tick has not come round for "
+                            f"{quiet:.0f} min, and that seat is the one that "
+                            f"steps the party's script — so {seat.name} is "
+                            f"stepping it instead. Nothing else changes: it "
+                            f"is the same program driving the same wizards")
+                    for other in self.seats:
+                        try:
+                            other.tel.note_questing("script-driver-moved",
+                                                    said)
+                        except Exception:
+                            pass
+                    self._say(seat, said)
+                return seat
+        # Nobody is ticking. Leave it with seat 0 rather than answering
+        # None -- None would read as "there is no script", which is a
+        # different thing and unlocks rungs that must not run.
+        return owner
 
     async def _stage(self, seat, name, coro, limit=None, wheel=False):
         """Run one stage of the service tick, reporting its own failure.
@@ -1393,7 +1537,10 @@ class LiveWorker(QThread):
         import time
 
         seat = self.seats[0] if seat is None else seat
-        runner = seat.runner
+        # The VM belongs to seat 0 whoever is stepping it -- one program,
+        # one instruction pointer. `seat` is only whose loop is calling.
+        owner = self.seats[0]
+        runner = owner.runner
         if runner is None:
             return
         if not runner.stale:
@@ -1448,7 +1595,7 @@ class LiveWorker(QThread):
             if not runner.restart():
                 self._say(seat, "script stopped — it could not be reloaded")
                 self._note_reload(seat, f"could NOT be reloaded — {why}")
-                seat.runner = None
+                owner.runner = None
                 return
             if (sig != self._reload_sig
                     or now - self._reload_at >= self.RELOAD_THRASH):
@@ -1480,7 +1627,7 @@ class LiveWorker(QThread):
                             f"(pass {runner.restarts + 1})")
         else:
             self._say(seat, "script finished")
-            seat.runner = None
+            owner.runner = None
 
     async def _auto_dialogue(self, client, seat=None):
         """Open and clear dialogue, but only the quest's.
@@ -3197,7 +3344,17 @@ class LiveWorker(QThread):
                             if idle >= 60 else "moving")
             steps = getattr(self.seats[0].runner, "steps", None)
             if driven and isinstance(steps, int):
-                bits.append(f"script at {steps:,} instructions")
+                # ...and for how long it has been at that number. A
+                # count on its own reads identically whether the script
+                # is racing or dead, and rev f32be436 printed "script at
+                # 23,324 instructions" once a minute for 110 minutes
+                # while nothing executed. The heartbeat is the thing an
+                # operator reads; it should not need arithmetic across
+                # two hours of log to notice a stopped script.
+                still = now - self._steps_at if self._steps_at > NEVER else 0.0
+                bits.append(f"script at {steps:,} instructions"
+                            + (f" — UNCHANGED for {still / 60:.0f} min"
+                               if still >= 120 else ""))
             elif driven:
                 bits.append("script driving")
             seat.tel.note_questing("heartbeat", " · ".join(bits))
@@ -3568,7 +3725,22 @@ class LiveWorker(QThread):
         import time
 
         runner = self.seats[0].runner
-        if runner is None or parked:
+        if runner is None:
+            return
+        if parked and getattr(runner, "running", False):
+            # A parked script is waiting on something real and the
+            # stuck-instruction reload owns that case -- but only while
+            # the VM is actually being stepped, which is the assumption
+            # this used to make silently. At rev f32be436 it was false
+            # for 110 minutes: the step count was frozen because nobody
+            # was calling `step()`, `parked` was therefore true on every
+            # look, and this returned here every time while the one
+            # thing that could have crossed a zone sat still.
+            #
+            # `_check_script_alive` is the detector for that now, and it
+            # reloads rather than restarts. This keeps its own refusal
+            # for the case it was written for: a VM that is alive and
+            # inside a long instruction.
             return
         away = seat.marker_away
         blind = self._marker_unusable(seat) if away is None else ""
@@ -4644,6 +4816,85 @@ class LiveWorker(QThread):
                     pass
             self._say(seat, said)
 
+    #: how long the script's instruction pointer may sit still, with
+    #: nothing legitimately holding it, before the VM is written off and
+    #: reloaded.
+    #:
+    #: Five minutes is far longer than any single instruction is allowed
+    #: to take -- `ScriptRunner.STEP_LIMIT` cuts one off at 180s -- so
+    #: reaching this means `step()` is not being CALLED, which is a
+    #: different failure and the one nothing could see. Rev f32be436 sat
+    #: in it for 110 minutes.
+    SCRIPT_STALL_AFTER = 300.0
+
+    def _check_script_alive(self):
+        """Notice a script that has stopped executing at all.
+
+        Every other watchdog in here asks whether the script is doing
+        the RIGHT thing. This one asks whether it is doing anything, and
+        it exists because the answer turned out to be unknowable from
+        the inside: `ScriptRunner.STEP_LIMIT` only fires for an
+        instruction that is running long, and `_unstick` reads a frozen
+        step count as "parked", which is the one state
+        `_maybe_restart_script` excuses itself from -- on the grounds
+        that the stuck-instruction reload owns it. Nothing owned it.
+
+        Run from EVERY seat's loop, deliberately. The seat that steps the
+        VM is the seat that can stop ticking, so a check that lived on
+        the driving seat would go quiet with it.
+
+        The clock only runs while nothing legitimately holds the script:
+        a catch-up pauses it by design, a duel and the after-fight chores
+        skip the tick that steps it, and the steering hold stops
+        everything for a few seconds after a teleport. None of those is a
+        stall, and counting them as one would reload a healthy script
+        every five minutes.
+        """
+        import time
+
+        runner = self.seats[0].runner
+        if runner is None or not self.script:
+            return
+        now = time.monotonic()
+        steps = getattr(runner, "steps", None)
+        held = (bool(self._catching_up())
+                or self._hop_held()
+                or all(s.in_duel or s.in_upkeep for s in self.seats
+                       if s.client is not None))
+        if steps != self._steps_seen or held or runner.stale:
+            self._steps_seen = steps
+            self._steps_at = now
+            return
+        if now - self._steps_at < self.SCRIPT_STALL_AFTER:
+            return
+        stalled = (now - self._steps_at) / 60.0
+        self._steps_at = now
+        said = (f"the script has not executed an instruction in "
+                f"{stalled:.0f} min and nothing is holding it — it is "
+                f"parked at {steps:,} with no wizard in a fight, no "
+                f"catch-up running and no teleport settling. An "
+                f"instruction that merely runs long is cut off after "
+                f"three minutes, so this is the VM not being stepped at "
+                f"all. Reloading it")
+        for other in self.seats:
+            try:
+                other.tel.note_questing("script-stalled", said)
+            except Exception:
+                pass
+        self._say(self.seats[0], said)
+        # Hand it to the reload path rather than restarting from here:
+        # that path already owns the backoff, the "could not be
+        # reloaded" case and the setup-skipping restart source.
+        runner.stale = True
+        runner.stale_sig = f"stalled at {steps}"
+        runner.last_error = said
+
+    #: the most quests one recovery will offer the book. Each one costs
+    #: a pass over four visible entries, and a wizard more than a
+    #: handful of steps behind is a catch-up's problem rather than a
+    #: mis-selected tracker's.
+    SPAN_CANDIDATES = 6
+
     def _lost_quest(self, seat, places=None):
         """([(quest, how it was named)], why) for a wizard off the line.
 
@@ -4699,6 +4950,27 @@ class LiveWorker(QThread):
             lowest = min(others, key=lambda p: p.order)
             add(questlist.quest_at(lowest.world, lowest.order),
                 f"where the rest of the party is, #{lowest.order}")
+            # ...and every step BETWEEN the two, in order.
+            #
+            # Rev f32be436 is why. Konstantin's tracker wandered onto
+            # 'Trophy Quest' while he was two quests behind the party,
+            # and both answers above missed for the same reason: his own
+            # last main was finished and out of the book, and the
+            # party's #46 was two quests further on than anything he
+            # could have been given. The quest he was actually holding
+            # was one of the ones in between, and nothing offered it.
+            #
+            # Cheap, because the book session reads its entries once and
+            # tries each candidate against what it already has. Bounded
+            # at `SPAN_CANDIDATES` so a wizard a whole world behind does
+            # not turn one recovery into a page-through.
+            if mine and mine[0] == lowest.world and mine[1] is not None:
+                step = 1 if lowest.order >= mine[1] else -1
+                for order in range(mine[1] + step, lowest.order, step):
+                    if len(found) >= self.SPAN_CANDIDATES:
+                        break
+                    add(questlist.quest_at(lowest.world, order),
+                        f"a step between the two, #{order}")
         if not found:
             return [], ("nothing names a main-line quest for this wizard: "
                         "it has not been seen on the line, and no other "
