@@ -548,11 +548,36 @@ class Client:
             if not wait_on_inuse:
                 raise ValueError("Tried to teleport while should update bool is set")
 
-            await maybe_wait_for_value_with_timeout(
-                self._teleport_helper.should_update,
-                value=False,
-                timeout=wait_on_inuse_timeout,
-            )
+            try:
+                await maybe_wait_for_value_with_timeout(
+                    self._teleport_helper.should_update,
+                    value=False,
+                    timeout=wait_on_inuse_timeout,
+                )
+            except ExceptionalTimeout:
+                # A LATCH, upstream, and the worst kind: the flag it is
+                # waiting on is cleared by the game's own hook, and when
+                # that does not happen the flag stays set for the rest of
+                # the run. Every later teleport on this client re-enters
+                # this branch, waits a second, and raises again -- while
+                # the one piece of code that clears the flag sits below,
+                # unreachable, in the `purge_on_after_unuser_fixer`
+                # handler.
+                #
+                # wizAi's run at rev 35f0fc6e is that failure at full
+                # size: 1,336 identical `ExceptionalTimeout: Timed out
+                # waiting for coro should_update` over 101 minutes, one
+                # every four and a half seconds, all on one wizard, while
+                # the party stood on its quest marker and the script ran
+                # a quarter of a million instructions getting nowhere.
+                #
+                # A second is a long time for a flag the hook clears
+                # every frame, so reaching here means nothing is going to
+                # clear it. Clearing it and carrying on cannot cancel a
+                # teleport that is really in flight -- this call is about
+                # to overwrite the target and set the flag again anyway,
+                # which is exactly what the caller asked for.
+                await self._teleport_helper.write_should_update(False)
 
         jes = await self._get_je_instruction_forward_backwards()
 

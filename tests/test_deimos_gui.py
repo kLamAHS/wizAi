@@ -15785,13 +15785,108 @@ def test_an_in_zone_marker_is_the_hops_case_not_a_restart():
     seat = worker.seats[0]
     seat.progress_at = (time.monotonic() - worker.STUCK_AFTER
                         - worker.UNSTICK_EVERY - 1)
-    seat.marker_away = 500.0               # reachable: the hop's domain
+    # In this zone and far enough that a teleport is worth making: the
+    # hop can cross it, so this rung stays out of the way.
+    seat.marker_away = 5_000.0
     restarts = []
     worker.seats[0].runner = type("R", (), {
         "running": True, "steps": 1,
         "restart": lambda self: restarts.append(True) or True})()
     worker._maybe_restart_script(seat, 6.0, parked=False)
     assert restarts == []
+
+
+def _on_its_marker():
+    """A wizard standing on its own quest marker, script looping."""
+    import time
+
+    worker, _read = _zoned_party(["KT_Krokosphinx/KT_Arena"])
+    seat = worker.seats[0]
+    seat.progress_at = (time.monotonic() - worker.STUCK_AFTER
+                        - worker.UNSTICK_EVERY - 1)
+    seat.marker_away = 400.0                    # inside AT_THE_MARKER
+    restarts = []
+    worker.seats[0].runner = type("R", (), {
+        "running": True, "steps": 1, "skipped_setup": (),
+        "restart": lambda self: restarts.append(True) or True})()
+    return worker, seat, restarts
+
+
+def test_standing_on_the_marker_is_given_time_before_a_restart():
+    """Arriving at your objective and then working is the normal shape
+    of questing — a dungeon sigil, a dialogue chain and a fight all
+    happen standing still on the marker."""
+    worker, seat, restarts = _on_its_marker()
+    worker._maybe_restart_script(seat, 6.0, parked=False)
+    assert restarts == []
+
+
+def test_an_hour_on_the_marker_with_nothing_changing_restarts_the_script():
+    """Rev 35f0fc6e: 103 minutes with all three wizards standing on the
+    Khai Amahte marker in KT_Arena while the script ran a quarter of a
+    million instructions. Every rung answered correctly and none of them
+    acted — the hop refused ("teleporting to the spot this wizard is
+    standing on"), X had nothing in range, the realm change is for
+    Collect steps, and this returned early because the marker was in
+    zone. The only actor that can leave a spot the script keeps walking
+    back to is the script's own route."""
+    worker, seat, restarts = _on_its_marker()
+    worker._maybe_restart_script(seat, worker.ON_MARKER_RESTART / 60.0 + 1,
+                                 parked=False)
+    assert restarts == [True]
+    said = [e for e in seat.tel.questing if e["kind"] == "script-restarted"]
+    assert said and "standing ON its quest marker" in said[0]["detail"]
+
+
+def test_a_parked_script_on_the_marker_is_still_not_this_rungs_case():
+    """`_check_script_alive` owns a VM that is not executing; this rung
+    is for one that is executing the wrong thing."""
+    worker, seat, restarts = _on_its_marker()
+    worker._maybe_restart_script(seat, 999.0, parked=True)
+    assert restarts == []
+
+
+# ---- one sentence, said once
+
+def test_a_party_task_that_fails_forever_does_not_bury_the_log():
+    """Rev 35f0fc6e: 1,336 identical `ExceptionalTimeout: Timed out
+    waiting for coro should_update` in EACH of three exports — 4,008
+    lines saying one thing, a third of the questing log's whole budget
+    spent burying everything around the failure it was reporting."""
+    worker, _read = _zoned_party(["KT_Arena"] * 3)
+    for i in range(1336):
+        worker._broadcast_once("tp-fail", "`teleport` failed for one wizard",
+                               "party-task-failed")
+    for seat in worker.seats:
+        wrote = [e for e in seat.tel.questing
+                 if e["kind"] == "party-task-failed"]
+        assert 1 < len(wrote) <= 10, len(wrote)
+        assert "times in a row" in wrote[-1]["detail"]
+
+
+def test_every_seats_export_still_shows_a_party_wide_failure():
+    """It is a fact about the party, so any of the three exports should
+    carry it — thinning must not turn it into seat 0's private note."""
+    worker, _read = _zoned_party(["KT_Arena"] * 3)
+    worker._broadcast_once("tp-fail", "`teleport` failed", "party-task-failed")
+    for seat in worker.seats:
+        assert [e["kind"] for e in seat.tel.questing] == ["party-task-failed"]
+
+
+def test_a_new_failure_is_said_at_once_not_thinned_behind_the_old_one():
+    """`_say_once` keys on the message, so a teleport that starts
+    failing a NEW way is not hidden behind the count of the old one."""
+    worker, _read = _zoned_party(["KT_Arena"] * 2)
+    for _ in range(200):
+        worker._broadcast_once("a", "timed out waiting for should_update",
+                               "party-task-failed")
+    before = len(worker.seats[0].tel.questing)
+    worker._broadcast_once("b", "no child window named wndCharacter",
+                           "party-task-failed")
+    after = worker.seats[0].tel.questing
+    assert len(after) == before + 1
+    assert "wndCharacter" in after[-1]["detail"]
+    assert "times in a row" not in after[-1]["detail"]
 
 
 # ------------------ a restart is not a first start
@@ -18558,3 +18653,38 @@ def test_one_change_of_mind_is_not_churn():
     worker._start_catching_up([worker.seats[0]], 1, "questline")
     assert worker._catch_up_state is not None, \
         "a single retarget must still be allowed to start again"
+
+
+def test_every_await_in_the_service_tick_is_bounded():
+    """The loop's own body is where a hung client kills a seat silently:
+    a stage has a deadline, a bare await does not, and the heartbeat
+    that would show the seat had gone quiet is written at the TOP of the
+    tick — so a read that never returns stops the heartbeats too.
+
+    Rev f32be436 lost the party's script to the combat read. Rev
+    35f0fc6e lost Konstantin's tick at t=4230 to the goal read, with no
+    `client-not-answering` against it because that guard only covers the
+    combat one. Both were the last bare await of their day."""
+    import inspect
+    import re
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._service_loop)
+    body = src.split('"""', 2)[2]
+    bare = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("await "):
+            continue
+        if re.match(r"await self\._stage\(", stripped):
+            continue
+        # The bounded reads and the loop's own sleep are fine.
+        if re.match(r"await (asyncio\.sleep|self\._read_in_battle|"
+                    r"self\._heartbeat)\(", stripped):
+            continue
+        bare.append(stripped)
+    assert not bare, (
+        "a bare await in the service tick — a client that stops "
+        f"answering it takes this seat off the air with no timeout, no "
+        f"exception and no heartbeat: {bare}")
