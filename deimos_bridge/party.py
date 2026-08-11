@@ -172,6 +172,32 @@ async def friends_list_name(follower, short_name):
     return ""
 
 
+async def _put_the_friends_list_away(client):
+    """Best effort: close the friends list and the character panel.
+
+    Both block movement, so a wizard left behind them is a wizard that
+    cannot follow, cannot quest and cannot be walked out by anything --
+    and the next teleport attempt starts by clicking through them.
+    That is what turned one failed rejoin into ten in rev cfeb9a85.
+
+    wizwalker's own `teleport_to_friend_from_list` does this in a
+    `finally` now; this covers the timeout, which cancels that finally
+    before it can run. Never raises.
+    """
+    try:
+        from .deimos_path import ensure_path
+
+        ensure_path()
+        from wizwalker.extensions.scripting.utils import _close_friend_windows
+    except Exception:
+        return False
+    try:
+        await _close_friend_windows(client)
+    except Exception:
+        return False
+    return True
+
+
 async def teleport_to_leader_across_zones(follower, leader_name):
     """(ok, reason). The friends-list teleport, for a different zone.
 
@@ -211,6 +237,16 @@ async def teleport_to_leader_across_zones(follower, leader_name):
                 teleport_to_friend_from_list(follower, name=name),
                 TELEPORT_TIMEOUT)
         except asyncio.TimeoutError:
+            # The one failure wizwalker's own cleanup cannot cover.
+            # `teleport_to_friend_from_list` closes the friends list and
+            # the character panel in a `finally` now, but a timeout
+            # CANCELS it, and a cancelled coroutine raises again at the
+            # first `await` in that finally -- CancelledError is not an
+            # Exception, so the suppress inside does not hold it. The
+            # windows are therefore left up, on the one path where the
+            # wizard is already known to be wedged. Closed from out here
+            # instead, where nothing is cancelled.
+            await _put_the_friends_list_away(follower)
             return False, (
                 f"the friends-list teleport to {name} ran for "
                 f"{TELEPORT_TIMEOUT:.0f}s without finishing and was cut "

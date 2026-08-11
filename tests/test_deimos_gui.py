@@ -8684,6 +8684,77 @@ def test_the_friends_list_teleport_is_bounded(qapp, monkeypatch):
     assert "Online Friends" in why, why
 
 
+def test_a_cut_off_teleport_still_puts_the_friends_list_away(qapp,
+                                                            monkeypatch):
+    """The one failure wizwalker's own cleanup cannot cover.
+    `teleport_to_friend_from_list` closes both windows in a `finally`
+    now, but a TIMEOUT cancels it -- and a cancelled coroutine raises
+    again at the first `await` in that finally, which the suppress
+    inside does not hold because CancelledError is not an Exception.
+
+    The windows being left up is not cosmetic: both block movement, so
+    the wizard cannot follow, cannot quest and cannot be walked out by
+    anything, and the next attempt starts by clicking through them."""
+    import asyncio
+    import sys
+    import types
+
+    from deimos_bridge import party
+
+    async def _never(*_a, **_kw):
+        await asyncio.Event().wait()
+
+    class _Mouse:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_a):
+            return False
+
+    class _Follower:
+        mouse_handler = _Mouse()
+
+    closed = []
+
+    async def _close(client):
+        closed.append(client)
+
+    for name in ("wizwalker", "wizwalker.extensions"):
+        stub = types.ModuleType(name)
+        stub.__path__ = []
+        sys.modules[name] = stub
+    mod = types.ModuleType("wizwalker.extensions.scripting")
+    mod.teleport_to_friend_from_list = _never
+    sys.modules["wizwalker.extensions.scripting"] = mod
+    utils = types.ModuleType("wizwalker.extensions.scripting.utils")
+    utils._close_friend_windows = _close
+    sys.modules["wizwalker.extensions.scripting.utils"] = utils
+    monkeypatch.setattr(party, "TELEPORT_TIMEOUT", 0.2)
+    try:
+        ok, _why = asyncio.run(
+            party.teleport_to_leader_across_zones(_Follower(), "Jeffrey"))
+    finally:
+        for name in ("wizwalker.extensions.scripting.utils",
+                     "wizwalker.extensions.scripting",
+                     "wizwalker.extensions", "wizwalker"):
+            sys.modules.pop(name, None)
+        party._FULL_NAMES.clear()
+
+    assert ok is False
+    assert closed, "the friends list was left up on a cut-off teleport"
+
+
+def test_a_cleanup_that_is_not_available_never_takes_the_run_with_it(qapp):
+    """`_put_the_friends_list_away` runs on the failure path, where an
+    exception would replace the real reason with a tidying-up one. On a
+    machine with no wizwalker at all it must simply answer False."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    assert asyncio.run(party._put_the_friends_list_away(object())) is False
+
+
 def test_restoring_a_seats_boxes_does_not_retune_the_running_party(qapp,
                                                                   monkeypatch):
     """`setChecked` fires `toggled` exactly like a click. Switching the
