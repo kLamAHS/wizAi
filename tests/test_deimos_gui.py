@@ -8684,6 +8684,77 @@ def test_the_friends_list_teleport_is_bounded(qapp, monkeypatch):
     assert "Online Friends" in why, why
 
 
+def test_a_cut_off_teleport_still_puts_the_friends_list_away(qapp,
+                                                            monkeypatch):
+    """The one failure wizwalker's own cleanup cannot cover.
+    `teleport_to_friend_from_list` closes both windows in a `finally`
+    now, but a TIMEOUT cancels it -- and a cancelled coroutine raises
+    again at the first `await` in that finally, which the suppress
+    inside does not hold because CancelledError is not an Exception.
+
+    The windows being left up is not cosmetic: both block movement, so
+    the wizard cannot follow, cannot quest and cannot be walked out by
+    anything, and the next attempt starts by clicking through them."""
+    import asyncio
+    import sys
+    import types
+
+    from deimos_bridge import party
+
+    async def _never(*_a, **_kw):
+        await asyncio.Event().wait()
+
+    class _Mouse:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_a):
+            return False
+
+    class _Follower:
+        mouse_handler = _Mouse()
+
+    closed = []
+
+    async def _close(client):
+        closed.append(client)
+
+    for name in ("wizwalker", "wizwalker.extensions"):
+        stub = types.ModuleType(name)
+        stub.__path__ = []
+        sys.modules[name] = stub
+    mod = types.ModuleType("wizwalker.extensions.scripting")
+    mod.teleport_to_friend_from_list = _never
+    sys.modules["wizwalker.extensions.scripting"] = mod
+    utils = types.ModuleType("wizwalker.extensions.scripting.utils")
+    utils._close_friend_windows = _close
+    sys.modules["wizwalker.extensions.scripting.utils"] = utils
+    monkeypatch.setattr(party, "TELEPORT_TIMEOUT", 0.2)
+    try:
+        ok, _why = asyncio.run(
+            party.teleport_to_leader_across_zones(_Follower(), "Jeffrey"))
+    finally:
+        for name in ("wizwalker.extensions.scripting.utils",
+                     "wizwalker.extensions.scripting",
+                     "wizwalker.extensions", "wizwalker"):
+            sys.modules.pop(name, None)
+        party._FULL_NAMES.clear()
+
+    assert ok is False
+    assert closed, "the friends list was left up on a cut-off teleport"
+
+
+def test_a_cleanup_that_is_not_available_never_takes_the_run_with_it(qapp):
+    """`_put_the_friends_list_away` runs on the failure path, where an
+    exception would replace the real reason with a tidying-up one. On a
+    machine with no wizwalker at all it must simply answer False."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    assert asyncio.run(party._put_the_friends_list_away(object())) is False
+
+
 def test_restoring_a_seats_boxes_does_not_retune_the_running_party(qapp,
                                                                   monkeypatch):
     """`setChecked` fires `toggled` exactly like a click. Switching the
@@ -14430,7 +14501,7 @@ def test_a_conversation_being_advanced_is_left_alone(monkeypatch):
 # operator: "the auto run starts after the first combat when the names
 # are set for the characters just so you know".
 
-def _named_party():
+def _named_party(full=True):
     worker, _read = _zoned_party(["KT_Hub"] * 3)
     worker.script = _QUESTER
     for seat, (name, school) in zip(worker.seats,
@@ -14439,15 +14510,22 @@ def _named_party():
                                      ("Konstantin", "ice")]):
         seat.wizard_name = name
         seat.school = school
+    if full:
+        # What `_resolve_party_names` reads off a friends list. Without
+        # it the account settings stay at their placeholder on purpose
+        # -- see `test_a_first_name_is_never_written_into_the_script`.
+        worker._full_names = {"Phönix": "Phönix Storm",
+                              "Sebastian": "Sebastian Life",
+                              "Konstantin": "Konstantin Ice"}
     return worker
 
 
 def test_the_first_duels_names_fill_the_script():
     worker = _named_party()
     worker._fill_script_names()
-    assert 'var Main_Account = "Phönix"' in worker.script
-    assert 'var Questee2 = "Sebastian"' in worker.script
-    assert 'var Questee3 = "Konstantin"' in worker.script
+    assert 'var Main_Account = "Phönix Storm"' in worker.script
+    assert 'var Questee2 = "Sebastian Life"' in worker.script
+    assert 'var Questee3 = "Konstantin Ice"' in worker.script
     kinds = [e["kind"] for e in worker.seats[0].tel.questing]
     assert "script-configured" in kinds
     # ...and the guards the script tests itself with stay untouched, so
@@ -14457,6 +14535,319 @@ def test_the_first_duels_names_fill_the_script():
     worker._fill_script_names()
     kinds = [e["kind"] for e in worker.seats[0].tel.questing]
     assert kinds.count("script-configured") == 1, "filled twice"
+
+
+def test_a_first_name_is_never_written_into_the_script():
+    """The fill used to write what a duel reports, which is a FIRST
+    name. Every teleport that reads these settings ends in wizwalker's
+    `friend_name == name` against a list holding "Sebastian Life", so a
+    short name does not half-work — and it is worse than the
+    placeholder, because the script's guards are `if NOT Questee2 =
+    "QuestingAccountName"`, so filling the variable at all switches the
+    branch ON and makes every teleport behind it unfindable. Rev
+    f32be436 ran three hours that way."""
+    worker = _named_party(full=False)
+    worker._fill_script_names()
+    assert 'var Main_Account = "QuestingAccountName"' in worker.script, \
+        "a first name went in, which turns the branch on and cannot match"
+    assert '"Phönix"' not in worker.script
+    # The schools are not name-matched against anything, so they land
+    # either way and `Train_Spells` works from the first duel.
+    assert 'var Main_Account_School = "storm"' in worker.script
+
+
+# ---- reading the full names off a friends list
+# The half that was missing. wizAi knew the party's names from the first
+# duel and wrote them straight into the quester's account settings --
+# and a duel reports a FIRST name while every teleport that consumes
+# those settings matches the friends list exactly.
+
+
+def _friends_text(*names):
+    """A friends list holding these wizards, in the markup wizwalker's
+    own `_friend_list_entry` parses."""
+    out = []
+    for i, name in enumerate(names):
+        out.append(f"<Y;0><X;0><indent;0><Color;ffffffff><left>"
+                   f"<icon;FriendsList/Friend_Icon_List_01.dds;1;1;{i}>"
+                   f"</left><Y;0><X;0><indent;1><Color;ffffffff><left>"
+                   f"<COLOR;ffffffff>{name}")
+    return "".join(out)
+
+
+def _resolving(monkeypatch, lists):
+    """A named party whose clients' friends lists read as given.
+
+    `lists` is [text per seat]. Returns (worker, what each client was
+    asked to read).
+    """
+    from deimos_bridge import party, questing
+
+    worker = _named_party(full=False)
+    party._FULL_NAMES.clear()
+    worker._full_names = {}
+    asked = []
+
+    async def read(client):
+        for seat, text in zip(worker.seats, lists):
+            if seat.client is client:
+                asked.append(seat.index)
+                return text
+        return ""
+
+    async def no_dialogue(_c):
+        return False
+
+    monkeypatch.setattr(party, "_read_friends_list", read)
+    monkeypatch.setattr(questing, "in_dialogue", no_dialogue)
+    return worker, asked
+
+
+def test_the_party_gets_its_full_names_off_the_friends_list(monkeypatch):
+    """Seat 0's list holds the other two; seat 1's holds seat 0. Two
+    reads answer for a party of three, and the wizard doing the reading
+    gets its own name from somebody else's list."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    worker, asked = _resolving(monkeypatch, [
+        _friends_text("Sebastian Life", "Konstantin Ice"),
+        _friends_text("Phönix Storm", "Konstantin Ice"),
+        _friends_text("Phönix Storm", "Sebastian Life"),
+    ])
+    asyncio.run(worker._resolve_party_names(worker.seats[0]))
+    assert worker._full_names == {"Phönix": "Phönix Storm",
+                                  "Sebastian": "Sebastian Life",
+                                  "Konstantin": "Konstantin Ice"}
+    assert asked == [0, 1], "read a third list it did not need"
+    party._FULL_NAMES.clear()
+
+
+def test_the_full_names_go_straight_into_the_script(monkeypatch):
+    import asyncio
+
+    from deimos_bridge import party
+
+    worker, _asked = _resolving(monkeypatch, [
+        _friends_text("Sebastian Life", "Konstantin Ice"),
+        _friends_text("Phönix Storm"),
+        "",
+    ])
+    asyncio.run(worker._resolve_party_names(worker.seats[0]))
+    assert 'var Main_Account = "Phönix Storm"' in worker.script
+    assert 'var Questee2 = "Sebastian Life"' in worker.script
+    assert 'var Questee3 = "Konstantin Ice"' in worker.script
+    kinds = [e["kind"] for e in worker.seats[0].tel.questing]
+    assert "party-names-read" in kinds and "script-configured" in kinds
+    party._FULL_NAMES.clear()
+
+
+def test_a_wizard_nobody_has_added_leaves_its_setting_alone(monkeypatch):
+    """The script copes with an unset account setting by design -- its
+    guards switch that branch off. Writing a name that cannot be found
+    is the thing that does not cope."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    worker, _asked = _resolving(monkeypatch, [
+        _friends_text("Sebastian Life"),
+        _friends_text("Phönix Storm"),
+        _friends_text("Phönix Storm", "Sebastian Life"),
+    ])
+    asyncio.run(worker._resolve_party_names(worker.seats[0]))
+    assert 'var Main_Account = "Phönix Storm"' in worker.script
+    assert 'var Questee2 = "Sebastian Life"' in worker.script
+    assert 'var Questee3 = "QuestingAccountName"' in worker.script
+    said = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "party-names-read"][0]["detail"]
+    assert "Konstantin is not on any of the others' lists" in said
+    party._FULL_NAMES.clear()
+
+
+def test_a_party_that_are_not_friends_at_all_is_said_plainly(monkeypatch):
+    import asyncio
+
+    from deimos_bridge import party
+
+    worker, _asked = _resolving(monkeypatch, ["", "", ""])
+    asyncio.run(worker._resolve_party_names(worker.seats[0]))
+    assert 'var Main_Account = "QuestingAccountName"' in worker.script
+    assert not [e for e in worker.seats[0].tel.questing
+                if e["kind"] == "party-names-read"]
+    party._FULL_NAMES.clear()
+
+
+def test_the_names_are_read_once_not_every_tick(monkeypatch):
+    import asyncio
+
+    from deimos_bridge import party
+
+    worker, asked = _resolving(monkeypatch, [
+        _friends_text("Sebastian Life", "Konstantin Ice"),
+        _friends_text("Phönix Storm"),
+        "",
+    ])
+    for _ in range(4):
+        asyncio.run(worker._resolve_party_names(worker.seats[0]))
+    assert asked == [0, 1], asked
+    assert worker._names_done
+    party._FULL_NAMES.clear()
+
+
+def test_an_unresolved_name_is_retried_on_a_cooldown(monkeypatch):
+    """A wizard that was offline when the list was read comes back."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    worker, asked = _resolving(monkeypatch, [
+        _friends_text("Sebastian Life"), "", ""])
+    asyncio.run(worker._resolve_party_names(worker.seats[0]))
+    assert not worker._names_done
+    asyncio.run(worker._resolve_party_names(worker.seats[0]))
+    assert len(asked) == 3, "ignored NAME_RESOLVE_EVERY"
+    worker._names_tried_at = -1e9
+    asyncio.run(worker._resolve_party_names(worker.seats[0]))
+    assert len(asked) > 3, "never looked again"
+    party._FULL_NAMES.clear()
+
+
+def test_a_solo_pilot_run_never_names_the_script(monkeypatch):
+    """`solo_source` strips the account names on purpose so the script
+    never friend-teleports at all."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    worker, asked = _resolving(monkeypatch, [
+        _friends_text("Sebastian Life", "Konstantin Ice"), "", ""])
+    worker.solo_script = True
+    asyncio.run(worker._resolve_party_names(worker.seats[0]))
+    assert asked == []
+    party._FULL_NAMES.clear()
+
+
+def test_reading_the_list_puts_it_away_again():
+    """A friends window left open blocks movement, and this opens one on
+    up to two clients."""
+    import inspect
+
+    from deimos_bridge import party
+
+    src = inspect.getsource(party._read_friends_list)
+    assert "finally:" in src and "_put_the_friends_list_away" in src
+
+
+def test_the_names_are_read_before_anything_that_needs_them():
+    """Until this runs the script's account settings hold a first name
+    or a placeholder, and its own regroup cannot work either way."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._service_loop)
+    assert src.index("_resolve_party_names") < src.index("_catch_up(seat)")
+
+
+def test_a_school_is_filled_in_the_scripts_own_spelling():
+    """wizAi holds a seat's school lowercase — it is a dropdown value —
+    and the template dispatches on `elif Main_Account_School = "Storm"`.
+    deimoslang's `=` is a plain string comparison, so filling in "storm"
+    is the worst of both: the outer `if NOT ... = "SchoolGoesHere"`
+    guard passes, and every branch inside it fails. The whole dispatch
+    runs and does nothing, silently."""
+    from deimos_bridge import scripts
+
+    source = _QUESTER.replace(
+        'if NOT Main_Account_School = "SchoolGoesHere" { p1 sendkey X }',
+        'if NOT Main_Account_School = "SchoolGoesHere" {\n'
+        '  if Main_Account_School = "Life" { p1 sendkey X }\n'
+        '  } elif Main_Account_School = "Storm" { p1 sendkey X }\n'
+        '}')
+    out, filled = scripts.configure(source, [("Phönix Storm", "storm")])
+    assert 'var Main_Account_School = "Storm"' in out
+    assert ("Main_Account_School", "Storm") in filled
+
+
+def test_the_spelling_is_read_from_the_script_not_guessed():
+    """Not `.capitalize()`. The vocabulary is whatever literals the
+    script compares the variable against, which is the same evidence
+    `unconfigured` reads the placeholders from — so a script that spells
+    its schools some other way gets that spelling."""
+    from deimos_bridge import scripts
+
+    source = ('var S = "SchoolGoesHere"\n'
+              'block B {\n'
+              '  if NOT S = "SchoolGoesHere" {\n'
+              '    if S = "STORM" { p1 sendkey X }\n'
+              '  }\n'
+              '}\n')
+    assert scripts.script_spelling(source, "S", "storm",
+                                   "SchoolGoesHere") == "STORM"
+    # A value the script has no word for is left exactly as given.
+    assert scripts.script_spelling(source, "S", "ice",
+                                   "SchoolGoesHere") == "ice"
+
+
+def test_a_filled_school_is_not_reported_as_a_placeholder_again():
+    """The regression that filling them correctly creates: once "Storm"
+    is on the `var` line, "Storm" is both assigned and compared, and the
+    plain assigned-AND-compared rule calls a configured variable unset
+    forever. A placeholder is what the script tests the ABSENCE of;
+    anything it dispatches ON is vocabulary."""
+    from deimos_bridge import scripts
+
+    source = ('var Main_Account_School = "SchoolGoesHere"\n'
+              'block B {\n'
+              '  if NOT Main_Account_School = "SchoolGoesHere" {\n'
+              '    if Main_Account_School = "Life" { p1 sendkey X }\n'
+              '    } elif Main_Account_School = "Storm" { p1 sendkey X }\n'
+              '  }\n'
+              '}\n')
+    assert [n for n, _v in scripts.unconfigured(source)] \
+        == ["Main_Account_School"]
+    out, _filled = scripts.configure(source, [("Somebody Else", "storm")])
+    assert 'var Main_Account_School = "Storm"' in out
+    assert scripts.unconfigured(out) == [], \
+        "a correctly configured school reads as unset"
+
+
+def test_a_positive_only_guard_is_still_a_placeholder():
+    """The old rule stays as the fallback: a variable with no negative
+    guard at all has only `if X = "unset"` as evidence, and that is
+    still the author saying what unset means."""
+    from deimos_bridge import scripts
+
+    source = ('var X = "FillMeIn"\n'
+              'block B {\n'
+              '  if X = "FillMeIn" { p1 sendkey X }\n'
+              '}\n')
+    assert scripts.unconfigured(source) == [("X", "FillMeIn")]
+
+
+def test_the_real_quester_fills_completely_and_stays_filled():
+    """End to end on the shipped preset, which is the thing that has to
+    work: every account and school setting filled, the guards the script
+    tests itself with untouched, and nothing left reading as unset."""
+    from deimos_bridge import scripts
+
+    presets = [p for title, p in scripts.presets()]
+    if not presets:                       # pragma: no cover - no presets
+        return
+    source = scripts.read_preset(presets[0])
+    before = [n for n, _v in scripts.unfilled(source, 3)]
+    if not any(n in scripts.ACCOUNT_VARS for n in before):
+        return
+    out, filled = scripts.configure(
+        source, [("Phönix Storm", "storm"), ("Sebastian Life", "life"),
+                 ("Konstantin Ice", "ice")])
+    assert [n for n, _v in filled] == before, (before, filled)
+    assert scripts.unfilled(out, 3) == [], \
+        "a fully configured script still reads as unconfigured"
+    assert 'if NOT Main_Account = "QuestingAccountName"' in out, \
+        "the guard the script tests itself with was rewritten"
 
 
 def test_the_fill_waits_for_every_seat_to_have_a_name():
@@ -16849,6 +17240,335 @@ def test_the_recovery_runs_before_everything_that_aims_a_teleport():
     recover = src.index("_maybe_recover_questline")
     for later in ("_maybe_realm_hop", "_catch_up(seat)"):
         assert recover < src.index(later), later
+
+
+# ------------------------------------------- the script that stopped executing
+# Rev f32be436, the whole run: the deimoslang instruction pointer froze
+# at 23,324 and stayed there for 110 minutes — 56% of a 3h16m session —
+# while every wizard's heartbeat went on printing "script at 23,324
+# instructions" once a minute.
+#
+# Nothing was broken in a way anything could see. Seat 0's service loop
+# stopped coming round (its client stopped answering the one unbounded
+# read in the tick), and seat 0 is the only seat that steps the party's
+# VM. `ScriptRunner.STEP_LIMIT` could not fire, because it only bounds an
+# instruction that is RUNNING. `_unstick` read the frozen count as
+# "parked", and `_maybe_restart_script` excuses itself from parked
+# scripts on the grounds that the stuck-instruction reload owns them.
+# Every guard was individually right and together they covered nothing.
+
+
+class _LiveRunner:
+    """A runner that is running and whose step count the test drives."""
+
+    def __init__(self, steps=1000):
+        self.steps = steps
+        self.stale = False
+        self.stale_sig = ""
+        self.last_error = ""
+        self.running = True
+        self.restarted = 0
+        self.restarts = 0
+        self.failures = 0
+        self.finished = False
+
+    def restart(self):
+        self.restarted += 1
+        self.stale = False
+        return True
+
+    async def run_for(self, **kw):
+        return 0
+
+
+def _scripted(zones=("KT_Hub", "KT_Hub", "KT_Hub"), steps=1000):
+    """A party running a script, with every seat's loop ticking now."""
+    import time
+
+    worker, _read = _zoned_party(list(zones))
+    worker.script = "###deimos_expertmode"
+    runner = _LiveRunner(steps)
+    worker.seats[0].runner = runner
+    now = time.monotonic()
+    for seat in worker.seats:
+        seat.ticked_at = now
+    return worker, runner
+
+
+def test_a_script_that_stops_executing_is_noticed_and_reloaded():
+    """The headline. An instruction that merely runs long is cut off at
+    `ScriptRunner.STEP_LIMIT`; a step count that stops moving because
+    nothing is CALLING step() had no detector at all."""
+    import time
+
+    worker, runner = _scripted()
+    worker._check_script_alive()                 # first look: start the clock
+    assert not runner.stale
+    worker._steps_at = time.monotonic() - worker.SCRIPT_STALL_AFTER - 1
+    worker._check_script_alive()
+    assert runner.stale, "110 minutes of nothing is still not a stall"
+    said = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "script-stalled"]
+    assert said, [e["kind"] for e in worker.seats[0].tel.questing]
+    assert "not being stepped at all" in said[0]["detail"]
+    # Every seat gets it: the seat that owns the script is the one that
+    # can go quiet, so its export is the one least likely to be read.
+    for seat in worker.seats:
+        assert any(e["kind"] == "script-stalled" for e in seat.tel.questing)
+
+
+def test_a_script_that_is_executing_is_never_called_stalled():
+    import time
+
+    worker, runner = _scripted()
+    for tick in range(5):
+        runner.steps += 40
+        worker._steps_at = time.monotonic() - worker.SCRIPT_STALL_AFTER - 1
+        worker._check_script_alive()
+    assert not runner.stale
+
+
+def test_the_things_that_legitimately_hold_the_script_are_not_stalls():
+    """A catch-up pauses the script by design, a duel and the
+    after-fight chores skip the tick that steps it, and the steering
+    hold stops everything for a few seconds after a teleport. Counting
+    any of those would reload a healthy script every five minutes."""
+    import time
+
+    for hold in ("catch-up", "duel", "upkeep", "hop"):
+        worker, runner = _scripted()
+        if hold == "catch-up":
+            worker._catch_up_state = {"seats": [worker.seats[1]]}
+        elif hold == "duel":
+            for seat in worker.seats:
+                seat.in_duel = True
+        elif hold == "upkeep":
+            for seat in worker.seats:
+                seat.in_upkeep = True
+        else:
+            worker._hop_pause_until = time.monotonic() + 30
+        worker._check_script_alive()
+        worker._steps_at = time.monotonic() - worker.SCRIPT_STALL_AFTER - 1
+        worker._check_script_alive()
+        assert not runner.stale, f"{hold} was counted as a stall"
+
+
+def test_a_frozen_step_count_no_longer_excuses_the_restart_rung():
+    """`_maybe_restart_script` refuses for a parked script because the
+    stuck-instruction reload owns that case. It only owns it while the
+    VM is being stepped — and a VM nobody steps looks exactly like a
+    parked one."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._maybe_restart_script)
+    body = src.split('"""')[2]
+    assert "parked and getattr(runner" in body, \
+        "the parked refusal is unconditional again"
+
+
+# ---- the seat that steps the VM
+
+def test_the_script_moves_to_a_seat_whose_loop_is_still_ticking():
+    """Seat 0 owns the VM and is the only seat that steps it, so seat 0
+    going quiet stops the script for the whole party. It is now a
+    handover rather than a stop."""
+    import time
+
+    worker, runner = _scripted()
+    assert worker._script_seat() is worker.seats[0]
+    worker.seats[0].ticked_at = time.monotonic() - worker.DRIVER_QUIET - 1
+    assert worker._script_seat() is worker.seats[1]
+    said = [e for e in worker.seats[1].tel.questing
+            if e["kind"] == "script-driver-moved"]
+    assert said, "a handover this consequential was silent"
+    assert "steps the party's script" in said[0]["detail"]
+
+
+def test_the_handover_is_said_once_not_every_tick():
+    import time
+
+    worker, runner = _scripted()
+    worker.seats[0].ticked_at = time.monotonic() - worker.DRIVER_QUIET - 1
+    for _ in range(5):
+        worker._script_seat()
+    said = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "script-driver-moved"]
+    assert len(said) == 1, said
+
+
+def test_the_owner_takes_the_script_back_when_it_starts_ticking_again():
+    import time
+
+    worker, runner = _scripted()
+    worker.seats[0].ticked_at = time.monotonic() - worker.DRIVER_QUIET - 1
+    assert worker._script_seat() is worker.seats[1]
+    worker.seats[0].ticked_at = time.monotonic()
+    assert worker._script_seat() is worker.seats[0]
+
+
+def test_a_party_where_nobody_is_ticking_still_names_the_owner():
+    """`None` would read as "there is no script", which unlocks rungs
+    that must not run while one exists."""
+    import time
+
+    worker, runner = _scripted()
+    for seat in worker.seats:
+        seat.ticked_at = time.monotonic() - 10_000
+    assert worker._script_seat() is worker.seats[0]
+
+
+def test_only_the_driving_seat_steps_the_script():
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._service_loop)
+    assert "driving = self._script_seat() is seat" in src
+    assert "if driving and not catching:" in src
+
+
+def test_the_vm_belongs_to_seat_zero_whoever_steps_it():
+    """One program, one instruction pointer. A second seat stepping its
+    own runner would be two programs driving the same four wizards."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._script_step)
+    assert "owner = self.seats[0]" in src
+    assert "runner = owner.runner" in src
+    assert "seat.runner" not in src, \
+        "a driving seat would step its own runner instead of the party's"
+
+
+# ---- the read that could hang
+
+def test_the_combat_read_at_the_top_of_the_tick_is_bounded():
+    """The one unbounded await left in the service loop, and the reason
+    a client that stopped answering took the party's script with it: no
+    heartbeat, no stage timeout and no exception can fire from inside a
+    read that never returns."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, _runner = _scripted()
+    seat = worker.seats[0]
+    seat.in_duel = True
+
+    async def never(_client):
+        await asyncio.Event().wait()
+
+    async def go():
+        real, questing.in_battle = questing.in_battle, never
+        worker.IN_BATTLE_LIMIT = 0.2
+        try:
+            return await worker._read_in_battle(seat, seat.client)
+        finally:
+            questing.in_battle = real
+
+    got = asyncio.run(go())
+    assert got is True, ("a client that stopped answering was reported as "
+                         "out of combat, which sends every rung below to "
+                         "click at a wizard nothing can read")
+
+
+def test_a_client_that_stops_answering_says_so():
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, _runner = _scripted()
+    seat = worker.seats[0]
+
+    async def never(_client):
+        await asyncio.Event().wait()
+
+    async def go():
+        real, questing.in_battle = questing.in_battle, never
+        worker.IN_BATTLE_LIMIT = 0.05
+        try:
+            for _ in range(worker.NOT_ANSWERING_AFTER + 2):
+                await worker._read_in_battle(seat, seat.client)
+        finally:
+            questing.in_battle = real
+
+    asyncio.run(go())
+    said = [e for e in seat.tel.questing if e["kind"] == "client-not-answering"]
+    assert len(said) == 1, said
+    assert "the party's script" in said[0]["detail"]
+
+
+def test_a_working_combat_read_is_not_slowed_down():
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, _runner = _scripted()
+    seat = worker.seats[0]
+
+    async def yes(_client):
+        return True
+
+    async def go():
+        real, questing.in_battle = questing.in_battle, yes
+        try:
+            return await worker._read_in_battle(seat, seat.client)
+        finally:
+            questing.in_battle = real
+
+    assert asyncio.run(go()) is True
+    assert not [e for e in seat.tel.questing
+                if e["kind"] == "client-not-answering"]
+
+
+def test_the_tick_clock_is_stamped_before_the_read_that_can_hang():
+    """Stamped after it, the clock would freeze with the loop and the
+    handover could never fire — the seat would look like it had never
+    ticked at all rather than like one that stopped."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._service_loop)
+    assert src.index("seat.ticked_at = time.monotonic()") \
+        < src.index("await self._read_in_battle("), \
+        "the tick clock is stamped after the read it exists to survive"
+
+
+# ---- naming the quest a laggard actually holds
+
+def test_the_steps_between_a_laggard_and_the_party_are_offered_too():
+    """Rev f32be436: Konstantin's tracker wandered onto 'Trophy Quest'
+    while he was two quests behind. His own last main was finished and
+    out of the book; the party's was two steps further on than anything
+    he could have been given. The quest he was holding was one of the
+    ones in between, and nothing offered it."""
+    worker, lost = _off_the_line()
+    # Party on #12, this wizard last seen on #9 — so #10 and #11 are the
+    # ones it could actually be holding.
+    lost.last_main = ("Krokotopia", 9, "Quarter Master")
+    found, _why = worker._lost_quest(lost)
+    orders = [p.order for p, _s in found]
+    assert orders[:2] == [9, 12], orders
+    assert 10 in orders and 11 in orders, orders
+
+
+def test_the_span_of_candidates_is_bounded():
+    worker, lost = _off_the_line()
+    lost.last_main = ("Krokotopia", 1, "Krokotopia")
+    found, _why = worker._lost_quest(lost)
+    assert len(found) <= worker.SPAN_CANDIDATES, len(found)
+
+
+def test_a_laggard_in_another_world_gets_no_span():
+    """Two positions only compare inside one world's line."""
+    worker, lost = _off_the_line()
+    lost.last_main = ("Marleybone", 3, "A Marleybone Quest")
+    found, _why = worker._lost_quest(lost)
+    assert [p.order for p, _s in found if p.world == "Krokotopia"] == [12]
 
 
 # --------------------------------------------- the stale-reload backoff

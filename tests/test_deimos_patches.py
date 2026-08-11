@@ -85,14 +85,422 @@ def test_the_friend_teleport_still_waits_long_enough_for_its_windows():
     one-second sleep, then a lookup that gives up 1.6s later. Three game
     clients on one machine lose that race: five of the rejoins in one run
     died on `No child window named MessageBoxModalWindow`, and one on
-    `wndCharacter`."""
-    src = _source(UTILS)
-    assert src.count("retries=20") >= 2, \
-        "the widened waits in teleport_to_friend_from_list are gone"
-    assert '"wndCharacter", retries=20' in src.replace("\n", " ").replace(
-        "        ", " ").replace("   ", " ").replace("  ", " ") or \
-        "retries=20" in src.split("wndCharacter", 1)[1][:200], \
-        "the character-window wait is back to the default"
+    `wndCharacter`.
+
+    Checked by driving it rather than by reading it: the fixture makes
+    each window appear only after a dozen polls, which the default four
+    retries cannot survive and the widened wait can. See
+    `_load_ww_utils` below for how the module runs without the game.
+
+    The row-click count is the assertion that bites. Clicking the row
+    again is a SECOND cure for a different fault (see
+    `test_a_row_click_that_opened_nothing_is_tried_again`), and it
+    would paper over a narrowed wait -- three short attempts add up to
+    one long one. One click means the first wait was long enough on its
+    own.
+    """
+    mod = _load_ww_utils()
+    client = _FriendsClient(friends=["Konstantin Ice"], slow_windows=12)
+    _run_tp(mod, client, name="Konstantin Ice")
+    assert client.teleported, "a slow window lost the teleport again"
+    rows = [c for c in client.clicks if c.startswith("row@")]
+    assert len(rows) == 1, \
+        f"the first look gave up early and the retry covered for it: {rows}"
+
+
+# ------------------------------------------ the friends-list teleport, driven
+# Not source-grepped like the guards above: this module is the one piece
+# of vendored wizwalker that can be LOADED on a machine without the game,
+# because it only touches windows and the mouse. Stub those and the whole
+# teleport runs, which is worth doing -- ten of these failed per run at
+# rev cfeb9a85 and every one of them was reported as a bare
+# `ValueError: No child window named wndCharacter`, a message that names
+# the symptom and nothing else.
+
+
+def _load_ww_utils():
+    """The vendored wizwalker friends-list module, importable on Linux.
+
+    Its only imports are `regex`, `WindowFlags` and one wizwalker util,
+    so stubbing those three lets the real code run against fake windows.
+    Loaded into a throwaway namespace rather than `sys.modules` so
+    nothing else in the suite inherits the stubs.
+    """
+    import asyncio
+    import enum
+    import re
+    import sys
+    import types
+
+    enums = types.ModuleType("wizwalker.memory.memory_objects.enums")
+
+    class WindowFlags(enum.IntFlag):
+        visible = 1
+        noclip = 2
+        disabled = 2147483648
+
+    enums.WindowFlags = WindowFlags
+    utils_mod = types.ModuleType("wizwalker.utils")
+
+    async def maybe_wait_for_value_with_timeout(*a, **kw):
+        return None
+
+    utils_mod.maybe_wait_for_value_with_timeout = maybe_wait_for_value_with_timeout
+
+    saved = {}
+    names = ("wizwalker", "wizwalker.memory", "wizwalker.memory.memory_objects",
+             "wizwalker.memory.memory_objects.enums", "wizwalker.utils", "regex")
+    for name in names:
+        saved[name] = sys.modules.get(name)
+    try:
+        for name in ("wizwalker", "wizwalker.memory",
+                     "wizwalker.memory.memory_objects"):
+            sys.modules[name] = types.ModuleType(name)
+        sys.modules["wizwalker.memory.memory_objects.enums"] = enums
+        sys.modules["wizwalker.utils"] = utils_mod
+        if sys.modules.get("regex") is None:
+            stub = types.ModuleType("regex")
+            stub.compile = re.compile
+            stub.findall = re.findall
+            sys.modules["regex"] = stub
+        namespace = {"__name__": "_ww_scripting_utils"}
+        exec(compile(_source(UTILS), UTILS, "exec"), namespace)
+        # The waits are real -- 20 retries at 0.4s is eight seconds per
+        # lookup, three times over on a retried click -- and they are
+        # guarded by `test_the_friend_teleport_still_waits_long_enough_
+        # for_its_windows` reading the source. Nothing here is testing
+        # the clock, so the module's own `asyncio` is swapped for one
+        # whose sleep returns at once. Everything else is the real
+        # module, so a `create_task` or a `wait_for` still works.
+        shim = types.ModuleType("asyncio")
+        shim.__dict__.update(asyncio.__dict__)
+
+        async def _no_wait(_seconds):
+            return None
+
+        shim.sleep = _no_wait
+        namespace["asyncio"] = shim
+    finally:
+        for name, was in saved.items():
+            if was is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = was
+    return types.SimpleNamespace(**namespace)
+
+
+class _Win:
+    """A game window with a name, text, children and visibility."""
+
+    def __init__(self, name, children=(), text="", visible=True):
+        self._name = name
+        self._children = children if callable(children) else list(children)
+        self._text = text
+        self._visible = visible
+        self.flags = None
+
+    async def name(self):
+        return self._name
+
+    async def children(self):
+        kids = self._children() if callable(self._children) else self._children
+        return [kid for kid in kids if kid is not None]
+
+    async def is_visible(self):
+        v = self._visible
+        return bool(v() if callable(v) else v)
+
+    async def maybe_text(self):
+        t = self._text
+        return t() if callable(t) else t
+
+    async def write_flags(self, flags):
+        self.flags = flags
+
+    async def get_windows_with_name(self, name):
+        found = []
+
+        async def walk(win):
+            if await win.name() == name:
+                found.append(win)
+            for kid in await win.children():
+                await walk(kid)
+
+        await walk(self)
+        return found
+
+    async def scale_to_client(self):
+        return _Rect()
+
+
+class _Rect:
+    y1 = 0
+
+    def center(self):
+        return (100, 100)
+
+
+def _entry(icon_list, icon_index, name):
+    """One friends-list row, in the markup `_friend_list_entry` parses."""
+    return (f"<Y;0><X;0><indent;0><Color;ffffffff><left>"
+            f"<icon;FriendsList/Friend_Icon_List_0{icon_list}.dds;1;1;"
+            f"{icon_index}></left><Y;0><X;0><indent;1><Color;ffffffff>"
+            f"<left><COLOR;ffffffff>{name}")
+
+
+class _FriendsClient:
+    """A client whose friends list and character panel actually behave.
+
+    `panel_for` is the wizard the next row click opens -- set it to
+    somebody other than the one asked for and the run should refuse to
+    press "Go to Friend".
+    """
+
+    def __init__(self, friends=("Konstantin Ice",), page=1, pages=1,
+                 opens_panel=True, panel_for=None, confirms=True,
+                 panel_text=True, slow_windows=0):
+        #: how many polls the panel and the confirmation box take to
+        #: appear once they have been asked for. Three game clients on
+        #: one machine is what makes this non-zero live.
+        self.slow_windows = slow_windows
+        self._panel_polls = 0
+        self._confirm_polls = 0
+        self.friends = list(friends)
+        self.page = page
+        self.pages = pages
+        self.clicks = []
+        self.opens_panel = opens_panel
+        self._panel_for = panel_for
+        self.confirms = confirms
+        self.panel_text = panel_text
+        self.panel_open = False
+        self.confirm_open = False
+        self.teleported = False
+        me = self
+
+        def list_text():
+            return "".join(_entry(1, i, n) for i, n in enumerate(me.friends))
+
+        self.character = _Win("wndCharacter", [
+            _Win("btnGoToFriend"),
+            _Win("btnCharacterClose"),
+            _Win("txtName", text=lambda: (me._panel_name()
+                                          if me.panel_text else "")),
+        ], visible=lambda: me.panel_open)
+        self.confirm = _Win("MessageBoxModalWindow", [_Win("centerButton")],
+                            visible=lambda: me.confirm_open)
+        self.friends_window = _Win("NewFriendsListWindow", [
+            _Win("lblFriendsList", text="<center>Online Friends</center>"),
+            _Win("btnListTypeRight"),
+            _Win("listFriends", text=list_text),
+            _Win("btnArrowDown"),
+            _Win("PageNumber",
+                 text=lambda: f"<center>{me.page} / {me.pages}</center>"),
+        ])
+        # The panel and the confirmation box are absent from the tree
+        # until the game builds them, which is why the live failure
+        # reads "No child window named wndCharacter" rather than "not
+        # visible" -- `get_windows_with_name` walks children and does
+        # not filter on visibility (`memory_objects/window.py:61`).
+        def tree():
+            panel = confirm = None
+            if me.panel_open:
+                me._panel_polls += 1
+                if me._panel_polls > me.slow_windows:
+                    panel = me.character
+            if me.confirm_open:
+                me._confirm_polls += 1
+                if me._confirm_polls > me.slow_windows:
+                    confirm = me.confirm
+            return [_Win("btnFriends"), me.friends_window, panel, confirm]
+
+        self.root_window = _Win("root", tree)
+
+        class _Mouse:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def click_window(self, win):
+                name = await win.name()
+                me.clicks.append(name)
+                if name == "btnArrowDown":
+                    me.page = me.page % max(me.pages, 1) + 1
+                elif name == "btnGoToFriend":
+                    me.confirm_open = bool(me.confirms)
+                elif name == "centerButton":
+                    me.teleported = True
+                    me.confirm_open = False
+                elif name == "btnCharacterClose":
+                    me.panel_open = False
+
+            async def click(self, x, y):
+                me.clicks.append(f"row@{y}")
+                me.panel_open = bool(me.opens_panel)
+
+        self.mouse_handler = _Mouse()
+
+        class _Render:
+            async def ui_scale(self):
+                return 1.0
+
+        self.render_context = _Render()
+
+    def _panel_name(self):
+        if self._panel_for is not None:
+            return self._panel_for
+        return self.friends[0] if self.friends else ""
+
+
+def _run_tp(mod, client, **kw):
+    import asyncio
+
+    return asyncio.run(mod.teleport_to_friend_from_list(client, **kw))
+
+
+def test_a_friend_teleport_that_works_closes_everything_it_opened():
+    """Upstream closed the friends window on the LAST line of the happy
+    path and the character panel inside `_teleport_to_friend`. Both are
+    still closed -- a wizard behind its own friends list cannot walk."""
+    mod = _load_ww_utils()
+    client = _FriendsClient(friends=["Konstantin Ice"])
+    _run_tp(mod, client, name="Konstantin Ice")
+    assert client.teleported
+    assert not client.panel_open, "the character panel was left open"
+    assert client.friends_window.flags == mod.WindowFlags.disabled
+
+
+def test_a_failed_teleport_does_not_leave_the_wizard_behind_two_modals():
+    """The compounding one, and the reason ten of these failed in one
+    run rather than one. Upstream raised out of the middle with
+    `wndCharacter` on screen on top of a friends list nothing closed
+    either, so every attempt after the first started by clicking through
+    two windows the wizard could not walk out of."""
+    import pytest
+
+    mod = _load_ww_utils()
+    client = _FriendsClient(friends=["Konstantin Ice"], opens_panel=False)
+    with pytest.raises(ValueError):
+        _run_tp(mod, client, name="Konstantin Ice")
+    assert not client.panel_open
+    assert client.friends_window.flags == mod.WindowFlags.disabled, \
+        "the friends list was left up after a failed teleport"
+
+
+def test_a_confirmation_that_never_comes_still_closes_the_panel():
+    import pytest
+
+    mod = _load_ww_utils()
+    client = _FriendsClient(friends=["Konstantin Ice"], confirms=False)
+    with pytest.raises(ValueError):
+        _run_tp(mod, client, name="Konstantin Ice")
+    assert not client.teleported
+    assert not client.panel_open
+    assert client.friends_window.flags == mod.WindowFlags.disabled
+
+
+def test_a_row_click_that_opened_nothing_is_tried_again():
+    """The online friends list RE-SORTS as people change zone, so the
+    row that matched the text a moment ago can hold nobody by the time
+    the mouse arrives. Upstream got one click and then ended the whole
+    call on `No child window named wndCharacter`."""
+    mod = _load_ww_utils()
+    client = _FriendsClient(friends=["Konstantin Ice"], opens_panel=False)
+
+    real_click = client.mouse_handler.click
+    tries = []
+
+    async def flaky(x, y):
+        tries.append(y)
+        if len(tries) >= 2:
+            client.opens_panel = True
+        await real_click(x, y)
+
+    client.mouse_handler.click = flaky
+    _run_tp(mod, client, name="Konstantin Ice")
+    assert len(tries) == 2, tries
+    assert client.teleported
+
+
+def test_the_panel_is_checked_against_the_name_before_teleporting():
+    """A stale row offset still opens a panel -- somebody else's. In a
+    party of three, everyone on everyone's list, teleporting to the
+    wrong one is a party split that reports as a success."""
+    import pytest
+
+    mod = _load_ww_utils()
+    client = _FriendsClient(friends=["Konstantin Ice"],
+                            panel_for="Sebastian Life")
+    with pytest.raises(ValueError) as caught:
+        _run_tp(mod, client, name="Konstantin Ice")
+    assert "somebody other than" in str(caught.value)
+    assert not client.teleported, "teleported to the wrong wizard"
+
+
+def test_a_panel_whose_name_will_not_read_is_still_allowed_through():
+    """`None` is not `False`. Unreadable text is not evidence of the
+    wrong wizard, and refusing on it would break the teleport on every
+    client whose panel keeps the name somewhere this cannot walk to."""
+    mod = _load_ww_utils()
+    client = _FriendsClient(friends=["Konstantin Ice"], panel_text=False)
+    _run_tp(mod, client, name="Konstantin Ice")
+    assert client.teleported
+
+
+def test_turning_back_to_an_earlier_page_is_not_a_silent_no_op():
+    """Upstream::
+
+        for _ in range(target_page - current_page):
+            await client.mouse_handler.click_window(right_button)
+
+    `range()` of a negative number is empty, so a friend on page 1 with
+    the window showing page 2 turned nothing -- and then clicked the row
+    offset anyway, on the wrong page. That is not an error, it is a
+    teleport to whoever happened to be sitting there."""
+    mod = _load_ww_utils()
+    # Twelve friends is two pages; the target is row 0, page 1, and the
+    # window opens on page 2.
+    friends = [f"Wizard{i} Name{i}" for i in range(12)]
+    client = _FriendsClient(friends=friends, page=2, pages=2,
+                            panel_for="Wizard0 Name0")
+    _run_tp(mod, client, name="Wizard0 Name0")
+    assert client.page == 1, "the list never turned back to page 1"
+    assert client.teleported
+
+
+def test_a_page_that_will_not_turn_is_reported_as_that():
+    """Not as "could not find friend" -- the caller retries other
+    spellings of a name that was just matched, and gives up saying the
+    wizard is not on the list."""
+    import pytest
+
+    mod = _load_ww_utils()
+    friends = [f"Wizard{i} Name{i}" for i in range(12)]
+    client = _FriendsClient(friends=friends, page=2, pages=2)
+
+    async def stuck(win):
+        client.clicks.append(await win.name())
+
+    client.mouse_handler.click_window = stuck
+    with pytest.raises(ValueError) as caught:
+        _run_tp(mod, client, name="Wizard0 Name0")
+    assert "would not turn" in str(caught.value)
+    assert "Could not find friend" not in str(caught.value)
+
+
+def test_a_friend_who_is_not_on_the_list_still_says_so_exactly():
+    """`party.py` matches this string to tell "try another spelling"
+    from "this teleport is broken". Changing it silently turns every
+    not-found into a fatal error."""
+    import pytest
+
+    mod = _load_ww_utils()
+    client = _FriendsClient(friends=["Konstantin Ice"])
+    with pytest.raises(ValueError) as caught:
+        _run_tp(mod, client, name="Nobody Here")
+    assert "Could not find friend" in str(caught.value)
 
 
 # ------------------------------------------------------------ navmap_tp result
@@ -684,3 +1092,32 @@ def test_the_correct_sameany_usages_were_not_touched():
             / "TTS Arc 1.txt").read_text(encoding="utf-8")
     assert arc1.count("sameany") > 500, \
         "the positive-any usages went missing with the dead ones"
+
+
+# ------------------------------------------- the friends-list row pattern
+def test_the_local_friend_entry_pattern_still_matches_wizwalkers():
+    """`party._ENTRY` is a copy of wizwalker's `_friend_list_entry`,
+    kept locally because the import is the part that cannot happen off
+    Windows -- `wizwalker.extensions.scripting.utils` pulls in the
+    memory layer -- while reading a name out of text is not
+    Windows-specific at all. That copy is what lets the party's
+    name resolution be tested at all.
+
+    A copy can drift, and drifting silently means matching nothing:
+    the account settings would stay at their placeholder forever and
+    the script would go on skipping every friend-teleport it has, which
+    is the failure the whole thing exists to end. So the two patterns
+    are compared character for character, and a Deimos bump that
+    changes the game's markup fails here.
+    """
+    from deimos_bridge import party
+
+    src = _source(UTILS)
+    body = src.split("_friend_list_entry = regex.compile(", 1)[1]
+    body = body.split("\n)", 1)[0]
+    theirs = "".join(re.findall(r'r"([^"]*)"', body))
+    assert theirs, "wizwalker's pattern could not be read at all"
+    assert party._ENTRY == theirs, (
+        "the local copy has drifted from wizwalker's:\n"
+        f"  ours:   {party._ENTRY!r}\n"
+        f"  theirs: {theirs!r}")

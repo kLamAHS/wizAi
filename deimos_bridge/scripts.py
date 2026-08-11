@@ -238,6 +238,24 @@ def unconfigured(source: str):
     `if NOT X = "Y"` elsewhere is the author saying "Y means unset".
     That generalises to any script written the same way, which is all of
     the ones built from this template.
+
+    The NOT matters, and it took filling the schools in correctly to
+    find out why. The template dispatches on them::
+
+        if NOT Main_Account_School = "SchoolGoesHere" {
+            if Main_Account_School = "Life" {
+            } elif Main_Account_School = "Storm" {
+
+    so once `configure` writes "Storm" onto the `var` line -- in the
+    script's own spelling, which is the whole point of
+    `script_spelling` -- the plain assigned-AND-compared rule sees
+    "Storm" assigned and "Storm" compared and calls a correctly
+    configured variable a placeholder, forever.
+
+    A placeholder is what the script tests for the ABSENCE of. Anything
+    it dispatches ON is vocabulary. The old rule stays as the fallback
+    for a variable with no negative guard at all, where a positive
+    `if X = "unset"` is the only evidence available.
     """
     import re
 
@@ -247,9 +265,16 @@ def unconfigured(source: str):
         if not value:
             continue
         pattern = rf'{re.escape(name)}\s*=\s*"{re.escape(value)}"'
-        # More than one is the `var` line plus at least one guard.
-        if len(re.findall(pattern, source)) > 1:
-            found.append((name, value))
+        # More than one is the `var` line plus at least one comparison.
+        if len(re.findall(pattern, source)) <= 1:
+            continue
+        negated = re.findall(rf'\bNOT\s+{re.escape(name)}\s*=\s*"([^"]*)"',
+                             source)
+        if negated:
+            if value in negated:
+                found.append((name, value))
+            continue
+        found.append((name, value))
     return found
 
 
@@ -332,6 +357,40 @@ def unfilled(source: str, party_size=None):
     return [(name, value) for name, value in blanks if name not in spare]
 
 
+def script_spelling(source: str, var: str, value: str, placeholder: str):
+    """`value` spelled the way THIS script spells it, or `value`.
+
+    The schools are the case in point. wizAi holds a seat's school
+    lowercase -- it is a dropdown value -- and the TTS template
+    dispatches on::
+
+        if NOT Main_Account_School = "SchoolGoesHere" {
+            if Main_Account_School = "Life" {
+            } elif Main_Account_School = "Storm" {
+
+    Capitalised, and deimoslang's `=` is a plain string comparison. So
+    filling in "storm" is the worst of both: the outer guard passes,
+    because "storm" is not the placeholder, and every branch inside it
+    fails, so the whole dispatch runs and does nothing. Silent, and
+    exactly the shape of the bug this module exists to prevent.
+
+    Rather than hardcoding the seven school names, this reads the
+    spellings out of the script the same way `unconfigured` reads the
+    placeholders: whatever literals the script COMPARES this variable
+    against are its vocabulary, and a case-insensitive match against
+    that list is the script's own spelling of the value.
+    """
+    import re
+
+    want = (value or "").strip().lower()
+    if not want:
+        return value
+    for literal in re.findall(rf'{re.escape(var)}\s*=\s*"([^"]*)"', source):
+        if literal != placeholder and literal.strip().lower() == want:
+            return literal
+    return value
+
+
 def configure(source: str, wizards):
     """(source, filled). Put the party's real names into the script.
 
@@ -368,6 +427,8 @@ def configure(source: str, wizards):
             placeholder = blanks.get(target)
             if not placeholder or not value:
                 continue
+            # ...in the script's own spelling. See `script_spelling`.
+            value = script_spelling(source, target, value, placeholder)
             # The `var` line only. The guards elsewhere compare against
             # the placeholder literal and MUST keep doing so -- that is
             # how the script tests whether it was configured, and
