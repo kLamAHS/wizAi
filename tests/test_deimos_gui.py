@@ -16804,7 +16804,7 @@ def test_a_quest_that_is_not_in_the_book_is_reported_as_such(monkeypatch):
         questing.select_quest(book, ["Eye of Krok"]))
     assert not ok
     assert in_book is False
-    assert "not been accepted" in why, why
+    assert "evidence, not proof" in why, why
     assert "Krokotopian Bundle" in why, "should show what the book DID list"
     assert book.tracked == "Krokotopian Bundle", "nothing should be clicked"
     assert "txtGoal" not in book.clicked
@@ -17161,10 +17161,38 @@ def test_a_quest_that_is_not_in_the_book_is_not_retried_forever(monkeypatch):
     asyncio.run(worker._maybe_recover_questline(lost))
     said = [e for e in lost.tel.questing
             if e["kind"] == "questline-quest-missing"]
-    assert said and "not retried" in said[0]["detail"]
+    assert said and "checked again in 30 min" in said[0]["detail"]
     lost.recover_tried_at = -1e9                  # cooldown out of the way
     asyncio.run(worker._maybe_recover_questline(lost))
     assert len(calls) == 1, "paged through the journal to learn the same thing"
+    # ...but the give-up EXPIRES. "Not among the visible entries" is
+    # evidence, not proof — the book shows four quests per page and the
+    # read cannot turn pages, so the quest may sit on page two the whole
+    # time, and a party that turns in the previous step makes it
+    # accepted where it was not. Rev f2b8101f wrote Phönix off at t=4536
+    # on that reading and never looked again.
+    lost.recover_gave_up_at = -1e9
+    lost.recover_tried_at = -1e9
+    asyncio.run(worker._maybe_recover_questline(lost))
+    assert len(calls) == 2, "the give-up never expires"
+
+
+def test_an_empty_book_read_is_retried_not_written_off(monkeypatch):
+    """Rev f2b8101f at t=6267: "The book showed: nothing" — and the
+    recovery concluded the quest was never accepted, on zero evidence.
+    A page with no entries is a read that failed: every wizard mid-arc
+    has a journal full of quests. Unreadable is not absent."""
+    import asyncio
+
+    questing = _fast_select(monkeypatch)
+    book = _TrackedBook(listing=[], all_listing=[],
+                        tracked="Krokotopian Bundle")
+    ok, why, in_book = asyncio.run(
+        questing.select_quest(book, ["Eye of Krok"]))
+    assert not ok
+    assert in_book is True, \
+        "an empty read must land in the retryable arm, not the write-off"
+    assert "read failure" in why, why
 
 
 def test_a_quest_nothing_looked_for_is_not_called_missing(monkeypatch):
@@ -18998,3 +19026,134 @@ def test_the_auto_dialogue_gate_asks_whose_dialogue_it_is():
     src = inspect.getsource(LiveWorker._service_loop)
     assert "not driven or self._dialogue_is_ours()" in src, \
         "wizAi stands back from every scripted wizard's dialogue again"
+
+
+def test_toggling_the_script_log_mid_run_rebuilds_the_script(qapp,
+                                                            monkeypatch):
+    """`set_debug` is baked into the build, so a runner built with the
+    flag off keeps `DebugMode = False` whatever the checkbox says now.
+    The 115-minute run at rev f2b8101f: "Script log" ticked mid-run, the
+    capture attached instantly, and nothing printed — the export's
+    script log only starts at t=1054 because the name fill happened to
+    rebuild the script 44 seconds later. Without that coincidence it
+    stays empty for the rest of the run."""
+    import asyncio
+
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    worker.script = _QUESTER
+    worker.script_debug = False
+    built = []
+
+    async def setup(_client, s):
+        built.append(worker.script_debug)
+        runner = _LiveRunner()
+        runner.stop = lambda: None
+        s.runner = runner
+
+    monkeypatch.setattr(worker, "_setup_script", setup)
+    monkeypatch.setattr(worker, "_scripted", lambda s: True)
+    asyncio.run(worker._sync_script(seat))
+    assert built == [False]
+    # Same text, same flag: no rebuild.
+    asyncio.run(worker._sync_script(seat))
+    assert built == [False]
+    # The operator ticks "Script log": same text, different flag — the
+    # runner must be rebuilt so its DebugMode follows.
+    worker.script_debug = True
+    asyncio.run(worker._sync_script(seat))
+    assert built == [False, True], \
+        "ticking Script log mid-run did not rebuild — DebugMode stays off"
+
+
+# ----------------------- the journal's Quest Finder pseudo-entry
+# Rev f2b8101f, the last 25 minutes: Sebastian's tracked quest read
+# "quest finder" — the journal tab the script's own lost-quest routine
+# leaves selected when a cycle fails partway. No quest tracked at all.
+# Every rung looked past him, each for a locally-correct reason: the
+# off-questline check skips unknown names (unreadable must not be called
+# a side quest), the recovery rung required a KNOWN placement, and the
+# marker read stale coordinates from the last real quest so the rearm
+# never saw a dead hook. "Quest Finder" is not unreadable — it is the
+# journal affirmatively saying nothing is selected.
+
+def test_the_quest_finder_pseudo_entry_is_recognised():
+    from deimos_bridge import questlist
+
+    assert questlist.no_quest_selected("Quest Finder")
+    assert questlist.no_quest_selected("quest finder")
+    assert not questlist.no_quest_selected("Eye of Krok")
+    assert not questlist.no_quest_selected("")
+    assert not questlist.no_quest_selected(None)
+
+
+def test_a_journal_on_quest_finder_is_reported_as_nothing_selected():
+    import time
+
+    from deimos_bridge import questlist
+
+    worker = _party_on_quests(["Gather the Troops", "Gather the Troops",
+                               "Quest Finder"])
+    finder = questlist.position_of("Quest Finder")
+    assert not finder.known, "the precondition of the whole bug"
+    worker._places = lambda: [questlist.position_of("Gather the Troops"),
+                              questlist.position_of("Gather the Troops"),
+                              finder]
+    worker._check_on_questline()                    # starts the clock
+    assert worker.seats[2].off_line_since is not None, \
+        "the pseudo-entry was skipped as an unreadable tracker again"
+    worker.seats[2].off_line_since = time.monotonic() - 300
+    worker._check_on_questline()
+    said = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "off-questline"]
+    assert said, "nothing owns the no-quest-selected state"
+    assert "NO quest selected" in said[0]["detail"]
+    assert "Quest Finder pseudo-entry" in said[0]["detail"]
+    assert "side quest" not in said[0]["detail"], \
+        "the pseudo-entry is not a side quest and must not be called one"
+
+
+def test_a_genuinely_unreadable_tracker_is_still_skipped():
+    """The rule the pseudo-entry is an exception TO must survive it."""
+    from deimos_bridge import questlist
+
+    worker = _party_on_quests(["Gather the Troops", "Gather the Troops"])
+    worker._places = lambda: [questlist.position_of("Gather the Troops"),
+                              questlist.Position()]          # nothing read
+    worker._check_on_questline()
+    worker._check_on_questline()
+    assert worker.seats[1].off_line_since is None
+
+
+def test_the_recovery_selects_a_real_quest_for_a_quest_finder_journal(
+        monkeypatch):
+    """The cure, end to end: the pseudo-entry passes the recovery gate,
+    `_lost_quest` names where the party is, and the book click puts a
+    real quest back on the tracker."""
+    import asyncio
+    import time
+
+    from deimos_bridge import questlist
+
+    questing = _no_dialogue(monkeypatch)
+    worker = _party_on_quests(["Gather the Troops", "Gather the Troops",
+                               "Quest Finder"])
+    lost = worker.seats[2]
+    places = [questlist.position_of("Gather the Troops"),
+              questlist.position_of("Gather the Troops"),
+              questlist.position_of("Quest Finder")]
+    worker._places = lambda: list(places)
+    lost.off_line_since = time.monotonic() - 400
+    calls = []
+
+    async def select(_c, names, on_status=None):
+        calls.append(list(names))
+        return True, names[0], True
+
+    monkeypatch.setattr(questing, "select_quest", select)
+    asyncio.run(worker._maybe_recover_questline(lost))
+    assert calls == [["Gather the Troops"]], \
+        "the pseudo-entry still cannot reach the recovery"
+    said = [e for e in lost.tel.questing
+            if e["kind"] == "questline-recovered"]
+    assert said and "'Quest Finder'" in said[0]["detail"]

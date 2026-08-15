@@ -180,6 +180,7 @@ class _Seat:
         #: forever. See `LiveWorker._maybe_recover_questline`.
         self.recover_tried_at = NEVER
         self.recover_gave_up = ""
+        self.recover_gave_up_at = NEVER
         #: the tracked quest's NAME, which is what `questlist` can place
         #: in a questline. The goal cannot be placed: "Talk to Professor
         #: Winthrop" is the objective of nine Krokotopia quests spanning
@@ -283,8 +284,11 @@ class _Seat:
         #: trimmed from every build after the first. See `_fresh_source`.
         self.script_built = False
         #: what `runner` was built from, so the service tick can notice
-        #: the operator turning the script on, off, or replacing it
+        #: the operator turning the script on, off, or replacing it --
+        #: and which way the debug flag pointed at build time, because
+        #: `set_debug` is baked into the build. See `_sync_script`.
         self.script_source = None
+        self.script_debug_built = None
         #: whether "the script is running" has been said for this
         #: runner. Said once, because the alternative is once per burst.
         self.script_said = False
@@ -1664,9 +1668,28 @@ class LiveWorker(QThread):
         if not self._scripted(seat):
             return
         want = self.script or ""
-        if seat.script_source == want:
+        # The debug flag is part of what the runner was BUILT from, not
+        # just the text: `_fresh_source` bakes `set_debug` into the
+        # build, so a runner built with the flag off keeps `DebugMode =
+        # False` no matter what the checkbox says now. The 115-minute
+        # run at rev f2b8101f shows the gap: "Script log" was ticked
+        # mid-run, the capture attached instantly — and nothing printed
+        # for the next stretch, because the running build still had
+        # DebugMode off. The export's script log only starts at t=1054
+        # because the name fill happened to rebuild the script 44
+        # seconds after the tick. Without that coincidence it would
+        # have stayed empty for the rest of the run.
+        if seat.script_source == want \
+                and seat.script_debug_built == self.script_debug:
             return
+        if seat.script_source == want and seat.runner is not None:
+            self._say(seat,
+                      f"script log turned {'on' if self.script_debug else 'off'}"
+                      f" — reloading the script so its own DebugMode "
+                      f"follows (a reload re-runs the route from the top; "
+                      f"its one-time setup stays skipped)")
         seat.script_source = want
+        seat.script_debug_built = self.script_debug
         if seat.runner is not None:
             seat.runner.stop()
             seat.runner = None
@@ -2424,6 +2447,7 @@ class LiveWorker(QThread):
 
         seat = self._seat_for(client) if seat is None else seat
         seat.script_source = self.script or ""
+        seat.script_debug_built = self.script_debug
         seat.script_said = False
         party = [s.client for s in self.seats if s.client is not None]
         try:
@@ -5000,7 +5024,17 @@ class LiveWorker(QThread):
                 # main-line one is worth keeping.
                 seat.last_main = (place.world, place.order, place.name)
                 seat.last_main_at = now
-            if place.on_main or not place.known:
+            # The one unknown name that IS evidence: "Quest Finder", the
+            # journal's own pseudo-entry. Not a failed read -- the
+            # journal affirmatively saying no quest is selected, which
+            # the script's own lost-quest routine leaves behind when a
+            # cycle fails partway. Rev f2b8101f: Sebastian's tracker sat
+            # on it for the last 25 minutes of the run and every rung
+            # looked past him, precisely because unknown is skipped
+            # below. It gets the off-line clock, and the recovery rung
+            # takes it from there.
+            none_selected = questlist.no_quest_selected(seat.quest_name)
+            if place.on_main or (not place.known and not none_selected):
                 # `known` False is a read that failed or a quest the
                 # list has never heard of -- not evidence of anything.
                 # Saying "off the questline" on an unreadable tracker
@@ -5028,12 +5062,24 @@ class LiveWorker(QThread):
             if seat.said_off_line == place.name:
                 continue
             seat.said_off_line = place.name
-            said = (f"{seat.name} has been off the main questline for "
-                    f"{away / 60:.0f} min — its tracker is on "
-                    f"{place.name!r}, which is a side quest"
-                    + (f", while the party is on {theirs}" if theirs else "")
-                    + ". Every `tp quest` goes to the side quest until the "
-                      "main one is selected again")
+            if none_selected:
+                said = (f"{seat.name} has had NO quest selected for "
+                        f"{away / 60:.0f} min — its journal is on the "
+                        f"Quest Finder pseudo-entry, which is what the "
+                        f"script's own lost-quest routine leaves behind "
+                        f"when a cycle fails partway"
+                        + (f", while the party is on {theirs}" if theirs
+                           else "")
+                        + ". Every `tp quest` has nothing to aim at until "
+                          "a real quest is selected again")
+            else:
+                said = (f"{seat.name} has been off the main questline for "
+                        f"{away / 60:.0f} min — its tracker is on "
+                        f"{place.name!r}, which is a side quest"
+                        + (f", while the party is on {theirs}" if theirs
+                           else "")
+                        + ". Every `tp quest` goes to the side quest until "
+                          "the main one is selected again")
             for other in self.seats:
                 try:
                     other.tel.note_questing("off-questline", said)
@@ -5255,6 +5301,13 @@ class LiveWorker(QThread):
     #: task lands mid-click turns the click into a misfire.
     RECOVER_CEILING = 60.0
     RECOVER_SETTLE = 3.0
+    #: how long a "not among the visible entries" give-up holds before
+    #: the same candidate list is worth one more look. Half an hour: a
+    #: retry costs ~15 held seconds of paging the book, and the two
+    #: states it recovers from -- the quest sitting on a page the read
+    #: cannot reach, and the party accepting it since -- both persist
+    #: far longer than a cooldown.
+    RECOVER_GIVEUP_TTL = 1800.0
 
     async def _maybe_recover_questline(self, seat):
         """Put a lost tracker back onto the main questline.
@@ -5306,7 +5359,17 @@ class LiveWorker(QThread):
             return
         places = self._places()
         place = dict(zip((id(s) for s in self.seats), places)).get(id(seat))
-        if place is None or place.on_main or not place.known:
+        if place is None or place.on_main:
+            return
+        if not place.known and not questlist.no_quest_selected(seat.quest_name):
+            # Unknown is a read that failed, and selecting a quest on
+            # that evidence would fire on every loading screen. The one
+            # exception is the journal's Quest Finder pseudo-entry,
+            # which is not a failed read -- it is the journal saying
+            # nothing is selected, and putting a real quest back is
+            # exactly what this rung is for. Rev f2b8101f: Sebastian
+            # spent the last 25 minutes of the run in that state while
+            # this line skipped him.
             return
         alone = not any(p.on_main for s, p in zip(self.seats, places)
                         if s is not seat)
@@ -5315,13 +5378,20 @@ class LiveWorker(QThread):
         candidates, why = self._lost_quest(seat, places)
         if not candidates:
             return
-        # A quest that is not in the book is not in the book. Retrying
-        # the identical candidate list every ten minutes for the rest
-        # of the run would page through the journal forever to learn
-        # the same thing; a NEW candidate list is a new question and
-        # gets a new attempt.
+        # A give-up holds for the same candidate list -- retrying it
+        # every ten minutes would page through the journal forever to
+        # learn the same thing -- but it EXPIRES, because "none of them
+        # is among the visible entries" is evidence and not proof. The
+        # book shows four quests per page and `select_quest` cannot
+        # turn pages, so the quest may sit on page two the whole time;
+        # and a party that turns in the previous step makes the quest
+        # accepted where it was not. The 115-min run at rev f2b8101f
+        # wrote Phönix off at t=4536 on exactly that reading and never
+        # looked again until the candidates happened to change. A NEW
+        # candidate list is still a new question and skips the wait.
         key = " | ".join(p.name for p, _s in candidates)
-        if seat.recover_gave_up == key:
+        if seat.recover_gave_up == key \
+                and now - seat.recover_gave_up_at < self.RECOVER_GIVEUP_TTL:
             return
         if await questing.in_dialogue(seat.client):
             return
@@ -5367,6 +5437,7 @@ class LiveWorker(QThread):
             # ONCE, because the answer will not change while the
             # candidates do not.
             seat.recover_gave_up = key
+            seat.recover_gave_up_at = now
             seat.tel.note_questing(
                 "questline-recovery-unsafe",
                 f"{seat.name} has been off the main questline for "
@@ -5384,15 +5455,18 @@ class LiveWorker(QThread):
             # it was never accepted. Nothing in the journal can take
             # it; somebody has to walk to the NPC that gives it.
             seat.recover_gave_up = key
+            seat.recover_gave_up_at = now
             seat.tel.note_questing(
                 "questline-quest-missing",
                 f"{seat.name} has been off the main questline for "
                 f"{away / 60:.0f} min and the quest it should be on is "
                 f"not in its book: {why}"
                 + (f" — {told}" if told else "")
-                + ". Until it is accepted from its NPC no selection can "
-                  "put this wizard back on the line, so this is not "
-                  "retried")
+                + f". If it was never accepted, only its NPC can fix "
+                  f"that — but the book shows four quests per page and "
+                  f"the read cannot turn pages, so this is checked "
+                  f"again in {self.RECOVER_GIVEUP_TTL / 60:.0f} min "
+                  f"rather than never")
             self._say(seat, f"cannot recover the questline: {why}")
             return
         seat.tel.note_questing(

@@ -155,6 +155,31 @@ class _Index:
                       if len(key.split()) >= 2]
 
 
+#: tracked-quest "names" that mean NO quest is selected at all. "Quest
+#: Finder" is the journal's own pseudo-entry: the tab the game selects
+#: when the quest-finder UI is used, and what `read_quest_name` returns
+#: while nothing real is tracked. It reads like a quest name and is the
+#: opposite of one.
+PSEUDO_ENTRIES = frozenset({"quest finder"})
+
+
+def no_quest_selected(quest_name) -> bool:
+    """Does this tracked-quest name mean NOTHING is selected?
+
+    The state every detector missed in the 115-minute run at rev
+    f2b8101f. The script's own lost-quest routine clicks the journal's
+    Quest Finder tab, and a cycle that fails partway leaves the journal
+    ON that tab — no quest tracked at all. Sebastian sat there for the
+    last 25 minutes of the run while every rung looked past him:
+    `position_of("Quest Finder")` answers `known=False`, and unknown is
+    deliberately skipped by the off-questline check, because unreadable
+    must not be called a side quest. This name is not unreadable — it
+    is the journal AFFIRMATIVELY saying no quest is selected, which is
+    the one thing better evidence than any placement.
+    """
+    return _norm(quest_name) in PSEUDO_ENTRIES
+
+
 def key_for(quest_name) -> str:
     """The stable key for a quest name, for callers keeping their own map.
 
