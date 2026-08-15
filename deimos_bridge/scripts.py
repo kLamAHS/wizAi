@@ -391,6 +391,105 @@ def script_spelling(source: str, var: str, value: str, placeholder: str):
     return value
 
 
+#: the keys a deimoslang script presses to advance a dialogue box.
+DIALOGUE_KEYS = ("SPACEBAR", "ENTER")
+
+
+def undeclared_guards(source: str):
+    """[(name, line)] for `if X = True` guards on a variable that is never
+    declared.
+
+    deimoslang answers an undefined constant with `False`, silently
+    (`vm.py:1109`) -- so a guard on a name nobody declared is not a
+    syntax error and not a warning, it is a branch that can never be
+    taken and a feature that is quietly off.
+
+    Every TTS preset has exactly one, and it is the dialogue clearer::
+
+        if any hasdialogue {
+            print "Dialogue detected. Clearing..."
+            if Handle_Dialogue = True {
+                sameany sendkey SPACEBAR, .1
+            }
+        }
+
+    `Handle_Dialogue` is used on that line and declared nowhere in
+    14,427 lines, so the script announces that it is clearing the box
+    and then does not press anything. See `clears_dialogue`.
+    """
+    import re
+
+    declared = {m.group(1) for m in
+                re.finditer(r'^\s*var\s+(\w+)\s*=', source or "", re.M)}
+    found = []
+    for n, raw in enumerate((source or "").splitlines(), 1):
+        line = raw.split("#", 1)[0]
+        for m in re.finditer(r'\bif\s+(?:NOT\s+)?(\w+)\s*=\s*(?:True|False)\b',
+                             line):
+            name = m.group(1)
+            if name not in declared and (name, n) not in found:
+                found.append((name, n))
+    return found
+
+
+def dead_dialogue_guard(source: str) -> str:
+    """The undeclared variable switching this script's dialogue clearer
+    off, or "".
+
+    The question wizAi has to answer before deciding whether to run its
+    own clicker for a scripted wizard. It used to assume that a running
+    script handles its own dialogue, and for every preset it ships that
+    is false::
+
+        if any hasdialogue {
+            print "Dialogue detected. Clearing..."
+            if Handle_Dialogue = True {
+                sameany sendkey SPACEBAR, .1
+            }
+        }
+
+    `Handle_Dialogue` is declared nowhere in 14,427 lines, deimoslang
+    answers an undefined constant with `False` (`vm.py:1109`), so the
+    press never happens -- the script announces that it is clearing the
+    box and then does not press anything. Rev ed709013 caught the
+    symptom without the cause: `Dialogue detected. Clearing...` fifteen
+    times in eight milliseconds with General Khaba's MORE button
+    untouched on all three clients.
+
+    Deliberately narrow. It does NOT ask "does this script ever press
+    space" -- the presets do, in per-quest sequences and in the spell
+    trainer, and those are not the general handler. It asks whether a
+    dialogue press is gated on a name that cannot ever be true, which
+    is a fact about one guard and checkable exactly.
+    """
+    import re
+
+    declared = {m.group(1) for m in
+                re.finditer(r'^\s*var\s+(\w+)\s*=', source or "", re.M)}
+    keys = "|".join(DIALOGUE_KEYS)
+    stack = []
+    for raw in (source or "").splitlines():
+        line = raw.split("#", 1)[0]
+        # Closes first, so `} else {` pops the branch it is leaving
+        # before opening the one it enters.
+        for _ in range(line.count("}")):
+            if stack:
+                stack.pop()
+        guard = None
+        m = re.search(r'\bif\s+(\w+)\s*=\s*(?:True|False)\b', line)
+        opens = line.count("{")
+        if m and opens:
+            guard = m.group(1)
+        for i in range(opens):
+            # Only the innermost brace this line opens carries the guard.
+            stack.append(guard if i == opens - 1 else None)
+        if re.search(rf'\bsendkey\s+(?:{keys})\b', line, re.I):
+            for name in stack:
+                if name is not None and name not in declared:
+                    return name
+    return ""
+
+
 def configure(source: str, wizards):
     """(source, filled). Put the party's real names into the script.
 

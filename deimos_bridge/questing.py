@@ -1401,14 +1401,15 @@ async def select_quest(client, names, on_status=None):
     the second costs nothing.
 
     `in_book` is the third return because the failures need different
-    responses. True: the quest IS listed and would not select, a UI
-    problem worth retrying. False: it is NOT listed, so it was never
-    accepted -- the wizard has to go and take it from an NPC, which no
-    amount of clicking in the journal achieves, and the caller should
-    say so rather than trying again in ten minutes. None: the book was
-    never looked in, because no candidate was safe to match on, and
-    saying "not in the book" about a quest nothing looked for would be
-    a lie that writes the wizard off.
+    responses. True: the book was READ and this attempt failed for a
+    reason another attempt can fix -- a matched entry that would not
+    select, a close that did not take, a page that showed no entries at
+    all. False: entries were read and none matched -- evidence the
+    quest was never accepted, though not proof, because the book shows
+    `QUEST_BOOK_SLOTS` quests per page and this cannot turn pages.
+    None: the book was never looked in, because no candidate was safe
+    to match on, and saying "not in the book" about a quest nothing
+    looked for would be a lie that writes the wizard off.
 
     Only an UNAMBIGUOUS match is ever clicked. Two entries matching one
     name means the tokens do not identify a quest here, and clicking
@@ -1478,12 +1479,30 @@ async def select_quest(client, names, on_status=None):
                 picked = name
                 break
             else:
-                listing = " · ".join(t for (_s, _e, t) in seen) or "nothing"
                 tried = ", ".join(repr(n) for n, _t in wanted)
-                return False, (f"none of {tried} is in the quest book — "
-                               f"the quest has not been accepted, so it "
-                               f"has to be picked up from its NPC before "
-                               f"anything can track it. The book showed: "
+                if not seen:
+                    # The book opened and showed NO entries at all. That
+                    # is a read that failed, not a journal with nothing
+                    # in it — every wizard mid-arc has a page of quests.
+                    # The 115-min run at rev f2b8101f made this exact
+                    # call: "The book showed: nothing", concluded the
+                    # quest was never accepted, and wrote the recovery
+                    # off on zero evidence. Unreadable is not absent.
+                    # `True` — the retryable arm — because a read that
+                    # failed is a UI problem, and the next look may
+                    # simply work.
+                    return False, (f"the quest book opened but its quest "
+                                   f"page showed no entries at all — a "
+                                   f"read failure, so whether {tried} is "
+                                   f"in the book is unknown"), True
+                listing = " · ".join(t for (_s, _e, t) in seen)
+                return False, (f"none of {tried} is among the quest book's "
+                               f"visible entries. The book shows "
+                               f"{QUEST_BOOK_SLOTS} quests per page and "
+                               f"this cannot turn pages, so this is "
+                               f"evidence, not proof — the quest may be "
+                               f"on a later page, or genuinely not "
+                               f"accepted yet. The visible page: "
                                f"{listing[:200]}"), False
     finally:
         closed = await book.close()

@@ -180,6 +180,7 @@ class _Seat:
         #: forever. See `LiveWorker._maybe_recover_questline`.
         self.recover_tried_at = NEVER
         self.recover_gave_up = ""
+        self.recover_gave_up_at = NEVER
         #: the tracked quest's NAME, which is what `questlist` can place
         #: in a questline. The goal cannot be placed: "Talk to Professor
         #: Winthrop" is the objective of nine Krokotopia quests spanning
@@ -283,8 +284,11 @@ class _Seat:
         #: trimmed from every build after the first. See `_fresh_source`.
         self.script_built = False
         #: what `runner` was built from, so the service tick can notice
-        #: the operator turning the script on, off, or replacing it
+        #: the operator turning the script on, off, or replacing it --
+        #: and which way the debug flag pointed at build time, because
+        #: `set_debug` is baked into the build. See `_sync_script`.
         self.script_source = None
+        self.script_debug_built = None
         #: whether "the script is running" has been said for this
         #: runner. Said once, because the alternative is once per burst.
         self.script_said = False
@@ -524,6 +528,12 @@ class LiveWorker(QThread):
         self._full_names = {}
         self._names_tried_at = NEVER
         self._names_done = False
+        #: whether wizAi owns dialogue for this script, and the source
+        #: the answer was worked out from — so a reloaded or rewritten
+        #: script is re-examined and an unchanged one is not. See
+        #: `_dialogue_is_ours`.
+        self._dialogue_ours = None
+        self._dialogue_for = None
         #: which seat is currently stepping the VM, when it is not the
         #: seat that owns it. Kept only so the handover is said once
         #: rather than every tick. See `_script_seat`.
@@ -793,11 +803,16 @@ class LiveWorker(QThread):
                 # goal read, the in-step check and the script sync, so it
                 # waited on all three every tick before it even looked.
                 # Reported live as auto-dialogue being slow to trigger.
-                if self.auto_dialogue and seat.quester is None and not driven:
+                if (self.auto_dialogue and seat.quester is None
+                        and (not driven or self._dialogue_is_ours())):
                     # Deimos's questing does its own dialogue handling,
                     # so a second clicker would race it for the same
-                    # button. A running script is the same problem: they
-                    # all reach for the dialogue box.
+                    # button. A running script USUALLY is the same
+                    # problem -- but every preset wizAi ships has its
+                    # dialogue clearer switched off by a variable
+                    # nobody declared, so for those there is no second
+                    # clicker and standing back means nothing presses
+                    # anything. See `_dialogue_is_ours`.
                     await self._stage(seat, "auto-dialogue",
                                       self._auto_dialogue(client), wheel=True)
 
@@ -1229,6 +1244,75 @@ class LiveWorker(QThread):
     #: needs to notice anything at all.
     DRIVER_QUIET = 90.0
 
+    def _dialogue_is_ours(self):
+        """Should wizAi click dialogue for a wizard the script is driving?
+
+        The operator's report, and it is two symptoms of one cause: "the
+        auto dialogue works but when scripting is enabled ... it waits a
+        long time to start the dialogue / go through it".
+
+        wizAi stood back from any scripted wizard's dialogue box on the
+        reasoning that a second clicker would race the script's own. For
+        every preset it ships, there is no first clicker. The general
+        handler is::
+
+            if any hasdialogue {
+                print "Dialogue detected. Clearing..."
+                if Handle_Dialogue = True {
+                    sameany sendkey SPACEBAR, .1
+                }
+            }
+
+        and `Handle_Dialogue` is declared nowhere. deimoslang answers an
+        undefined constant with `False` without complaining
+        (`vm.py:1109`), so the script prints that it is clearing the box
+        and presses nothing, then sleeps `DialogDelay` and prints it
+        again. The script's banner asks the operator to switch Deimos's
+        own Dialogue toggle on -- and that is Deimos's GUI, which wizAi
+        does not run.
+
+        So nothing was clearing dialogue for a scripted wizard except
+        `_unstick`, which is a wedge detector: it waits `DIALOG_WEDGE`
+        for the box, then another `UNSTICK_EVERY` to see the same text
+        twice. Nearly a minute of standing still, by design, because it
+        was built for a box somebody else was failing to handle rather
+        than for one nobody was touching.
+
+        Rev ed709013 saw the symptom and drew the wrong conclusion --
+        `Dialogue detected. Clearing...` fifteen times in eight
+        milliseconds while General Khaba's MORE button sat unclicked --
+        and the note it left says "measurably not being handled", which
+        was right about the measurement and wrong about the cause.
+
+        Checked per script rather than assumed either way: a script that
+        declares the guard, or presses the key unguarded, still owns its
+        own dialogue and wizAi stays out of it.
+        """
+        from .. import scripts
+
+        source = self.script or ""
+        if not source:
+            return False
+        if self._dialogue_ours is None or self._dialogue_for != source:
+            self._dialogue_for = source
+            guard = scripts.dead_dialogue_guard(source)
+            self._dialogue_ours = bool(guard)
+            if guard:
+                said = (f"this script's dialogue clearer is switched off by "
+                        f"`{guard}`, which it never declares — deimoslang "
+                        f"reads an undefined name as False, so it prints "
+                        f"\"Dialogue detected. Clearing...\" and presses "
+                        f"nothing. wizAi is clicking dialogue for these "
+                        f"wizards instead of standing back for a handler "
+                        f"that does not run")
+                for seat in self.seats:
+                    try:
+                        seat.tel.note_questing("script-dialogue-dead", said)
+                    except Exception:
+                        pass
+                self._say(self.seats[0], said)
+        return self._dialogue_ours
+
     def _script_seat(self):
         """The seat whose loop steps the party's one VM, or None.
 
@@ -1296,34 +1380,72 @@ class LiveWorker(QThread):
         """
         if limit is None:
             limit = self.STAGE_LIMITS.get(name, self.DEFAULT_STAGE_LIMIT)
+        # A stage that does not take the wheel starts the moment it is
+        # awaited; one that does may spend its whole deadline waiting.
+        started = [not wheel]
         if wheel:
-            coro = self._at_the_wheel(seat, name, coro)
+            coro = self._at_the_wheel(seat, name, coro, started)
         try:
             await asyncio.wait_for(coro, limit)
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError:
-            self._say_once(
-                seat, name,
-                f"{name} ran for {limit:.0f}s without finishing and was cut "
-                f"off. It holds the wheel while it runs, so everything else "
-                f"for this wizard — the hotkeys included — was waiting "
-                f"behind it.",
-                kind="stage-timeout",
-                detail=f"{name} cut off after {limit:.0f}s")
+            if started[0]:
+                said = (f"{name} ran for {limit:.0f}s without finishing and "
+                        f"was cut off. It holds the wheel while it runs, so "
+                        f"everything else for this wizard — the hotkeys "
+                        f"included — was waiting behind it.")
+                detail = f"{name} cut off after {limit:.0f}s"
+            else:
+                # Never started. Saying "ran for 90s" here sends whoever
+                # reads it looking for a slow stage, and the slow thing
+                # is whatever has been holding this wizard's wheel for
+                # the whole ninety seconds.
+                said = (f"{name} waited {limit:.0f}s for this wizard's drive "
+                        f"lock and never got it, so it did not run at all — "
+                        f"something else has been steering this wizard that "
+                        f"whole time.")
+                detail = (f"{name} never started — {limit:.0f}s waiting for "
+                          f"the drive lock")
+            self._say_once(seat, name, said,
+                           kind="stage-timeout", detail=detail)
         except Exception as exc:
             self._stage_failed(seat, name, exc)
 
-    async def _at_the_wheel(self, seat, name, coro):
+    async def _at_the_wheel(self, seat, name, coro, started=None):
         """`coro`, holding this wizard's drive lock.
 
         Inside the stage's own deadline rather than outside it, which is
         the whole point: the *acquisition* is bounded too, so a stage
         that cannot get the wheel is cut off and reported instead of
         queueing up behind a wedge and adding to it.
+
+        `started` is a one-element list the caller reads afterwards, and
+        it exists because those two outcomes are not the same thing.
+        A stage cut off while still WAITING for the lock never ran at
+        all -- and its coroutine was never awaited, which Python says
+        out loud:
+
+            RuntimeWarning: coroutine 'LiveWorker._unstick' was never
+            awaited
+
+        Rev f2b8101f printed exactly that next to `stage-timeout:
+        unwedging a stuck script cut off after 90s`, and the two are one
+        event: `_unstick` did not run for 90 seconds, it waited 90
+        seconds for a lock somebody else was holding and was then
+        dropped. Closing it here is what stops the warning; telling the
+        caller is what stops the export from saying the wrong thing.
         """
-        async with self._driving(seat, name):
-            await coro
+        try:
+            async with self._driving(seat, name):
+                if started is not None:
+                    started[0] = True
+                await coro
+        finally:
+            if started is not None and not started[0]:
+                # Never awaited, so close it rather than leaving Python
+                # to garbage-collect an un-started coroutine.
+                coro.close()
 
     def _stage_failed(self, seat, name, exc):
         self._say_once(seat, name,
@@ -1546,9 +1668,28 @@ class LiveWorker(QThread):
         if not self._scripted(seat):
             return
         want = self.script or ""
-        if seat.script_source == want:
+        # The debug flag is part of what the runner was BUILT from, not
+        # just the text: `_fresh_source` bakes `set_debug` into the
+        # build, so a runner built with the flag off keeps `DebugMode =
+        # False` no matter what the checkbox says now. The 115-minute
+        # run at rev f2b8101f shows the gap: "Script log" was ticked
+        # mid-run, the capture attached instantly — and nothing printed
+        # for the next stretch, because the running build still had
+        # DebugMode off. The export's script log only starts at t=1054
+        # because the name fill happened to rebuild the script 44
+        # seconds after the tick. Without that coincidence it would
+        # have stayed empty for the rest of the run.
+        if seat.script_source == want \
+                and seat.script_debug_built == self.script_debug:
             return
+        if seat.script_source == want and seat.runner is not None:
+            self._say(seat,
+                      f"script log turned {'on' if self.script_debug else 'off'}"
+                      f" — reloading the script so its own DebugMode "
+                      f"follows (a reload re-runs the route from the top; "
+                      f"its one-time setup stays skipped)")
         seat.script_source = want
+        seat.script_debug_built = self.script_debug
         if seat.runner is not None:
             seat.runner.stop()
             seat.runner = None
@@ -2306,6 +2447,7 @@ class LiveWorker(QThread):
 
         seat = self._seat_for(client) if seat is None else seat
         seat.script_source = self.script or ""
+        seat.script_debug_built = self.script_debug
         seat.script_said = False
         party = [s.client for s in self.seats if s.client is not None]
         try:
@@ -4882,7 +5024,17 @@ class LiveWorker(QThread):
                 # main-line one is worth keeping.
                 seat.last_main = (place.world, place.order, place.name)
                 seat.last_main_at = now
-            if place.on_main or not place.known:
+            # The one unknown name that IS evidence: "Quest Finder", the
+            # journal's own pseudo-entry. Not a failed read -- the
+            # journal affirmatively saying no quest is selected, which
+            # the script's own lost-quest routine leaves behind when a
+            # cycle fails partway. Rev f2b8101f: Sebastian's tracker sat
+            # on it for the last 25 minutes of the run and every rung
+            # looked past him, precisely because unknown is skipped
+            # below. It gets the off-line clock, and the recovery rung
+            # takes it from there.
+            none_selected = questlist.no_quest_selected(seat.quest_name)
+            if place.on_main or (not place.known and not none_selected):
                 # `known` False is a read that failed or a quest the
                 # list has never heard of -- not evidence of anything.
                 # Saying "off the questline" on an unreadable tracker
@@ -4910,12 +5062,24 @@ class LiveWorker(QThread):
             if seat.said_off_line == place.name:
                 continue
             seat.said_off_line = place.name
-            said = (f"{seat.name} has been off the main questline for "
-                    f"{away / 60:.0f} min — its tracker is on "
-                    f"{place.name!r}, which is a side quest"
-                    + (f", while the party is on {theirs}" if theirs else "")
-                    + ". Every `tp quest` goes to the side quest until the "
-                      "main one is selected again")
+            if none_selected:
+                said = (f"{seat.name} has had NO quest selected for "
+                        f"{away / 60:.0f} min — its journal is on the "
+                        f"Quest Finder pseudo-entry, which is what the "
+                        f"script's own lost-quest routine leaves behind "
+                        f"when a cycle fails partway"
+                        + (f", while the party is on {theirs}" if theirs
+                           else "")
+                        + ". Every `tp quest` has nothing to aim at until "
+                          "a real quest is selected again")
+            else:
+                said = (f"{seat.name} has been off the main questline for "
+                        f"{away / 60:.0f} min — its tracker is on "
+                        f"{place.name!r}, which is a side quest"
+                        + (f", while the party is on {theirs}" if theirs
+                           else "")
+                        + ". Every `tp quest` goes to the side quest until "
+                          "the main one is selected again")
             for other in self.seats:
                 try:
                     other.tel.note_questing("off-questline", said)
@@ -5137,6 +5301,13 @@ class LiveWorker(QThread):
     #: task lands mid-click turns the click into a misfire.
     RECOVER_CEILING = 60.0
     RECOVER_SETTLE = 3.0
+    #: how long a "not among the visible entries" give-up holds before
+    #: the same candidate list is worth one more look. Half an hour: a
+    #: retry costs ~15 held seconds of paging the book, and the two
+    #: states it recovers from -- the quest sitting on a page the read
+    #: cannot reach, and the party accepting it since -- both persist
+    #: far longer than a cooldown.
+    RECOVER_GIVEUP_TTL = 1800.0
 
     async def _maybe_recover_questline(self, seat):
         """Put a lost tracker back onto the main questline.
@@ -5188,7 +5359,17 @@ class LiveWorker(QThread):
             return
         places = self._places()
         place = dict(zip((id(s) for s in self.seats), places)).get(id(seat))
-        if place is None or place.on_main or not place.known:
+        if place is None or place.on_main:
+            return
+        if not place.known and not questlist.no_quest_selected(seat.quest_name):
+            # Unknown is a read that failed, and selecting a quest on
+            # that evidence would fire on every loading screen. The one
+            # exception is the journal's Quest Finder pseudo-entry,
+            # which is not a failed read -- it is the journal saying
+            # nothing is selected, and putting a real quest back is
+            # exactly what this rung is for. Rev f2b8101f: Sebastian
+            # spent the last 25 minutes of the run in that state while
+            # this line skipped him.
             return
         alone = not any(p.on_main for s, p in zip(self.seats, places)
                         if s is not seat)
@@ -5197,13 +5378,20 @@ class LiveWorker(QThread):
         candidates, why = self._lost_quest(seat, places)
         if not candidates:
             return
-        # A quest that is not in the book is not in the book. Retrying
-        # the identical candidate list every ten minutes for the rest
-        # of the run would page through the journal forever to learn
-        # the same thing; a NEW candidate list is a new question and
-        # gets a new attempt.
+        # A give-up holds for the same candidate list -- retrying it
+        # every ten minutes would page through the journal forever to
+        # learn the same thing -- but it EXPIRES, because "none of them
+        # is among the visible entries" is evidence and not proof. The
+        # book shows four quests per page and `select_quest` cannot
+        # turn pages, so the quest may sit on page two the whole time;
+        # and a party that turns in the previous step makes the quest
+        # accepted where it was not. The 115-min run at rev f2b8101f
+        # wrote Phönix off at t=4536 on exactly that reading and never
+        # looked again until the candidates happened to change. A NEW
+        # candidate list is still a new question and skips the wait.
         key = " | ".join(p.name for p, _s in candidates)
-        if seat.recover_gave_up == key:
+        if seat.recover_gave_up == key \
+                and now - seat.recover_gave_up_at < self.RECOVER_GIVEUP_TTL:
             return
         if await questing.in_dialogue(seat.client):
             return
@@ -5249,6 +5437,7 @@ class LiveWorker(QThread):
             # ONCE, because the answer will not change while the
             # candidates do not.
             seat.recover_gave_up = key
+            seat.recover_gave_up_at = now
             seat.tel.note_questing(
                 "questline-recovery-unsafe",
                 f"{seat.name} has been off the main questline for "
@@ -5266,15 +5455,18 @@ class LiveWorker(QThread):
             # it was never accepted. Nothing in the journal can take
             # it; somebody has to walk to the NPC that gives it.
             seat.recover_gave_up = key
+            seat.recover_gave_up_at = now
             seat.tel.note_questing(
                 "questline-quest-missing",
                 f"{seat.name} has been off the main questline for "
                 f"{away / 60:.0f} min and the quest it should be on is "
                 f"not in its book: {why}"
                 + (f" — {told}" if told else "")
-                + ". Until it is accepted from its NPC no selection can "
-                  "put this wizard back on the line, so this is not "
-                  "retried")
+                + f". If it was never accepted, only its NPC can fix "
+                  f"that — but the book shows four quests per page and "
+                  f"the read cannot turn pages, so this is checked "
+                  f"again in {self.RECOVER_GIVEUP_TTL / 60:.0f} min "
+                  f"rather than never")
             self._say(seat, f"cannot recover the questline: {why}")
             return
         seat.tel.note_questing(
@@ -7004,20 +7196,33 @@ class LiveWorker(QThread):
         now = time.monotonic()
         if now - self._names_tried_at < self.NAME_RESOLVE_EVERY:
             return
+        # The preconditions BEFORE the cooldown is spent -- a refusal is
+        # not an attempt, the same rule `_maybe_rearm_quest_arrow`
+        # follows and this one broke.
+        #
+        # Rev f2b8101f is what breaking it costs. The party spent that
+        # run in a dungeon, out of combat for about ten seconds in
+        # sixteen minutes; every tick that reached this rung found a
+        # dialogue open, burned the two-minute cooldown and returned, so
+        # eight attempts in a row read nothing and the account settings
+        # stayed at their placeholder for the whole run.
+        if seat.in_duel or await questing.in_dialogue(seat.client):
+            return
+        readers = [s for s in seats if not s.in_duel]
+        if not readers:
+            # Nobody can open a friends list right now, and finding that
+            # out is not an attempt either.
+            return
         # One resolver at a time for the whole party: it drives several
         # clients, and two of them racing would each open a friends list
         # on the other's wizard mid-read.
         self._names_tried_at = now
-        if seat.in_duel or await questing.in_dialogue(seat.client):
-            return
 
         shorts = [s.wizard_name for s in seats]
-        for reader in seats:
+        for reader in readers:
             missing = [s for s in shorts if s not in self._full_names]
             if not missing:
                 break
-            if reader.in_duel:
-                continue
             try:
                 got = await party.friends_list_names(reader.client, missing)
             except Exception as exc:
