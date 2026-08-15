@@ -524,6 +524,12 @@ class LiveWorker(QThread):
         self._full_names = {}
         self._names_tried_at = NEVER
         self._names_done = False
+        #: whether wizAi owns dialogue for this script, and the source
+        #: the answer was worked out from — so a reloaded or rewritten
+        #: script is re-examined and an unchanged one is not. See
+        #: `_dialogue_is_ours`.
+        self._dialogue_ours = None
+        self._dialogue_for = None
         #: which seat is currently stepping the VM, when it is not the
         #: seat that owns it. Kept only so the handover is said once
         #: rather than every tick. See `_script_seat`.
@@ -793,11 +799,16 @@ class LiveWorker(QThread):
                 # goal read, the in-step check and the script sync, so it
                 # waited on all three every tick before it even looked.
                 # Reported live as auto-dialogue being slow to trigger.
-                if self.auto_dialogue and seat.quester is None and not driven:
+                if (self.auto_dialogue and seat.quester is None
+                        and (not driven or self._dialogue_is_ours())):
                     # Deimos's questing does its own dialogue handling,
                     # so a second clicker would race it for the same
-                    # button. A running script is the same problem: they
-                    # all reach for the dialogue box.
+                    # button. A running script USUALLY is the same
+                    # problem -- but every preset wizAi ships has its
+                    # dialogue clearer switched off by a variable
+                    # nobody declared, so for those there is no second
+                    # clicker and standing back means nothing presses
+                    # anything. See `_dialogue_is_ours`.
                     await self._stage(seat, "auto-dialogue",
                                       self._auto_dialogue(client), wheel=True)
 
@@ -1228,6 +1239,75 @@ class LiveWorker(QThread):
     #: slowest stage, and well under the five minutes `_check_progress`
     #: needs to notice anything at all.
     DRIVER_QUIET = 90.0
+
+    def _dialogue_is_ours(self):
+        """Should wizAi click dialogue for a wizard the script is driving?
+
+        The operator's report, and it is two symptoms of one cause: "the
+        auto dialogue works but when scripting is enabled ... it waits a
+        long time to start the dialogue / go through it".
+
+        wizAi stood back from any scripted wizard's dialogue box on the
+        reasoning that a second clicker would race the script's own. For
+        every preset it ships, there is no first clicker. The general
+        handler is::
+
+            if any hasdialogue {
+                print "Dialogue detected. Clearing..."
+                if Handle_Dialogue = True {
+                    sameany sendkey SPACEBAR, .1
+                }
+            }
+
+        and `Handle_Dialogue` is declared nowhere. deimoslang answers an
+        undefined constant with `False` without complaining
+        (`vm.py:1109`), so the script prints that it is clearing the box
+        and presses nothing, then sleeps `DialogDelay` and prints it
+        again. The script's banner asks the operator to switch Deimos's
+        own Dialogue toggle on -- and that is Deimos's GUI, which wizAi
+        does not run.
+
+        So nothing was clearing dialogue for a scripted wizard except
+        `_unstick`, which is a wedge detector: it waits `DIALOG_WEDGE`
+        for the box, then another `UNSTICK_EVERY` to see the same text
+        twice. Nearly a minute of standing still, by design, because it
+        was built for a box somebody else was failing to handle rather
+        than for one nobody was touching.
+
+        Rev ed709013 saw the symptom and drew the wrong conclusion --
+        `Dialogue detected. Clearing...` fifteen times in eight
+        milliseconds while General Khaba's MORE button sat unclicked --
+        and the note it left says "measurably not being handled", which
+        was right about the measurement and wrong about the cause.
+
+        Checked per script rather than assumed either way: a script that
+        declares the guard, or presses the key unguarded, still owns its
+        own dialogue and wizAi stays out of it.
+        """
+        from .. import scripts
+
+        source = self.script or ""
+        if not source:
+            return False
+        if self._dialogue_ours is None or self._dialogue_for != source:
+            self._dialogue_for = source
+            guard = scripts.dead_dialogue_guard(source)
+            self._dialogue_ours = bool(guard)
+            if guard:
+                said = (f"this script's dialogue clearer is switched off by "
+                        f"`{guard}`, which it never declares — deimoslang "
+                        f"reads an undefined name as False, so it prints "
+                        f"\"Dialogue detected. Clearing...\" and presses "
+                        f"nothing. wizAi is clicking dialogue for these "
+                        f"wizards instead of standing back for a handler "
+                        f"that does not run")
+                for seat in self.seats:
+                    try:
+                        seat.tel.note_questing("script-dialogue-dead", said)
+                    except Exception:
+                        pass
+                self._say(self.seats[0], said)
+        return self._dialogue_ours
 
     def _script_seat(self):
         """The seat whose loop steps the party's one VM, or None.

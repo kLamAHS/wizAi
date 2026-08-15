@@ -18858,3 +18858,143 @@ def test_a_party_all_in_duels_does_not_burn_the_cooldown_either(monkeypatch):
     asyncio.run(worker._resolve_party_names(worker.seats[0]))
     assert asked, "a fight that ended still had to wait out a cooldown"
     party._FULL_NAMES.clear()
+
+
+# --------------- the script's dialogue clearer that never clears anything
+# The operator, and it is two symptoms of one cause: "the auto dialogue
+# works but when scripting is enabled I suppose it uses the quest script
+# dialogue functions but it waits a long time to start the dialogue / go
+# through it".
+#
+# It does not use them. Every preset's general handler is
+#
+#     if any hasdialogue {
+#         print "Dialogue detected. Clearing..."
+#         if Handle_Dialogue = True { sameany sendkey SPACEBAR, .1 }
+#     }
+#
+# and `Handle_Dialogue` is declared nowhere in 14,427 lines. deimoslang
+# reads an undefined constant as False without complaining, so the box is
+# announced and never touched — while wizAi, whose clicker works, stood
+# back for a handler that does not run.
+
+_DEAD_GUARD = ('###deimos_expertmode\n'
+               'var DebugMode = True\n'
+               'block Any_Dialogue {\n'
+               '  if any hasdialogue {\n'
+               '    if Handle_Dialogue = True {\n'
+               '      sameany sendkey SPACEBAR, .1\n'
+               '    }\n'
+               '  }\n'
+               '}\n')
+
+
+def test_an_undeclared_guard_on_the_dialogue_key_is_found():
+    from deimos_bridge import scripts
+
+    assert scripts.dead_dialogue_guard(_DEAD_GUARD) == "Handle_Dialogue"
+
+
+def test_a_script_that_declares_the_guard_keeps_its_own_dialogue():
+    from deimos_bridge import scripts
+
+    alive = _DEAD_GUARD.replace("var DebugMode = True\n",
+                                "var DebugMode = True\n"
+                                "var Handle_Dialogue = True\n")
+    assert scripts.dead_dialogue_guard(alive) == ""
+
+
+def test_an_unguarded_key_press_is_a_working_handler():
+    from deimos_bridge import scripts
+
+    assert scripts.dead_dialogue_guard(
+        "block B {\n  sameany sendkey SPACEBAR, .1\n}\n") == ""
+
+
+def test_a_per_quest_key_press_is_not_the_general_handler():
+    """The presets press space in quest sequences and in the spell
+    trainer, and those are not the handler this is about. The question
+    is narrow on purpose: is a dialogue press gated on a name that can
+    never be true."""
+    from deimos_bridge import scripts
+
+    both = _DEAD_GUARD + ('block Spell_Learner {\n'
+                          '  if any hasdialogue {\n'
+                          '    sameany sendkey SPACEBAR, .1\n'
+                          '  }\n'
+                          '}\n')
+    assert scripts.dead_dialogue_guard(both) == "Handle_Dialogue"
+
+
+def test_every_shipped_preset_has_its_dialogue_clearer_switched_off():
+    """Not a lint that might fire — a fact about all six, and the reason
+    wizAi now clicks their dialogue. If a preset is ever fixed upstream
+    this fails, and the right answer then is to let it handle its own."""
+    from deimos_bridge import scripts
+
+    presets = scripts.presets()
+    assert presets, "no presets shipped"
+    for title, path in presets:
+        source = scripts.read_preset(path)
+        assert scripts.dead_dialogue_guard(source) == "Handle_Dialogue", title
+
+
+def test_undeclared_guards_are_reported_generally():
+    """`Handle_Dialogue` is not the only one — the presets also guard on
+    `Delay_Combat`, declared nowhere either. A guard on a name that
+    cannot be true is a feature that is silently off."""
+    from deimos_bridge import scripts
+
+    names = {n for n, _line in scripts.undeclared_guards(_DEAD_GUARD)}
+    assert names == {"Handle_Dialogue"}
+    presets = scripts.presets()
+    if presets:
+        found = {n for n, _l in
+                 scripts.undeclared_guards(scripts.read_preset(presets[0][1]))}
+        assert "Handle_Dialogue" in found and "Delay_Combat" in found, found
+
+
+def test_wizai_takes_dialogue_for_a_script_that_cannot_clear_it(qapp):
+    worker, _read = _zoned_party(["KT_Hub"] * 2)
+    worker.script = _DEAD_GUARD
+    assert worker._dialogue_is_ours() is True
+    said = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "script-dialogue-dead"]
+    assert said and "Handle_Dialogue" in said[0]["detail"]
+    # ...said once, not re-derived every tick.
+    for _ in range(5):
+        worker._dialogue_is_ours()
+    assert len([e for e in worker.seats[0].tel.questing
+                if e["kind"] == "script-dialogue-dead"]) == 1
+
+
+def test_wizai_stays_out_of_a_script_that_does_clear_dialogue(qapp):
+    worker, _read = _zoned_party(["KT_Hub"] * 2)
+    worker.script = _DEAD_GUARD.replace(
+        "var DebugMode = True\n",
+        "var DebugMode = True\nvar Handle_Dialogue = True\n")
+    assert worker._dialogue_is_ours() is False
+    assert not [e for e in worker.seats[0].tel.questing
+                if e["kind"] == "script-dialogue-dead"]
+
+
+def test_a_rewritten_script_is_re_examined(qapp):
+    """`configure` and the debug toggle rewrite the source mid-run, and
+    a reload can swap the script entirely."""
+    worker, _read = _zoned_party(["KT_Hub"] * 2)
+    worker.script = _DEAD_GUARD
+    assert worker._dialogue_is_ours() is True
+    worker.script = _DEAD_GUARD.replace(
+        "var DebugMode = True\n",
+        "var DebugMode = True\nvar Handle_Dialogue = True\n")
+    assert worker._dialogue_is_ours() is False
+
+
+def test_the_auto_dialogue_gate_asks_whose_dialogue_it_is():
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._service_loop)
+    assert "not driven or self._dialogue_is_ours()" in src, \
+        "wizAi stands back from every scripted wizard's dialogue again"
