@@ -18688,3 +18688,173 @@ def test_every_await_in_the_service_tick_is_bounded():
         "a bare await in the service tick — a client that stops "
         f"answering it takes this seat off the air with no timeout, no "
         f"exception and no heartbeat: {bare}")
+
+
+# ------------- a stage cut off waiting for the wheel never ran at all
+# Rev f2b8101f printed this to the console, next to `stage-timeout:
+# unwedging a stuck script cut off after 90s`:
+#
+#     RuntimeWarning: coroutine 'LiveWorker._unstick' was never awaited
+#
+# One event, described two wrong ways. `_unstick` did not run for 90
+# seconds; it waited 90 seconds for a drive lock somebody else held, was
+# cancelled before `_at_the_wheel` ever reached `await coro`, and its
+# coroutine was then garbage-collected un-started.
+
+def _wheel_held(worker, seat, holding):
+    """Hold this seat's drive lock so nothing else can take it.
+
+    `holding` is set once the lock is actually held — waiting a tick is
+    not enough, and a test that races the holder proves nothing.
+    """
+    import asyncio
+
+    async def hog():
+        async with worker._driving(seat, "something slow"):
+            holding.set()
+            await asyncio.Event().wait()
+
+    return hog
+
+
+def test_a_stage_that_never_got_the_wheel_says_so(qapp):
+    import asyncio
+
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+    ran = []
+
+    async def work():
+        ran.append(True)
+
+    async def go():
+        # A real lock, made inside the running loop. Without one
+        # `_driving` is a nullcontext and every stage gets the wheel at
+        # once, which is not the situation being tested.
+        seat.drive = asyncio.Lock()
+        holding = asyncio.Event()
+        holder = asyncio.create_task(_wheel_held(worker, seat, holding)())
+        await holding.wait()
+        try:
+            await worker._stage(seat, "unwedging a stuck script", work(),
+                                limit=0.2, wheel=True)
+        finally:
+            holder.cancel()
+
+    asyncio.run(go())
+    assert ran == [], "it got the wheel after all — the test proves nothing"
+    said = [e for e in seat.tel.questing if e["kind"] == "stage-timeout"]
+    assert said, [e["kind"] for e in seat.tel.questing]
+    assert "never started" in said[0]["detail"], said[0]["detail"]
+    assert "cut off after" not in said[0]["detail"], \
+        "a stage that never ran is still reported as one that ran too long"
+
+
+def test_a_dropped_stage_closes_the_coroutine_it_never_ran(qapp):
+    """The RuntimeWarning itself, asserted on the mechanism rather than
+    on the warning: Python only emits it when the un-started coroutine
+    is garbage-collected, and pytest intercepts that as an unraisable
+    rather than something a test can catch. A closed coroutine has no
+    frame, and closing it is exactly what stops the warning."""
+    import asyncio
+
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+
+    async def work():
+        return None
+
+    work_coro = work()
+
+    async def go():
+        seat.drive = asyncio.Lock()
+        holding = asyncio.Event()
+        holder = asyncio.create_task(_wheel_held(worker, seat, holding)())
+        await holding.wait()
+        try:
+            await worker._stage(seat, "unwedging a stuck script", work_coro,
+                                limit=0.2, wheel=True)
+        finally:
+            holder.cancel()
+
+    asyncio.run(go())
+    assert work_coro.cr_frame is None, \
+        ("the stage's coroutine was left un-started for the garbage "
+         "collector to warn about")
+
+
+def test_a_stage_that_ran_and_overran_is_still_reported_as_that(qapp):
+    """The other half: a stage that DID get the wheel and then took too
+    long is the original message, and it should not have been changed."""
+    import asyncio
+
+    worker, _read = _zoned_party(["KT_Hub"])
+    seat = worker.seats[0]
+
+    async def slow():
+        await asyncio.Event().wait()
+
+    asyncio.run(worker._stage(seat, "auto-dialogue", slow(),
+                              limit=0.2, wheel=True))
+    said = [e for e in seat.tel.questing if e["kind"] == "stage-timeout"]
+    assert said and "cut off after" in said[0]["detail"], said
+
+
+def test_a_dialogue_does_not_burn_the_name_resolvers_cooldown(monkeypatch):
+    """A refusal is not an attempt — the rule `_maybe_rearm_quest_arrow`
+    follows and this rung broke.
+
+    Rev f2b8101f: the party spent that run in a dungeon and was out of
+    combat for about ten seconds in sixteen minutes. Every tick that
+    reached this rung found a dialogue open, spent the two-minute
+    cooldown and returned, so eight attempts in a row read nothing and
+    the account settings stayed at their placeholder for the whole run.
+    """
+    import asyncio
+
+    from deimos_bridge import party, questing
+
+    worker, asked = _resolving(monkeypatch, [
+        _friends_text("Sebastian Life", "Konstantin Ice"),
+        _friends_text("Phönix Storm"),
+        "",
+    ])
+    talking = [True]
+
+    async def in_dialogue(_c):
+        return talking[0]
+
+    monkeypatch.setattr(questing, "in_dialogue", in_dialogue)
+    for _ in range(4):
+        asyncio.run(worker._resolve_party_names(worker.seats[0]))
+    assert asked == []
+    # ...and the moment the box clears, it reads — without waiting out a
+    # cooldown it never should have spent.
+    talking[0] = False
+    asyncio.run(worker._resolve_party_names(worker.seats[0]))
+    assert asked, "the cooldown was spent on ticks that never looked"
+    assert 'var Main_Account = "Phönix Storm"' in worker.script
+    party._FULL_NAMES.clear()
+
+
+def test_a_party_all_in_duels_does_not_burn_the_cooldown_either(monkeypatch):
+    """The friends list cannot be opened from inside a duel, so a party
+    mid-fight is another refusal rather than a failed attempt."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    worker, asked = _resolving(monkeypatch, [
+        _friends_text("Sebastian Life", "Konstantin Ice"),
+        _friends_text("Phönix Storm"),
+        "",
+    ])
+    for seat in worker.seats:
+        seat.in_duel = True
+    asyncio.run(worker._resolve_party_names(worker.seats[0]))
+    assert asked == []
+    for seat in worker.seats:
+        seat.in_duel = False
+    asyncio.run(worker._resolve_party_names(worker.seats[0]))
+    assert asked, "a fight that ended still had to wait out a cooldown"
+    party._FULL_NAMES.clear()

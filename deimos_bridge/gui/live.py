@@ -1296,34 +1296,72 @@ class LiveWorker(QThread):
         """
         if limit is None:
             limit = self.STAGE_LIMITS.get(name, self.DEFAULT_STAGE_LIMIT)
+        # A stage that does not take the wheel starts the moment it is
+        # awaited; one that does may spend its whole deadline waiting.
+        started = [not wheel]
         if wheel:
-            coro = self._at_the_wheel(seat, name, coro)
+            coro = self._at_the_wheel(seat, name, coro, started)
         try:
             await asyncio.wait_for(coro, limit)
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError:
-            self._say_once(
-                seat, name,
-                f"{name} ran for {limit:.0f}s without finishing and was cut "
-                f"off. It holds the wheel while it runs, so everything else "
-                f"for this wizard — the hotkeys included — was waiting "
-                f"behind it.",
-                kind="stage-timeout",
-                detail=f"{name} cut off after {limit:.0f}s")
+            if started[0]:
+                said = (f"{name} ran for {limit:.0f}s without finishing and "
+                        f"was cut off. It holds the wheel while it runs, so "
+                        f"everything else for this wizard — the hotkeys "
+                        f"included — was waiting behind it.")
+                detail = f"{name} cut off after {limit:.0f}s"
+            else:
+                # Never started. Saying "ran for 90s" here sends whoever
+                # reads it looking for a slow stage, and the slow thing
+                # is whatever has been holding this wizard's wheel for
+                # the whole ninety seconds.
+                said = (f"{name} waited {limit:.0f}s for this wizard's drive "
+                        f"lock and never got it, so it did not run at all — "
+                        f"something else has been steering this wizard that "
+                        f"whole time.")
+                detail = (f"{name} never started — {limit:.0f}s waiting for "
+                          f"the drive lock")
+            self._say_once(seat, name, said,
+                           kind="stage-timeout", detail=detail)
         except Exception as exc:
             self._stage_failed(seat, name, exc)
 
-    async def _at_the_wheel(self, seat, name, coro):
+    async def _at_the_wheel(self, seat, name, coro, started=None):
         """`coro`, holding this wizard's drive lock.
 
         Inside the stage's own deadline rather than outside it, which is
         the whole point: the *acquisition* is bounded too, so a stage
         that cannot get the wheel is cut off and reported instead of
         queueing up behind a wedge and adding to it.
+
+        `started` is a one-element list the caller reads afterwards, and
+        it exists because those two outcomes are not the same thing.
+        A stage cut off while still WAITING for the lock never ran at
+        all -- and its coroutine was never awaited, which Python says
+        out loud:
+
+            RuntimeWarning: coroutine 'LiveWorker._unstick' was never
+            awaited
+
+        Rev f2b8101f printed exactly that next to `stage-timeout:
+        unwedging a stuck script cut off after 90s`, and the two are one
+        event: `_unstick` did not run for 90 seconds, it waited 90
+        seconds for a lock somebody else was holding and was then
+        dropped. Closing it here is what stops the warning; telling the
+        caller is what stops the export from saying the wrong thing.
         """
-        async with self._driving(seat, name):
-            await coro
+        try:
+            async with self._driving(seat, name):
+                if started is not None:
+                    started[0] = True
+                await coro
+        finally:
+            if started is not None and not started[0]:
+                # Never awaited, so close it rather than leaving Python
+                # to garbage-collect an un-started coroutine.
+                coro.close()
 
     def _stage_failed(self, seat, name, exc):
         self._say_once(seat, name,
@@ -7004,20 +7042,33 @@ class LiveWorker(QThread):
         now = time.monotonic()
         if now - self._names_tried_at < self.NAME_RESOLVE_EVERY:
             return
+        # The preconditions BEFORE the cooldown is spent -- a refusal is
+        # not an attempt, the same rule `_maybe_rearm_quest_arrow`
+        # follows and this one broke.
+        #
+        # Rev f2b8101f is what breaking it costs. The party spent that
+        # run in a dungeon, out of combat for about ten seconds in
+        # sixteen minutes; every tick that reached this rung found a
+        # dialogue open, burned the two-minute cooldown and returned, so
+        # eight attempts in a row read nothing and the account settings
+        # stayed at their placeholder for the whole run.
+        if seat.in_duel or await questing.in_dialogue(seat.client):
+            return
+        readers = [s for s in seats if not s.in_duel]
+        if not readers:
+            # Nobody can open a friends list right now, and finding that
+            # out is not an attempt either.
+            return
         # One resolver at a time for the whole party: it drives several
         # clients, and two of them racing would each open a friends list
         # on the other's wizard mid-read.
         self._names_tried_at = now
-        if seat.in_duel or await questing.in_dialogue(seat.client):
-            return
 
         shorts = [s.wizard_name for s in seats]
-        for reader in seats:
+        for reader in readers:
             missing = [s for s in shorts if s not in self._full_names]
             if not missing:
                 break
-            if reader.in_duel:
-                continue
             try:
                 got = await party.friends_list_names(reader.client, missing)
             except Exception as exc:
