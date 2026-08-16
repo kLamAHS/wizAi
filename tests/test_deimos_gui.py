@@ -14413,6 +14413,237 @@ def test_the_service_loop_consults_the_hold_before_stepping(monkeypatch):
         "the hold must gate the script step, not follow it"
 
 
+# ------------------------------- the walk-in door: through the marker
+#
+# Rev 9e13d385: Konstantin stood at "Go To Amy Brooks' Place in
+# Knight's Court" with "marker 2 away", then "marker 8 away", for two
+# minutes — jittering, so the stuck ladder's position clock never fired
+# — until the script's own watchdog "recovered" him to MB_Hub, 10,602
+# units from the door he was touching. The operator, on the same class
+# of stall: "still standing just outside the door and teleporting away,
+# not walking forward to go through like the script used to". A walk-in
+# transition's trigger sits just past its marker, and a collision-solved
+# teleport stops exactly ON the marker.
+
+class _DoorClient:
+    """A client parked at a walk-in door. `goto` records its legs, and
+    the zone flips (or a loading screen starts) when the configured leg
+    crosses the trigger."""
+
+    def __init__(self, crosses_on_leg=None, loads_on_leg=None):
+        self.zone = "Marleybone/MB_ScotlandYard/MB_KnightsCourt"
+        self.legs = []
+        self.crosses_on_leg = crosses_on_leg
+        self.loads_on_leg = loads_on_leg
+        self.loading = False
+
+        class _Body:
+            async def position(_self):
+                from types import SimpleNamespace
+                return SimpleNamespace(x=100.0, y=200.0, z=0.0)
+
+            async def yaw(_self):
+                return 0.0
+
+        self.body = _Body()
+
+    async def is_loading(self):
+        return self.loading
+
+    async def zone_name(self):
+        return self.zone
+
+    async def goto(self, x, y):
+        self.legs.append((round(x, 1), round(y, 1)))
+        if self.crosses_on_leg and len(self.legs) >= self.crosses_on_leg:
+            self.zone = "Marleybone/Interiors/MB_AmyBrooks"
+        if self.loads_on_leg and len(self.legs) >= self.loads_on_leg:
+            self.loading = True
+
+
+def _parked_at_the_door(monkeypatch, away=8.0, marker_y=208.0,
+                        crosses_on_leg=1, loads_on_leg=None,
+                        dialogue=False, prompt=False, aggro=False):
+    """A quester standing basically ON its Go-To marker, stall aged."""
+    import time
+    from types import SimpleNamespace
+
+    from deimos_bridge import questing
+
+    worker, _read = _zoned_party(["Marleybone/MB_ScotlandYard/MB_KnightsCourt"])
+    seat = worker.seats[0]
+    client = _DoorClient(crosses_on_leg=crosses_on_leg,
+                         loads_on_leg=loads_on_leg)
+    seat.client = client
+    seat.goal = "Go To Amy Brooks' Place in Knight's Court"
+    seat.marker_away = away
+    seat.zone_seen = client.zone
+    now = time.monotonic()
+    seat.zone_since = now - 600.0
+    seat.goal_at = now - 600.0
+    seat.through_since = now - worker.WALK_THROUGH_AFTER - 1.0
+
+    async def in_dialogue(_c):
+        return dialogue
+
+    async def near(_c):
+        return prompt
+
+    async def in_battle(_c):
+        return aggro and bool(client.legs)
+
+    async def marker_pos(_c):
+        # Due "north" of the wizard, so the approach line is (0, +1).
+        return SimpleNamespace(x=100.0, y=marker_y, z=0.0), ""
+
+    monkeypatch.setattr(questing, "in_dialogue", in_dialogue)
+    monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "in_battle", in_battle)
+    monkeypatch.setattr(questing, "read_quest_position", marker_pos)
+    return worker, seat, client
+
+
+def test_a_wizard_parked_on_a_walk_in_marker_is_walked_through_it(
+        monkeypatch):
+    """The first leg extends the wizard->marker line PAST the marker —
+    through the door, the way the old scripts' hardcoded walk legs went
+    — and a zone change ends the walk."""
+    import asyncio
+
+    worker, seat, client = _parked_at_the_door(
+        monkeypatch, away=30.0, marker_y=230.0)
+    asyncio.run(worker._maybe_walk_through(seat))
+    assert client.legs == [(100.0, 230.0 + worker.WALK_THROUGH_PAST)], \
+        "one leg, aimed past the marker along the approach line"
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert "walked-through" in kinds
+    assert worker._hop_held(), "the settle window should hold the script"
+
+
+def test_standing_on_the_marker_walks_out_along_the_wizards_facing(
+        monkeypatch):
+    """At "marker 2 away" the approach line is noise — the wizard is
+    still FACING the way it came at the door, so its yaw is the
+    direction. Yaw 0 is wizwalker's (-sin, -cos) = (0, -1)."""
+    import asyncio
+
+    worker, seat, client = _parked_at_the_door(
+        monkeypatch, away=2.0, marker_y=202.0)
+    asyncio.run(worker._maybe_walk_through(seat))
+    assert client.legs == [(100.0, 202.0 - worker.WALK_THROUGH_PAST)]
+    assert "walked-through" in [e["kind"] for e in seat.tel.questing]
+
+
+def test_a_loading_screen_counts_as_having_crossed(monkeypatch):
+    import asyncio
+
+    worker, seat, client = _parked_at_the_door(
+        monkeypatch, crosses_on_leg=None, loads_on_leg=1)
+    asyncio.run(worker._maybe_walk_through(seat))
+    assert len(client.legs) == 1
+    assert "walked-through" in [e["kind"] for e in seat.tel.questing]
+
+
+def test_a_miss_sweeps_all_four_directions_and_says_so(monkeypatch):
+    """Every leg aims past the MARKER, so left, right and back all
+    re-cross the door area — and a marker that is not a door gets the
+    script back after the short settle, on a cooldown."""
+    import asyncio
+    import time
+
+    worker, seat, client = _parked_at_the_door(
+        monkeypatch, crosses_on_leg=None)
+    asyncio.run(worker._maybe_walk_through(seat))
+    assert len(client.legs) == 4
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert "walk-through-missed" in kinds and "walked-through" not in kinds
+    assert (worker._hop_pause_until - time.monotonic()
+            <= worker.WALK_THROUGH_SETTLE + 0.5), \
+        "a missed walk must not hold the script for the hop's settle"
+    assert time.monotonic() - seat.walked_through_at < 60.0, \
+        "the cooldown stamp is what stops a retry every tick"
+    # ...and the cooldown actually refuses the next attempt.
+    seat.through_since = time.monotonic() - worker.WALK_THROUGH_AFTER - 1.0
+    asyncio.run(worker._maybe_walk_through(seat))
+    assert len(client.legs) == 4, "walked again inside the cooldown"
+
+
+def test_a_mob_mid_sweep_ends_the_walk(monkeypatch):
+    """A leg that aggros a mob stops the sweep — the fight loop owns
+    the wizard now, and walking during a duel pull is how a wizard ends
+    up out of the circle."""
+    import asyncio
+
+    worker, seat, client = _parked_at_the_door(
+        monkeypatch, crosses_on_leg=None, aggro=True)
+    asyncio.run(worker._maybe_walk_through(seat))
+    assert len(client.legs) == 1
+
+
+def test_a_press_x_prompt_owns_the_spot_not_the_walk(monkeypatch):
+    """A prompt in range means a sigil or an NPC — the X rungs' cases,
+    and walking away from a counting sigil un-joins it. The clock
+    restarts, so a prompt that later disappears gets a fresh stall."""
+    import asyncio
+    import time
+
+    worker, seat, client = _parked_at_the_door(monkeypatch, prompt=True)
+    asyncio.run(worker._maybe_walk_through(seat))
+    assert client.legs == []
+    assert time.monotonic() - seat.through_since < 5.0, \
+        "the stall clock should restart while the prompt shows"
+
+
+def test_an_open_dialogue_owns_the_spot_not_the_walk(monkeypatch):
+    import asyncio
+
+    worker, seat, client = _parked_at_the_door(monkeypatch, dialogue=True)
+    asyncio.run(worker._maybe_walk_through(seat))
+    assert client.legs == []
+
+
+def test_the_walk_through_waits_out_the_stall_first(monkeypatch):
+    """A sigil countdown, a turn-in round-trip — the work that
+    legitimately happens ON a marker gets `WALK_THROUGH_AFTER` before
+    anything walks."""
+    import asyncio
+    import time
+
+    worker, seat, client = _parked_at_the_door(monkeypatch)
+    seat.through_since = time.monotonic() - 5.0
+    asyncio.run(worker._maybe_walk_through(seat))
+    assert client.legs == [] and seat.tel.questing == []
+
+
+def test_a_wizard_merely_near_the_door_is_the_scripts_walk(monkeypatch):
+    """700 from the marker is conversation range, not a door — the
+    script is still walking that wizard, and the clock clears."""
+    import asyncio
+
+    worker, seat, client = _parked_at_the_door(monkeypatch, away=400.0)
+    asyncio.run(worker._maybe_walk_through(seat))
+    assert client.legs == [] and seat.through_since is None
+
+
+def test_the_walk_through_is_on_the_service_ladder(monkeypatch):
+    """Wired after the realm change, gated like its neighbours — the
+    quester's rungs, never a booster's."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._service_loop)
+    assert '"walking through the door"' in src
+    assert "_maybe_walk_through(seat)" in src
+    assert (src.index('"changing realms"')
+            < src.index('"walking through the door"')
+            < src.index('"going back for the others"'))
+    rung = src[src.index('"changing realms"'):
+               src.index('"walking through the door"')]
+    assert "not self._is_booster(seat)" in rung, \
+        "a booster parked at the quester's marker must not wander off"
+
+
 # --------------------------- a wedged dialogue clears on the fast lane
 #
 # Rev ed709013, the run photographed with General Khaba's MORE button up

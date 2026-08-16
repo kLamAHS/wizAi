@@ -279,6 +279,14 @@ class _Seat:
         #: the spot a desperation quest-teleport was already tried from,
         #: as a `progress` stamp. See `LiveWorker._desperate_hop`.
         self.hop_tried_at = None
+        #: since when this wizard has been standing essentially ON its
+        #: quest marker with the zone and the goal both unchanged -- the
+        #: walk-in door signature. Cleared whenever the marker reads far
+        #: or something changes. See `LiveWorker._maybe_walk_through`.
+        self.through_since = None
+        #: when a walk-through was last attempted, so a door that will
+        #: not open is walked at on a cooldown rather than every tick.
+        self.walked_through_at = NEVER
         #: whether this seat has ever built a script runner. A REBUILD
         #: is not a first start, so the program's one-time setup is
         #: trimmed from every build after the first. See `_fresh_source`.
@@ -981,6 +989,18 @@ class LiveWorker(QThread):
                     await self._stage(seat, "changing realms",
                                       self._maybe_realm_hop(seat),
                                       wheel=True, limit=360)
+
+                if (driven or self.auto_quest) and not self._is_booster(seat):
+                    # The walk-in door: a wizard parked ON its marker
+                    # with no transition, because the collision-solved
+                    # teleport stops exactly at the marker and the
+                    # door's trigger sits just past it. The rung the
+                    # operator described as "walking forward to go
+                    # through like the script used to". Cheap gates
+                    # first; it reads nothing until the stall is old.
+                    await self._stage(seat, "walking through the door",
+                                      self._maybe_walk_through(seat),
+                                      wheel=True, limit=90)
 
                 if driven and self._should_catch_up(seat):
                     # The one case where wizAi steers a wizard the script
@@ -2543,13 +2563,16 @@ class LiveWorker(QThread):
                 self._say_once(
                     seat, "sigil-steadied",
                     "sigil entry hardened — the preset's fixed 10s "
-                    "countdown wait becomes a loop that re-joins while "
-                    "the TeamUp window is still up, because a second "
-                    "wizard stepping on late RESTARTS the counter (a "
-                    "booster arrives by the follow, so that is the "
-                    "normal case) and the single sleep expired "
-                    "mid-countdown — the main loop then teleported "
-                    "everyone off the sigil")
+                    "countdown wait becomes `waitforzonechange "
+                    "completion`: it holds on the sigil until the "
+                    "dungeon load actually starts, through any number "
+                    "of counter restarts (a booster stepping on late "
+                    "RESTARTS the counter, and the follow makes that "
+                    "the normal case), bounded at 150s with a logged "
+                    "give-up",
+                    kind="sigil-steadied",
+                    detail="the Enter_Sigil sleep-10 bet was replaced "
+                           "at load; see scripts.steady_sigil")
             if self._solo_pilot():
                 # The pilot's client and nobody else's. `solo_source`
                 # puts the account settings back to their placeholders
@@ -4320,6 +4343,207 @@ class LiveWorker(QThread):
         import time
 
         return time.monotonic() < self._hop_pause_until
+
+    #: how close to the marker "standing at a walk-in door" starts. NOT
+    #: `AT_THE_MARKER`'s 750: that is conversation range, and a wizard
+    #: 700 units from a door is a wizard the script is still walking.
+    #: The stall this rung answers reads single digits -- rev 9e13d385's
+    #: Konstantin sat at "marker 2 away", then "marker 8 away" -- with
+    #: room for a landing truncated at a collision volume's edge.
+    WALK_THROUGH_NEAR = 120.0
+    #: how long the wizard must stand there, zone and goal unchanged,
+    #: before walking. Long enough for the work that legitimately
+    #: happens ON a marker -- a dungeon sigil's countdown (~10s, and it
+    #: RESTARTS when a partner steps on), a turn-in's server round-trip
+    #: -- and comfortably shorter than the ~2 min the script's own
+    #: watchdog waits before "recovering" the wizard to the world hub,
+    #: which is the outcome this rung exists to beat.
+    WALK_THROUGH_AFTER = 45.0
+    #: how long between attempts at one door.
+    WALK_THROUGH_EVERY = 120.0
+    #: how far past the marker to walk. A transition trigger sits at or
+    #: just behind its door; the marker sits ON the door. The script's
+    #: own approach walked ~500-unit legs into doors, so 120 is well
+    #: inside "what a player's W key does" and short enough not to
+    #: matter when the direction is wrong.
+    WALK_THROUGH_PAST = 120.0
+    #: the ceiling on the script hold around the walk -- same shape as
+    #: the desperate hop's, for the same reason: the script's own tp
+    #: loop re-teleporting the wizard back onto the marker mid-walk is
+    #: precisely the loop being broken.
+    WALK_THROUGH_CEILING = 60.0
+    #: the settle after a walk that did NOT cross. Short: nothing is in
+    #: flight, and the script should get its own machinery back.
+    WALK_THROUGH_SETTLE = 3.0
+
+    async def _maybe_walk_through(self, seat):
+        """Walk THROUGH a marker the wizard is parked on, like a player.
+
+        The stall the collision teleport left behind, in the operator's
+        words: "still standing just outside the door and teleporting
+        away, not walking forward to go through like the script used
+        to". A walk-in transition -- a house door, a service lift, a
+        street gate -- has its quest marker ON the door and its trigger
+        volume just past it. The old scripts teleported NEAR the door
+        and then walked a hardcoded leg through it; a collision-solved
+        teleport lands ON the marker, exactly, and then nothing crosses
+        the trigger.
+
+        Rev 9e13d385 is the case in full: Konstantin stood at "Go To
+        Amy Brooks' Place in Knight's Court" with "marker 2 away", then
+        "marker 8 away", for two minutes -- jittering, so the stuck
+        ladder's position clock never fired -- until the script's own
+        watchdog "recovered" him to MB_Hub, 10,602 units from the door
+        he was touching. The fix a player would apply is the W key.
+
+        So: standing essentially ON a marker, zone and goal unchanged
+        for `WALK_THROUGH_AFTER`, no dialogue open and no press-X
+        prompt in range (a prompt means a sigil or an NPC owns this
+        spot, and the X rungs own those), hold the script the way the
+        desperate hop does and walk through the marker -- along the
+        approach line first, then, if the zone still has not changed,
+        sweep the other three directions. Any leg that crosses shows up
+        as a zone change or a loading screen, and the sweep stops.
+        """
+        import math
+        import time
+
+        from .. import questing
+
+        away = seat.marker_away
+        now = time.monotonic()
+        if away is None or away > self.WALK_THROUGH_NEAR:
+            seat.through_since = None
+            return
+        since = seat.through_since
+        if since is None or max(seat.zone_since, seat.goal_at) > since:
+            # Just arrived, or the zone/goal moved while standing here:
+            # whatever is happening on this marker is WORKING.
+            seat.through_since = now
+            return
+        if now - since < self.WALK_THROUGH_AFTER:
+            return
+        if now - seat.walked_through_at < self.WALK_THROUGH_EVERY:
+            return
+        if await questing.in_dialogue(seat.client):
+            # Dialogue is work, and walking mid-page abandons it.
+            seat.through_since = now
+            return
+        if await questing.near_interactable(seat.client):
+            # The game is offering X. A sigil, a dungeon door with a
+            # prompt, the quest NPC -- every one of those is another
+            # rung's case, and walking away from a counting sigil
+            # un-joins it.
+            seat.through_since = now
+            return
+        client = seat.client
+        try:
+            if await client.is_loading():
+                return
+        except Exception:
+            pass
+        try:
+            here = await client.body.position()
+            marker, _why = await questing.read_quest_position(client)
+        except Exception:
+            return
+        if here is None or marker is None:
+            return
+        start_zone = seat.zone_seen
+        try:
+            start_zone = await client.zone_name() or start_zone
+        except Exception:
+            pass
+        dx, dy = marker.x - here.x, marker.y - here.y
+        dist = math.hypot(dx, dy)
+        if dist >= 15.0:
+            # The approach line: wizard -> marker, extended past it.
+            # The wizard came AT the door, so through the marker along
+            # this line is through the door.
+            ux, uy = dx / dist, dy / dist
+        else:
+            # Standing ON it -- the line is noise. The wizard is still
+            # FACING the way it walked or teleported in, so its yaw is
+            # the next best approach vector (the `- sin/cos` pair is
+            # wizwalker's forward, see `calc_FrontalVector`).
+            try:
+                yaw = await client.body.yaw()
+                ux, uy = -math.sin(yaw), -math.cos(yaw)
+            except Exception:
+                ux, uy = 1.0, 0.0
+        mins = (now - since) / 60.0
+        # Stamp and hold BEFORE the first step, like the hop: a walk
+        # cut off mid-leg must not retry every tick, and the script's
+        # tp loop must not land a teleport between our legs.
+        seat.walked_through_at = now
+        self._hop_pause_until = now + self.WALK_THROUGH_CEILING
+        self._say(seat,
+                  f"parked {mins:.0f} min basically ON the quest marker "
+                  f"({away:,.0f} away) with no transition — holding the "
+                  f"script and walking through it, the way the old "
+                  f"scripts walked into doors")
+        crossed = False
+        legs = 0
+        try:
+            # Forward, then left, right, back -- each leg aims past the
+            # MARKER, so every one of them crosses the door area again.
+            for vx, vy in ((ux, uy), (-uy, ux), (uy, -ux), (-ux, -uy)):
+                legs += 1
+                try:
+                    await asyncio.wait_for(
+                        client.goto(marker.x + vx * self.WALK_THROUGH_PAST,
+                                    marker.y + vy * self.WALK_THROUGH_PAST),
+                        timeout=12.0)
+                except Exception:
+                    # A wall. The wrong direction refuting itself is
+                    # the sweep working, not a failure to report.
+                    pass
+                if await self._zone_crossed(client, start_zone):
+                    crossed = True
+                    break
+                if await questing.in_battle(client):
+                    # A mob got the wizard mid-sweep. The fight loop
+                    # owns it now, and a fight is at least movement.
+                    break
+        finally:
+            self._hop_pause_until = time.monotonic() + (
+                self.HOP_SETTLE if crossed else self.WALK_THROUGH_SETTLE)
+        if crossed:
+            seat.tel.note_questing(
+                "walked-through",
+                f"parked {mins:.0f} min on the marker with no transition "
+                f"— walked through it ({legs} leg(s)) and the zone "
+                f"changed. A walk-in door's trigger sits just past its "
+                f"marker, and a collision-solved teleport stops exactly "
+                f"ON the marker")
+            self._say(seat, "walked through the door — the zone changed")
+        else:
+            seat.tel.note_questing(
+                "walk-through-missed",
+                f"parked {mins:.0f} min on the marker — walked {legs} "
+                f"leg(s) through and past it and the zone did not "
+                f"change. Whatever this marker wants, it is not a "
+                f"walk-in door; the script gets the wheel back in "
+                f"{self.WALK_THROUGH_SETTLE:.0f}s")
+
+    async def _zone_crossed(self, client, start_zone):
+        """Did a walk leg actually cross a transition?
+
+        A loading screen counts: `zone_name` is unreadable mid-load, and
+        waiting out the load here would hold the script for nothing --
+        the settle window and the script's own `waitforzonechange` both
+        handle the far side.
+        """
+        try:
+            if await client.is_loading():
+                return True
+        except Exception:
+            pass
+        try:
+            zone = await client.zone_name()
+        except Exception:
+            return False
+        return bool(zone) and bool(start_zone) and zone != start_zone
 
     #: how long the quest position must be continuously unreadable --
     #: goal line reading fine the whole time -- before the hook counts
