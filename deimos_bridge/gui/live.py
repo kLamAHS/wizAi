@@ -2543,13 +2543,16 @@ class LiveWorker(QThread):
                 self._say_once(
                     seat, "sigil-steadied",
                     "sigil entry hardened — the preset's fixed 10s "
-                    "countdown wait becomes a loop that re-joins while "
-                    "the TeamUp window is still up, because a second "
-                    "wizard stepping on late RESTARTS the counter (a "
-                    "booster arrives by the follow, so that is the "
-                    "normal case) and the single sleep expired "
-                    "mid-countdown — the main loop then teleported "
-                    "everyone off the sigil")
+                    "countdown wait becomes `waitforzonechange "
+                    "completion`: it holds on the sigil until the "
+                    "dungeon load actually starts, through any number "
+                    "of counter restarts (a booster stepping on late "
+                    "RESTARTS the counter, and the follow makes that "
+                    "the normal case), bounded at 150s with a logged "
+                    "give-up",
+                    kind="sigil-steadied",
+                    detail="the Enter_Sigil sleep-10 bet was replaced "
+                           "at load; see scripts.steady_sigil")
             if self._solo_pilot():
                 # The pilot's client and nobody else's. `solo_source`
                 # puts the account settings back to their placeholders

@@ -1672,11 +1672,11 @@ def test_the_sigil_wait_outlasts_a_reset_counter():
         out, changed = scripts.steady_sigil(src)
         assert changed, f"{path}: the Enter_Sigil tail was not found"
         assert out.count("{") == out.count("}"), f"{path}: braces broken"
-        assert src.count("\r\n") and out.count("\r\n") > src.count("\r\n"), \
-            f"{path}: the preset's CRLF endings did not survive"
-        block = out[out.find("block Enter_Sigil"):][:900]
-        assert "times 3 {" in block and "break" in block, block
-        assert block.count("sendkey X") == 2, \
-            f"{path}: the re-join press is missing"
+        assert src.count("\r\n") and "waitforzonechange completion\r\n" \
+            in out, f"{path}: the preset's CRLF endings did not survive"
+        block = out[out.find("block Enter_Sigil"):][:700]
+        assert "waitforzonechange completion" in block, block
+        assert "sleep 10" not in block, \
+            f"{path}: the countdown bet is back"
         again, changed2 = scripts.steady_sigil(out)
         assert not changed2 and again == out, f"{path}: not idempotent"

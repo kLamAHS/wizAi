@@ -691,7 +691,7 @@ _SIGIL_TAIL = re.compile(
 
 
 def steady_sigil(source: str):
-    """(source, changed) — hold the wizard on a sigil through a reset.
+    """(source, changed) — hold the wizard on a sigil until it fires.
 
     The presets enter a dungeon with `Enter_Sigil`: spam X onto the
     sigil, `sleep 10`, `call Load`. The 10 is the countdown — and a bet
@@ -704,36 +704,29 @@ def steady_sigil(source: str):
     operator watches "the counter starts, then both characters teleport
     away and it never goes in".
 
-    So the bet becomes a loop, in the preset's own idiom: sleep, Load,
-    and then — if the TeamUp window is STILL up, meaning still parked
-    at the sigil un-zoned — press X again and wait again, three rounds
-    before giving the loop back. A wizard that zoned breaks out on the
-    vanished window; a wizard that missed the sigil entirely is no
-    worse off than the single-shot version left it.
+    The first cut of this fix looped on the TeamUp window staying
+    visible, and lost the same way one layer down: a wizard that has
+    JOINED the sigil no longer shows the prompt, so the loop read the
+    hidden button as "we zoned" and broke out mid-countdown. So the
+    wait now watches the one signal a sigil cannot fake: the preset's
+    own `waitforzonechange completion` idiom, which holds until the
+    dungeon load actually starts — through any number of counter
+    resets — and is bounded at 150s by the VM's waitfor patch, whose
+    timeout hook says so in the log if the sigil never fires at all.
+    `call Load` then rides out the loading screen as before.
 
     Idempotent: the rewritten tail no longer matches the pattern.
     Line endings and indentation are taken from the matched text, so
     the presets' CRLF survives.
     """
-    def loop(m):
+    def hold(m):
         spam, eol, ind = m.group(1), m.group(2), m.group(3)
-        deep = ind + "\t"
-        deeper = deep + "\t"
         return (
             spam
-            + f"{eol}{ind}times 3 {{"
-            + f"{eol}{deep}sleep 10"
-            + f"{eol}{deep}call Load"
-            + f"{eol}{deep}if NOT any windowvisible ['WorldView', "
-              f"'NPCRangeWin', 'imgBackground', 'TeamUpButton'] {{"
-            + f"{eol}{deeper}break"
-            + f"{eol}{deep}}}"
-            + f"{eol}{deep}times 10 {{"
-            + f"{eol}{deeper}sendkey X, .1"
-            + f"{eol}{deep}}}"
-            + f"{eol}{ind}}}")
+            + f"{eol}{ind}waitforzonechange completion"
+            + f"{eol}{ind}call Load")
 
-    out, n = _SIGIL_TAIL.subn(loop, source)
+    out, n = _SIGIL_TAIL.subn(hold, source)
     return (out, True) if n else (source, False)
 
 
