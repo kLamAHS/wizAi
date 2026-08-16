@@ -44,6 +44,22 @@ PIP_NAMES = {
     "cryptography": "cryptography",
     "win32api": "pywin32",
     "win32gui": "pywin32",
+    # The 3.14 collision teleport's solver. Optional on purpose:
+    # `collision_tp` degrades to `navmap_tp` without them, so these are
+    # named here for the day the degradation is the thing being debugged.
+    "shapely": "shapely",
+    "numpy": "numpy",
+    # The precise static-entity layer on top of it (teleporter pads,
+    # boats, exact player radius). Also optional: `entity_collision`
+    # probes for all three at import and quietly returns no colliders
+    # without them -- collision teleports still work, minus that layer.
+    # kinif is NOT on PyPI: it is upstream Deimos's own Rust extension
+    # (libs/kinif, built with maturin), so the pip line for it is a
+    # pointer, not an install.
+    "katsuba": "katsuba",
+    "wiztype": "wiztype",
+    "kinif": "kinif (upstream Deimos's Rust lib -- build from "
+             "Deimos-Wizard101 v3.14.0 libs/kinif with maturin)",
 }
 
 

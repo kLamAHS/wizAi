@@ -18,6 +18,11 @@ dependencies = [
     "pyyaml>=6.0.1",
     "requests>=2.32.3",
     "thefuzz>=0.22.1",
+    "numpy>=2.4.6",
+    "shapely>=2.1.2",
+    "kinif",
+    "katsuba>=0.4.0",
+    "wiztype>=0.1.12",
     "wizwalker",
     "wizsprinter",
     "wizlaunch",
@@ -30,10 +35,11 @@ allow-direct-references = true
 packages = ["src"]
 
 [tool.uv.workspace]
-members = ["libs/wizwalker", "libs/wizsprinter", "libs/wizlaunch"]
+members = ["libs/wizwalker", "libs/wizsprinter", "libs/wizlaunch", "libs/kinif"]
 
 [tool.uv.sources]
 wizwalker = { workspace = true }
+kinif = { workspace = true }
 wizsprinter = { workspace = true }
 wizlaunch = { workspace = true }
 

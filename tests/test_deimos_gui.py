@@ -19368,3 +19368,35 @@ def test_a_boosters_wandering_journal_is_left_alone():
     worker._check_on_questline()
     kinds = [e["kind"] for e in lost.tel.questing]
     assert "off-questline" in kinds, "the check itself stopped biting"
+
+
+def test_the_hop_prefers_the_collision_teleport(monkeypatch):
+    """wizAi's own quest-marker hop rides Deimos's best teleport. Since
+    the 3.14 port that is collision_tp -- the geometry-solved landing
+    that ends the lands-in-a-wall class this hop's retry loop was
+    absorbing -- with navmap_tp still the answer on a Deimos old enough
+    not to have it, and None when Deimos is not importable at all."""
+    import sys
+    import types
+
+    from deimos_bridge import questing
+
+    fake = types.ModuleType("src.teleport_math")
+
+    async def collision_tp(client, xyz=None, leader_client=None):
+        return True
+
+    async def navmap_tp(client, xyz=None, leader_client=None):
+        return True
+
+    fake.collision_tp = collision_tp
+    fake.navmap_tp = navmap_tp
+    pkg = types.ModuleType("src")
+    pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, "src", pkg)
+    monkeypatch.setitem(sys.modules, "src.teleport_math", fake)
+    assert questing._navmap_tp() is collision_tp
+
+    del fake.collision_tp
+    assert questing._navmap_tp() is navmap_tp, \
+        "an older Deimos without collision_tp must still hand back navmap_tp"

@@ -1235,3 +1235,92 @@ def test_an_unreadable_pip_rack_reads_as_empty_not_as_an_error():
 
     member = _member_with_rack(None)
     assert asyncio.run(member.school_pips()) == {}
+
+
+# ------------------------------------------------- Deimos 3.14 collision tp
+def test_collision_tp_answers_and_reports_like_navmap_tp():
+    """The 3.14 port kept wizAi's contract: a teleport primitive that
+    RETURNS whether it landed and reports through `on_teleport_result`.
+    Upstream's collision_tp is bare-return like its navmap_tp was --
+    success, failure and never-attempted all the same answer -- and a
+    blocked client is silently dropped on the first line, the exact
+    lost-instruction bug the navmap patch exists for. Here the blocked
+    entry and the no-solution path both DELEGATE to navmap_tp, whose
+    wait machinery and reporting answer for them."""
+    src = _source(TP)
+    assert "async def collision_tp" in src, "the 3.14 collision teleport is gone"
+    head, body = src.split("async def collision_tp", 1)
+    body = body.split("\ndef ", 1)[0]
+    assert "-> bool" in body.split("\n", 1)[0], \
+        "collision_tp no longer declares the landed/not answer"
+    bare = [line for line in body.splitlines() if line.strip() == "return"]
+    assert not bare, f"collision_tp has bare returns again: {bare}"
+    assert body.count("return await navmap_tp(") == 2, \
+        "blocked entry and no-solution fallback must both delegate to navmap_tp"
+    assert body.count("_tp_result(") >= 4, \
+        "not every collision landing reports a result"
+
+
+def test_the_collision_solver_stays_optional():
+    """collision_tp imports the solver stack (shapely, numpy, the
+    collision modules) lazily, inside the function, inside a try -- so
+    a box without shapely still imports teleport_math and every
+    collision teleport degrades to navmap_tp instead of the module
+    failing to import at all. A top-level import here would take down
+    scripts.py's `from src.teleport_math import navmap_tp` and with it
+    every teleport in the program."""
+    import ast
+
+    tree = ast.parse(_source(TP))
+    banned = {"shapely", "numpy", "src.collision", "src.collision_math",
+              "src.entity_collision"}
+    top = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            top.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            top.add(node.module or "")
+    hits = {t for t in top if t in banned or t.split(".")[0] in banned}
+    assert not hits, f"solver imports moved to module top level: {hits}"
+
+
+VM_TELEPORTS = "Deimos/src/deimoslang/vm.py"
+
+
+def test_the_script_vms_teleports_solve_collision_first():
+    """Deimos 3.14's own change to the script VM: the `tp quest` /
+    `tp entity` instructions go through collision_tp (which falls back
+    to navmap_tp by itself). The arc scripts' most-used instruction,
+    and the one where a wall landing costs the most."""
+    src = _source(VM_TELEPORTS)
+    assert "from src.teleport_math import navmap_tp, collision_tp" in src, \
+        "vm.py no longer imports the collision teleport"
+    assert src.count("await collision_tp(client, pos)") == 3, \
+        "the entity/vague/quest teleports are not all on collision_tp"
+
+
+def test_the_314_collision_stack_is_vendored():
+    """The three modules collision_tp solves with, present and parsing.
+    Parse-only on purpose: collision_math imports shapely/numpy at its
+    top, which this container does not carry -- exactly the situation
+    the lazy import above exists for. The precise static-entity layer
+    (teleporter pads, boats) additionally wants katsuba + wiztype +
+    kinif, and entity_collision probes for those at import and quietly
+    degrades to no colliders without them."""
+    for rel, needles in (
+        ("Deimos/src/collision.py",
+         ("def get_collision_data", "class CollisionWorld")),
+        ("Deimos/src/collision_math.py",
+         ("def find_walkable_teleport_point", "def get_walk_grid",
+          "def blocking_volumes_at")),
+        ("Deimos/src/entity_collision.py",
+         ("def build_zone_static_shapes", "def get_object_collider_radius",
+          "_PRECISE_AVAILABLE = False")),
+    ):
+        src = _source(rel)
+        compile(src, rel, "exec")
+        for needle in needles:
+            assert needle in src, f"{rel} lost {needle!r}"
+    for rel in ("Deimos/src/questing.py", "Deimos/src/sigil.py"):
+        assert "collision_tp(" in _source(rel), \
+            f"{rel} did not take the 3.14 navmap->collision swaps"
