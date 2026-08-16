@@ -289,6 +289,12 @@ class _Seat:
         #: `set_debug` is baked into the build. See `_sync_script`.
         self.script_source = None
         self.script_debug_built = None
+        #: the wiring the runner was BUILT over: (solo?, the leader it
+        #: drives when solo, else None). A solo VM holds one client and
+        #: a party VM holds them all, so a mode or Leader change
+        #: mid-run is a different BUILD, not a different flag -- see
+        #: `_sync_script`, which rebuilds on any difference.
+        self.script_wiring_built = None
         #: whether "the script is running" has been said for this
         #: runner. Said once, because the alternative is once per burst.
         self.script_said = False
@@ -1722,17 +1728,40 @@ class LiveWorker(QThread):
         # because the name fill happened to rebuild the script 44
         # seconds after the tick. Without that coincidence it would
         # have stayed empty for the rest of the run.
+        # So is the wiring: a solo VM is built over the leader's client
+        # alone and a party VM over all of them, so switching the
+        # questing mode or the Leader mid-run changes what the runner
+        # must be BUILT from, not a flag it reads. Rev d4b5506c is the
+        # cost of comparing text alone: the operator switched to
+        # "Booster party + script" and pointed Leader at the quester
+        # while a whole-party build kept running, and the script went
+        # on walking the BOOSTER's questline with the quester in tow.
+        wiring = (self._solo_pilot(),
+                  self.leader if self._solo_pilot() else None)
         if seat.script_source == want \
-                and seat.script_debug_built == self.script_debug:
+                and seat.script_debug_built == self.script_debug \
+                and seat.script_wiring_built == wiring:
             return
         if seat.script_source == want and seat.runner is not None:
-            self._say(seat,
-                      f"script log turned {'on' if self.script_debug else 'off'}"
-                      f" — reloading the script so its own DebugMode "
-                      f"follows (a reload re-runs the route from the top; "
-                      f"its one-time setup stays skipped)")
+            if seat.script_wiring_built != wiring:
+                solo, lead = wiring
+                self._say(seat,
+                          ("the questing mode changed — rebuilding the "
+                           "script over "
+                           + (f"{self.seats[lead].name} alone"
+                              if solo else "the whole party")
+                           + " (a reload re-runs the route from the top; "
+                             "its one-time setup stays skipped)"))
+            else:
+                self._say(seat,
+                          f"script log turned "
+                          f"{'on' if self.script_debug else 'off'}"
+                          f" — reloading the script so its own DebugMode "
+                          f"follows (a reload re-runs the route from the "
+                          f"top; its one-time setup stays skipped)")
         seat.script_source = want
         seat.script_debug_built = self.script_debug
+        seat.script_wiring_built = wiring
         if seat.runner is not None:
             seat.runner.stop()
             seat.runner = None
@@ -2491,6 +2520,9 @@ class LiveWorker(QThread):
         seat = self._seat_for(client) if seat is None else seat
         seat.script_source = self.script or ""
         seat.script_debug_built = self.script_debug
+        seat.script_wiring_built = (self._solo_pilot(),
+                                    self.leader if self._solo_pilot()
+                                    else None)
         seat.script_said = False
         party = [s.client for s in self.seats if s.client is not None]
         try:
