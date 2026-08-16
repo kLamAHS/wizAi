@@ -474,6 +474,9 @@ class LiveWorker(QThread):
         self.passes = int(passes)
         self.barrier = barrier
         self.hive = None
+        #: successful scripted-teleport landings per outcome kind, for
+        #: the thinned `teleport-landed` telemetry. See `teleported`.
+        self._tp_landed = {}
         #: which wizard sets the pace, and whether the rest chase it.
         #: Without this a party is four wizards questing independently to
         #: four different places, coordinating perfectly with nobody --
@@ -3648,6 +3651,14 @@ class LiveWorker(QThread):
             except Exception:
                 bits.append("combat state unread")
             bits.append(seat.goal or "no quest goal")
+            away = getattr(seat, "marker_away", None)
+            if away is not None:
+                # How far from the objective, not merely which one. The
+                # rev dbced750 stall read "Defeat Jacques the Scratcher
+                # · moving" for four minutes and gave no way to tell a
+                # wizard working the quest from one parked a zone away
+                # -- this is the number that tells them apart.
+                bits.append(f"marker {away:,.0f} away")
             if seat.progress_at:
                 idle = now - seat.progress_at
                 bits.append(f"unchanged for {idle / 60:.0f} min"
@@ -3672,6 +3683,56 @@ class LiveWorker(QThread):
             raise
         except Exception:
             pass
+
+    def _whose_client(self, client):
+        """The name of the wizard a hook is talking about, or ""."""
+        if client is None:
+            return ""
+        for other in self.seats:
+            if other.client is client:
+                return other.name
+        return ""
+
+    def _teleport_outcome(self, landed, how, zone, client=None):
+        """One scripted teleport's result, into the run's log.
+
+        Failures verbatim; successes counted and THINNED per outcome
+        kind. "Only the failures" left the rev dbced750 stall
+        undiagnosable: the script teleported to the quest twenty times,
+        every landing "succeeded", and the export could not say which
+        path landed them (collision solve? retreat? navmap fallback?)
+        or that it kept happening -- the wrong place that a teleport
+        reports as success is exactly the case the counts are for.
+        """
+        name = self._whose_client(client)
+        if landed:
+            key = how.split(" (", 1)[0] if how else "unknown"
+            counts = self._tp_landed
+            n = counts[key] = counts.get(key, 0) + 1
+            if self._thinning(n, 20):
+                said = (f"{name}: " if name else "") + \
+                    f"scripted teleports landing by {how!r}" + \
+                    (f" in {zone}" if zone else "") + f" — {n} so far"
+                for other in self.seats:
+                    try:
+                        other.tel.note_questing("teleport-landed", said)
+                    except Exception:
+                        pass
+            return
+        said = (f"{name}'s scripted teleport did not land" if name
+                else "a scripted teleport did not land")
+        for other in self.seats:
+            try:
+                other.tel.note_questing(
+                    "teleport-failed",
+                    f"{said} — {how}" + (f" (in {zone})" if zone else ""))
+            except Exception:
+                pass
+        self._say_once(
+            self.seats[0], "tp-failed",
+            f"{said} — {how}. Upstream this returns nothing at all, so "
+            f"the script cannot tell and its next instruction is for "
+            f"wherever it meant to be")
 
     def _watch_waitfor(self, seat):
         """Put a `waitfor` that gave up into the run's log.
@@ -3724,25 +3785,7 @@ class LiveWorker(QThread):
             return ""
 
         def teleported(landed, how, zone, client=None):
-            # Only the failures. A run makes thousands of these and the
-            # ones that worked are what the `zone` entries already show.
-            if landed:
-                return
-            name = whose(client)
-            said = (f"{name}'s scripted teleport did not land" if name
-                    else "a scripted teleport did not land")
-            for other in self.seats:
-                try:
-                    other.tel.note_questing(
-                        "teleport-failed",
-                        f"{said} — {how}" + (f" (in {zone})" if zone else ""))
-                except Exception:
-                    pass
-            self._say_once(
-                self.seats[0], "tp-failed",
-                f"{said} — {how}. Upstream this returns nothing at all, so "
-                f"the script cannot tell and its next instruction is for "
-                f"wherever it meant to be")
+            self._teleport_outcome(landed, how, zone, client)
 
         def tp_noted(message, client=None):
             name = whose(client)
@@ -5730,6 +5773,12 @@ class LiveWorker(QThread):
         instruction aimed at the wizard that fell behind is aimed at the
         wrong step.
 
+        Not in a booster party. A booster's journal points wherever it
+        was left -- diverging from the quester is the DESIGN -- so the
+        comparison has nothing to warn about, and at rev dbced750 it
+        spent a run reporting the booster "behind" on a quest nobody
+        was questing.
+
         This does not try to fix it. Nothing here can: the wizard that
         is behind has to actually complete the step it missed, and the
         script is the only thing that knows how. What it can do is stop
@@ -5771,7 +5820,7 @@ class LiveWorker(QThread):
         """
         import time
 
-        if len(self.seats) < 2 or self._solo_pilot():
+        if len(self.seats) < 2 or self._solo_pilot() or self.booster_party:
             return
         from .. import questing, questlist
 

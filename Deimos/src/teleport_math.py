@@ -716,7 +716,20 @@ async def teleport_collision_verified(client: Client, dest: XYZ, anchor: XYZ,
 
 
 # Don't bother walking gaps smaller than this -- the teleport already put us in range.
-_WALK_GAP_MIN = 120.0
+#
+# wizAi patch: upstream sets 120, "in range" meaning INTERACTION range --
+# right for talk/collect, wrong for a defeat quest, where the wizard has
+# to stand in the mobs' AGGRO radius before anything happens. The
+# collision landing is by construction the nearest CLEAR point, which is
+# systematically outside a mob pack, and at rev dbced750 that composed
+# into a stall: the preset teleported to "Defeat Jacques the Scratcher"
+# over and over, each landing a reported success ~a hundred units short,
+# no mob ever pulled, and the script looped its safe-area/quest-teleport
+# cycle for four minutes. navmap_tp never had this failure because it
+# lands ON the marker, mobs and all. Twenty units is inside both
+# interaction and aggro range, and the A* walk this enables costs
+# nothing measurable at these distances.
+_WALK_GAP_MIN = 20.0
 
 
 async def _walk_remaining_to_target(client: Client, target_xyz: XYZ, world, zone_name: str,
