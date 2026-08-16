@@ -288,6 +288,12 @@ class _Seat:
         #: `LiveWorker._maybe_count_hold`.
         self.count_hold_seen = None
         self.count_hold_spot = None
+        #: since when this follower's follow has been continuously
+        #: failing, how many attempts that is, and when the stranding
+        #: alarm last fired. See `LiveWorker.STRANDED_ALARM_EVERY`.
+        self.follow_failing_since = None
+        self.follow_fails = 0
+        self.stranded_said_at = NEVER
         #: when a walk-through was last attempted, so a door that will
         #: not open is walked at on a cooldown rather than every tick.
         self.walked_through_at = NEVER
@@ -1267,6 +1273,13 @@ class LiveWorker(QThread):
     #: that blocks forever on an empty potion bottle is as broken as one
     #: that suicides, so this ends -- loudly.
     LOW_HEALTH_WAIT = 150.0
+    #: below this health fraction, giving up the heal wait means dying,
+    #: not fighting: rev 676d6e77 "gave up after 150s on 1% health" and
+    #: walked back into the pack that had just killed him, twenty-two
+    #: times over four hours. The wait stretches instead -- wisps do
+    #: arrive given time, and the same export proves it.
+    CRITICAL_HEALTH = 0.25
+    CRITICAL_HEALTH_WAIT = 600.0
     #: between health reads while waiting
     LOW_HEALTH_POLL = 10.0
     #: how often to re-read a wizard's quest tracker. It only changes
@@ -2752,20 +2765,79 @@ class LiveWorker(QThread):
         if now - seat.followed_at < self.FOLLOW_EVERY:
             return
         seat.followed_at = now
+
+        # The game may already be naming the leader for us: a follower
+        # whose Quest Helper tracks the leader carries `Quest Helper
+        # Following <full name>` in its own goal line -- the exact
+        # spelling the friends list holds, before any duel has read a
+        # name. Rev 676d6e77's booster spent four hours one zone from
+        # its quester for want of this string, while displaying it.
+        harvested = party.helper_followed_name(seat.goal)
+        if harvested:
+            known = boss.wizard_name or ""
+            longer = (harvested.lower().startswith(known.lower() + " ")
+                      and len(harvested) > len(known))
+            if not known or longer:
+                if known:
+                    party._FULL_NAMES.setdefault(known, harvested)
+                boss.wizard_name = harvested
+                seat.tel.note_questing(
+                    "leader-name-learned",
+                    f"the leader's full name read off this wizard's own "
+                    f"Quest Helper line: {harvested!r} — the friends-list "
+                    f"teleport can aim now, no duel needed")
+                self._say(seat, f"learned the leader's name from the "
+                                f"Quest Helper: {harvested}")
+
         moved, why = await party.follow(client, boss.client,
                                         leader_name=boss.wizard_name)
         if moved and why:
             self._say(seat, why)
-        elif why:
-            # A follower that cannot reach its leader is the failure that
-            # makes the whole party pointless, so it is said -- but
-            # thinned, because the cause is usually standing. EXPORTED,
-            # too: rev d3ed4d3c's Oz missed the whole Water Dojo fight
-            # (Konstantin soloed Yochimo) and the export contained not
-            # one word about why -- the follow's failures only went to
-            # the status bar, which nobody was watching.
-            self._say_once(seat, "follow", why, kind="follow-failed",
-                           detail=why)
+        if moved or not why:
+            seat.follow_failing_since = None
+            seat.follow_fails = 0
+            return
+        # A follower that cannot reach its leader is the failure that
+        # makes the whole party pointless, so it is said -- but
+        # thinned, because the cause is usually standing. EXPORTED,
+        # too: rev d3ed4d3c's Oz missed the whole Water Dojo fight
+        # (Konstantin soloed Yochimo) and the export contained not
+        # one word about why -- the follow's failures only went to
+        # the status bar, which nobody was watching.
+        self._say_once(seat, "follow", why, kind="follow-failed",
+                       detail=why)
+        # ...and thinning is for noise, not for emergencies. Rev
+        # 676d6e77: the booster failed this follow continuously for
+        # FOUR HOURS -- the quester died twenty-three times fighting
+        # alone one zone over -- and the geometric thinning let exactly
+        # one line into the export. A stranding that lasts minutes is
+        # the booster mode not existing, so it reports on its own
+        # steady clock, with the verbatim current reason, however long
+        # it goes on.
+        if seat.follow_failing_since is None:
+            seat.follow_failing_since = now
+            seat.follow_fails = 0
+        seat.follow_fails += 1
+        stuck = now - seat.follow_failing_since
+        if (stuck >= self.STRANDED_ALARM_EVERY
+                and now - seat.stranded_said_at >= self.STRANDED_ALARM_EVERY):
+            seat.stranded_said_at = now
+            alarm = (f"{seat.name} has been unable to reach "
+                     f"{boss.wizard_name or boss.name} for "
+                     f"{stuck / 60:.0f} min ({seat.follow_fails} attempts). "
+                     f"Latest reason: {why}")
+            for other in self.seats:
+                try:
+                    other.tel.note_questing("follower-stranded", alarm)
+                except Exception:
+                    pass
+            self._say(seat, alarm)
+
+    #: how often a follower that KEEPS failing to reach its leader says
+    #: so, per seat — a steady clock deliberately outside `_say_once`'s
+    #: geometric thinning, because a stranding that lasts hours is not
+    #: noise to thin, it is the run's headline.
+    STRANDED_ALARM_EVERY = 300.0
 
     #: goals a follower must NOT chase on its own. A defeat step is
     #: satisfied by the PILOT's duels -- everyone in the circle who has
@@ -7534,16 +7606,27 @@ class LiveWorker(QThread):
                         f"back to {left:.0%} after {time.monotonic() - started:.0f}s"
                         if left is not None else "carrying on")
                 return
-            if time.monotonic() - started > self.LOW_HEALTH_WAIT:
+            # The give-up is for a wizard that could plausibly survive
+            # the fight anyway -- NOT for one on fumes. Rev 676d6e77:
+            # twenty-two "went-in-hurt" in one run, most on 0-5%
+            # health, each a certain death costing three to four
+            # minutes of dying, respawning and walking back -- while
+            # the same export shows wisps arriving given time ("back
+            # to 45% after 133s"). Below `CRITICAL_HEALTH`, waiting
+            # longer is strictly cheaper than dying again, so the
+            # deadline stretches to `CRITICAL_HEALTH_WAIT`.
+            limit = (self.LOW_HEALTH_WAIT if left >= self.CRITICAL_HEALTH
+                     else self.CRITICAL_HEALTH_WAIT)
+            if time.monotonic() - started > limit:
                 self._say(seat,
                           f"still on {left:.0%} health after "
-                          f"{self.LOW_HEALTH_WAIT:.0f}s and nothing is "
+                          f"{limit:.0f}s and nothing is "
                           f"fixing it — going into the next fight anyway, "
                           f"because a run that stops here reports nothing "
                           f"at all")
                 seat.tel.note_questing(
                     "went-in-hurt",
-                    f"gave up after {self.LOW_HEALTH_WAIT:.0f}s on "
+                    f"gave up after {limit:.0f}s on "
                     f"{left:.0%} health, needing {floor:.0%}")
                 return
             if not said:

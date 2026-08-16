@@ -1639,6 +1639,10 @@ def test_a_wizard_on_almost_no_health_does_not_start_another_fight(qapp):
     worker.status = type("S", (), {"emit": staticmethod(said.append)})()
     worker.LOW_HEALTH_POLL = 0.01
     worker.LOW_HEALTH_WAIT = 0.05
+    # 4% is under CRITICAL_HEALTH, where the deadline stretches rather
+    # than sending a dying wizard back in — shortened here so the test
+    # still exercises the eventual give-up.
+    worker.CRITICAL_HEALTH_WAIT = 0.1
 
     seat = worker.seats[0]
     seat.client = _hurt_client(0.04)
@@ -10424,6 +10428,168 @@ def test_an_unreadable_prompt_is_not_a_prompt():
     assert asyncio.run(party.at_a_prompt(_party_client())) is False
 
 
+def test_the_quest_helper_line_names_the_leader():
+    """Rev 676d6e77: the booster's own goal line read `Quest Helper
+    Following Konstantin VeränderungBeschwörer` for four hours while
+    the friends-list teleport failed for want of exactly that string —
+    the game's own full spelling, umlauts and all, published before
+    any duel."""
+    from deimos_bridge import party
+
+    goal = ("Quest Helper Following Konstantin VeränderungBeschwörer\n"
+            "Defeat Otomo Supply Runners in Tatakai Outpost")
+    assert party.helper_followed_name(goal) == \
+        "Konstantin VeränderungBeschwörer"
+    assert party.helper_followed_name("Defeat X in Y") == ""
+    assert party.helper_followed_name("") == ""
+
+
+def test_the_followers_goal_teaches_the_leaders_name(monkeypatch):
+    import asyncio
+
+    from deimos_bridge import party
+
+    worker, _read = _zoned_party(["MS_Hub", "MS_War"])
+    worker.leader = 0
+    boss, seat = worker.seats
+    boss.wizard_name = None
+    seat.goal = ("Quest Helper Following Konstantin VeränderungBeschwörer\n"
+                 "Defeat Otomo Supply Runners in Tatakai Outpost")
+    captured = {}
+
+    async def fake_follow(_f, _l, leader_name=None, **_kw):
+        captured["name"] = leader_name
+        return False, ""
+
+    monkeypatch.setattr(party, "follow", fake_follow)
+    asyncio.run(worker._follow_step(seat.client, seat))
+    assert boss.wizard_name == "Konstantin VeränderungBeschwörer"
+    assert captured["name"] == "Konstantin VeränderungBeschwörer"
+    assert "leader-name-learned" in [e["kind"] for e in seat.tel.questing]
+
+
+def test_a_duel_name_is_upgraded_and_a_different_one_kept(monkeypatch):
+    """A duel reports a first name; the helper line holds the full one
+    — same wizard, longer spelling, upgrade. A name that does not even
+    prefix-match is the operator's own setting and stays."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    worker, _read = _zoned_party(["MS_Hub", "MS_War"])
+    worker.leader = 0
+    boss, seat = worker.seats
+    seat.goal = "Quest Helper Following Konstantin VeränderungBeschwörer"
+
+    async def fake_follow(*_a, **_kw):
+        return False, ""
+
+    monkeypatch.setattr(party, "follow", fake_follow)
+    boss.wizard_name = "Konstantin"
+    asyncio.run(worker._follow_step(seat.client, seat))
+    assert boss.wizard_name == "Konstantin VeränderungBeschwörer"
+    assert party._FULL_NAMES.get("Konstantin") == \
+        "Konstantin VeränderungBeschwörer"
+
+    boss.wizard_name = "Phönix"
+    seat.followed_at = 0.0
+    asyncio.run(worker._follow_step(seat.client, seat))
+    assert boss.wizard_name == "Phönix", \
+        "a non-matching name was overwritten from the helper line"
+
+
+def test_a_stranded_follower_alarms_on_a_steady_clock(monkeypatch):
+    """Rev 676d6e77: the booster failed its follow continuously for
+    FOUR HOURS — the quester died twenty-three times fighting alone one
+    zone over — and the geometric thinning let exactly one line into
+    the export. The stranding alarm is a steady five-minute clock with
+    the verbatim current reason, and it writes to every seat."""
+    import asyncio
+    import time
+
+    from deimos_bridge import party
+
+    worker, _read = _zoned_party(["MS_Hub", "MS_War"])
+    worker.leader = 0
+    boss, seat = worker.seats
+    boss.wizard_name = "Konstantin VeränderungBeschwörer"
+
+    async def failing(*_a, **_kw):
+        return False, ("the friends-list teleport to X ran for 45s "
+                       "without finishing and was cut off")
+
+    monkeypatch.setattr(party, "follow", failing)
+    asyncio.run(worker._follow_step(seat.client, seat))
+    assert seat.follow_failing_since is not None
+    assert [e for e in seat.tel.questing
+            if e["kind"] == "follower-stranded"] == [], \
+        "alarmed before the stranding was minutes old"
+    seat.follow_failing_since = time.monotonic() - 400
+    seat.followed_at = 0.0
+    asyncio.run(worker._follow_step(seat.client, seat))
+    strand = [e for e in seat.tel.questing if e["kind"] == "follower-stranded"]
+    assert strand and "45s" in strand[0]["detail"]
+    assert "min" in strand[0]["detail"]
+    assert [e for e in boss.tel.questing if e["kind"] == "follower-stranded"], \
+        "the leader's export must carry the stranding too"
+
+    async def landed(*_a, **_kw):
+        return True, "followed the leader into MS_War"
+
+    monkeypatch.setattr(party, "follow", landed)
+    seat.followed_at = 0.0
+    asyncio.run(worker._follow_step(seat.client, seat))
+    assert seat.follow_failing_since is None, \
+        "a success must clear the stranding clock"
+
+
+def test_a_critical_wizard_keeps_waiting_past_the_give_up(monkeypatch):
+    """Rev 676d6e77: "gave up after 150s on 1% health" twenty-two
+    times, each a certain death costing minutes — while the same export
+    shows wisps arriving given time ("back to 45% after 133s"). Below
+    CRITICAL_HEALTH the deadline stretches; at merely-low health the
+    old give-up stands."""
+    import asyncio
+
+    from deimos_bridge import upkeep
+
+    worker, _read = _zoned_party(["MS_Hub"])
+    seat = worker.seats[0]
+    worker.LOW_HEALTH_WAIT = 0.05
+    worker.CRITICAL_HEALTH_WAIT = 10.0
+    worker.LOW_HEALTH_POLL = 0.01
+    health = {"left": 0.02}
+
+    async def left(_seat):
+        return health["left"]
+
+    async def after_fight(*_a, **_kw):
+        return None
+
+    monkeypatch.setattr(worker, "_health_left", left)
+    monkeypatch.setattr(worker, "_health_needed", lambda _s: 0.66)
+    monkeypatch.setattr(upkeep, "after_fight", after_fight)
+
+    async def drive():
+        task = asyncio.ensure_future(worker._let_it_heal(seat))
+        await asyncio.sleep(0.3)        # far past LOW_HEALTH_WAIT
+        health["left"] = 0.8            # the wisp arrives
+        await task
+
+    asyncio.run(drive())
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert "went-in-hurt" not in kinds, \
+        "a 2%-health wizard was sent in to die on the old deadline"
+    assert "healed" in kinds
+
+    # ...and a merely-low wizard keeps the old give-up.
+    seat.tel.questing.clear()
+    health["left"] = 0.5
+    asyncio.run(worker._let_it_heal(seat))
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert "went-in-hurt" in kinds
+
+
 def test_wisps_wait_when_the_leader_is_already_fighting(qapp):
     """The chores set `in_upkeep`, and the service task skips its whole
     tick while that is set — so a follower that started a wisp sweep as
@@ -11151,8 +11317,11 @@ def test_waiting_to_heal_is_written_down_where_the_export_can_see_it():
     worker.use_potions = worker.collect_wisps = worker.buy_potions = False
     # Short, but not zero: the give-up check runs before the first
     # report, so a zero wait would skip straight past the hold the test
-    # is about. In production the wait is 150s and cannot.
+    # is about. In production the wait is 150s and cannot. 5% health is
+    # under CRITICAL_HEALTH, so the stretched deadline is the one that
+    # has to be shortened here.
     worker.LOW_HEALTH_WAIT = 0.01
+    worker.CRITICAL_HEALTH_WAIT = 0.02
     worker.LOW_HEALTH_POLL = 0.05
 
     async def hurt(_seat):

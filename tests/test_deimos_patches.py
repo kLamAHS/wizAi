@@ -258,7 +258,8 @@ class _FriendsClient:
 
     def __init__(self, friends=("Konstantin Ice",), page=1, pages=1,
                  opens_panel=True, panel_for=None, confirms=True,
-                 panel_text=True, slow_windows=0):
+                 panel_text=True, slow_windows=0,
+                 tab_label="Online Friends"):
         #: how many polls the panel and the confirmation box take to
         #: appear once they have been asked for. Three game clients on
         #: one machine is what makes this non-zero live.
@@ -290,7 +291,7 @@ class _FriendsClient:
         self.confirm = _Win("MessageBoxModalWindow", [_Win("centerButton")],
                             visible=lambda: me.confirm_open)
         self.friends_window = _Win("NewFriendsListWindow", [
-            _Win("lblFriendsList", text="<center>Online Friends</center>"),
+            _Win("lblFriendsList", text=f"<center>{tab_label}</center>"),
             _Win("btnListTypeRight"),
             _Win("listFriends", text=list_text),
             _Win("btnArrowDown"),
@@ -358,6 +359,95 @@ def _run_tp(mod, client, **kw):
     import asyncio
 
     return asyncio.run(mod.teleport_to_friend_from_list(client, **kw))
+
+
+def test_a_tab_that_never_reads_online_friends_fails_fast_not_forever():
+    """Upstream's `_cycle_to_online_friends` is `while (text) != "Online
+    Friends": click`, with no exit — a label that never reads exactly
+    that parks the caller for the rest of the run, and every failure
+    surfaces as an opaque outer timeout. Rev 676d6e77's booster failed
+    the cross-zone follow continuously for four hours with exactly that
+    45s-timeout signature. Bounded now: two full laps of the tab
+    carousel, then a ValueError that names what the label actually
+    reads."""
+    import pytest
+
+    mod = _load_ww_utils()
+    client = _FriendsClient(tab_label="Freunde")
+    with pytest.raises(ValueError) as err:
+        _run_tp(mod, client, name="Konstantin Ice")
+    assert "never showed 'Online Friends'" in str(err.value)
+    assert "Freunde" in str(err.value)
+
+
+def test_the_cross_zone_follow_prefers_the_hardened_copy():
+    """`wizwalker.extensions.scripting` resolves to the pip-installed
+    fork's UNHARDENED copy at runtime — `deimos_path`'s overlay can only
+    add missing extension subpackages, never shadow ones the fork ships
+    — so every hardening in the vendored utils was dead code in wizAi's
+    own follow. The loader reads the vendored file by path and execs it;
+    its imports are all absolute and resolve against the installed
+    wizwalker, so the follow runs hardened logic over the running
+    primitives, with the stock import as the fallback."""
+    src = _source("deimos_bridge/party.py")
+    assert "def _hardened_friend_tp" in src
+    body = src.split("async def teleport_to_leader_across_zones", 1)[1]
+    body = body.split("\nasync def ", 1)[0]
+    assert "_hardened_friend_tp()" in body
+    assert body.index("_hardened_friend_tp()") < body.index(
+        "from wizwalker.extensions.scripting import"), \
+        "the stock import must be the fallback, not the first choice"
+
+
+def test_the_hardened_loader_runs_against_the_installed_wizwalker():
+    """Driven with the same stubs `_load_ww_utils` uses standing in for
+    the installed fork: the loader execs the vendored file and hands
+    back its `teleport_to_friend_from_list`."""
+    import enum
+    import re as _re
+    import sys
+    import types
+
+    from deimos_bridge import party
+
+    enums = types.ModuleType("wizwalker.memory.memory_objects.enums")
+
+    class WindowFlags(enum.IntFlag):
+        visible = 1
+
+    enums.WindowFlags = WindowFlags
+    utils_mod = types.ModuleType("wizwalker.utils")
+
+    async def maybe_wait_for_value_with_timeout(*a, **kw):
+        return None
+
+    utils_mod.maybe_wait_for_value_with_timeout = \
+        maybe_wait_for_value_with_timeout
+    names = ("wizwalker", "wizwalker.memory", "wizwalker.memory.memory_objects",
+             "wizwalker.memory.memory_objects.enums", "wizwalker.utils",
+             "regex")
+    saved = {name: sys.modules.get(name) for name in names}
+    kept = dict(party._HARDENED)
+    try:
+        for name in ("wizwalker", "wizwalker.memory",
+                     "wizwalker.memory.memory_objects"):
+            sys.modules[name] = types.ModuleType(name)
+        sys.modules["wizwalker.memory.memory_objects.enums"] = enums
+        sys.modules["wizwalker.utils"] = utils_mod
+        if saved["regex"] is None:
+            stub = types.ModuleType("regex")
+            stub.compile = _re.compile
+            sys.modules["regex"] = stub
+        party._HARDENED.update(fn=None, tried=False)
+        fn = party._hardened_friend_tp()
+        assert callable(fn), "the hardened copy did not load"
+    finally:
+        party._HARDENED.update(kept)
+        for name, mod in saved.items():
+            if mod is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = mod
 
 
 def test_a_friend_teleport_that_works_closes_everything_it_opened():

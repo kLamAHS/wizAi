@@ -146,6 +146,68 @@ async def wizard_name(client):
     return None
 
 
+def helper_followed_name(goal) -> str:
+    """The full wizard name in the game's own Quest Helper line, or "".
+
+    Rev 676d6e77's booster stood one zone from its quester for FOUR
+    HOURS because the friends-list teleport had no name to aim
+    ("wizard name is not known yet ... read from the first duel") --
+    while its own goal line read, verbatim, `Quest Helper Following
+    Konstantin VeränderungBeschwörer`. The game itself publishes the
+    followed wizard's exact full name, umlauts and all, before any
+    duel has happened, and it is the one spelling guaranteed to match
+    the friends list. Harvesting it is free.
+    """
+    import re
+
+    if not goal:
+        return ""
+    m = re.search(r"Quest Helper Following\s+([^\n\r]+)", goal)
+    return m.group(1).strip() if m else ""
+
+
+#: The hardened friends-list teleport, loaded once. See
+#: `_hardened_friend_tp`.
+_HARDENED = {"fn": None, "tried": False}
+
+
+def _hardened_friend_tp():
+    """wizAi's hardened `teleport_to_friend_from_list`, or None.
+
+    The vendored wizwalker carries the widened window-waits, the
+    row-click retry and the bounded Online-Friends cycle -- but the
+    RUNNING wizwalker is the pip-installed fork, and
+    `wizwalker.extensions.scripting` resolves to the fork's own
+    unhardened copy: the overlay in `deimos_path` can only ADD missing
+    extension subpackages, never shadow ones the fork ships. So the
+    hardened module is loaded from its file, by path, into a throwaway
+    namespace. Its imports are all absolute (`wizwalker.memory...`,
+    `wizwalker.utils`, `regex`) and resolve against the installed
+    wizwalker at exec time, which is exactly right: hardened logic
+    over the running primitives. Best-effort -- any failure falls back
+    to the stock import, same as before.
+    """
+    if _HARDENED["tried"]:
+        return _HARDENED["fn"]
+    _HARDENED["tried"] = True
+    try:
+        import os
+
+        from .deimos_path import DEIMOS_ROOT
+
+        path = os.path.join(DEIMOS_ROOT, "libs", "wizwalker", "wizwalker",
+                            "extensions", "scripting", "utils.py")
+        with open(path, encoding="utf-8") as handle:
+            source = handle.read()
+        namespace = {"__name__": "_wizai_hardened_friend_tp"}
+        exec(compile(source, path, "exec"), namespace)
+        fn = namespace.get("teleport_to_friend_from_list")
+        _HARDENED["fn"] = fn if callable(fn) else None
+    except Exception:
+        _HARDENED["fn"] = None
+    return _HARDENED["fn"]
+
+
 #: resolved full friends-list names, keyed by the short name a duel
 #: gives. One lookup per leader per run rather than one per follow.
 _FULL_NAMES = {}
@@ -301,7 +363,17 @@ async def teleport_to_leader_across_zones(follower, leader_name):
         from .deimos_path import ensure_path
 
         ensure_path()
-        from wizwalker.extensions.scripting import teleport_to_friend_from_list
+        # The hardened copy first -- widened waits, row-click retry,
+        # bounded Online-Friends cycle -- and the fork's stock one only
+        # when it will not load. Which copy ran is stamped into the
+        # failure reasons, because rev 676d6e77 spent four hours
+        # failing this teleport and exported one line about it.
+        teleport_to_friend_from_list = _hardened_friend_tp()
+        copy = "hardened copy"
+        if teleport_to_friend_from_list is None:
+            from wizwalker.extensions.scripting import \
+                teleport_to_friend_from_list
+            copy = "stock wizwalker"
     except Exception as exc:
         return False, (f"cross-zone follow needs wizwalker's scripting "
                        f"extension ({type(exc).__name__}: {exc})")
@@ -336,18 +408,19 @@ async def teleport_to_leader_across_zones(follower, leader_name):
             return False, (
                 f"the friends-list teleport to {name} ran for "
                 f"{TELEPORT_TIMEOUT:.0f}s without finishing and was cut "
-                f"off. It gets stuck paging the list to 'Online Friends' "
-                f"when that tab will not come up — check the friends "
-                f"window is not already open on another tab, or turn "
-                f"'follow the leader' off and walk this wizard over")
+                f"off ({copy}). It gets stuck paging the list to 'Online "
+                f"Friends' when that tab will not come up — check the "
+                f"friends window is not already open on another tab, or "
+                f"turn 'follow the leader' off and walk this wizard over")
         except ValueError as exc:
             if "Could not find friend" in str(exc):
                 return False, ""
             return False, (f"could not teleport to {name} through the "
-                           f"friends list (ValueError: {exc})")
+                           f"friends list (ValueError: {exc}; {copy})")
         except Exception as exc:
             return False, (f"could not teleport to {name} through the "
-                           f"friends list ({type(exc).__name__}: {exc})")
+                           f"friends list ({type(exc).__name__}: {exc}; "
+                           f"{copy})")
         return True, ""
 
     async with follower.mouse_handler:
