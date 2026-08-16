@@ -19400,3 +19400,131 @@ def test_the_hop_prefers_the_collision_teleport(monkeypatch):
     del fake.collision_tp
     assert questing._navmap_tp() is navmap_tp, \
         "an older Deimos without collision_tp must still hand back navmap_tp"
+
+
+def test_the_rack_reads_through_the_participant_when_the_member_lacks_it():
+    """The regression that made the archmastery fix a no-op in
+    production: `school_pips()` was added to the VENDORED wizwalker's
+    member, but the live venv installs a different fork whose member
+    never grew it — so the fold read zero rack for a whole fight while
+    the wizard's converted pips sat at the participant offsets both
+    trees share (rev 8a48fd42: Oz frozen at 1 normal + 1 power every
+    round, buffing and passing, exactly the fight the fix was built
+    for). The participant's `pip_count` object is the common ground,
+    and this mock is shaped exactly like the live fork: NO school_pips
+    on the member, the rack on the participant."""
+    import asyncio
+
+    from data_full import load_spells_full
+    from deimos_bridge.live_state import NameResolver, read_state
+    from deimos_bridge.mock_client import MockCard, MockCombat, MockMember
+
+    cards = load_spells_full()
+    me = MockMember("Oz", 10008, client=True, normal_pips=1, power_pips=1,
+                    participant_school_pips={"storm": 3})
+    mob = MockMember("Lost Soul", 55, monster=True)
+    combat = MockCombat([me, mob], [MockCard("Stormblade")])
+    read = asyncio.new_event_loop().run_until_complete(
+        read_state(combat, NameResolver(cards), "storm"))
+    p = read.state.player
+    assert (p.school_pips, p.norm_pips, p.pow_pips) == (3, 1, 1)
+
+
+def test_the_school_reads_through_the_participant_too():
+    """`primary_magic_school_id` does not exist on CombatMember in ANY
+    wizwalker this project runs — vendored or fork — it lives on the
+    participant. Asking only the member meant read_school had never
+    returned a real answer off a live client: every enemy was the
+    balance fallback, and the client's own answer was empty, which
+    starved `_check_school`'s misconfiguration alarm — a storm booster
+    configured as fire stayed fire for the whole fight."""
+    import asyncio
+
+    from data_full import load_spells_full
+    from deimos_bridge.deimos_damage import school_id
+    from deimos_bridge.live_state import NameResolver, read_state
+    from deimos_bridge.mock_client import MockCard, MockCombat, MockMember
+
+    cards = load_spells_full()
+    me = MockMember("Oz", 10008, client=True,
+                    participant_school_id=school_id("storm"))
+    mob = MockMember("Firebrand", 500, monster=True,
+                     participant_school_id=school_id("fire"))
+    combat = MockCombat([me, mob], [MockCard("Stormblade")])
+    read = asyncio.new_event_loop().run_until_complete(
+        read_state(combat, NameResolver(cards), "fire"))
+    assert read.client_school == "storm", \
+        "the client's own school answer is empty again"
+    assert read.state.enemies[0].school == "fire", \
+        "enemy schools are the balance fallback again"
+
+
+def test_a_member_level_school_answer_still_wins():
+    """The member-first order is load-bearing for older tests and any
+    build that DOES answer at the member — the participant is the
+    fallback, not a replacement."""
+    import asyncio
+
+    from data_full import load_spells_full
+    from deimos_bridge.deimos_damage import school_id
+    from deimos_bridge.live_state import NameResolver, read_state
+    from deimos_bridge.mock_client import MockCard, MockCombat, MockMember
+
+    cards = load_spells_full()
+    me = MockMember("W", 800, client=True, school_id=school_id("ice"),
+                    participant_school_id=school_id("fire"))
+    mob = MockMember("m", 180, monster=True)
+    combat = MockCombat([me, mob], [MockCard("Frost Beetle")])
+    read = asyncio.new_event_loop().run_until_complete(
+        read_state(combat, NameResolver(cards), "ice"))
+    assert read.client_school == "ice"
+
+
+def test_a_booster_party_with_a_script_is_solo_pilot_wiring(qapp):
+    """The operator's requirement, verbatim: "I want booster mode to
+    work with script questing, since auto quester (non scripts) is
+    essentially useless." A script normally makes EVERY seat
+    script-driven, which starves the booster branch of the tick — and
+    at rev 8a48fd42 each mass `tp quest` scattered the booster to its
+    own stale journal, through the world teleporter to Krokotopia
+    while its quester fought in Marleybone. Booster party + script
+    therefore MEANS solo-pilot wiring: the script quests the leader
+    alone, and the boosters are wizAi's — forced even when the solo
+    checkbox was left off, because the raw checkboxes can spell the
+    combination no mode names."""
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    w = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1,
+                   seats=[SeatConfig(school="fire")], booster_party=True,
+                   script="teleport quest", leader=1)
+    assert w.solo_script and w._booster_solo_forced
+    assert w._solo_pilot()
+    assert [w._is_booster(s) for s in w.seats] == [True, False]
+    assert [w._follows(s) for s in w.seats] == [True, False]
+
+    explicit = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1,
+                          seats=[SeatConfig(school="fire")],
+                          booster_party=True, script="teleport quest",
+                          solo_script=True)
+    assert explicit.solo_script and not explicit._booster_solo_forced
+
+    unscripted = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1,
+                            seats=[SeatConfig(school="fire")],
+                            booster_party=True)
+    assert not unscripted.solo_script, \
+        "forcing solo without a script would change plain booster mode"
+
+
+def test_the_booster_script_mode_is_offered_and_distinct(qapp):
+    """The dropdown row for it, with the booster flag distinguishing
+    it from plain solo pilot in `_sync_quest_mode`'s reverse map — the
+    two have identical checkbox flags, so without the fourth flag the
+    dropdown would snap to whichever row comes first."""
+    from deimos_bridge.gui.app import MainWindow
+
+    flags = [mode for _name, mode in MainWindow.QUEST_MODES]
+    assert (False, True, True, True) in flags, "booster + script mode gone"
+    assert (False, True, True, False) in flags, "solo pilot mode gone"
+    assert len(flags) == len(set(flags)), \
+        "two quest modes share one flag tuple — the reverse map cannot " \
+        "tell them apart"

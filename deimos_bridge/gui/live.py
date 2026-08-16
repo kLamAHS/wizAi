@@ -494,6 +494,21 @@ class LiveWorker(QThread):
         #: wizAi's follow + hivemind instead, and let the script do the
         #: one thing it is good at, which is the route.
         self.solo_script = bool(solo_script)
+        #: A booster party with a script MEANS solo-pilot script wiring:
+        #: the script quests the leader alone, and the boosters are
+        #: wizAi's to keep on it. Without this, a script makes EVERY
+        #: seat script-driven, the booster branch of the tick is
+        #: unreachable, and each mass `tp quest` scatters the boosters
+        #: to their own stale journals -- rev 8a48fd42 sent a max-level
+        #: booster through the world teleporter to Krokotopia to chase
+        #: "Defeat Street Player" while its quester fought in
+        #: Marleybone. Forced rather than rejected, because the raw
+        #: checkboxes can spell this combination even though no mode
+        #: names it; said out loud in `_go`.
+        self._booster_solo_forced = False
+        if self.booster_party and self.script and not self.solo_script:
+            self.solo_script = True
+            self._booster_solo_forced = True
         #: overrides for the script's own `SpeedDelay`/`DialogDelay`
         #: settings, or None to run it as written. The author's pacing
         #: is a knob, and editing a 14,000-line file is not a knob --
@@ -2503,13 +2518,22 @@ class LiveWorker(QThread):
                 seat.runner = scripts.make_runner(
                     [pilot.client or client], source, solo=True)
                 seat.script_built = True
+                what = ("boosters — they keep to it and join its fights, "
+                        "their own journals ignored"
+                        if self.booster_party else "others follow and fight")
                 self._say(seat,
-                          f"script loaded — solo pilot: it drives "
-                          f"{pilot.name} alone"
+                          f"script loaded — "
+                          + ("booster party: the script quests "
+                             if self.booster_party else "solo pilot: it drives ")
+                          + f"{pilot.name} alone"
                           + (f" ({len(reset)} account setting(s) reset to "
                              f"placeholders so it quests solo)"
                              if reset else "")
-                          + "; the others follow and fight")
+                          + f"; the {what}"
+                          + (". Booster party with a script means exactly "
+                             "this, so solo-pilot wiring was engaged even "
+                             "though its checkbox was off"
+                             if self._booster_solo_forced else ""))
                 return
             source, skipped_setup = self._fresh_source(seat, source)
             seat.runner = scripts.make_runner(party or [client], source)
