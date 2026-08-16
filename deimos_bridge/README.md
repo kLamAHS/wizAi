@@ -778,6 +778,11 @@ is absent or found later, turning "wizsprinter is missing" into
 "wizwalker is broken".
 
 What remains are ordinary packages: `lark`, `thefuzz`, `loguru`,
-`pyyaml`, `requests`. `setup-windows.bat` installs them and treats
-failure as non-fatal; `available()` then names the specific module that
-did not import rather than reciting a fixed list.
+`pyyaml`, `requests`, and — since the Deimos 3.14 port — `katsuba` and
+`wiztype` for the collision teleport's precise entity layer.
+`setup-windows.bat` installs them and treats failure as non-fatal;
+`available()` then names the specific module that did not import rather
+than reciting a fixed list. (`shapely`, the collision solver itself,
+rides in the required line beside `numpy`: without it every teleport
+silently falls back to the old navmap behaviour, which is exactly the
+kind of invisible degradation the setup exists to prevent.)
