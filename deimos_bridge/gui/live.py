@@ -5905,7 +5905,8 @@ class LiveWorker(QThread):
                     questline="main"),
                 f"its own last main-line quest, {mine[0]} #{mine[1]}")
         others = [p for s, p in zip(self.seats, places)
-                  if s is not seat and p.on_main]
+                  if s is not seat and p.on_main
+                  and not self._is_booster(s)]
         if others:
             lowest = min(others, key=lambda p: p.order)
             add(questlist.quest_at(lowest.world, lowest.order),
@@ -6060,12 +6061,54 @@ class LiveWorker(QThread):
             # spent the last 25 minutes of the run in that state while
             # this line skipped him.
             return
+        # Boosters are not evidence about the questline, in either
+        # direction: a booster's journal is a max-level wizard's,
+        # parked on whatever world it stopped in, so it reading
+        # on-main is a coincidence and it reading off-main says
+        # nothing. Counting it made every booster party "alone" here
+        # -- and the alone wait below became the cure's ceiling.
         alone = not any(p.on_main for s, p in zip(self.seats, places)
-                        if s is not seat)
+                        if s is not seat and not self._is_booster(s))
         if alone and away < self.RECOVER_ALONE_AFTER:
-            return
+            # A whole party off the line is usually the script running
+            # a side chain on purpose -- and a side chain being WORKED
+            # moves: goals turn in, zones change, fights start. One
+            # that has moved NOTHING for the full recovery deadline is
+            # not being worked by anybody. Rev d3ed4d3c's ending is
+            # the case in full: the tracker fell onto 'Blue Oyster
+            # Cult', the script spun ~4,000 instructions a minute at
+            # an oyster it has no route for, goal and zone sat frozen
+            # for nine straight minutes -- and the twenty-minute alone
+            # wait outlived the run, with the booster party reading as
+            # "alone" by the old rule on top.
+            stalled = (bool(seat.goal_at) and bool(seat.zone_since)
+                       and now - max(seat.goal_at, seat.zone_since)
+                       >= self.RECOVER_QUESTLINE_AFTER)
+            if not stalled:
+                self._say_once(
+                    seat, f"recover-wait:{seat.off_line_since:.0f}",
+                    f"{seat.name} has been off the main questline for "
+                    f"{away / 60:.0f} min with nobody on the line to "
+                    f"compare against — waiting "
+                    f"{self.RECOVER_ALONE_AFTER / 60:.0f} min in case "
+                    f"the side quest is deliberate. A stall (no goal or "
+                    f"zone change for "
+                    f"{self.RECOVER_QUESTLINE_AFTER / 60:.0f} min) "
+                    f"skips the wait",
+                    kind="questline-recovery-waiting",
+                    detail=(f"off the line {away / 60:.0f} min on "
+                            f"{place.name!r}, nobody on the main line to "
+                            f"compare against, and the side quest still "
+                            f"shows signs of being worked — holding the "
+                            f"cure back on purpose"))
+                return
         candidates, why = self._lost_quest(seat, places)
         if not candidates:
+            self._say_once(
+                seat, f"recover-blind:{seat.off_line_since:.0f}",
+                f"{seat.name} is off the main questline and nothing can "
+                f"name the quest it should be on — {why}",
+                kind="questline-recovery-blind", detail=why)
             return
         # A give-up holds for the same candidate list -- retrying it
         # every ten minutes would page through the journal forever to

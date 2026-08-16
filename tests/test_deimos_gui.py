@@ -17725,6 +17725,97 @@ def test_a_whole_party_on_side_quests_is_the_script_not_a_loss(monkeypatch):
     assert len(calls) == 3, "twenty minutes is nobody's side quest"
 
 
+def test_a_booster_is_not_evidence_about_the_questline(monkeypatch):
+    """A booster's journal is a max-level wizard's, parked on whatever
+    world it stopped in — it reading on-main is a coincidence and it
+    reading off-main says nothing. Rev d3ed4d3c: counting it made the
+    booster party "alone", and the twenty-minute alone wait outlived
+    the run. Here the side quest still shows movement, so the wait is
+    right — but it must be SAID, not silent."""
+    import asyncio
+    import time
+
+    questing = _no_dialogue(monkeypatch)
+    worker, lost = _off_the_line(orders=("Gather the Troops",))
+    worker.booster_party = True
+    worker.leader = lost.index          # the quester; the other seat boosts
+    now = time.monotonic()
+    lost.off_line_since = now - 400
+    lost.goal_at = now                  # the side quest is being worked
+    lost.zone_since = now
+    calls = []
+
+    async def select(_c, names, on_status=None):
+        calls.append(names)
+        return True, names[0], True
+
+    monkeypatch.setattr(questing, "select_quest", select)
+    asyncio.run(worker._maybe_recover_questline(lost))
+    assert calls == [], "a booster's on-main tracker counted as evidence"
+    waits = [e for e in lost.tel.questing
+             if e["kind"] == "questline-recovery-waiting"]
+    assert waits, "the alone wait was silent again"
+    assert "deliberate" in waits[0]["detail"] or "worked" in waits[0]["detail"]
+
+
+def test_a_stalled_wizard_skips_the_alone_wait(monkeypatch):
+    """The end of rev d3ed4d3c: nine minutes on 'Blue Oyster Cult' with
+    neither the goal nor the zone budging while the script spun ~4,000
+    instructions a minute at an oyster it has no route for. A side
+    chain being worked MOVES; one that has moved nothing for the full
+    recovery deadline is not being worked by anybody, and the
+    twenty-minute alone wait guards a courtesy nobody is using."""
+    import asyncio
+    import time
+
+    questing = _no_dialogue(monkeypatch)
+    worker, lost = _off_the_line(orders=("Gather the Troops",))
+    worker.booster_party = True
+    worker.leader = lost.index
+    lost.last_main = ("Krokotopia", 12, "Gather the Troops")
+    now = time.monotonic()
+    lost.off_line_since = now - 400
+    lost.goal_at = now - 400            # frozen the whole time
+    lost.zone_since = now - 400
+    calls = []
+
+    async def select(_c, names, on_status=None):
+        calls.append(list(names))
+        return True, names[0], True
+
+    monkeypatch.setattr(questing, "select_quest", select)
+    asyncio.run(worker._maybe_recover_questline(lost))
+    assert len(calls) == 1, "the stall did not skip the alone wait"
+    assert "Gather the Troops" in calls[0][0]
+    said = [e for e in lost.tel.questing
+            if e["kind"] == "questline-recovered"]
+    assert said, [e["kind"] for e in lost.tel.questing]
+
+
+def test_a_stall_needs_real_clocks_not_unread_ones(monkeypatch):
+    """goal_at and zone_since start at zero, and zero is "never read",
+    not "frozen forever" — a fresh worker must not treat missing data
+    as proof of a stall."""
+    import asyncio
+    import time
+
+    questing = _no_dialogue(monkeypatch)
+    worker, lost = _off_the_line(orders=("Gather the Troops",))
+    worker.booster_party = True
+    worker.leader = lost.index
+    lost.off_line_since = time.monotonic() - 400
+    assert (lost.goal_at, lost.zone_since) == (0.0, 0.0)
+    calls = []
+
+    async def select(_c, names, on_status=None):
+        calls.append(names)
+        return True, names[0], True
+
+    monkeypatch.setattr(questing, "select_quest", select)
+    asyncio.run(worker._maybe_recover_questline(lost))
+    assert calls == [], "unread clocks were taken as a stall"
+
+
 def test_a_quest_that_is_not_in_the_book_is_not_retried_forever(monkeypatch):
     """The one failure retrying cannot fix, and a different fact worth
     its own entry: the quest was never accepted, so somebody has to
