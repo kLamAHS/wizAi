@@ -19528,3 +19528,81 @@ def test_the_booster_script_mode_is_offered_and_distinct(qapp):
     assert len(flags) == len(set(flags)), \
         "two quest modes share one flag tuple — the reverse map cannot " \
         "tell them apart"
+
+
+def test_switching_the_wiring_mid_run_rebuilds_the_script(qapp, monkeypatch):
+    """A solo VM is built over the leader's client alone and a party VM
+    over all of them, so the questing mode and the Leader are part of
+    what the runner was BUILT from — not flags it can read later. Rev
+    d4b5506c: the operator switched to "Booster party + script" and
+    pointed Leader at the quester mid-run, the whole-party build kept
+    running, and the script walked the BOOSTER's questline with the
+    quester in tow."""
+    import asyncio
+
+    worker, _read = _zoned_party(["KT_Hub", "KT_Hub"])
+    seat = worker.seats[0]
+    worker.script = _QUESTER
+    built = []
+
+    async def setup(_client, s):
+        built.append((worker._solo_pilot(), worker.leader))
+        runner = _LiveRunner()
+        runner.stop = lambda: None
+        s.runner = runner
+        s.script_wiring_built = (worker._solo_pilot(),
+                                 worker.leader if worker._solo_pilot()
+                                 else None)
+
+    monkeypatch.setattr(worker, "_setup_script", setup)
+    monkeypatch.setattr(worker, "_scripted", lambda s: True)
+    asyncio.run(worker._sync_script(seat))
+    assert built == [(False, 0)]
+    # Same text, same wiring: no rebuild.
+    asyncio.run(worker._sync_script(seat))
+    assert built == [(False, 0)]
+    # The operator picks booster+script and points Leader at wizard 2.
+    worker.booster_party = True
+    worker.solo_script = True
+    worker.leader = 1
+    asyncio.run(worker._sync_script(seat))
+    assert built == [(False, 0), (True, 1)], \
+        "the mode change did not rebuild — the whole-party VM keeps running"
+    # And moving the Leader alone is a different solo build too.
+    worker.leader = 0
+    asyncio.run(worker._sync_script(seat))
+    assert built[-1] == (True, 0), \
+        "a Leader change under solo wiring did not rebuild"
+
+
+def test_quest_mode_changes_reach_the_running_worker(qapp):
+    """The mode dropdown and Leader picker were read once at Play live
+    — changing either mid-run silently did nothing, while the script
+    box already pushed live, leaving the party half-reconfigured. The
+    push writes plain attributes the worker reads each tick."""
+    import types
+
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    fake = types.SimpleNamespace(
+        isRunning=lambda: True, seats=[object(), object()],
+        auto_quest=False, booster_party=False, solo_script=False,
+        follow_leader=True, leader=0)
+    win.live = fake
+
+    booster_script = next(
+        i for i, (_n, flags) in enumerate(MainWindow.QUEST_MODES)
+        if flags == (False, True, True, True))
+    win.leader_pick.setCurrentIndex(1)
+    win.quest_mode.setCurrentIndex(booster_script)
+    win.on_quest_mode(booster_script)
+    assert fake.booster_party is True
+    assert fake.solo_script is True
+    assert fake.leader == 1
+
+    # The Leader picker alone reaches it too, clamped to the party.
+    win.leader_pick.setCurrentIndex(0)
+    assert fake.leader == 0
+    win.leader_pick.setCurrentIndex(3)
+    assert fake.leader == 1, "a Leader beyond the party was not clamped"

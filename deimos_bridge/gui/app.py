@@ -2368,6 +2368,12 @@ class MainWindow(QMainWindow):
         self.booster_party = False
         for box in (self.auto_quest, self.use_script, self.solo_script):
             box.toggled.connect(self._sync_quest_mode)
+            # ...and reach the running worker, not just the dropdown:
+            # a checkbox flipped mid-run is the same intent as picking
+            # a mode mid-run, and both used to be silently ignored.
+            box.toggled.connect(self._push_quest_mode)
+        self.follow_leader.toggled.connect(self._push_quest_mode)
+        self.leader_pick.currentIndexChanged.connect(self._push_quest_mode)
         self._sync_quest_mode()
         return panel
 
@@ -2381,6 +2387,42 @@ class MainWindow(QMainWindow):
         self.use_script.setChecked(script)
         self.solo_script.setChecked(solo)
         self._sync_quest_mode()
+        self._push_quest_mode()
+
+    def _push_quest_mode(self, *_a):
+        """Hand the running worker the questing mode as it stands now.
+
+        The mode dropdown and the Leader picker were read once at Play
+        live and never again, so changing either mid-run silently did
+        nothing -- while the script BOX already pushed live, leaving
+        the party half-reconfigured. Rev d4b5506c is what that looks
+        like: the operator switched to "Booster party + script" and
+        pointed Leader at the quester, the running worker heard
+        neither, and the whole-party build it was still running let
+        the name fill make the BOOSTER the script's main account --
+        the party spent the run walking the booster's questline.
+
+        Plain attribute writes on purpose: the worker reads these each
+        tick, and `_sync_script` treats the wiring as part of what the
+        runner was BUILT from, so a mode or Leader change rebuilds the
+        VM over the right client within a tick.
+        """
+        if self._loading:
+            return                    # a restore, not a person
+        live = self.live
+        if live is None or not live.isRunning():
+            return
+        booster = getattr(self, "booster_party", False)
+        solo = self.solo_script.isChecked()
+        if booster and self.use_script.isChecked():
+            solo = True   # booster party with a script MEANS solo wiring
+        live.auto_quest = self.auto_quest.isChecked()
+        live.booster_party = booster
+        live.solo_script = solo
+        live.follow_leader = self.follow_leader.isChecked()
+        live.leader = max(0, min(self.leader_pick.currentIndex(),
+                                 len(live.seats) - 1))
+        self.status.setText("questing mode applied to the running party")
 
     def _sync_quest_mode(self, _on=None):
         """Point the dropdown at whatever the checkboxes now say."""
