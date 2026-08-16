@@ -791,20 +791,42 @@ async def _walk_remaining_to_target(client: Client, target_xyz: XYZ, world, zone
         if avoid:
             from shapely.geometry import Point as _Point
 
-            kept = []
-            for wp in walk:
-                if any(fp.contains(_Point(wp[0], wp[1])) for fp in avoid):
-                    break  # stop at the edge of the solid instead of walking into it
-                kept.append(wp)
-            if len(kept) != len(walk) or any(
-                fp.contains(_Point(target_xyz.x, target_xyz.y)) for fp in avoid
-            ):
+            # wizAi patch: which KIND of solid bounced us? When the
+            # TARGET ITSELF sits inside the volume, the volume is the
+            # destination rather than an obstacle -- the game aims the
+            # quest arrow INTO zone doors, service lifts and warp
+            # volumes, whose frames carry ordinary collision that
+            # rejects a teleport landing while welcoming a wizard on
+            # foot. Walking in is how the transition fires. Rev
+            # 66a4fe5b is the cost of treating them like statues:
+            # 'collision (strict re-solve)' landed both wizards 103
+            # units from a marker pointing into the Scotland Yard
+            # service lift, the truncation parked them at its edge,
+            # and the script teleport-looped against a door it only
+            # needed to walk through. A target OUTSIDE the footprint
+            # keeps upstream's statue rule -- stop at the edge, since
+            # grinding into a wall face buys nothing.
+            if any(fp.contains(_Point(target_xyz.x, target_xyz.y))
+                   for fp in avoid):
                 logger.debug(
-                    f"[collision_tp] {client.title}: walk truncated at {len(kept)}/{len(walk)} "
-                    f"waypoints -- the rest runs into the collider that bounced the teleport"
+                    f"[collision_tp] {client.title}: the target sits inside "
+                    f"the volume that bounced the teleport -- treating it "
+                    f"as a door and walking in"
                 )
-                refine = False
-            walk = kept
+            else:
+                kept = []
+                for wp in walk:
+                    if any(fp.contains(_Point(wp[0], wp[1])) for fp in avoid):
+                        break  # stop at the edge of the solid instead of walking into it
+                    kept.append(wp)
+                if len(kept) != len(walk):
+                    logger.debug(
+                        f"[collision_tp] {client.title}: walk truncated at "
+                        f"{len(kept)}/{len(walk)} waypoints -- the rest runs "
+                        f"into the collider that bounced the teleport"
+                    )
+                    refine = False
+                walk = kept
         logger.debug(
             f"[collision_tp] {client.title}: walking the final {gap:.0f}u via {len(walk)} "
             f"A* waypoints to the target"

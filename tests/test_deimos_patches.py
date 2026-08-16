@@ -1340,3 +1340,30 @@ def test_the_collision_walk_floor_is_aggro_range_not_interaction_range():
     assert "_WALK_GAP_MIN = 20.0" in src, \
         "the walk floor went back above aggro range"
     assert "_WALK_GAP_MIN = 120.0" not in src
+
+
+def test_a_marker_inside_the_bouncing_volume_is_a_door_not_a_statue():
+    """The avoid-truncation exists for a statue the target stands
+    AGAINST: stop at the edge, do not grind into the face. But the game
+    aims the quest arrow INTO zone doors and service lifts, whose
+    frames carry ordinary collision that rejects a teleport landing
+    while welcoming a wizard on foot — walking in is how the transition
+    fires. Rev 66a4fe5b: 'collision (strict re-solve)' landed both
+    wizards 103 units from a marker pointing into the Scotland Yard
+    service lift, the truncation parked them at its edge, and the
+    script teleport-looped against a door it only needed to walk
+    through. The discriminator is the target itself: inside the
+    bouncing volume = destination, walk in; outside = statue, stop."""
+    src = _source(TP)
+    body = src.split("async def _walk_remaining_to_target", 1)[1]
+    body = body.split("\nasync def ", 1)[0]
+    assert "treating it " in body and "as a door and walking in" in body, \
+        "the door branch is gone — lifts and zone doors truncate again"
+    door_gate = body.index("as a door and walking in")
+    truncation = body.index("stop at the edge of the solid")
+    assert door_gate < truncation, \
+        "the door check must come before the statue truncation"
+    # The truncation must now be CONDITIONAL on the target being outside
+    # the volume — an unconditional truncation is the rev 66a4fe5b bug.
+    gate = body[:truncation]
+    assert gate.count("fp.contains(_Point(target_xyz.x, target_xyz.y))") == 1
