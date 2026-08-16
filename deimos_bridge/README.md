@@ -778,11 +778,14 @@ is absent or found later, turning "wizsprinter is missing" into
 "wizwalker is broken".
 
 What remains are ordinary packages: `lark`, `thefuzz`, `loguru`,
-`pyyaml`, `requests`, and — since the Deimos 3.14 port — `katsuba` and
-`wiztype` for the collision teleport's precise entity layer.
-`setup-windows.bat` installs them and treats failure as non-fatal;
-`available()` then names the specific module that did not import rather
-than reciting a fixed list. (`shapely`, the collision solver itself,
-rides in the required line beside `numpy`: without it every teleport
-silently falls back to the old navmap behaviour, which is exactly the
-kind of invisible degradation the setup exists to prevent.)
+`pyyaml`, `requests`. `setup-windows.bat` installs them and treats
+failure as non-fatal; `available()` then names the specific module that
+did not import rather than reciting a fixed list. (`shapely`, the 3.14
+collision solver, rides in the required line beside `numpy`: without it
+every teleport silently falls back to the old navmap behaviour, which
+is exactly the kind of invisible degradation the setup exists to
+prevent. The solver's optional precise-entity trio — `katsuba`,
+`wiztype`, upstream's Rust `kinif` — is deliberately NOT installed:
+`wiztype`'s dependency chain hard-pins a `pefile` too old for
+wizwalker, and the layer cannot activate without `kinif`, which is not
+on PyPI. `entity_collision` degrades to no colliders without them.)

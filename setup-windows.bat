@@ -26,6 +26,23 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM A venv outlives the Python that built it. Upgrade Python (3.13 ->
+REM 3.14, say) and the venv's python.exe runs the NEW interpreter over
+REM site-packages full of the OLD version's compiled modules -- pip sees
+REM "numpy already installed" and leaves the broken cp313 binaries in
+REM place, and the failure only surfaces as an ImportError at the very
+REM end. So before reusing a venv, compare the version its pyvenv.cfg
+REM recorded at creation with the version its python actually runs;
+REM a mismatch means rebuild from scratch.
+if exist ".venv\Scripts\python.exe" (
+    ".venv\Scripts\python.exe" -c "import sys,re,pathlib; cfg=pathlib.Path('.venv/pyvenv.cfg').read_text(); m=re.search(r'version *= *(\d+)\.(\d+)', cfg); sys.exit(0 if m and (int(m.group(1)), int(m.group(2))) == tuple(sys.version_info[:2]) else 1)" >nul 2>&1
+    if errorlevel 1 (
+        echo .venv was built by a different Python than it now runs --
+        echo rebuilding it so compiled packages match the interpreter.
+        rmdir /s /q .venv
+    )
+)
+
 if not exist ".venv\Scripts\python.exe" (
     echo Creating .venv ...
     python -m venv .venv
@@ -86,13 +103,17 @@ REM deimos_bridge/deimos_path.py puts them on the path at import time
 REM instead, so only genuine PyPI packages are installed below. `lark` is
 REM among them because wizsprinter needs it and nothing is resolving its
 REM dependencies for us now.
-REM katsuba + wiztype belong to the collision teleport's PRECISE layer
-REM (exact teleporter-pad/boat colliders and player radius). That layer
-REM only switches on when upstream Deimos's Rust extension `kinif` is
-REM ALSO importable, which is not on PyPI -- so these two are installed
-REM ready for it, and until then entity_collision quietly reports no
-REM colliders and collision teleports work without that refinement.
-"%PY%" -m pip install --quiet lark thefuzz loguru pyyaml requests pypresence pyperclip katsuba wiztype
+REM katsuba + wiztype (the collision teleport's PRECISE entity layer)
+REM are deliberately NOT here. wiztype depends on memobj, which
+REM hard-pins pefile==2021.9.3 on Windows -- the exact package wizwalker
+REM needs at >=2023.2.7 -- so installing it into this venv downgrades
+REM pefile and breaks wizwalker. Upstream Deimos forces pefile back up
+REM with uv's override-dependencies, which plain pip has no equivalent
+REM of. The layer could not activate anyway until kinif (upstream's
+REM Rust extension, not on PyPI) is built; entity_collision probes and
+REM quietly reports no colliders without the trio, and collision
+REM teleports work without that refinement.
+"%PY%" -m pip install --quiet lark thefuzz loguru pyyaml requests pypresence pyperclip
 if errorlevel 1 (
     echo.
     echo NOTE: Deimos's questing requirements did not install. That is not
@@ -105,7 +126,10 @@ if errorlevel 1 (
 echo.
 "%PY%" -c "import wizwalker, numpy, shapely, PyQt6; print('all imports OK')"
 if errorlevel 1 (
-    echo ERROR: something did not install cleanly.
+    echo ERROR: something did not install cleanly. If the error above is
+    echo        an ImportError from a package this script just said was
+    echo        already satisfied, the venv predates your current Python:
+    echo        delete the .venv folder and run this file again.
     pause
     exit /b 1
 )

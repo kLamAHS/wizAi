@@ -55,9 +55,13 @@ PIP_NAMES = {
     # without them -- collision teleports still work, minus that layer.
     # kinif is NOT on PyPI: it is upstream Deimos's own Rust extension
     # (libs/kinif, built with maturin), so the pip line for it is a
-    # pointer, not an install.
+    # pointer, not an install. CAUTION before installing wiztype into
+    # the live venv: its memobj dependency hard-pins pefile==2021.9.3
+    # on Windows, which downgrades the pefile wizwalker needs at
+    # >=2023.2.7 -- upstream forces it back up with uv
+    # override-dependencies, which plain pip cannot do.
     "katsuba": "katsuba",
-    "wiztype": "wiztype",
+    "wiztype": "wiztype (see the pefile caution above)",
     "kinif": "kinif (upstream Deimos's Rust lib -- build from "
              "Deimos-Wizard101 v3.14.0 libs/kinif with maturin)",
 }
