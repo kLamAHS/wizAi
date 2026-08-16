@@ -926,7 +926,7 @@ class LiveWorker(QThread):
                     # to land before that instruction runs.
                     await self._stage(seat, "guarding a sigil countdown",
                                       self._maybe_count_hold(seat),
-                                      wheel=True, limit=30)
+                                      wheel=True, limit=90)
 
                 catching = self._catching_up()
                 # Whichever seat is CURRENTLY stepping the VM, which is
@@ -2759,8 +2759,13 @@ class LiveWorker(QThread):
         elif why:
             # A follower that cannot reach its leader is the failure that
             # makes the whole party pointless, so it is said -- but
-            # thinned, because the cause is usually standing.
-            self._say_once(seat, "follow", why)
+            # thinned, because the cause is usually standing. EXPORTED,
+            # too: rev d3ed4d3c's Oz missed the whole Water Dojo fight
+            # (Konstantin soloed Yochimo) and the export contained not
+            # one word about why -- the follow's failures only went to
+            # the status bar, which nobody was watching.
+            self._say_once(seat, "follow", why, kind="follow-failed",
+                           detail=why)
 
     #: goals a follower must NOT chase on its own. A defeat step is
     #: satisfied by the PILOT's duels -- everyone in the circle who has
@@ -4439,7 +4444,6 @@ class LiveWorker(QThread):
         sweep the other three directions. Any leg that crosses shows up
         as a zone change or a loading screen, and the sweep stops.
         """
-        import math
         import time
 
         from .. import questing
@@ -4476,13 +4480,33 @@ class LiveWorker(QThread):
                 return
         except Exception:
             pass
+        mins = (now - since) / 60.0
+        await self._sweep_through(seat, away, f"parked {mins:.0f} min")
+
+    async def _sweep_through(self, seat, away, label):
+        """The walk itself: through the marker, then sweep. Shared by
+        the walk-through rung and the countdown hold's expiry -- see
+        `_maybe_walk_through` for the door reasoning and rev 9e13d385;
+        `label` says which stall this walk is answering ("parked 2
+        min", "held 20s with no countdown"). Holds the script for its
+        own duration the way the desperate hop does, stamps the
+        cooldown, and reports the outcome either way. Returns whether
+        a leg crossed a transition.
+        """
+        import math
+        import time
+
+        from .. import questing
+
+        client = seat.client
+        now = time.monotonic()
         try:
             here = await client.body.position()
             marker, _why = await questing.read_quest_position(client)
         except Exception:
-            return
+            return False
         if here is None or marker is None:
-            return
+            return False
         start_zone = seat.zone_seen
         try:
             start_zone = await client.zone_name() or start_zone
@@ -4505,14 +4529,13 @@ class LiveWorker(QThread):
                 ux, uy = -math.sin(yaw), -math.cos(yaw)
             except Exception:
                 ux, uy = 1.0, 0.0
-        mins = (now - since) / 60.0
         # Stamp and hold BEFORE the first step, like the hop: a walk
         # cut off mid-leg must not retry every tick, and the script's
         # tp loop must not land a teleport between our legs.
         seat.walked_through_at = now
         self._hop_pause_until = now + self.WALK_THROUGH_CEILING
         self._say(seat,
-                  f"parked {mins:.0f} min basically ON the quest marker "
+                  f"{label} basically ON the quest marker "
                   f"({away:,.0f} away) with no transition — holding the "
                   f"script and walking through it, the way the old "
                   f"scripts walked into doors")
@@ -4545,7 +4568,7 @@ class LiveWorker(QThread):
         if crossed:
             seat.tel.note_questing(
                 "walked-through",
-                f"parked {mins:.0f} min on the marker with no transition "
+                f"{label} on the marker with no transition "
                 f"— walked through it ({legs} leg(s)) and the zone "
                 f"changed. A walk-in door's trigger sits just past its "
                 f"marker, and a collision-solved teleport stops exactly "
@@ -4554,11 +4577,12 @@ class LiveWorker(QThread):
         else:
             seat.tel.note_questing(
                 "walk-through-missed",
-                f"parked {mins:.0f} min on the marker — walked {legs} "
+                f"{label} on the marker — walked {legs} "
                 f"leg(s) through and past it and the zone did not "
                 f"change. Whatever this marker wants, it is not a "
                 f"walk-in door; the script gets the wheel back in "
                 f"{self.WALK_THROUGH_SETTLE:.0f}s")
+        return crossed
 
     async def _zone_crossed(self, client, start_zone):
         """Did a walk leg actually cross a transition?
@@ -4592,6 +4616,11 @@ class LiveWorker(QThread):
     #: the very first look would classify every fresh arrival at a Talk
     #: NPC as a possible sigil.
     COUNT_HOLD_ARM = 0.4
+    #: how long a wizard may have been parked on the spot before a hold
+    #: guards nothing: a countdown fires in ten to twenty seconds, so a
+    #: wizard that has stood still past this has no countdown running
+    #: and gets the walk-through sweep directly.
+    COUNT_HOLD_STALE = 45.0
     #: how close the gathered party is brought to the (possibly)
     #: counting sigil. Inside the sigil circle, and far enough that a
     #: wizard already standing on it is not re-teleported -- every
@@ -4603,6 +4632,42 @@ class LiveWorker(QThread):
         import time
 
         return time.monotonic() < self._count_hold_until
+
+    async def _sweep_after_hold(self, seat):
+        """Chain an expired countdown hold into the walk-through sweep.
+
+        The two rungs answer the same ambiguous state -- at the marker,
+        no prompt -- with the two possible cures, in the right order:
+        stand still first (a countdown loses everything to a walk), and
+        only then walk (a door loses nothing to 20 still seconds). An
+        expired hold has finished the standing; re-verify the state and
+        do the walking, instead of returning the wheel to the script
+        whose next teleport is the yank being outwaited.
+        """
+        import time
+
+        from .. import questing
+
+        now = time.monotonic()
+        away = seat.marker_away
+        goal = (seat.goal or "").strip().lower()
+        if (away is None or away > self.AT_THE_MARKER or not goal
+                or any(goal.startswith(w) for w in self.FIGHT_GOALS)):
+            return
+        if now - seat.walked_through_at < self.WALK_THROUGH_EVERY:
+            return
+        if await questing.in_dialogue(seat.client):
+            return
+        if await questing.near_interactable(seat.client):
+            return
+        try:
+            if await seat.client.is_loading():
+                return
+        except Exception:
+            pass
+        await self._sweep_through(
+            seat, away,
+            f"held {self.COUNT_HOLD:.0f}s with no countdown")
 
     async def _maybe_count_hold(self, seat):
         """Hold the script while a dungeon sigil may be counting down.
@@ -4656,9 +4721,10 @@ class LiveWorker(QThread):
                     self._count_hold_until = 0.0
                     seat.tel.note_questing(
                         "countdown-hold-over",
-                        f"the zone changed while the script was held — the "
-                        f"sigil counted down and fired. This is the entry "
-                        f"the script's own loop kept cancelling")
+                        f"the zone changed while the script was held — a "
+                        f"sigil counted down and fired, or a walk already "
+                        f"in flight crossed a door. Either way, this is "
+                        f"the entry the script's own loop kept cancelling")
                     self._say(seat, "the sigil fired — script released")
                 return
             self._count_hold_until = 0.0
@@ -4667,7 +4733,17 @@ class LiveWorker(QThread):
                     "countdown-hold-over",
                     f"held {self.COUNT_HOLD:.0f}s and no zone change came — "
                     f"not a counting sigil (or the countdown was already "
-                    f"lost). The script gets the wheel back")
+                    f"lost). The state left standing is the walk-in door's "
+                    f"exactly, so the sweep gets it before the script does")
+                # An expired hold IS the walk-through's evidence, already
+                # aged: at the marker, no prompt, 20s of proven nothing.
+                # Rev d3ed4d3c spent seven minutes at the Emperor's
+                # Palace door in MS_Hub while four holds expired one
+                # after another and the separate walk-through clock
+                # never ran 45s unbroken -- the script's yanks kept
+                # resetting it. Chaining here converts the wasted hold
+                # into the walk that enters the door.
+                await self._sweep_after_hold(seat)
             return
 
         if seat.count_hold_spot and seat.progress != seat.count_hold_spot:
@@ -4705,6 +4781,23 @@ class LiveWorker(QThread):
                 return
         except Exception:
             pass
+
+        if seat.progress_at and now - seat.progress_at > self.COUNT_HOLD_STALE:
+            # Standing on this spot for this long already means no
+            # countdown is running -- one fires in ten to twenty
+            # seconds, not a minute. Rev d3ed4d3c: "marker 0 away ·
+            # unchanged for 2 min" at the Emperor's Palace door, and a
+            # hold there guards a countdown that provably is not
+            # happening. Straight to the walk.
+            seat.count_hold_spot = seat.progress
+            seat.count_hold_seen = None
+            self._count_hold_last = now
+            if now - seat.walked_through_at >= self.WALK_THROUGH_EVERY:
+                await self._sweep_through(
+                    seat, away,
+                    f"parked {(now - seat.progress_at) / 60:.0f} min with "
+                    f"no countdown possible")
+            return
 
         seat.count_hold_spot = seat.progress
         seat.count_hold_seen = None

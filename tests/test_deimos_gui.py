@@ -14710,8 +14710,11 @@ def test_the_walk_through_is_on_the_service_ladder(monkeypatch):
 # to the safe area, cancelling the countdown it was standing in.
 
 class _SigilClient:
-    def __init__(self, pos=(0.0, 0.0, 0.0)):
+    def __init__(self, pos=(0.0, 0.0, 0.0), crosses_on_leg=None):
         self.tped = []
+        self.legs = []
+        self.zone = "MB_KnightsCourt"
+        self.crosses_on_leg = crosses_on_leg
         x, y, z = pos
 
         class _Body:
@@ -14724,26 +14727,40 @@ class _SigilClient:
     async def is_loading(self):
         return False
 
+    async def zone_name(self):
+        return self.zone
+
     async def teleport(self, xyz):
         self.tped.append((xyz.x, xyz.y, xyz.z))
 
+    async def goto(self, x, y):
+        self.legs.append((round(x, 1), round(y, 1)))
+        if self.crosses_on_leg and len(self.legs) >= self.crosses_on_leg:
+            self.zone = "Interiors/MB_AmyBrooks"
+
 
 def _at_the_sigil(monkeypatch, goal="Go To Amy Brooks' Place in Knight's Court",
-                  away=8.0, prompt=False, dialogue=False, armed=True):
+                  away=8.0, prompt=False, dialogue=False, armed=True,
+                  crosses_on_leg=None):
     """A scripted quester parked at its marker, partner up the street."""
     import time
+    from types import SimpleNamespace
 
     from deimos_bridge import questing
 
     worker, _read = _zoned_party(["MB_KnightsCourt", "MB_KnightsCourt"])
     seat, other = worker.seats
-    seat.client = _SigilClient(pos=(100.0, 200.0, 0.0))
+    seat.client = _SigilClient(pos=(100.0, 200.0, 0.0),
+                               crosses_on_leg=crosses_on_leg)
     other.client = _SigilClient(pos=(900.0, 200.0, 0.0))
     for s in (seat, other):
         s.zone_seen = "MB_KnightsCourt"
     seat.goal = goal
     seat.marker_away = away
     seat.progress = ("MB_KnightsCourt", (2, 4, 0), goal)
+    # Freshly arrived: the stale bypass is for a wizard parked so long a
+    # countdown could not still be running.
+    seat.progress_at = time.monotonic()
     if armed:
         seat.count_hold_seen = time.monotonic() - 1.0
 
@@ -14756,9 +14773,13 @@ def _at_the_sigil(monkeypatch, goal="Go To Amy Brooks' Place in Knight's Court",
     async def in_battle(_c):
         return False
 
+    async def marker_pos(_c):
+        return SimpleNamespace(x=100.0, y=208.0, z=0.0), ""
+
     monkeypatch.setattr(questing, "in_dialogue", in_dialogue)
     monkeypatch.setattr(questing, "near_interactable", near)
     monkeypatch.setattr(questing, "in_battle", in_battle)
+    monkeypatch.setattr(questing, "read_quest_position", marker_pos)
     return worker, seat, other
 
 
@@ -14859,6 +14880,90 @@ def test_the_first_look_only_arms_the_countdown_guard(monkeypatch):
     asyncio.run(worker._maybe_count_hold(seat))
     assert not worker._countdown_held()
     assert seat.count_hold_seen is not None, "the first look did not arm"
+
+
+def test_an_expired_hold_chains_into_the_walk_through(monkeypatch):
+    """Rev d3ed4d3c: seven minutes at the Emperor's Palace door in
+    MS_Hub while four holds expired one after another — the state an
+    expired hold leaves standing (at the marker, no prompt, 20s of
+    proven nothing) IS the walk-in door's, and the separate
+    walk-through clock never got 45 unbroken seconds because the
+    script's yanks kept resetting it. The expiry walks, immediately."""
+    import asyncio
+    import time
+
+    worker, seat, other = _at_the_sigil(monkeypatch, crosses_on_leg=1)
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held()
+    worker._count_hold_until = time.monotonic() - 1.0
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert not worker._countdown_held()
+    assert len(seat.client.legs) == 1, \
+        "the expiry did not chain into the walk"
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert "countdown-hold-over" in kinds and "walked-through" in kinds
+
+
+def test_a_prompt_that_appeared_mid_hold_stops_the_chain(monkeypatch):
+    """A press-X prompt that shows up while the script was held means
+    the spot is a sigil or an NPC the script's own check can read —
+    walking away from it would un-join a sigil."""
+    import asyncio
+    import time
+
+    from deimos_bridge import questing
+
+    worker, seat, other = _at_the_sigil(monkeypatch, crosses_on_leg=1)
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held()
+
+    async def now_showing(_c):
+        return True
+
+    monkeypatch.setattr(questing, "near_interactable", now_showing)
+    worker._count_hold_until = time.monotonic() - 1.0
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert seat.client.legs == [], "walked away from a visible prompt"
+
+
+def test_a_long_parked_wizard_skips_the_hold_and_walks(monkeypatch):
+    """"marker 0 away · unchanged for 2 min" (rev d3ed4d3c): a
+    countdown fires in ten to twenty seconds, so a wizard parked past
+    `COUNT_HOLD_STALE` has none running and the 20s hold guards
+    nothing. Straight to the sweep."""
+    import asyncio
+    import time
+
+    worker, seat, other = _at_the_sigil(monkeypatch, crosses_on_leg=1)
+    seat.progress_at = time.monotonic() - 120.0
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert not worker._countdown_held(), \
+        "held for a countdown that provably is not running"
+    assert len(seat.client.legs) == 1
+    assert "walked-through" in [e["kind"] for e in seat.tel.questing]
+
+
+def test_follow_failures_reach_the_export(monkeypatch):
+    """Rev d3ed4d3c: Oz missed the whole Water Dojo fight and the
+    export said nothing about why — the follow's failures only went to
+    the status bar. A booster that cannot reach its quester is the
+    booster mode failing entirely; the export must carry it."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    worker, _read = _zoned_party(["MS_Hub", "MS_WaterDojoT1"])
+    worker.leader = 0
+    seat = worker.seats[1]
+
+    async def failing_follow(*_a, **_kw):
+        return False, ("could not teleport to the leader "
+                       "(ValueError: no such friend)")
+
+    monkeypatch.setattr(party, "follow", failing_follow)
+    asyncio.run(worker._follow_step(seat.client, seat))
+    fails = [e for e in seat.tel.questing if e["kind"] == "follow-failed"]
+    assert fails and "no such friend" in fails[0]["detail"]
 
 
 def test_the_countdown_guard_sits_ahead_of_the_script_step():
