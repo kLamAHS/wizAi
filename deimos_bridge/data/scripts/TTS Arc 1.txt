@@ -11,7 +11,6 @@ var DebugMode = True     # Will show exact steps more in depth. Useful for deter
 var RebuyPotions = True     # Will attempt to refill potions if you're empty.
 var Resume_Dungeons_On_Death = True     # Will attempt to resume dungeons upon dieing.
 var Recconect_To_Game = True     # If you disconnect, will attempt to recconect.
-var Train_Spells = False     # Will attempt to train all learnable spells at levels 25, 35, 50, 75, 100, 135, 150, 170 (Only goes to the schools teacher. Does not complete spell quests.)
 var Sell_Inventory_At_Max_Bag = False     # Will quick sell once anyone (besides main) reaches 150 bag size. Lock items you don't want sold.
 var Auto_Find_Quest = True     # After roughly 5 loops, will attempt to find your lost quest (only if it's actually lost)
 
@@ -20,18 +19,13 @@ var Create_Adventure_Party = False
 
 var All_Accounts_Are_Questing = False     # Set to true if you do not have a booster and all accounts are questing.
 
-# If you're solo questing, you do not have to change any of the account information below EXCEPT Main_Account_School IF you have 'Train_Spells' enabled.
 var Main_Account = "QuestingAccountName"     # Name of the main account. Also MUST BE SET AS p1. Ensure all account names are wrapped with quotes. Example: ("LeftClick Simulator")
-var Main_Account_School = "SchoolGoesHere"     # (e.g: Life, Storm, Death, Balance, Ice, Fire, Myth)
 
 var Questee2 = "QuestingAccountName"     # Name of a questing account
-var Questee2_School = "SchoolGoesHere"
 
 var Questee3 = "QuestingAccountName"     # ONLY CHANGE if you have a third questing account (Same for the following questing accounts)
-var Questee3_School = "SchoolGoesHere"
 
 var Questee4 = "QuestingAccountName"     # 4th questing account
-var Questee4_School = "SchoolGoesHere"
 
 var SpeedDelay = 1     # How long each step of the bot will take in seconds.
 var DialogDelay = 1     # How long before the bot proceeds after dialogue. (If you're not picking up quests, set it longer.)
@@ -96,6 +90,20 @@ block Close_Menus {
 	}
 	clickwindow ['WorldView', 'NPCTrainingShadowMagicGUI', 'Dialog', 'ExitButton']
 	clickwindow ['MessageBoxModalWindow', 'messageBoxBG', 'messageBoxLayout', 'AdjustmentWindow', 'RetryBtn']
+	if any windowvisible ['MessageBoxModalWindow', 'messageBoxBG', 'messageBoxLayout', '', 'TitleText'] {
+		if sameany windowtext ['MessageBoxModalWindow', 'messageBoxBG', 'messageBoxLayout', '', 'TitleText'] contains "transformation elixir" {
+			times 50 {
+				if any windowvisible ['MessageBoxModalWindow', 'messageBoxBG', 'messageBoxLayout', 'AdjustmentWindow', 'Layout', 'rightButton'] {
+					clickwindow ['MessageBoxModalWindow', 'messageBoxBG', 'messageBoxLayout', 'AdjustmentWindow', 'Layout', 'rightButton']
+				} else {
+					break
+				}
+			}
+		}
+	}
+	clickwindow ['WorldView', 'MinigameInterface', 'MGInterfaceBG', 'mg_int_exit']
+	clickwindow ['WorldView', 'DeckConfiguration', 'Close_Button']
+	clickwindow ['WorldView', 'WhirlyBurlyKioskWindow', 'CloseWhirlyBurlyButton']
 	#_____________________________________#
 }
 block Clear_Dialogue {
@@ -253,6 +261,11 @@ block Auto_Adventure_Party {
 	}
 }
 block First_Run_Settings {
+	if any incombat {
+		print "Waiting until all players are out of combat before starting..."
+		sleep 5
+		restart
+	}
 	if DebugMode = True {
 		print "Auto configuring settings..."
 	}
@@ -271,7 +284,7 @@ block First_Run_Settings {
 	times 4 {
 		times 300 {
 			if NOT any windowvisible ['WorldView', 'DeckConfiguration', 'SettingPage', 'QuitButton'] {
-				mass sendkey ESC, .1
+				sameany sendkey ESC, .1
 			} else {
 				break
 			}
@@ -312,6 +325,23 @@ block First_Run_Settings {
 			p4 clickwindow [ 'WorldView', 'DeckConfiguration', 'SettingPage', 'VideoOptions', 'OptionFullscreen', 'OptionControl', 'OptionButtonLeft' ]
 		}
 		if windowtext [ 'WorldView', 'DeckConfiguration', 'SettingPage', 'VideoOptions', 'OptionFullscreen', 'OptionControl', 'OptionValue' ] "<center>off" {
+			break
+		}
+	}
+	times 100 {
+		if NOT p1 windowtext [ 'WorldView', 'DeckConfiguration', 'SettingPage', 'VideoOptions', 'OptionUISize', 'OptionControl', 'OptionValue' ] "<center>regular" {
+			p1 clickwindow [ 'WorldView', 'DeckConfiguration', 'SettingPage', 'VideoOptions', 'OptionUISize', 'OptionControl', 'OptionButtonLeft' ]
+		}
+		if NOT p2 windowtext [ 'WorldView', 'DeckConfiguration', 'SettingPage', 'VideoOptions', 'OptionUISize', 'OptionControl', 'OptionValue' ] "<center>regular" {
+			p2 clickwindow [ 'WorldView', 'DeckConfiguration', 'SettingPage', 'VideoOptions', 'OptionUISize', 'OptionControl', 'OptionButtonLeft' ]
+		}
+		if NOT p3 windowtext [ 'WorldView', 'DeckConfiguration', 'SettingPage', 'VideoOptions', 'OptionUISize', 'OptionControl', 'OptionValue' ] "<center>regular" {
+			p3 clickwindow [ 'WorldView', 'DeckConfiguration', 'SettingPage', 'VideoOptions', 'OptionUISize', 'OptionControl', 'OptionButtonLeft' ]
+		}
+		if NOT p4 windowtext [ 'WorldView', 'DeckConfiguration', 'SettingPage', 'VideoOptions', 'OptionUISize', 'OptionControl', 'OptionValue' ] "<center>regular" {
+			p4 clickwindow [ 'WorldView', 'DeckConfiguration', 'SettingPage', 'VideoOptions', 'OptionUISize', 'OptionControl', 'OptionButtonLeft' ]
+		}
+		if windowtext [ 'WorldView', 'DeckConfiguration', 'SettingPage', 'VideoOptions', 'OptionUISize', 'OptionControl', 'OptionValue' ] "<center>regular" {
 			break
 		}
 	}
@@ -421,8 +451,8 @@ block Retrieve_Lost_Quests {
 	block Enter_Sigil {
 		times 5 {
 			if NOT any windowvisible ['WorldView', 'NPCRangeWin', 'imgBackground', 'TeamUpButton'] {
-				mass minustp XYZ(0,0,1000)
-				mass plustp XYZ(0,0,1000)
+				sameany minustp XYZ(0,0,1000)
+				sameany plustp XYZ(0,0,1000)
 				sleep 2
 			} else {
 				break
@@ -1996,6 +2026,10 @@ block Check_Active_Mainline_Quest {
 				break
 			} 
 		}
+		if NOT p1 windowvisible ['WorldView', 'DeckConfiguration', 'wndQuestList', 'QuestLogMainlineAndSideButton'] {
+			print "Skipping mainline quest check..."
+			return
+		}
 		times 2 {
 			p1 clickwindow ['WorldView', 'DeckConfiguration', 'wndQuestList', 'QuestLogAllButton']
 		}
@@ -2062,6 +2096,10 @@ block Check_Active_Mainline_Quest {
 			} else {
 				break
 			} 
+		}
+		if NOT p2 windowvisible ['WorldView', 'DeckConfiguration', 'wndQuestList', 'QuestLogMainlineAndSideButton'] {
+			print "Skipping mainline quest check..."
+			return
 		}
 		times 2 {
 			p2 clickwindow ['WorldView', 'DeckConfiguration', 'wndQuestList', 'QuestLogAllButton']
@@ -2130,6 +2168,10 @@ block Check_Active_Mainline_Quest {
 				break
 			} 
 		}
+		if NOT p2 windowvisible ['WorldView', 'DeckConfiguration', 'wndQuestList', 'QuestLogMainlineAndSideButton'] {
+			print "Skipping mainline quest check..."
+			return
+		}
 		times 2 {
 			p2 clickwindow ['WorldView', 'DeckConfiguration', 'wndQuestList', 'QuestLogAllButton']
 		}
@@ -2196,6 +2238,10 @@ block Check_Active_Mainline_Quest {
 			} else {
 				break
 			} 
+		}
+		if NOT p3 windowvisible ['WorldView', 'DeckConfiguration', 'wndQuestList', 'QuestLogMainlineAndSideButton'] {
+			print "Skipping mainline quest check..."
+			return
 		}
 		times 2 {
 			p3 clickwindow ['WorldView', 'DeckConfiguration', 'wndQuestList', 'QuestLogAllButton']
@@ -2264,6 +2310,10 @@ block Check_Active_Mainline_Quest {
 				break
 			} 
 		}
+		if NOT p2 windowvisible ['WorldView', 'DeckConfiguration', 'wndQuestList', 'QuestLogMainlineAndSideButton'] {
+			print "Skipping mainline quest check..."
+			return
+		}
 		times 2 {
 			p2 clickwindow ['WorldView', 'DeckConfiguration', 'wndQuestList', 'QuestLogAllButton']
 		}
@@ -2331,6 +2381,10 @@ block Check_Active_Mainline_Quest {
 				break
 			} 
 		}
+		if NOT p3 windowvisible ['WorldView', 'DeckConfiguration', 'wndQuestList', 'QuestLogMainlineAndSideButton'] {
+			print "Skipping mainline quest check..."
+			return
+		}
 		times 2 {
 			p3 clickwindow ['WorldView', 'DeckConfiguration', 'wndQuestList', 'QuestLogAllButton']
 		}
@@ -2397,6 +2451,10 @@ block Check_Active_Mainline_Quest {
 			} else {
 				break
 			} 
+		}
+		if NOT p4 windowvisible ['WorldView', 'DeckConfiguration', 'wndQuestList', 'QuestLogMainlineAndSideButton'] {
+			print "Skipping mainline quest check..."
+			return
 		}
 		times 2 {
 			p4 clickwindow ['WorldView', 'DeckConfiguration', 'wndQuestList', 'QuestLogAllButton']
@@ -2488,7 +2546,11 @@ block Quest_Check_Watchdog {
 		}
 		if QuestCheckState = 4 {
 			print "QUEST_CHECK TRIGGERED: Verifying mainline quest is still active..."
-			call Check_Active_Mainline_Quest
+			if NOT any incombat or NOT any inzone WizardCity/Interiors/WC_Headmistress_House or NOT any inzone WizardCity/Interiors/WC_Headmaster_Tower or NOT any inzone Khrysalis/Interiors/KR_Z11_I01_BlackHole { 
+				call Check_Active_Mainline_Quest
+			} else {
+				print "Skipping quest check..."
+			}
 			var QuestCheckState = 0
 			print "Quest_Check: Verification complete. Resuming normal operation."
 			return
@@ -2496,86 +2558,128 @@ block Quest_Check_Watchdog {
 	}
 }
 block Sell_Inventory {
+	block Sell_All_Items {
+		if DebugMode = True {
+			print "Quick sell window opened. Selling all categories..."
+		}
+		clickwindow ['WorldView', 'DeckConfiguration', 'InventorySpellbookPage', 'QuickSell_Item']
+		sleep 2
+		clickwindow ['WorldView', 'shopGUI', 'BackpackStuff', 'ShopCategory_Hat']
+		sleep .5
+		clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
+		sleep .5
+		clickwindow ['MessageBoxModalWindow', 'messageBoxBG', 'messageBoxLayout', 'AdjustmentWindow', 'Layout', 'centerButton']
+		sleep .5
+		clickwindow ['WorldView', 'shopGUI', 'BackpackStuff', 'ShopCategory_Robe']
+		sleep .5
+		clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
+		sleep .5
+		clickwindow ['MessageBoxModalWindow', 'messageBoxBG', 'messageBoxLayout', 'AdjustmentWindow', 'Layout', 'centerButton']
+		sleep .5
+		clickwindow ['WorldView', 'shopGUI', 'BackpackStuff', 'ShopCategory_Shoes']
+		sleep .5
+		clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
+		sleep .5
+		clickwindow ['MessageBoxModalWindow', 'messageBoxBG', 'messageBoxLayout', 'AdjustmentWindow', 'Layout', 'centerButton']
+		sleep .5
+		clickwindow ['WorldView', 'shopGUI', 'BackpackStuff', 'ShopCategory_Weapon'] 
+		sleep .5
+		clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
+		sleep .5
+		clickwindow ['MessageBoxModalWindow', 'messageBoxBG', 'messageBoxLayout', 'AdjustmentWindow', 'Layout', 'centerButton']
+		sleep .5
+		clickwindow ['WorldView', 'shopGUI', 'BackpackStuff', 'ShopCategory_Athame']
+		sleep .5
+		clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
+		sleep .5
+		clickwindow ['MessageBoxModalWindow', 'messageBoxBG', 'messageBoxLayout', 'AdjustmentWindow', 'Layout', 'centerButton']
+		sleep .5
+		clickwindow ['WorldView', 'shopGUI', 'BackpackStuff', 'ShopCategory_Amulet']
+		sleep .5
+		clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
+		sleep .5
+		clickwindow ['MessageBoxModalWindow', 'messageBoxBG', 'messageBoxLayout', 'AdjustmentWindow', 'Layout', 'centerButton']
+		sleep .5
+		clickwindow ['WorldView', 'shopGUI', 'BackpackStuff', 'ShopCategory_Ring']
+		sleep .5
+		clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
+		sleep .5
+		clickwindow ['MessageBoxModalWindow', 'messageBoxBG', 'messageBoxLayout', 'AdjustmentWindow', 'Layout', 'centerButton']
+		sleep .5
+		clickwindow ['WorldView', 'shopGUI', 'TreasureCardStuff', 'NextCategory_ReagentStuff']
+		sleep .5
+		clickwindow [ 'WorldView', 'shopGUI', 'HousingStuff', 'ShopCategory_PlantLife' ]
+		sleep .5
+		clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
+		sleep .5
+		clickwindow ['MessageBoxModalWindow', 'messageBoxBG', 'messageBoxLayout', 'AdjustmentWindow', 'Layout', 'centerButton']
+		sleep .5
+		clickwindow [ 'WorldView', 'shopGUI', 'HousingStuff', 'ShopCategory_WallHangings' ]
+		sleep .5
+		clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
+		sleep .5
+		clickwindow ['MessageBoxModalWindow', 'messageBoxBG', 'messageBoxLayout', 'AdjustmentWindow', 'Layout', 'centerButton']
+		sleep .5
+		clickwindow [ 'WorldView', 'shopGUI', 'HousingStuff', 'ShopCategory_WallpaperCarpet' ]
+		sleep .5
+		clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
+		sleep .5
+		clickwindow ['MessageBoxModalWindow', 'messageBoxBG', 'messageBoxLayout', 'AdjustmentWindow', 'Layout', 'centerButton']
+		sleep .5
+		clickwindow [ 'WorldView', 'shopGUI', 'HousingStuff', 'ShopCategory_Outdoor' ]
+		sleep .5
+		clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
+		sleep .5
+		clickwindow ['MessageBoxModalWindow', 'messageBoxBG', 'messageBoxLayout', 'AdjustmentWindow', 'Layout', 'centerButton']
+		sleep .5
+		clickwindow [ 'WorldView', 'shopGUI', 'HousingStuff', 'ShopCategory_Furniture' ]
+		sleep .5
+		clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
+		sleep .5
+		clickwindow ['MessageBoxModalWindow', 'messageBoxBG', 'messageBoxLayout', 'AdjustmentWindow', 'Layout', 'centerButton']
+		sleep .5
+		clickwindow [ 'WorldView', 'shopGUI', 'HousingStuff', 'ShopCategory_Decoration' ]
+		sleep .5
+		clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
+		sleep .5
+		clickwindow ['MessageBoxModalWindow', 'messageBoxBG', 'messageBoxLayout', 'AdjustmentWindow', 'Layout', 'centerButton']
+		sleep .5
+		clickwindow [ 'WorldView', 'shopGUI', 'HousingStuff', 'ShopCategory_MusicScroll' ]
+		sleep .5
+		clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
+		sleep .5
+		clickwindow ['MessageBoxModalWindow', 'messageBoxBG', 'messageBoxLayout', 'AdjustmentWindow', 'Layout', 'centerButton']
+		sleep .5
+		clickwindow [ 'WorldView', 'shopGUI', 'HousingStuff', 'ShopCategory_Seed' ]
+		sleep .5
+		clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
+		sleep .5
+		clickwindow ['MessageBoxModalWindow', 'messageBoxBG', 'messageBoxLayout', 'AdjustmentWindow', 'Layout', 'centerButton']
+		sleep .5
+		clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'sellAction']
+		sleep .5
+		clickwindow ['WorldView', 'shopGUI', 'QuickSellConfirmationWindow', 'SellButton']
+		sleep .5
+		clickwindow ['MessageBoxModalWindow', 'messageBoxBG', 'messageBoxLayout', 'AdjustmentWindow', 'Layout', 'centerButton']  
+		sleep 3
+		if DebugMode = True {
+			print "Quick sell complete. Closing inventory..."
+		}
+		if any windowvisible ['WorldView', 'DeckConfiguration', 'InventorySpellbookPage', 'QuickSell_Item'] {
+			sameany sendkey B, .1
+		}
+	}
 	if Sell_Inventory_At_Max_Bag = True {
 		if DebugMode = True {
 			print "Checking bag sizes..."
 		}
-		if playercount > 1 {
-			if except p1 bagcount > 149 {
+		if playercount 1 {
+			if any bagcount > 149 {
 				if DebugMode = True {
-					print "Questee bag is full. Initiating quick sell..."
+					print "Bag is full. Initiating quick sell..."
 				}
 				times 2 {
-					tp XYZ(0,100000,0)
-				}
-				call Close_Menus
-				times 100 {
-					if NOT except p1 windowvisible ['WorldView', 'DeckConfiguration', 'InventorySpellbookPage', 'QuickSell_Item'] {
-						except p1 sendkey B, .1
-					} else {
-						break
-					}
-					sleep .1 
-				}
-				if DebugMode = True {
-					print "Quick sell window opened. Selling all categories..."
-				}
-				except p1 clickwindow ['WorldView', 'DeckConfiguration', 'InventorySpellbookPage', 'QuickSell_Item']
-				sleep 2
-				except p1 clickwindow ['WorldView', 'shopGUI', 'BackpackStuff', 'ShopCategory_Hat']
-				sleep 1
-				except p1 clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
-				sleep 1
-				except p1 clickwindow ['WorldView', 'shopGUI', 'BackpackStuff', 'ShopCategory_Robe']
-				sleep 1
-				except p1 clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
-				sleep 1
-				except p1 clickwindow ['WorldView', 'shopGUI', 'BackpackStuff', 'ShopCategory_Shoes']
-				sleep 1
-				except p1 clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
-				sleep 1
-				except p1 clickwindow ['WorldView', 'shopGUI', 'BackpackStuff', 'ShopCategory_Weapon'] 
-				sleep 1
-				except p1 clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
-				sleep 1
-				except p1 clickwindow ['WorldView', 'shopGUI', 'BackpackStuff', 'ShopCategory_Athame']
-				sleep 1
-				except p1 clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
-				sleep 1
-				except p1 clickwindow ['WorldView', 'shopGUI', 'BackpackStuff', 'ShopCategory_Amulet']
-				sleep 1
-				except p1 clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
-				sleep 1
-				except p1 clickwindow ['WorldView', 'shopGUI', 'BackpackStuff', 'ShopCategory_Ring']
-				sleep 1
-				except p1 clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
-				sleep 1
-				except p1 clickwindow ['WorldView', 'shopGUI', 'BackpackStuff', 'ShopCategory_Pet']
-				sleep 1
-				except p1 clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
-				sleep 1
-				except p1 clickwindow ['WorldView', 'shopGUI', 'BackpackStuff', 'ShopCategory_Deck']
-				sleep 1
-				except p1 clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
-				sleep 1
-				except p1 clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'sellAction']
-				sleep 1
-				except p1 clickwindow ['WorldView', 'shopGUI', 'QuickSellConfirmationWindow', 'SellButton']
-				sleep 1
-				except p1 clickwindow ['MessageBoxModalWindow', 'messageBoxBG', 'messageBoxLayout', 'AdjustmentWindow', 'Layout', 'centerButton']  
-				sleep 3
-				if DebugMode = True {
-					print "Quick sell complete. Closing inventory..."
-				}
-				except p1 sendkey B, .1
-			}
-		} else {
-			if bagcount > 149 {
-				if DebugMode = True {
-					print "Bag is full (solo). Initiating quick sell..."
-				}
-				times 2 {
-					tp XYZ(0,100000,0)
+					tp XYZ(0,0,100000)
 				}
 				call Close_Menus
 				times 100 {
@@ -2586,1435 +2690,27 @@ block Sell_Inventory {
 					}
 					sleep .1 
 				}
-				if DebugMode = True {
-					print "Quick sell window opened (solo). Selling all categories..."
-				}
-				clickwindow ['WorldView', 'DeckConfiguration', 'InventorySpellbookPage', 'QuickSell_Item']
-				sleep 2
-				clickwindow ['WorldView', 'shopGUI', 'BackpackStuff', 'ShopCategory_Hat']
-				sleep 1
-				clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
-				sleep 1
-				clickwindow ['WorldView', 'shopGUI', 'BackpackStuff', 'ShopCategory_Robe']
-				sleep 1
-				clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
-				sleep 1
-				clickwindow ['WorldView', 'shopGUI', 'BackpackStuff', 'ShopCategory_Shoes']
-				sleep 1
-				clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
-				sleep 1
-				clickwindow ['WorldView', 'shopGUI', 'BackpackStuff', 'ShopCategory_Weapon'] 
-				sleep 1
-				clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
-				sleep 1
-				clickwindow ['WorldView', 'shopGUI', 'BackpackStuff', 'ShopCategory_Athame']
-				sleep 1
-				clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
-				sleep 1
-				clickwindow ['WorldView', 'shopGUI', 'BackpackStuff', 'ShopCategory_Amulet']
-				sleep 1
-				clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
-				sleep 1
-				clickwindow ['WorldView', 'shopGUI', 'BackpackStuff', 'ShopCategory_Ring']
-				sleep 1
-				clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
-				sleep 1
-				clickwindow ['WorldView', 'shopGUI', 'BackpackStuff', 'ShopCategory_Pet']
-				sleep 1
-				clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
-				sleep 1
-				clickwindow ['WorldView', 'shopGUI', 'BackpackStuff', 'ShopCategory_Deck']
-				sleep 1
-				clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'AllAction']
-				sleep 1
-				clickwindow ['WorldView', 'shopGUI', 'buyWindow', 'sellAction']
-				sleep 1
-				clickwindow ['WorldView', 'shopGUI', 'QuickSellConfirmationWindow', 'SellButton']
-				sleep 1
-				clickwindow ['MessageBoxModalWindow', 'messageBoxBG', 'messageBoxLayout', 'AdjustmentWindow', 'Layout', 'centerButton']  
-				sleep 3
-				if DebugMode = True {
-					print "Quick sell complete (solo). Closing inventory..."
-				}
-				sendkey B, .1
-			}
-		}
-	}
-}
-block Spell_Learner {
-	block Find_Train_Option {
-		block Any_Dialogue {
-			if DebugMode = True {
-				print "Clearing dialog for any players with dialogue..."
-			}
-			if any hasdialogue {
-				times 30 {
-					#call Close_Menus
-					sameany sendkey SPACEBAR, .1
-				}
-			}
-		}
-		if NOT any windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'TrainButton'] {
-			if DebugMode = True {
-				print "Train button not visible. Trying different menu positions..."
-			}
-			times 20 {
-				mass click 533, 286
-			}
-			if DebugMode = True {
-				print "Attempt 1: Clicking 426,277..."
-			}
-			mass click 426, 277
-			sleep 2
-			if any windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'TrainButton'] {
-				if DebugMode = True {
-					print "Train button found after attempt 1!"
-				}
-				return
-			}
-			call Any_Dialogue
-			sleep 1
-			call Any_Dialogue
-			times 10 {
-				mass sendkey X, .1
-			}
-			#----#
-			if DebugMode = True {
-				print "Attempt 2: Clicking 418,232..."
-			}
-			mass click 418, 232
-			sleep 2
-			if any windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'TrainButton'] {
-				if DebugMode = True {
-					print "Train button found after attempt 2!"
-				}
-				return
-			}
-			call Any_Dialogue
-			sleep 1
-			call Any_Dialogue
-			times 10 {
-				mass sendkey X, .1
-			}
-			#----#
-			if DebugMode = True {
-				print "Attempt 3: Clicking 416,189..."
-			}
-			mass click 416, 189
-			sleep 2
-			if any windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'TrainButton'] {
-				if DebugMode = True {
-					print "Train button found after attempt 3!"
-				}
-				return
-			}
-			call Any_Dialogue
-			sleep 1
-			call Any_Dialogue
-			times 10 {
-				mass sendkey X, .1
-			}
-			#----#
-			if DebugMode = True {
-				print "Attempt 4: Clicking 418,146..."
-			}
-			mass click 418, 146
-			sleep 2
-			if any windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'TrainButton'] {
-				if DebugMode = True {
-					print "Train button found after attempt 4!"
-				}
-				return
-			}
-			call Any_Dialogue
-			sleep 1
-			call Any_Dialogue
-			times 10 {
-				mass sendkey X, .1
-			}
-			#----#
-			if DebugMode = True {
-				print "Attempt 5: Clicking 418,104..."
-			}
-			mass click 418, 104
-			sleep 2
-			if any windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'TrainButton'] {
-				if DebugMode = True {
-					print "Train button found after attempt 5!"
-				}
-				return
-			}
-			call Any_Dialogue
-			sleep 1
-			call Any_Dialogue
-			times 10 {
-				mass sendkey X, .1
-			}
-			#----#
-			if DebugMode = True {
-				print "Attempt 6: Clicking 408,63..."
-			}
-			mass click 408, 63
-			sleep 2
-			if any windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'TrainButton'] {
-				if DebugMode = True {
-					print "Train button found after attempt 6!"
-				}
-				return
-			}
-			call Any_Dialogue
-			sleep 1
-			call Any_Dialogue
-			times 10 {
-				mass sendkey X, .1
-			}
-			#----#
-		}
-		print "Unable to locate train button. Maybe too many quests available? Killing bot."
-		kill
-	}
-	block Learn_All_Spells {
-		if DebugMode = True {
-			print "Pressing X on all players..."
-		}
-		times 20 {
-			sendkey X, .1
-		}
-		sleep 2
-		if NOT any windowvisible ['WorldView', 'NPCServicesWin', 'ControlSprite', 'optionsLayout', 'NPCServicesOptionWindow', 'OptionButton'] or any windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'TrainButton'] {
-			return
-		}  
-		times 10 {
-			if any windowvisible ['WorldView', 'NPCServicesWin', 'ControlSprite', 'optionsLayout', 'NPCServicesOptionWindow', 'OptionButton'] {
-				call Find_Train_Option
-				if DebugMode = True {
-					print "On spell training screen. Learning all available spells..."
-				}
-				times 20 {
-					block Press_Train_Button {
-						print "Training new spell..."
-						clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'TrainButton']
-						sleep 1
-						clickwindow ['MessageBoxModalWindow', 'messageBoxBG', 'messageBoxLayout', 'AdjustmentWindow', 'Layout', 'centerButton']
-						sleep 1
-						click 616, 515
-						sleep 2
-					}
-					var TrainedThisPass = False
-					if NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1'] {
-						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1'] {
-							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1']
-							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1', 'NameBox', 'Name']
-							call Press_Train_Button
-							var TrainedThisPass = True
-						}
-					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2'] {
-						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2'] {
-							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2']
-							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2', 'NameBox', 'Name']	
-							call Press_Train_Button
-							var TrainedThisPass = True
-						}
-					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3'] {
-						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3'] {
-							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3']
-							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3', 'NameBox', 'Name']
-							call Press_Train_Button
-							var TrainedThisPass = True
-						}
-					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4'] {
-						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4'] {
-							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4']
-							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4', 'NameBox', 'Name']
-							call Press_Train_Button
-							var TrainedThisPass = True
-						}
-					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5'] {
-						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5'] {
-							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5']
-							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5', 'NameBox', 'Name']
-							call Press_Train_Button
-							var TrainedThisPass = True
-						}
-					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6'] {
-						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6'] {
-							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6']
-							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6', 'NameBox', 'Name']
-							call Press_Train_Button
-							var TrainedThisPass = True
-						}
-					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7'] {
-						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7'] {
-							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7']
-							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7', 'NameBox', 'Name']
-							call Press_Train_Button
-							var TrainedThisPass = True
-						}
-					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8'] {
-						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8'] {
-							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8']
-							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8', 'NameBox', 'Name']
-							call Press_Train_Button
-							var TrainedThisPass = True
-						}
-					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9'] {
-						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9'] {
-							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9']
-							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9', 'NameBox', 'Name']
-							call Press_Train_Button
-							var TrainedThisPass = True
-						}
-					}
-					if TrainedThisPass = False {
-						if any windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1'] {
-							if NOT sameany windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'PageControls', 'PageDown'] {
-								sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'PageControls', 'PageDown']
-								sleep $SpeedDelay
-							} else {
-								print "All trainable spells learned."
-								var AllLearned = True
-								return
-							}
-						} else {
-							print "All spells learned. Resuming..."
-							var AllLearned = True
-							return
-						}
-					}
-				}
-			} else {
-				times 20 {
-					block Press_Train_Button {
-						print "Training new spell..."
-						clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'TrainButton']
-						sleep 2
-						clickwindow ['MessageBoxModalWindow', 'messageBoxBG', 'messageBoxLayout', 'AdjustmentWindow', 'Layout', 'centerButton']
-						sleep 2
-						click 616, 515
-						sleep 2
-					}
-					var TrainedThisPass = False
-					if NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1'] {
-						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1'] {
-							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1']
-							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1', 'NameBox', 'Name']
-							call Press_Train_Button
-							var TrainedThisPass = True
-						}
-					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2'] {
-						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2'] {
-							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2']
-							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_2', 'NameBox', 'Name']	
-							call Press_Train_Button
-							var TrainedThisPass = True
-						}
-					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3'] {
-						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3'] {
-							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3']
-							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_3', 'NameBox', 'Name']
-							call Press_Train_Button
-							var TrainedThisPass = True
-						}
-					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4'] {
-						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4'] {
-							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4']
-							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_4', 'NameBox', 'Name']
-							call Press_Train_Button
-							var TrainedThisPass = True
-						}
-					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5'] {
-						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5'] {
-							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5']
-							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_5', 'NameBox', 'Name']
-							call Press_Train_Button
-							var TrainedThisPass = True
-						}
-					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6'] {
-						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6'] {
-							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6']
-							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_6', 'NameBox', 'Name']
-							call Press_Train_Button
-							var TrainedThisPass = True
-						}
-					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7'] {
-						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7'] {
-							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7']
-							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_7', 'NameBox', 'Name']
-							call Press_Train_Button
-							var TrainedThisPass = True
-						}
-					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8'] {
-						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8'] {
-							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8']
-							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_8', 'NameBox', 'Name']
-							call Press_Train_Button
-							var TrainedThisPass = True
-						}
-					} elif NOT any windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9'] {
-						if sameany windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9'] {
-							mass clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9']
-							mass print windowtext ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_9', 'NameBox', 'Name']
-							call Press_Train_Button
-							var TrainedThisPass = True
-						}
-					}
-					if TrainedThisPass = False {
-						if any windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'SpellList', 'Option_1'] {
-							if NOT sameany windowdisabled ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'PageControls', 'PageDown'] {
-								sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'PageControls', 'PageDown']
-								sleep $SpeedDelay
-							} else {
-								print "All trainable spells learned."
-								var AllLearned = True
-								return
-							}
-						} else {
-							print "All spells learned. Resuming..."
-							var AllLearned = True
-							return
-						}
-					}
-				}
-			}
-		}
-	}
-	block Go_To_Ravenwood {
-		if DebugMode = True {
-			print "Marking location..."
-		}
-		clickwindow [ 'WorldView', 'windowHUD', 'compassAndTeleporterButtons', 'MarkButton' ]	
-		sleep $SpeedDelay
-		if DebugMode = True {
-			print "Going to dorm room..."
-		}
-		until windowdisabled [ 'WorldView', 'windowHUD', 'compassAndTeleporterButtons', 'GotoDormButton' ] {
-			clickwindow [ 'WorldView', 'windowHUD', 'compassAndTeleporterButtons', 'GotoDormButton' ]
-		}
-		if DebugMode = True {
-			print "Waiting for zone to change..."
-		}
-		waitforzonechange completion
-		sleep 3
-		if inzone WizardCity/Interiors/WC_Housing_Dorm_Interior {
-			if DebugMode = True {
-				print "Forcing characters to dorm room door..."
-			}
-			until hasxyz XYZ(-202.81295776367188, 22.34906578063965, 0.0) {
-				tp XYZ(-202.81295776367188, 22.34906578063965, 0.0)
-			}
-			if DebugMode = True {
-				print "Waiting for zone to change..."
-			}
-			waitforzonechange completion
-			if DebugMode = True {
-				print "Manually waiting 5 additional seconds before resuming..."
-			}
-			sleep 5
-			if DebugMode = True {
-				print "Currently in ravenwood."
+				call Sell_All_Items
 			}
 		} else {
-			print "Not inside dorm. Un-equip all homes and restart bot."
-			restart
-		}
-	}
-	block Go_To_Arcanum {
-		call Go_To_Ravenwood
-		tp XYZ(10.837, 1919.342, 76.942)
-		waitforzonechange completion
-		sleep 3
-		entitytp nav UniverseTeleport
-		sleep 2
-		times 30 {
-			sendkey X, .1
-		}
-		if any level > 105 {
-			times 4 {     # Up to 4 players
-				times 7 {     # Up to 7 world door pages
-					if any windowvisible ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'wbtnArcanum'] {
-						sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'wbtnArcanum']
-						break
+			if except p1 bagcount > 149 {
+				if DebugMode = True {
+					print "Bag(s) is full. Initiating quick sell..."
+				}
+				times 2 {
+					tp XYZ(0,0,100000)
+				}
+				call Close_Menus
+				times 100 {
+					if NOT except p1 windowvisible ['WorldView', 'DeckConfiguration', 'InventorySpellbookPage', 'QuickSell_Item'] {
+						except p1 sendkey B, .1
 					} else {
-						clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'rightButton']
+						break
 					}
+					sleep .1 
 				}
+				call Sell_All_Items
 			}
-			if any windowvisible ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'wbtnArcanum'] {
-				if sameany windowvisible ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'teleportButton'] {
-					sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'teleportButton']
-					sameany waitforzonechange completion
-					sleep 3
-					sameany tp XYZ(-3.426, -7499.881, -106.124)
-				} 
-			}
-		} else {
-			return
-		}
-	}
-	if Train_Spells = True {
-		if DebugMode = True {
-			print "Checking if questee's are at a certain level..."
-		}
-		var ShouldTrainRavenwood = False
-		if any level 25 {
-			if Level25 = False {
-				var Level25 = True
-			}
-		}
-		if any level 35 {
-			if Level35 = False {
-				var ShouldTrainRavenwood = True
-				var Level35 = True
-			}
-		}
-		if any level 50 {
-			if Level50 = False {
-				var ShouldTrainRavenwood = True
-				var Level50 = True
-			}
-		}
-		if any level 75 {
-			if Level75 = False {
-				var ShouldTrainRavenwood = True
-				var Level75 = True
-			}
-		}
-		if any level 100 {
-			if Level100 = False {
-				var ShouldTrainRavenwood = True
-				var Level100 = True
-			}
-		}
-		var ShouldTrainArcanum = False
-		if any level 135 {
-			if Level135 = False {
-				var ShouldTrainArcanum = True
-				var Level135 = True
-			}
-		}
-		if any level 150 {
-			if Level150 = False {
-				var ShouldTrainArcanum = True
-				var Level150 = True
-			}
-		}
-		if any level 170 {
-			if Level170 = False {
-				var ShouldTrainArcanum = True
-				var Level170 = True
-			}
-		}
-		if ShouldTrainRavenwood = True {
-			call Close_Menus
-			if DebugMode = True {
-				print "Players have reached a specified level. Attempting to learn new spells..."
-			}
-			call Go_To_Ravenwood
-			if NOT Main_Account = "QuestingAccountName" {
-				if NOT Main_Account_School = "SchoolGoesHere" {
-					if Main_Account_School = "Life" {
-						if DebugMode = True {
-							print $Main_Account
-							print "is Life. Teleporting to Life teacher..."
-						}
-						p1 tp XYZ(-2871.408, 643.838, 1.715)
-						p1 waitforzonechange completion
-						sleep 3
-						p1 entitytp nav WC-RAV-NPC01
-						call Learn_All_Spells
-						times 2 {
-							p1 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p1 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Main_Account_School = "Death" {
-						if DebugMode = True {
-							print $Main_Account
-							print "is Death. Teleporting to Death teacher..."
-						}
-						times 2 {
-							clickwindow ['WorldView', 'windowHUD', 'compassAndTeleporterButtons', 'GoHomeButton']
-						}
-						p1 waitforzonechange completion
-						sleep 3
-						p1 tp XYZ(2644.949, 4999.042, 2.512)
-						p1 waitforzonechange completion
-						sleep 3
-						p1 tp XYZ(520.220, 12.170, 91.540)
-						p1 waitforzonechange completion
-						sleep 3
-						p1 entitytp nav WC-NIS-NPC01
-						call Learn_All_Spells 
-						times 2 {
-							p1 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p1 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Main_Account_School = "Balance" {
-						if DebugMode = True {
-							print $Main_Account
-							print "is Balance. Teleporting to Balance teacher..."
-						}
-						p1 tp XYZ(9.248, 1792.007, 62.714)
-						p1 waitforzonechange completion
-						sleep 3
-						p1 entitytp nav UniverseTeleport
-						sleep 2
-						times 10 {
-							p1 sendkey X, .1
-						}
-						sleep 2
-						times 20 {
-							if NOT p1 windowvisible ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'wbtnKrokotopia'] {
-								p1 clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'rightButton']
-							} else {
-								break
-							}
-						}
-						times 2 {
-							p1 clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'wbtnKrokotopia']
-						}
-						sleep 2
-						p1 clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'teleportButton']
-						p1 waitforzonechange completion
-						sleep 3
-						p1 tp XYZ(10.641, -2997.186, 627.596)
-						p1 waitforzonechange completion
-						sleep 3
-						p1 tp XYZ(4443.337, 3169.939, 25.792)
-						times 100 {
-							p1 sendkey X, .1
-						}
-						print "Sleeping 15 seconds cause I don't want to write anymore. May or may not break."
-						sleep 15
-						p1 tp XYZ(14161.237, 1929.254, 1139.239)
-						times 10 {
-							p1 sendkey X, .1
-						}
-						p1 waitforzonechange completion
-						sleep 3
-						p1 entitytp nav KT-SPHub-NPC02
-						call Learn_All_Spells
-						times 2 {
-							p1 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p1 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Main_Account_School = "Myth" {
-						if DebugMode = True {
-							print $Main_Account
-							print "is Myth. Teleporting to Myth teacher..."
-						}
-						p1 tp XYZ(-3545.785, 3897.719, 1.714)
-						p1 waitforzonechange completion
-						sleep 3
-						p1 entitytp nav WC-RAV-NPC02
-						call Learn_All_Spells 
-						times 2 {
-							p1 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p1 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Main_Account_School = "Storm" {
-						if DebugMode = True {
-							print $Main_Account
-							print "is Storm. Teleporting to Storm teacher..."
-						}
-						p1 tp XYZ(2905.652, 647.329, 1.713)
-						p1 waitforzonechange completion
-						sleep 3
-						p1 entitytp nav WC-RAV-NPC05
-						call Learn_All_Spells
-						times 2 {
-							p1 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p1 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Main_Account_School = "Ice" {
-						if DebugMode = True {
-							print $Main_Account
-							print "is Ice. Teleporting to Ice teacher..."
-						}
-						p1 tp XYZ(3672.363, 3681.770, 1.715)
-						p1 waitforzonechange completion
-						sleep 3
-						p1 entitytp nav WC-RAV-NPC03
-						call Learn_All_Spells
-						times 2 {
-							p1 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p1 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Main_Account_School = "Fire" {
-						if DebugMode = True {
-							print $Main_Account
-							print "is Fire. Teleporting to Fire teacher..."
-						}
-						p1 tp XYZ(1755.091, 6218.783, 1.710)
-						p1 waitforzonechange completion
-						sleep 3
-						p1 entitytp nav WC-RAV-NPC04
-						call Learn_All_Spells
-						times 2 {
-							p1 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p1 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					}
-				}
-			}
-			if NOT Questee2 = "QuestingAccountName" {
-				if NOT Questee2_School = "SchoolGoesHere" {
-					if Questee2_School = "Life" {
-						if DebugMode = True {
-							print $Questee2
-							print "is Life. Teleporting to Life teacher..."
-						}
-						p2 tp XYZ(-2871.408, 643.838, 1.715)
-						p2 waitforzonechange completion
-						sleep 3
-						p2 entitytp nav WC-RAV-NPC01
-						call Learn_All_Spells
-						times 2 {
-							p2 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p2 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee2_School = "Death" {
-						if DebugMode = True {
-							print $Questee2
-							print "is Death. Teleporting to Death teacher..."
-						}
-						times 2 {
-							clickwindow ['WorldView', 'windowHUD', 'compassAndTeleporterButtons', 'GoHomeButton']
-						}
-						p2 waitforzonechange completion
-						sleep 3
-						p2 tp XYZ(2644.949, 4999.042, 2.512)
-						p2 waitforzonechange completion
-						sleep 3
-						p2 tp XYZ(520.220, 12.170, 91.540)
-						p2 waitforzonechange completion
-						sleep 3
-						p2 entitytp nav WC-NIS-NPC01
-						call Learn_All_Spells 
-						times 2 {
-							p2 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p2 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee2_School = "Balance" {
-						if DebugMode = True {
-							print $Questee2
-							print "is Balance. Teleporting to Balance teacher..."
-						}
-						p2 tp XYZ(9.248, 1792.007, 62.714)
-						p2 waitforzonechange completion
-						sleep 3
-						p2 entitytp nav UniverseTeleport
-						sleep 2
-						times 10 {
-							p2 sendkey X, .1
-						}
-						sleep 2
-						times 20 {
-							if NOT p2 windowvisible ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'wbtnKrokotopia'] {
-								p2 clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'rightButton']
-							} else {
-								break
-							}
-						}
-						times 2 {
-							p2 clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'wbtnKrokotopia']
-						}
-						sleep 2
-						p2 clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'teleportButton']
-						p2 waitforzonechange completion
-						sleep 3
-						p2 tp XYZ(10.641, -2997.186, 627.596)
-						p2 waitforzonechange completion
-						sleep 3
-						p2 tp XYZ(4443.337, 3169.939, 25.792)
-						times 100 {
-							p2 sendkey X, .1
-						}
-						print "Sleeping 15 seconds cause I don't want to write anymore. May or may not break."
-						sleep 15
-						p2 tp XYZ(14161.237, 1929.254, 1139.239)
-						times 10 {
-							p2 sendkey X, .1
-						}
-						p2 waitforzonechange completion
-						sleep 3
-						p2 entitytp nav KT-SPHub-NPC02
-						call Learn_All_Spells
-						times 2 {
-							p2 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p2 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee2_School = "Myth" {
-						if DebugMode = True {
-							print $Questee2
-							print "is Myth. Teleporting to Myth teacher..."
-						}
-						p2 tp XYZ(-3545.785, 3897.719, 1.714)
-						p2 waitforzonechange completion
-						sleep 3
-						p2 entitytp nav WC-RAV-NPC02
-						call Learn_All_Spells 
-						times 2 {
-							p2 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p2 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee2_School = "Storm" {
-						if DebugMode = True {
-							print $Questee2
-							print "is Storm. Teleporting to Storm teacher..."
-						}
-						p2 tp XYZ(2905.652, 647.329, 1.713)
-						p2 waitforzonechange completion
-						sleep 3
-						p2 entitytp nav WC-RAV-NPC05
-						call Learn_All_Spells
-						times 2 {
-							p2 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p2 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee2_School = "Ice" {
-						if DebugMode = True {
-							print $Questee2
-							print "is Ice. Teleporting to Ice teacher..."
-						}
-						p2 tp XYZ(3672.363, 3681.770, 1.715)
-						p2 waitforzonechange completion
-						sleep 3
-						p2 entitytp nav WC-RAV-NPC03
-						call Learn_All_Spells
-						times 2 {
-							p2 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p2 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee2_School = "Fire" {
-						if DebugMode = True {
-							print $Questee2
-							print "is Fire. Teleporting to Fire teacher..."
-						}
-						p2 tp XYZ(1755.091, 6218.783, 1.710)
-						p2 waitforzonechange completion
-						sleep 3
-						p2 entitytp nav WC-RAV-NPC04
-						call Learn_All_Spells
-						times 2 {
-							p2 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p2 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					}
-				}
-			}
-			if NOT Questee3 = "QuestingAccountName" {
-				if NOT Questee3_School = "SchoolGoesHere" {
-					if Questee3_School = "Life" {
-						if DebugMode = True {
-							print $Questee3
-							print "is Life. Teleporting to Life teacher..."
-						}
-						p3 tp XYZ(-2871.408, 643.838, 1.715)
-						p3 waitforzonechange completion
-						sleep 3
-						p3 entitytp nav WC-RAV-NPC01
-						call Learn_All_Spells
-						times 2 {
-							p3 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p3 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee3_School = "Death" {
-						if DebugMode = True {
-							print $Questee3
-							print "is Death. Teleporting to Death teacher..."
-						}
-						times 2 {
-							p3 clickwindow ['WorldView', 'windowHUD', 'compassAndTeleporterButtons', 'GoHomeButton']
-						}
-						p3 waitforzonechange completion
-						sleep 3
-						p3 tp XYZ(2644.949, 4999.042, 2.512)
-						p3 waitforzonechange completion
-						sleep 3
-						p3 tp XYZ(520.220, 12.170, 91.540)
-						p3 waitforzonechange completion
-						sleep 3
-						p3 entitytp nav WC-NIS-NPC01
-						call Learn_All_Spells 
-						times 2 {
-							p3 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p3 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee3_School = "Balance" {
-						if DebugMode = True {
-							print $Questee3
-							print "is Balance. Teleporting to Balance teacher..."
-						}
-						p3 tp XYZ(9.248, 1792.007, 62.714)
-						p3 waitforzonechange completion
-						sleep 3
-						p3 entitytp nav UniverseTeleport
-						sleep 2
-						times 10 {
-							p3 sendkey X, .1
-						}
-						sleep 2
-						times 20 {
-							if NOT p3 windowvisible ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'wbtnKrokotopia'] {
-								p3 clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'rightButton']
-							} else {
-								break
-							}
-						}
-						times 2 {
-							p3 clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'wbtnKrokotopia']
-						}
-						sleep 2
-						p3 clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'teleportButton']
-						p3 waitforzonechange completion
-						sleep 3
-						p3 tp XYZ(10.641, -2997.186, 627.596)
-						p3 waitforzonechange completion
-						sleep 3
-						p3 tp XYZ(4443.337, 3169.939, 25.792)
-						times 100 {
-							p3 sendkey X, .1
-						}
-						print "Sleeping 15 seconds cause I don't want to write anymore. May or may not break."
-						sleep 15
-						p3 tp XYZ(14161.237, 1929.254, 1139.239)
-						times 10 {
-							p4 sendkey X, .1
-						}
-						p3 waitforzonechange completion
-						sleep 3
-						p3 entitytp nav KT-SPHub-NPC02
-						call Learn_All_Spells
-						times 2 {
-							p3 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p3 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee3_School = "Myth" {
-						if DebugMode = True {
-							print $Questee3
-							print "is Myth. Teleporting to Myth teacher..."
-						}
-						p3 tp XYZ(-3545.785, 3897.719, 1.714)
-						p3 waitforzonechange completion
-						sleep 3
-						p3 entitytp nav WC-RAV-NPC02
-						call Learn_All_Spells 
-						times 2 {
-							p3 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p3 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee3_School = "Storm" {
-						if DebugMode = True {
-							print $Questee3
-							print "is Storm. Teleporting to Storm teacher..."
-						}
-						p3 tp XYZ(2905.652, 647.329, 1.713)
-						p3 waitforzonechange completion
-						sleep 3
-						p3 entitytp nav WC-RAV-NPC05
-						call Learn_All_Spells
-						times 2 {
-							p3 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p3 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee3_School = "Ice" {
-						if DebugMode = True {
-							print $Questee3
-							print "is Ice. Teleporting to Ice teacher..."
-						}
-						p3 tp XYZ(3672.363, 3681.770, 1.715)
-						p3 waitforzonechange completion
-						sleep 3
-						p3 entitytp nav WC-RAV-NPC03
-						call Learn_All_Spells
-						times 2 {
-							p3 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p3 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee3_School = "Fire" {
-						if DebugMode = True {
-							print $Questee3
-							print "is Fire. Teleporting to Fire teacher..."
-						}
-						p3 tp XYZ(1755.091, 6218.783, 1.710)
-						p3 waitforzonechange completion
-						sleep 3
-						p3 entitytp nav WC-RAV-NPC04
-						call Learn_All_Spells
-						times 2 {
-							p3 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p3 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					}
-				}
-			}
-			if NOT Questee4 = "QuestingAccountName" {
-				if NOT Questee4_School = "SchoolGoesHere" {
-					if Questee4_School = "Life" {
-						if DebugMode = True {
-							print $Questee4
-							print "is Life. Teleporting to Life teacher..."
-						}
-						p4 tp XYZ(-2871.408, 643.838, 1.715)
-						p4 waitforzonechange completion
-						sleep 3
-						p4 entitytp nav WC-RAV-NPC01
-						call Learn_All_Spells
-						times 2 {
-							p4 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p4 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee4_School = "Death" {
-						if DebugMode = True {
-							print $Questee4
-							print "is Death. Teleporting to Death teacher..."
-						}
-						times 2 {
-							p4 clickwindow ['WorldView', 'windowHUD', 'compassAndTeleporterButtons', 'GoHomeButton']
-						}
-						p4 waitforzonechange completion
-						sleep 3
-						p4 tp XYZ(2644.949, 4999.042, 2.512)
-						p4 waitforzonechange completion
-						sleep 3
-						p4 tp XYZ(520.220, 12.170, 91.540)
-						p4 waitforzonechange completion
-						sleep 3
-						p4 entitytp nav WC-NIS-NPC01
-						call Learn_All_Spells 
-						times 2 {
-							p4 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p4 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee4_School = "Balance" {
-						if DebugMode = True {
-							print $Questee4
-							print "is Balance. Teleporting to Balance teacher..."
-						}
-						p4 tp XYZ(9.248, 1792.007, 62.714)
-						p4 waitforzonechange completion
-						sleep 3
-						p4 entitytp nav UniverseTeleport
-						sleep 2
-						times 10 {
-							p4 sendkey X, .1
-						}
-						sleep 2
-						times 20 {
-							if NOT p4 windowvisible ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'wbtnKrokotopia'] {
-								p4 clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'rightButton']
-							} else {
-								break
-							}
-						}
-						times 2 {
-							p4 clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'wbtnKrokotopia']
-						}
-						sleep 2
-						p4 clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'teleportButton']
-						p4 waitforzonechange completion
-						sleep 3
-						p4 tp XYZ(10.641, -2997.186, 627.596)
-						p4 waitforzonechange completion
-						sleep 3
-						p4 tp XYZ(4443.337, 3169.939, 25.792)
-						times 100 {
-							p4 sendkey X, .1
-						}
-						print "Sleeping 15 seconds cause I don't want to write anymore. May or may not break."
-						sleep 15
-						p4 tp XYZ(14161.237, 1929.254, 1139.239)
-						times 10 {
-							p4 sendkey X, .1
-						}
-						p4 waitforzonechange completion
-						sleep 3
-						p4 entitytp nav KT-SPHub-NPC02
-						call Learn_All_Spells
-						times 2 {
-							p4 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p4 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee4_School = "Myth" {
-						if DebugMode = True {
-							print $Questee4
-							print "is Myth. Teleporting to Myth teacher..."
-						}
-						p4 tp XYZ(-3545.785, 3897.719, 1.714)
-						p4 waitforzonechange completion
-						sleep 3
-						p4 entitytp nav WC-RAV-NPC02
-						call Learn_All_Spells 
-						times 2 {
-							p4 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p4 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee4_School = "Storm" {
-						if DebugMode = True {
-							print $Questee4
-							print "is Storm. Teleporting to Storm teacher..."
-						}
-						p4 tp XYZ(2905.652, 647.329, 1.713)
-						p4 waitforzonechange completion
-						sleep 3
-						p4 entitytp nav WC-RAV-NPC05
-						call Learn_All_Spells
-						times 2 {
-							p4 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p4 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee4_School = "Ice" {
-						if DebugMode = True {
-							print $Questee4
-							print "is Ice. Teleporting to Ice teacher..."
-						}
-						p4 tp XYZ(3672.363, 3681.770, 1.715)
-						p4 waitforzonechange completion
-						sleep 3
-						p4 entitytp nav WC-RAV-NPC03
-						call Learn_All_Spells
-						times 2 {
-							p4 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p4 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee4_School = "Fire" {
-						if DebugMode = True {
-							print $Questee4
-							print "is Fire. Teleporting to Fire teacher..."
-						}
-						p4 tp XYZ(1755.091, 6218.783, 1.710)
-						p4 waitforzonechange completion
-						sleep 3
-						p4 entitytp nav WC-RAV-NPC04
-						call Learn_All_Spells
-						times 2 {
-							p4 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p4 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					}
-				}
-			}
-			sleep $SpeedDelay
-			if any windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton'] {
-				sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-			}
-			click 586, 582
-			sleep $SpeedDelay
-			clickwindow ['WorldView', 'windowHUD', 'compassAndTeleporterButtons', 'RecallButton']
-		} elif ShouldTrainArcanum = True {
-			call Close_Menus
-			if DebugMode = True {
-				print anyclientlist
-				print "Players have reached a specified level. Attempting to learn new spells..."
-			}
-			call Go_To_Arcanum
-			if NOT Main_Account = "QuestingAccountName" {
-				if NOT Main_Account_School = "SchoolGoesHere" {
-					if Main_Account_School = "Life" {
-						p1 tp XYZ(2199.067, -10434.958, 7.847)
-						p1 waitforzonechange completion
-						sleep 3
-						p1 entitytp nav AR-ARC-NPC05
-						call Learn_All_Spells
-						times 2 {
-							p1 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p1 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Main_Account_School = "Death" {
-						p1 tp XYZ(1363.745, -13106.240, 7.847)
-						p1 waitforzonechange completion
-						sleep 3
-						p1 entitytp nav AR-ARC-NPC06
-						call Learn_All_Spells
-						times 2 {
-							p1 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p1 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Main_Account_School = "Storm" {
-						p1 tp XYZ(-2260.793, -10405.751, 7.847)
-						p1 waitforzonechange completion
-						sleep 3
-						p1 entitytp nav AR-ARC-NPC04
-						call Learn_All_Spells
-						times 2 {
-							p1 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p1 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Main_Account_School = "Ice" {
-						p1 tp XYZ(-1408.529, -13073.518, 7.847)
-						p1 waitforzonechange completion
-						sleep 3
-						p1 entitytp nav AR-ARC-NPC01
-						call Learn_All_Spells
-						times 2 {
-							p1 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p1 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Main_Account_School = "Fire" {
-						p1 tp XYZ(-2280.244, -11861.291, 7.847)
-						p1 waitforzonechange completion
-						sleep 3
-						p1 entitytp nav AR-ARC-NPC03
-						call Learn_All_Spells 
-						times 2 {
-							p1 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p1 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Main_Account_School = "Myth" {
-						p1 tp XYZ(2275.743, -11855.737, 7.847)
-						p1 waitforzonechange completion
-						sleep 3
-						p1 entitytp nav AR-ARC-NPC02
-						call Learn_All_Spells
-						times 2 {
-							p1 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p1 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Main_Account_School = "Balance" {
-						p1 tp XYZ(6.391, -13537.149, 7.847)
-						p1 waitforzonechange completion
-						sleep 3
-						p1 entitytp nav AR-ARC-NPC07 
-						call Learn_All_Spells
-						times 2 {
-							p1 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p1 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					}
-				}
-			}
-			if NOT Questee2 = "QuestingAccountName" {
-				if NOT Questee2_School = "SchoolGoesHere" {
-					if Questee2_School = "Life" {
-						p2 tp XYZ(2199.067, -10434.958, 7.847)
-						p2 waitforzonechange completion
-						sleep 3
-						p2 entitytp nav AR-ARC-NPC05
-						call Learn_All_Spells
-						times 2 {
-							p2 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p2 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee2_School = "Death" {
-						p2 tp XYZ(1363.745, -13106.240, 7.847)
-						p2 waitforzonechange completion
-						sleep 3
-						p2 entitytp nav AR-ARC-NPC06
-						call Learn_All_Spells
-						times 2 {
-							p2 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p2 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee2_School = "Storm" {
-						p2 tp XYZ(-2260.793, -10405.751, 7.847)
-						p2 waitforzonechange completion
-						sleep 3
-						p2 entitytp nav AR-ARC-NPC04
-						call Learn_All_Spells
-						times 2 {
-							p2 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p2 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee2_School = "Ice" {
-						p2 tp XYZ(-1408.529, -13073.518, 7.847)
-						p2 waitforzonechange completion
-						sleep 3
-						p2 entitytp nav AR-ARC-NPC01
-						call Learn_All_Spells
-						times 2 {
-							p2 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p2 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee2_School = "Fire" {
-						p2 tp XYZ(-2280.244, -11861.291, 7.847)
-						p2 waitforzonechange completion
-						sleep 3
-						p2 entitytp nav AR-ARC-NPC03
-						call Learn_All_Spells 
-						times 2 {
-							p2 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p2 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee2_School = "Myth" {
-						p2 tp XYZ(2275.743, -11855.737, 7.847)
-						p2 waitforzonechange completion
-						sleep 3
-						p2 entitytp nav AR-ARC-NPC02
-						call Learn_All_Spells
-						times 2 {
-							p2 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p2 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee2_School = "Balance" {
-						p2 tp XYZ(6.391, -13537.149, 7.847)
-						p2 waitforzonechange completion
-						sleep 3
-						p2 entitytp nav AR-ARC-NPC07 
-						call Learn_All_Spells
-						times 2 {
-							p2 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p2 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					}
-				}
-			}
-			if NOT Questee3 = "QuestingAccountName" {
-				if NOT Questee3_School = "SchoolGoesHere" {
-					if Questee3_School = "Life" {
-						p3 tp XYZ(2199.067, -10434.958, 7.847)
-						p3 waitforzonechange completion
-						sleep 3
-						p3 entitytp nav AR-ARC-NPC05
-						call Learn_All_Spells
-						times 2 {
-							p3 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p3 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee3_School = "Death" {
-						p3 tp XYZ(1363.745, -13106.240, 7.847)
-						p3 waitforzonechange completion
-						sleep 3
-						p3 entitytp nav AR-ARC-NPC06
-						call Learn_All_Spells
-						times 2 {
-							p3 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p3 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee3_School = "Storm" {
-						p3 tp XYZ(-2260.793, -10405.751, 7.847)
-						p3 waitforzonechange completion
-						sleep 3
-						p3 entitytp nav AR-ARC-NPC04
-						call Learn_All_Spells
-						times 2 {
-							p3 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p3 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee3_School = "Ice" {
-						p3 tp XYZ(-1408.529, -13073.518, 7.847)
-						p3 waitforzonechange completion
-						sleep 3
-						p3 entitytp nav AR-ARC-NPC01
-						call Learn_All_Spells
-						times 2 {
-							p3 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p3 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee3_School = "Fire" {
-						p3 tp XYZ(-2280.244, -11861.291, 7.847)
-						p3 waitforzonechange completion
-						sleep 3
-						p3 entitytp nav AR-ARC-NPC03
-						call Learn_All_Spells 
-						times 2 {
-							p3 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p3 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee3_School = "Myth" {
-						p3 tp XYZ(2275.743, -11855.737, 7.847)
-						p3 waitforzonechange completion
-						sleep 3
-						p3 entitytp nav AR-ARC-NPC02
-						call Learn_All_Spells
-						times 2 {
-							p3 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p3 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee3_School = "Balance" {
-						p3 tp XYZ(6.391, -13537.149, 7.847)
-						p3 waitforzonechange completion
-						sleep 3
-						p3 entitytp nav AR-ARC-NPC07 
-						call Learn_All_Spells
-						times 2 {
-							p3 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p3 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					}
-				}
-			}
-			if NOT Questee4 = "QuestingAccountName" {
-				if NOT Questee4_School = "SchoolGoesHere" {
-					if Questee4_School = "Life" {
-						p4 tp XYZ(2199.067, -10434.958, 7.847)
-						p4 waitforzonechange completion
-						sleep 3
-						p4 entitytp nav AR-ARC-NPC05
-						call Learn_All_Spells
-						times 2 {
-							p4 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p4 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee4_School = "Death" {
-						p4 tp XYZ(1363.745, -13106.240, 7.847)
-						p4 waitforzonechange completion
-						sleep 3
-						p4 entitytp nav AR-ARC-NPC06
-						call Learn_All_Spells
-						times 2 {
-							p4 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p4 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee4_School = "Storm" {
-						p4 tp XYZ(-2260.793, -10405.751, 7.847)
-						p4 waitforzonechange completion
-						sleep 3
-						p4 entitytp nav AR-ARC-NPC04
-						call Learn_All_Spells
-						times 2 {
-							p4 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p4 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee4_School = "Ice" {
-						p4 tp XYZ(-1408.529, -13073.518, 7.847)
-						p4 waitforzonechange completion
-						sleep 3
-						p4 entitytp nav AR-ARC-NPC01
-						call Learn_All_Spells
-						times 2 {
-							p4 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p4 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee4_School = "Fire" {
-						p4 tp XYZ(-2280.244, -11861.291, 7.847)
-						p4 waitforzonechange completion
-						sleep 3
-						p4 entitytp nav AR-ARC-NPC03
-						call Learn_All_Spells 
-						times 2 {
-							p4 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p4 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee4_School = "Myth" {
-						p4 tp XYZ(2275.743, -11855.737, 7.847)
-						p4 waitforzonechange completion
-						sleep 3
-						p4 entitytp nav AR-ARC-NPC02
-						call Learn_All_Spells
-						times 2 {
-							p4 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p4 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					} elif Questee4_School = "Balance" {
-						p4 tp XYZ(6.391, -13537.149, 7.847)
-						p4 waitforzonechange completion
-						sleep 3
-						p4 entitytp nav AR-ARC-NPC07 
-						call Learn_All_Spells
-						times 2 {
-							p4 clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-							p4 clickwindow ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'Exit']
-						}
-					}
-				}
-			}
-			sleep $SpeedDelay
-			if any windowvisible ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton'] {
-				sameany clickwindow ['WorldView', 'NPCTrainingGUI', 'TrainingSelection', 'ExitButton']
-			}
-			click 586, 582
-			sleep $SpeedDelay
-			clickwindow ['WorldView', 'windowHUD', 'compassAndTeleporterButtons', 'RecallButton']
 		}
 	}
 }
@@ -4396,6 +3092,84 @@ block Mass_Zone_Change_Anti_Lock {
 		}
 	}
 }
+block Special_Option_Case {
+	if any windowtext ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'wndTitleBackground', 'txtTitle'] contains "sergeant muldoon" {
+		sameany clickwindow ['WorldView', 'NPCServicesWin', 'ControlSprite', 'optionsLayout', 'NPCServicesOptionWindow', 'OptionButton']
+		times 3 {
+			if sameany hasdialogue {
+				print "Clearing additional prompt dialogue..."
+				times 300 {
+					if sameany windowvisible ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'wndTitleBackground'] {
+						break
+					}
+					if NOT sameany hasdialogue {
+						break
+					}
+					sleep .1
+				}
+			}
+			print "Checking for repeated dialogue..."
+			sleep 1
+		}
+	}
+	if any windowtext ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'wndTitleBackground', 'txtTitle'] contains "mellori" {
+		sameany clickwindow ['WorldView', 'NPCServicesWin', 'ControlSprite', 'optionsLayout', 'NPCServicesOptionWindow', 'OptionButton']
+		times 3 {
+			if sameany hasdialogue {
+				print "Clearing additional prompt dialogue..."
+				times 300 {
+					if sameany windowvisible ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'wndTitleBackground'] {
+						break
+					}
+					if NOT sameany hasdialogue {
+						break
+					}
+					sleep .1
+				}
+			}
+			print "Checking for repeated dialogue..."
+			sleep 1
+		}
+	}
+	if any windowtext ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'wndTitleBackground', 'txtTitle'] contains "old quack" {
+		sameany clickwindow ['WorldView', 'NPCServicesWin', 'ControlSprite', 'optionsLayout', 'NPCServicesOptionWindow', 'OptionButton']
+		times 3 {
+			if sameany hasdialogue {
+				print "Clearing additional prompt dialogue..."
+				times 300 {
+					if sameany windowvisible ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'wndTitleBackground'] {
+						break
+					}
+					if NOT sameany hasdialogue {
+						break
+					}
+					sleep .1
+				}
+			}
+			print "Checking for repeated dialogue..."
+			sleep 1
+		}
+	}
+	if any windowtext ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'wndTitleBackground', 'txtTitle'] contains "lucy easton" {
+		sameany clickwindow ['WorldView', 'NPCServicesWin', 'ControlSprite', 'optionsLayout', 'NPCServicesOptionWindow', 'OptionButton']
+		times 3 {
+			if sameany hasdialogue {
+				print "Clearing additional prompt dialogue..."
+				times 300 {
+					if sameany windowvisible ['WorldView', 'NPCServicesWin', 'wndDialogMain', 'wndTitleBackground'] {
+						break
+					}
+					if NOT sameany hasdialogue {
+						break
+					}
+					sleep .1
+				}
+			}
+			print "Checking for repeated dialogue..."
+			sleep 1
+		}
+	}
+}
 block Check_X_Key_Type_For_P1 {
 	times 30 {
 		if p1 windowvisible ['WorldView', 'NPCRangeWin', 'imgBackground'] {
@@ -4454,11 +3228,6 @@ block Check_X_Key_Type_For_P1 {
 					}
 					times 20 {
 						p1 sendkey X, .1
-						if p1 windowvisible ['WorldView', 'NPCServicesWin', 'ControlSprite', 'optionsLayout', 'NPCServicesOptionWindow', 'OptionButton'] {
-							times 10 {
-								p1 clickwindow ['WorldView', 'NPCServicesWin', 'ControlSprite', 'optionsLayout', 'NPCServicesOptionWindow', 'OptionButton']
-							}
-						}
 					}
 				} else {
 					if DebugMode = True {
@@ -4466,18 +3235,24 @@ block Check_X_Key_Type_For_P1 {
 					}
 					times 20 {
 						sendkey X, .1
-						if windowvisible ['WorldView', 'NPCServicesWin', 'ControlSprite', 'optionsLayout', 'NPCServicesOptionWindow', 'OptionButton'] {
-							times 10 {
-								clickwindow ['WorldView', 'NPCServicesWin', 'ControlSprite', 'optionsLayout', 'NPCServicesOptionWindow', 'OptionButton']
-							}
-						}
 					}
 				}
+				call Special_Option_Case
 				call Clear_Dialogue
 				break
 			}
 		}
 		sleep .1
+	}
+	times 1200 {
+		if any windowvisible ['WorldView', 'wndDialogMain', 'imgBackground'] {
+			print "Possible cutscene open. Waiting..."
+			var QuestCheckState = 0
+			call Close_Menus
+			sleep .1
+		} else {
+			break
+		}
 	}
 }
 block Check_X_Key_Type_For_P2 {
@@ -4538,11 +3313,6 @@ block Check_X_Key_Type_For_P2 {
 					}
 					times 20 {
 						p2 sendkey X, .1
-						if p2 windowvisible ['WorldView', 'NPCServicesWin', 'ControlSprite', 'optionsLayout', 'NPCServicesOptionWindow', 'OptionButton'] {
-							times 10 {
-								p2 clickwindow ['WorldView', 'NPCServicesWin', 'ControlSprite', 'optionsLayout', 'NPCServicesOptionWindow', 'OptionButton']
-							}
-						}
 					}
 				} else {
 					if DebugMode = True {
@@ -4550,18 +3320,24 @@ block Check_X_Key_Type_For_P2 {
 					}
 					times 20 {
 						sendkey X, .1
-						if windowvisible ['WorldView', 'NPCServicesWin', 'ControlSprite', 'optionsLayout', 'NPCServicesOptionWindow', 'OptionButton'] {
-							times 10 {
-								clickwindow ['WorldView', 'NPCServicesWin', 'ControlSprite', 'optionsLayout', 'NPCServicesOptionWindow', 'OptionButton']
-							}
-						}
 					}
 				}
+				call Special_Option_Case
 				call Clear_Dialogue
 				break
 			}
 		}
 		sleep .1
+	}
+	times 1200 {
+		if any windowvisible ['WorldView', 'wndDialogMain', 'imgBackground'] {
+			print "Possible cutscene open. Waiting..."
+			var QuestCheckState = 0
+			call Close_Menus
+			sleep .1
+		} else {
+			break
+		}
 	}
 }
 block Check_X_Key_Type_For_P3 {
@@ -4622,11 +3398,6 @@ block Check_X_Key_Type_For_P3 {
 					}
 					times 20 {
 						p3 sendkey X, .1
-						if p3 windowvisible ['WorldView', 'NPCServicesWin', 'ControlSprite', 'optionsLayout', 'NPCServicesOptionWindow', 'OptionButton'] {
-							times 10 {
-								p3 clickwindow ['WorldView', 'NPCServicesWin', 'ControlSprite', 'optionsLayout', 'NPCServicesOptionWindow', 'OptionButton']
-							}
-						}
 					}
 				} else {
 					if DebugMode = True {
@@ -4634,18 +3405,24 @@ block Check_X_Key_Type_For_P3 {
 					}
 					times 20 {
 						sendkey X, .1
-						if windowvisible ['WorldView', 'NPCServicesWin', 'ControlSprite', 'optionsLayout', 'NPCServicesOptionWindow', 'OptionButton'] {
-							times 10 {
-								clickwindow ['WorldView', 'NPCServicesWin', 'ControlSprite', 'optionsLayout', 'NPCServicesOptionWindow', 'OptionButton']
-							}
-						}
 					}
 				}
+				call Special_Option_Case
 				call Clear_Dialogue
 				break
 			}
 		}
 		sleep .1
+	}
+	times 1200 {
+		if any windowvisible ['WorldView', 'wndDialogMain', 'imgBackground'] {
+			print "Possible cutscene open. Waiting..."
+			var QuestCheckState = 0
+			call Close_Menus
+			sleep .1
+		} else {
+			break
+		}
 	}
 }
 block Check_X_Key_Type_For_P4 {
@@ -4706,11 +3483,6 @@ block Check_X_Key_Type_For_P4 {
 					}
 					times 20 {
 						p4 sendkey X, .1
-						if p4 windowvisible ['WorldView', 'NPCServicesWin', 'ControlSprite', 'optionsLayout', 'NPCServicesOptionWindow', 'OptionButton'] {
-							times 10 {
-								p4 clickwindow ['WorldView', 'NPCServicesWin', 'ControlSprite', 'optionsLayout', 'NPCServicesOptionWindow', 'OptionButton']
-							}
-						}
 					}
 				} else {
 					if DebugMode = True {
@@ -4718,23 +3490,45 @@ block Check_X_Key_Type_For_P4 {
 					}
 					times 20 {
 						sendkey X, .1
-						if windowvisible ['WorldView', 'NPCServicesWin', 'ControlSprite', 'optionsLayout', 'NPCServicesOptionWindow', 'OptionButton'] {
-							times 10 {
-								clickwindow ['WorldView', 'NPCServicesWin', 'ControlSprite', 'optionsLayout', 'NPCServicesOptionWindow', 'OptionButton']
-							}
-						}
 					}
 				}
+				call Special_Option_Case
 				call Clear_Dialogue
 				break
 			}
 		}
 		sleep .1
 	}
+	times 1200 {
+		if any windowvisible ['WorldView', 'wndDialogMain', 'imgBackground'] {
+			print "Possible cutscene open. Waiting..."
+			var QuestCheckState = 0
+			call Close_Menus
+			sleep .1
+		} else {
+			break
+		}
+	}
 }
 ######################################################################################################
 block Dungeons_And_Broken_Quests_For_P1 {
 	# <-----> Dungeons and Broken Quests <----->#
+	if p1 tracking_quest "clear waters" {
+		if p1 tracking_goal "talk to sun hing in shoshun village" {
+			if p1 inzone MooShu/Interiors/MS_WaterDojot1_Common {
+				p1 tp XYZ(-1882.806, -1696.435, -0.000)
+			}
+		}
+	}
+	if p1 tracking_quest "oni no death" {
+		if p1 tracking_goal "talk to yishin chen in tree of life" {
+			if p1 inzone MooShu/MS_Death/Interiors/MS_Death3_SpiritWorld {
+				tp XYZ(21.962, -755.669, 0.000)
+				call Load
+				tp XYZ(0,0,100000)
+			}
+		}
+	}
 	if p1 tracking_quest "release" {
 		if p1 tracking_goal "defeat plague oni in shirataki temple" {
 			if p1 inzone MooShu/MS_Plague/MS_Plague_Zone3_CliffsidePalace {
@@ -4942,8 +3736,6 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				p1 turncam 4.83
 				call Check_X_Key_Type_For_P1
 				sleep 1
-			} else {
-				break
 			}
 		}
 	}
@@ -5081,8 +3873,6 @@ block Dungeons_And_Broken_Quests_For_P1 {
 						sameany sendkey SPACEBAR, .1
 					}
 				}
-			} else {
-				break
 			}
 		}
 	}
@@ -5374,8 +4164,6 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				p1 tp XYZ(-750.4791870117188, -19761.77734375, -0.4017333984375)
 				call Check_X_Key_Type_For_P1
 				sleep 1
-			} else {
-				break
 			}
 		}
 	}
@@ -5403,8 +4191,6 @@ block Dungeons_And_Broken_Quests_For_P1 {
 					p1 tp p1
 				}
 				p1 waitforcombat completion
-			} else {
-				break
 			}
 		}
 	}
@@ -5423,8 +4209,6 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(9965.517578125, -44040.296875, 9.99993896484375)
 				call Check_X_Key_Type_For_P1
-			} else {
-				break
 			}
 		}
 	}
@@ -6015,8 +4799,6 @@ block Dungeons_And_Broken_Quests_For_P1 {
 					}
 				}
 				sleep 1
-			} else {
-				break
 			}
 		}
 	}
@@ -6484,6 +5266,22 @@ block Dungeons_And_Broken_Quests_For_P1 {
 }
 block Dungeons_And_Broken_Quests_For_P2 {
 	# <-----> Dungeons and Broken Quests <----->#
+	if p2 tracking_quest "clear waters" {
+		if p2 tracking_goal "talk to sun hing in shoshun village" {
+			if p2 inzone MooShu/Interiors/MS_WaterDojot1_Common {
+				p2 tp XYZ(-1882.806, -1696.435, -0.000)
+			}
+		}
+	}
+	if p2 tracking_quest "oni no death" {
+		if p2 tracking_goal "talk to yishin chen in tree of life" {
+			if p2 inzone MooShu/MS_Death/Interiors/MS_Death3_SpiritWorld {
+				tp XYZ(21.962, -755.669, 0.000)
+				call Load
+				tp XYZ(0,0,100000)
+			}
+		}
+	}
 	if p2 tracking_quest "release" {
 		if p2 tracking_goal "defeat plague oni in shirataki temple" {
 			if p2 inzone MooShu/MS_Plague/MS_Plague_Zone3_CliffsidePalace {
@@ -6719,8 +5517,6 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				p2 turncam 4.83
 				call Check_X_Key_Type_For_P2
 				sleep 1
-			} else {
-				break
 			}
 		}
 	}
@@ -6864,8 +5660,6 @@ block Dungeons_And_Broken_Quests_For_P2 {
 						sameany sendkey SPACEBAR, .1
 					}
 				}
-			} else {
-				break
 			}
 		}
 	}
@@ -7163,8 +5957,6 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				p2 tp XYZ(-750.4791870117188, -19761.77734375, -0.4017333984375)
 				call Check_X_Key_Type_For_P2
 				sleep 1
-			} else {
-				break
 			}
 		}
 	}
@@ -7211,8 +6003,6 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(9965.517578125, -44040.296875, 9.99993896484375)
 				call Check_X_Key_Type_For_P2
-			} else {
-				break
 			}
 		}
 	}
@@ -7804,8 +6594,6 @@ block Dungeons_And_Broken_Quests_For_P2 {
 					}
 				}
 				sleep 1
-			} else {
-				break
 			}
 		}
 	}
@@ -8263,6 +7051,22 @@ block Dungeons_And_Broken_Quests_For_P2 {
 }
 block Dungeons_And_Broken_Quests_For_P3 {
 	# <-----> Dungeons and Broken Quests <----->#
+	if p3 tracking_quest "clear waters" {
+		if p3 tracking_goal "talk to sun hing in shoshun village" {
+			if p3 inzone MooShu/Interiors/MS_WaterDojot1_Common {
+				p3 tp XYZ(-1882.806, -1696.435, -0.000)
+			}
+		}
+	}
+	if p3 tracking_quest "oni no death" {
+		if p3 tracking_goal "talk to yishin chen in tree of life" {
+			if p3 inzone MooShu/MS_Death/Interiors/MS_Death3_SpiritWorld {
+				tp XYZ(21.962, -755.669, 0.000)
+				call Load
+				tp XYZ(0,0,100000)
+			}
+		}
+	}
 	if p3 tracking_quest "release" {
 		if p3 tracking_goal "defeat plague oni in shirataki temple" {
 			if p3 inzone MooShu/MS_Plague/MS_Plague_Zone3_CliffsidePalace {
@@ -8498,8 +7302,6 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				p3 turncam 4.83
 				call Check_X_Key_Type_For_P3
 				sleep 1
-			} else {
-				break
 			}
 		}
 	}
@@ -8643,8 +7445,6 @@ block Dungeons_And_Broken_Quests_For_P3 {
 						sameany sendkey SPACEBAR, .1
 					}
 				}
-			} else {
-				break
 			}
 		}
 	}
@@ -8936,8 +7736,6 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				p3 tp XYZ(-750.4791870117188, -19761.77734375, -0.4017333984375)
 				call Check_X_Key_Type_For_P3
 				sleep 1
-			} else {
-				break
 			}
 		}
 	}
@@ -8984,8 +7782,6 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(9965.517578125, -44040.296875, 9.99993896484375)
 				call Check_X_Key_Type_For_P3
-			} else {
-				break
 			}
 		}
 	}
@@ -9577,8 +8373,6 @@ block Dungeons_And_Broken_Quests_For_P3 {
 					}
 				}
 				sleep 1
-			} else {
-				break
 			}
 		}
 	}
@@ -10036,6 +8830,22 @@ block Dungeons_And_Broken_Quests_For_P3 {
 }
 block Dungeons_And_Broken_Quests_For_P4 {
 	# <-----> Dungeons and Broken Quests <----->#
+	if p4 tracking_quest "clear waters" {
+		if p4 tracking_goal "talk to sun hing in shoshun village" {
+			if p4 inzone MooShu/Interiors/MS_WaterDojot1_Common {
+				p4 tp XYZ(-1882.806, -1696.435, -0.000)
+			}
+		}
+	}
+	if p4 tracking_quest "oni no death" {
+		if p4 tracking_goal "talk to yishin chen in tree of life" {
+			if p4 inzone MooShu/MS_Death/Interiors/MS_Death3_SpiritWorld {
+				tp XYZ(21.962, -755.669, 0.000)
+				call Load
+				tp XYZ(0,0,100000)
+			}
+		}
+	}
 	if p4 tracking_quest "release" {
 		if p4 tracking_goal "defeat plague oni in shirataki temple" {
 			if p4 inzone MooShu/MS_Plague/MS_Plague_Zone3_CliffsidePalace {
@@ -10271,8 +9081,6 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				p4 turncam 4.83
 				call Check_X_Key_Type_For_P4
 				sleep 1
-			} else {
-				break
 			}
 		}
 	}
@@ -10416,8 +9224,6 @@ block Dungeons_And_Broken_Quests_For_P4 {
 						sameany sendkey SPACEBAR, .1
 					}
 				}
-			} else {
-				break
 			}
 		}
 	}
@@ -10709,8 +9515,6 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				p4 tp XYZ(-750.4791870117188, -19761.77734375, -0.4017333984375)
 				call Check_X_Key_Type_For_P4
 				sleep 1
-			} else {
-				break
 			}
 		}
 	}
@@ -10757,8 +9561,6 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(9965.517578125, -44040.296875, 9.99993896484375)
 				call Check_X_Key_Type_For_P4
-			} else {
-				break
 			}
 		}
 	}
@@ -11350,8 +10152,6 @@ block Dungeons_And_Broken_Quests_For_P4 {
 					}
 				}
 				sleep 1
-			} else {
-				break
 			}
 		}
 	}
@@ -12791,25 +11591,101 @@ block Watchdog_Check {
 		return
 	}
 	if WatchdogState = 29 {
-		print "WATCHDOG TRIGGERED: No zone change detected. Initiating recovery..."
-		call Close_Menus
-		times 3 {
-			tp XYZ(0,1000000,0)
+		if NOT any inzone Azteca/AZ_Z12_Xibalba {
+			print "WATCHDOG TRIGGERED: No zone change detected. Initiating recovery..."
+			call Close_Menus
+			times 3 {
+				tp XYZ(0,1000000,0)
+			}
+			times 3 {
+				clickwindow ['WorldView', 'windowHUD', 'compassAndTeleporterButtons', 'GoHomeButton'] 
+			}
+			print "Sleeping 30 seconds... The bot is not broken."
+			sleep 30
+			var WatchdogState = 0
+			print "Watchdog: Recovery complete. Resuming normal operation."
+			return
+		} else {
+			print "Skipping watchdog check..."
+			var WatchdogState = 0
 		}
-		times 3 {
-			clickwindow ['WorldView', 'windowHUD', 'compassAndTeleporterButtons', 'GoHomeButton'] 
-		}
-		print "Sleeping 30 seconds... The bot is not broken."
-		sleep 30
-		var WatchdogState = 0
-		print "Watchdog: Recovery complete. Resuming normal operation."
-		return
 	}
 }
 block Orient_Edge_Cases {
+	if any windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "mellori" {
+		if sameany inzone Krokotopia/KT_Selenopolis/KT_Z04_Selenopolis {
+			sameany tp XYZ(9380.601, -128.523, 557.306)
+			sameany turncam 4.66
+			sleep 2
+			sameany sendkey X, .1
+			sleep 3
+			call Special_Option_Case
+			sameany tp XYZ(9380.601, -128.523, 557.306)
+			sameany turncam 4.66
+			sleep 2
+			sameany sendkey X, .1
+			sleep 3
+		} 
+	}
+	if any windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "solomon crane" {
+		if sameany inzone Lemuria/LM_Z01_WildLands {
+			sameany tp XYZ(-322.067, 11998.597, 498.770)
+			sameany turncam 3.49
+			sleep 2
+			sameany sendkey X, .1
+			sleep 3
+			sameany tp XYZ(-322.067, 11998.597, 498.770)
+			sameany turncam 3.49
+			sleep 2
+			sameany sendkey X, .1
+			sleep 3
+		} 
+	}
+	if any windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "josiah" {
+		if sameany inzone Empyrea/EM_Z10_PortAero {
+			sameany tp XYZ(-3275.721, 3500.270, -40.641)
+			sameany turncam .29
+			sleep 2
+			sameany sendkey X, .1
+			sleep 3
+			sameany tp XYZ(-3275.721, 3500.270, -40.641)
+			sameany turncam .29
+			sleep 2
+			sameany sendkey X, .1
+			sleep 3
+		} 
+	}
+	if any windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "maram" {
+		if sameany inzone Empyrea/EM_Z12_LandingZone {
+			sameany tp XYZ(331.036, 797.516, 13.373)
+			sameany turncam 3.16 
+			sleep 2
+			sameany sendkey X, .1
+			sleep 3
+			sameany tp XYZ(331.036, 797.516, 13.373)
+			sameany turncam 3.16 
+			sleep 2
+			sameany sendkey X, .1
+			sleep 3
+		} 
+	}
 	if any windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "sister constance" {
 		if sameany inzone Avalon/AV_Z07_OuterYard {
 			sameany turncam 2.11 
+		} 
+	}
+	if any windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "khan" {
+		if sameany inzone Empyrea/Interiors/EM_Z02_LeisureDome {
+			sameany tp XYZ(2923.261, 2456.535, 50.207)
+			sameany turncam 2.94
+			sleep 2
+			sameany sendkey X, .1
+			sleep 3
+			sameany tp XYZ(2923.261, 2456.535, 50.207)
+			sameany turncam 2.94
+			sleep 2
+			sameany sendkey X, .1
+			sleep 3
 		} 
 	}
 	if any windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "warwick" {
@@ -12817,13 +11693,64 @@ block Orient_Edge_Cases {
 			sameany turncam 5.93
 		} 
 	}
-	if any windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "merle ambrose" {
+	if any inrange "WC-HUB-NPC01" {
 		if sameany inzone WizardCity/Interiors/WC_Headmistress_House {
+			sameany entitytp nav WC-HUB-NPC01
 			sameany turncam 3.35
+			sleep 2
+			sameany sendkey X, .1
+			sleep 3
+			call Close_Menus
+			sameany entitytp nav WC-HUB-NPC01
+			sameany turncam 3.35
+			sleep 2
+			sameany sendkey X, .1
+			sleep 2
+		} 
+	}
+	if any inrange "WC-RAV-NPC02" {
+		if sameany inzone WizardCity/Interiors/WC_SchoolMyth {
+			sameany entitytp nav WC-RAV-NPC02
+			sleep 3
+			sendkey X, .1
+			sleep 3
+			call Close_Menus
+			sameany entitytp nav WC-RAV-NPC02
+			sendkey X, .1
+			sleep 2
+		} 
+	}
+	if any inrange "AR-ARC-NPC06" {
+		if sameany inzone Arcanum/Interiors/AR_Z01_DeathSchool {
+			sameany entitytp nav AR-ARC-NPC06
+			sameany turncam .79
+			sleep 2
+			sendkey X, .1
+			sleep 3
+			sameany entitytp nav AR-ARC-NPC06
+			sameany turncam .79
+			sleep 2
+			sendkey X, .1
+			sleep 3
+		}
+	}
+	if any windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "pork" {
+		if sameany inzone Empyrea/EM_Z00_Aeriel_HUB {
+			sameany turncam 2.01 
+			sleep 2
 		} 
 	}
 }
 block Hub_Area_Check {
+	block Arcanum_Lift_Door {
+		if any inzone Arcanum/AR_Z01_Hub {
+			sameany entitytp nav AR-TeleportGate
+			sleep 2
+			times 30 {
+				sameany sendkey X, .1
+			}
+		}
+	}
 	block Steam_Hub_Portal {
 		if any inzone Empyrea/EM_Z00_Aeriel_HUB {
 			sameany entitytp nav EmpyreaTeleportGate
@@ -12868,6 +11795,78 @@ block Hub_Area_Check {
 				sameany sendkey X, .1
 			} 
 		} 
+	}
+	block Check_Opts_For_The_Bridge {
+		if sameany windowtext ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'opt0'] contains "the bridge" {
+			sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'opt0']
+			sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'teleportButton']
+			return
+		}
+		if sameany windowtext ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'opt1'] contains "the bridge" {
+			sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'opt1']
+			sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'teleportButton']
+			return
+		}
+		if sameany windowtext ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'opt2'] contains "the bridge" {
+			sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'opt2']
+			sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'teleportButton']
+			return
+		}
+		if sameany windowtext ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'opt3'] contains "the bridge" {
+			sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'opt3']
+			sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'teleportButton']
+			return
+		}
+		sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'rightButton']
+		sleep 1
+	}
+	block Check_Opts_For_Lower_Decks {
+		if sameany windowtext ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'opt0'] contains "lower decks" {
+			sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'opt0']
+			sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'teleportButton']
+			return
+		}
+		if sameany windowtext ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'opt1'] contains "lower decks" {
+			sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'opt1']
+			sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'teleportButton']
+			return
+		}
+		if sameany windowtext ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'opt2'] contains "lower decks" {
+			sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'opt2']
+			sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'teleportButton']
+			return
+		}
+		if sameany windowtext ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'opt3'] contains "lower decks" {
+			sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'opt3']
+			sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'teleportButton']
+			return
+		}
+		sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'rightButton']
+		sleep 1
+	}
+	block Check_Opts_For_Panopticon {
+		if sameany windowtext ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'opt0'] contains "panopticon" {
+			sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'opt0']
+			sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'teleportButton']
+			return
+		}
+		if sameany windowtext ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'opt1'] contains "panopticon" {
+			sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'opt1']
+			sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'teleportButton']
+			return
+		}
+		if sameany windowtext ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'opt2'] contains "panopticon" {
+			sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'opt2']
+			sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'teleportButton']
+			return
+		}
+		if sameany windowtext ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'opt3'] contains "panopticon" {
+			sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'opt3']
+			sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'teleportButton']
+			return
+		}
+		sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'rightButton']
+		sleep 1
 	}
 	block Check_Opts_For_Billabong_Resort {
 		if sameany windowtext ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'opt0'] contains "billabong resort" {
@@ -13733,6 +12732,26 @@ block Hub_Area_Check {
 		sameany clickwindow ['WorldView', '', 'messageBoxBG', 'ControlSprite', 'optionWindow', 'rightButton']
 		sleep 1
 	}
+	if any inzone Arcanum/AR_Z01_Hub {
+		if sameany windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "panopticon" {
+			call Arcanum_Lift_Door
+			times 7 {
+				call Check_Opts_For_Panopticon
+			}
+		}
+		if sameany windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "lower decks" {
+			call Arcanum_Lift_Door
+			times 7 {
+				call Check_Opts_For_Lower_Decks
+			}
+		}
+		if sameany windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "the bridge" {
+			call Arcanum_Lift_Door
+			times 7 {
+				call Check_Opts_For_The_Bridge
+			}
+		}
+	}
 	if any inzone Wallaru/WL_Z01_Hub {
 		if sameany windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "hope springs" {
 			call Wallaru_Cargo_Truck
@@ -13944,20 +12963,7 @@ block Hub_Area_Check {
 		}
 	}
 }
-block Check_Network {
-	if any windowvisible ['WorldView', 'windowHUD', 'spriteNetworkLinkBroken'] {
-		print "Network error detected. Waiting until network is stable..."
-		times 1200 {     # Up to 2 minute wait time
-			if any windowvisible ['WorldView', 'windowHUD', 'spriteNetworkLinkBroken'] {
-				sleep .1
-			} else {
-				break
-			}
-		}
-	}
-}
 block Main_Quest_Handler {
-	call Check_Network
 	call Check_If_Paused
 	call Check_If_Clients_Are_In_Combat
 	call Check_If_On_Char_Screen
@@ -13987,10 +12993,23 @@ block Main_Quest_Handler {
 				sleep .5
 				p4 tp quest
 				sleep .5
-				p1 tp quest
+				p1 tp p2
 				sleep .5
 			} else {
-				tp quest
+				except p1 tp quest
+				if NOT samezone {
+					p1 tp quest
+				} else {
+					if playercount 1 {
+						p1 tp quest
+					} elif playercount 2 {
+						p1 tp p2
+					} elif playercount 3 {
+						p1 tp p3
+					} elif playercount 4 {
+						p1 tp p4
+					}
+				}
 			}
 		}
 	}
@@ -14010,11 +13029,51 @@ block Main_Quest_Handler {
 			call Close_Menus
 			call Check_If_On_Char_Screen
 			p1 tp quest
+			if p1 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "defeat" {
+				if p1 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "(" {
+					if NOT p1 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] "<center>defeat fire-spitter spawn in high road (0 of 3)</center>" {
+						p1 tp closestmob
+					} else {
+						sleep .1
+					}
+				} else {
+					sleep .1
+				}
+				if p1 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "collect" {
+					p1 tp quest
+					sleep 3
+					if p1 windowvisible ['WorldView', 'NPCRangeWin', 'imgBackground', 'TeamUpButton'] {
+						call Check_X_Key_Type_For_P1
+					} else {
+						p1 tp closestmob
+					}
+				}
+			}
 			call Check_If_On_Char_Screen
 		} else { 
 			call Close_Menus
 			call Check_If_On_Char_Screen
 			call TP_All_Quest
+			if p1 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "defeat" {
+				if p1 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "(" {
+					if NOT p1 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] "<center>defeat fire-spitter spawn in high road (0 of 3)</center>" {
+						p1 tp closestmob
+					} else {
+						sleep .1
+					}
+				} else {
+					sleep .1
+				}
+				if p1 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "collect" {
+					p1 tp quest
+					sleep 3
+					if p1 windowvisible ['WorldView', 'NPCRangeWin', 'imgBackground', 'TeamUpButton'] {
+						call Check_X_Key_Type_For_P1
+					} else {
+						p1 tp closestmob
+					}
+				}
+			}
 			call Check_If_On_Char_Screen
 			if DebugMode = True {
 				print "Teleporting All to quest objective..."
@@ -14043,6 +13102,7 @@ block Main_Quest_Handler {
 			}
 		} else {
 			call Check_If_On_Char_Screen
+			call Orient_Edge_Cases
 			call Check_X_Key_Type_For_P1
 			if DebugMode = True {
 				print "Checking X key type for P1..."
@@ -14065,6 +13125,7 @@ block Main_Quest_Handler {
 			print "Main quest handler: playercount 2 mode active"
 		}
 		call Check_If_Clients_Are_In_Combat
+		call Orient_Edge_Cases
 		call Dungeons_And_Broken_Quests_For_P2
 		call Check_If_Clients_Are_In_Combat
 		call Check_If_Paused
@@ -14077,11 +13138,47 @@ block Main_Quest_Handler {
 			}
 			call Close_Menus
 			p2 tp quest
+			if p2 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "defeat" {
+				if p2 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "(" {
+					if NOT p2 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] "<center>defeat fire-spitter spawn in high road (0 of 3)</center>" {
+						p2 tp closestmob
+					} else {
+						sleep .1
+					}
+				}
+				if p2 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "collect" {
+					p2 tp quest
+					sleep 3
+					if p2 windowvisible ['WorldView', 'NPCRangeWin', 'imgBackground', 'TeamUpButton'] {
+						call Check_X_Key_Type_For_P2
+					} else {
+						p2 tp closestmob
+					}
+				}
+			}
 		} else {
 			call Close_Menus
 			call TP_All_Quest
 			if DebugMode = True {
 				print "Teleporting All to quest objective..."
+			}
+			if p2 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "defeat" {
+				if p2 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "(" {
+					if NOT p2 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] "<center>defeat fire-spitter spawn in high road (0 of 3)</center>" {
+						p2 tp closestmob
+					} else {
+						sleep .1
+					}
+				}
+				if p2 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "collect" {
+					p2 tp quest
+					sleep 3
+					if p2 windowvisible ['WorldView', 'NPCRangeWin', 'imgBackground', 'TeamUpButton'] {
+						call Check_X_Key_Type_For_P2
+					} else {
+						p2 tp closestmob
+					}
+				}
 			}
 		}
 		times 20 {
@@ -14106,6 +13203,7 @@ block Main_Quest_Handler {
 				}
 			}
 		} else {
+			call Orient_Edge_Cases
 			call Check_X_Key_Type_For_P2
 			if DebugMode = True {
 				print "Checking X key type for P2..."
@@ -14140,11 +13238,49 @@ block Main_Quest_Handler {
 			}
 			call Close_Menus
 			p2 tp quest
+			if p2 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "defeat" {
+				if p2 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "(" {
+					if NOT p2 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] "<center>defeat fire-spitter spawn in high road (0 of 3)</center>" {
+						p2 tp closestmob
+					} else {
+						sleep .1
+					}
+				} else {
+					sleep .1
+				}
+				if p2 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "collect" {
+					p2 tp quest
+					sleep 3
+					if p2 windowvisible ['WorldView', 'NPCRangeWin', 'imgBackground', 'TeamUpButton'] {
+						call Check_X_Key_Type_For_P2
+					} else {
+						p2 tp closestmob
+					}
+				}
+			}
 		} else {
 			call Close_Menus
 			call TP_All_Quest
 			if DebugMode = True {
 				print "Teleporting All to quest objective..."
+			}
+			if p2 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "defeat" {
+				if p2 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "(" {
+					if NOT p2 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] "<center>defeat fire-spitter spawn in high road (0 of 3)</center>" {
+						p2 tp closestmob
+					} else {
+						sleep .1
+					}
+				}
+				if p2 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "collect" {
+					p2 tp quest
+					sleep 3
+					if p2 windowvisible ['WorldView', 'NPCRangeWin', 'imgBackground', 'TeamUpButton'] {
+						call Check_X_Key_Type_For_P2
+					} else {
+						p2 tp closestmob
+					}
+				}
 			}
 		}
 		times 20 {
@@ -14169,6 +13305,7 @@ block Main_Quest_Handler {
 				}
 			}
 		} else {
+			call Orient_Edge_Cases
 			call Check_X_Key_Type_For_P2
 			if DebugMode = True {
 				print "Checking X key type for P2..."
@@ -14191,11 +13328,51 @@ block Main_Quest_Handler {
 			}
 			call Close_Menus
 			p3 tp quest
+			if p3 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "defeat" {
+				if p3 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "(" {
+					if NOT p3 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] "<center>defeat fire-spitter spawn in high road (0 of 3)</center>" {
+						p3 tp closestmob
+					} else {
+						sleep .1
+					}
+				} else {
+					sleep .1
+				}
+				if p3 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "collect" {
+					p3 tp quest
+					sleep 3
+					if p3 windowvisible ['WorldView', 'NPCRangeWin', 'imgBackground', 'TeamUpButton'] {
+						call Check_X_Key_Type_For_P3
+					} else {
+						p3 tp closestmob
+					}
+				}
+			}
 		} else {
 			call Close_Menus
 			call TP_All_Quest
 			if DebugMode = True {
 				print "Teleporting All to quest objective..."
+			}
+			if p3 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "defeat" {
+				if p3 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "(" {
+					if NOT p3 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] "<center>defeat fire-spitter spawn in high road (0 of 3)</center>" {
+						p3 tp closestmob
+					} else {
+						sleep .1
+					}
+				} else {
+					sleep .1
+				}
+				if p3 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "collect" {
+					p3 tp quest
+					sleep 3
+					if p3 windowvisible ['WorldView', 'NPCRangeWin', 'imgBackground', 'TeamUpButton'] {
+						call Check_X_Key_Type_For_P3
+					} else {
+						p3 tp closestmob
+					}
+				}
 			}
 		}
 		times 20 {
@@ -14220,6 +13397,7 @@ block Main_Quest_Handler {
 				}
 			}
 		} else {
+			call Orient_Edge_Cases
 			call Check_X_Key_Type_For_P3
 			if DebugMode = True {
 				print "Checking X key type for P3..."
@@ -14252,11 +13430,51 @@ block Main_Quest_Handler {
 			}
 			call Close_Menus
 			p2 tp quest
+			if p2 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "defeat" {
+				if p2 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "(" {
+					if NOT p2 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] "<center>defeat fire-spitter spawn in high road (0 of 3)</center>" {
+						p2 tp closestmob
+					} else {
+						sleep .1
+					}
+				} else {
+					sleep .1
+				}
+				if p2 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "collect" {
+					p2 tp quest
+					sleep 3
+					if p2 windowvisible ['WorldView', 'NPCRangeWin', 'imgBackground', 'TeamUpButton'] {
+						call Check_X_Key_Type_For_P2
+					} else {
+						p2 tp closestmob
+					}
+				}
+			}
 		} else {
 			call Close_Menus
 			call TP_All_Quest
 			if DebugMode = True {
 				print "Teleporting All to quest objective..."
+			}
+			if p2 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "defeat" {
+				if p2 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "(" {
+					if NOT p2 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] "<center>defeat fire-spitter spawn in high road (0 of 3)</center>" {
+						p2 tp closestmob
+					} else {
+						sleep .1
+					}
+				} else {
+					sleep .1
+				}
+				if p2 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "collect" {
+					p2 tp quest
+					sleep 3
+					if p2 windowvisible ['WorldView', 'NPCRangeWin', 'imgBackground', 'TeamUpButton'] {
+						call Check_X_Key_Type_For_P2
+					} else {
+						p2 tp closestmob
+					}
+				}
 			}
 		}
 		times 20 {
@@ -14281,6 +13499,7 @@ block Main_Quest_Handler {
 				}
 			}
 		} else {
+			call Orient_Edge_Cases
 			call Check_X_Key_Type_For_P2
 			if DebugMode = True {
 				print "Checking X key type for P2..."
@@ -14303,11 +13522,51 @@ block Main_Quest_Handler {
 			}
 			call Close_Menus
 			p3 tp quest
+			if p3 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "defeat" {
+				if p3 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "(" {
+					if NOT p3 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] "<center>defeat fire-spitter spawn in high road (0 of 3)</center>" {
+						p3 tp closestmob
+					} else {
+						sleep .1
+					}
+				} else {
+					sleep .1
+				}
+				if p3 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "collect" {
+					p3 tp quest
+					sleep 3
+					if p3 windowvisible ['WorldView', 'NPCRangeWin', 'imgBackground', 'TeamUpButton'] {
+						call Check_X_Key_Type_For_P3
+					} else {
+						p3 tp closestmob
+					}
+				}
+			}
 		} else {
 			call Close_Menus
 			call TP_All_Quest
 			if DebugMode = True {
 				print "Teleporting All to quest objective..."
+			}
+			if p3 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "defeat" {
+				if p3 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "(" {
+					if NOT p3 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] "<center>defeat fire-spitter spawn in high road (0 of 3)</center>" {
+						p3 tp closestmob
+					} else {
+						sleep .1
+					}
+				} else {
+					sleep .1
+				}
+				if p3 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "collect" {
+					p3 tp quest
+					sleep 3
+					if p3 windowvisible ['WorldView', 'NPCRangeWin', 'imgBackground', 'TeamUpButton'] {
+						call Check_X_Key_Type_For_P3
+					} else {
+						p3 tp closestmob
+					}
+				}
 			}
 		}
 		times 20 {
@@ -14332,6 +13591,7 @@ block Main_Quest_Handler {
 				}
 			}
 		} else {
+			call Orient_Edge_Cases
 			call Check_X_Key_Type_For_P3
 			if DebugMode = True {
 				print "Checking X key type for P3..."
@@ -14354,11 +13614,51 @@ block Main_Quest_Handler {
 			}
 			call Close_Menus
 			p4 tp quest
+			if p4 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "defeat" {
+				if p4 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "(" {
+					if NOT p4 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] "<center>defeat fire-spitter spawn in high road (0 of 3)</center>" {
+						p4 tp closestmob
+					} else {
+						sleep .1
+					}
+				} else {
+					sleep .1
+				}
+				if p4 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "collect" {
+					p4 tp quest
+					sleep 3
+					if p4 windowvisible ['WorldView', 'NPCRangeWin', 'imgBackground', 'TeamUpButton'] {
+						call Check_X_Key_Type_For_P4
+					} else {
+						p4 tp closestmob
+					}
+				}
+			}
 		} else {
 			call Close_Menus
 			call TP_All_Quest
 			if DebugMode = True {
 				print "Teleporting All to quest objective..."
+			}
+			if p4 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "defeat" {
+				if p4 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "(" {
+					if NOT p4 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] "<center>defeat fire-spitter spawn in high road (0 of 3)</center>" {
+						p4 tp closestmob
+					} else {
+						sleep .1
+					}
+				} else {
+					sleep .1
+				}
+				if p4 windowtext ['WorldView', 'windowHUD', 'QuestHelperHud', 'ElementWindow', '', 'txtGoalName'] contains "collect" {
+					p4 tp quest
+					sleep 3
+					if p4 windowvisible ['WorldView', 'NPCRangeWin', 'imgBackground', 'TeamUpButton'] {
+						call Check_X_Key_Type_For_P4
+					} else {
+						p4 tp closestmob
+					}
+				}
 			}
 		}
 		times 20 {
@@ -14383,6 +13683,7 @@ block Main_Quest_Handler {
 				}
 			}
 		} else {
+			call Orient_Edge_Cases
 			call Check_X_Key_Type_For_P4
 			if DebugMode = True {
 				print "Checking X key type for P4..."
@@ -14395,12 +13696,11 @@ block Main_Quest_Handler {
 	call Check_If_Clients_Are_In_Combat
 	call Check_If_On_Char_Screen
 	call Check_If_Paused
-	call Hub_Area_Check
 }
 block First_Run {
 	print "Through the Spiral (Arc 1)"
 	print "Created by: KamarJ"
-	print "Last Updated: 07/15/2026"
+	print "Last Updated: 08/14/2026"
 	print "Requirements: Fullscreen (OFF) | Resolution: 800x600 | Combat (ON) | Speedhack (OFF) | Dialogue (ON) | Un-equip all homes before starting!"
 	print "Enjoy!"
 }
@@ -14408,7 +13708,6 @@ call First_Run
 call First_Run_Settings
 
 loop {
-	call Check_Network
 	call Check_If_Paused
 	call Watchdog_Check
 	call Quest_Check_Watchdog
@@ -14444,6 +13743,7 @@ loop {
 			sameany sendkey SPACEBAR, .1
 		}
 	}
+	call Hub_Area_Check
 	call Orient_Edge_Cases
 	call Main_Quest_Handler
 	call Orient_Edge_Cases
@@ -14463,7 +13763,4 @@ loop {
 	}
 	call Check_If_Clients_Are_In_Combat
 	call Check_If_Paused
-	call Spell_Learner
-	call Check_If_Paused
-	call Check_Network
 }
