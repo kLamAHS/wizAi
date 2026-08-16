@@ -284,6 +284,10 @@ class _Seat:
         #: walk-in door signature. Cleared whenever the marker reads far
         #: or something changes. See `LiveWorker._maybe_walk_through`.
         self.through_since = None
+        #: the countdown guard's debounce and once-per-visit stamp. See
+        #: `LiveWorker._maybe_count_hold`.
+        self.count_hold_seen = None
+        self.count_hold_spot = None
         #: when a walk-through was last attempted, so a door that will
         #: not open is walked at on a cooldown rather than every tick.
         self.walked_through_at = NEVER
@@ -545,6 +549,15 @@ class LiveWorker(QThread):
         #: mid-teleport releases the script by itself. See
         #: `_desperate_hop` and `_hop_held`.
         self._hop_pause_until = 0.0
+        #: until when the script takes no instructions because a wizard
+        #: may be standing on a COUNTING dungeon sigil -- the state the
+        #: script cannot see (a joined wizard shows no press-X prompt)
+        #: and keeps cancelling with its next teleport. Deadline, like
+        #: the hop's. See `_maybe_count_hold` and `_countdown_held`.
+        self._count_hold_until = 0.0
+        self._count_hold_zone = None
+        self._count_hold_seat = -1
+        self._count_hold_last = NEVER
         #: when the party last changed realm, and which realms this run
         #: has already tried. See `_realm_hop_party`.
         self._realm_hopped_at = NEVER
@@ -903,12 +916,33 @@ class LiveWorker(QThread):
                     await asyncio.sleep(0.5)
                     continue
 
+                if driven and not self._is_booster(seat):
+                    # The countdown guard, deliberately AHEAD of the
+                    # script step: a wizard the script just teleported
+                    # onto a dungeon sigil is standing in a countdown
+                    # the script cannot see (a joined wizard shows no
+                    # press-X prompt), and the script's very next
+                    # teleport is the one that cancels it. The hold has
+                    # to land before that instruction runs.
+                    await self._stage(seat, "guarding a sigil countdown",
+                                      self._maybe_count_hold(seat),
+                                      wheel=True, limit=30)
+
                 catching = self._catching_up()
                 # Whichever seat is CURRENTLY stepping the VM, which is
                 # seat 0 unless seat 0's loop has stopped coming round.
                 # See `_script_seat`.
                 driving = self._script_seat() is seat
-                if driving and not catching:
+                if driving and not catching and self._countdown_held():
+                    # Not stepped, not torn down: the VM keeps its state
+                    # and resumes when the hold releases -- to a changed
+                    # zone if the sigil fired, to the same spot if not.
+                    self._say_once(
+                        seat, "countdown-held",
+                        "script held — this wizard may be standing on a "
+                        "counting sigil, and the script's next teleport "
+                        "is the one that keeps cancelling the entry")
+                elif driving and not catching:
                     await self._stage(seat, "script step",
                                       self._script_step(seat), wheel=True)
                 elif driving:
@@ -4544,6 +4578,183 @@ class LiveWorker(QThread):
         except Exception:
             return False
         return bool(zone) and bool(start_zone) and zone != start_zone
+
+    #: how long the script is held for a possible sigil countdown. The
+    #: countdown itself is ~10s and RESTARTS once when the rest of the
+    #: party is brought onto the sigil, so 20 covers the restart with
+    #: margin; a spot that produces no zone change in 20s is not a
+    #: counting sigil and the script gets the wheel back.
+    COUNT_HOLD = 20.0
+    #: how long between holds, worker-wide.
+    COUNT_HOLD_EVERY = 30.0
+    #: the debounce between the first qualifying look and the hold. The
+    #: press-X prompt takes a beat to render after a landing; holding on
+    #: the very first look would classify every fresh arrival at a Talk
+    #: NPC as a possible sigil.
+    COUNT_HOLD_ARM = 0.4
+    #: how close the gathered party is brought to the (possibly)
+    #: counting sigil. Inside the sigil circle, and far enough that a
+    #: wizard already standing on it is not re-teleported -- every
+    #: re-landing restarts the countdown.
+    COUNT_HOLD_GATHER = 150.0
+
+    def _countdown_held(self):
+        """Is the script waiting out a possible sigil countdown?"""
+        import time
+
+        return time.monotonic() < self._count_hold_until
+
+    async def _maybe_count_hold(self, seat):
+        """Hold the script while a dungeon sigil may be counting down.
+
+        The operator's correction that produced this rung, after the
+        landing check alone did not explain their screen: "konstantin
+        literally had the sigil countdown running, and was still
+        teleporting away". So the wizard WAS on the sigil -- and that
+        is precisely the state the script cannot recognise: a wizard
+        standing on a joined sigil shows no press-X prompt (the same
+        fact that broke the first steady_sigil cut), so the preset's
+        `Check_X_Key_Type` -- whose dungeon test is `NPCRangeWin` +
+        `TeamUpButton` visible -- reads nothing, concludes "not a
+        dungeon", and the next main-loop iteration opens with
+        "Teleporting all clients to a safe area", cancelling the
+        countdown the wizard was standing in. Rev e786b716 did that
+        twice before one attempt happened to land NEAR the sigil
+        instead of ON it, which kept the prompt up and let the script's
+        own path work.
+
+        wizAi can act on the ambiguity the script cannot: a scripted
+        wizard parked at its non-fight quest marker, out of combat,
+        with NO dialogue and NO press-X prompt, is either standing on a
+        counting sigil or standing at a door -- and in both cases the
+        wrong move is teleporting away. So: hold the VM (state kept,
+        nothing torn down), bring the rest of the party onto the spot
+        (a sigil admits exactly the wizards ON it, and each join
+        restarts the counter once), and wait. A zone change releases
+        the hold early -- the sigil fired, and the script resumes to a
+        world its watchdog re-syncs against, which rev e786b716's own
+        log shows it does cleanly. Nothing in 20s means it was not a
+        counting sigil, and the wheel goes back.
+
+        Once per visit to a spot: the stamp clears when the wizard
+        leaves the cell, so a wizard yanked away and teleported back
+        gets a fresh hold -- standing on a sigil restarts its countdown,
+        and the second visit is exactly as protectable as the first.
+        """
+        import time
+
+        from .. import questing
+
+        now = time.monotonic()
+        if self._count_hold_until:
+            holder = seat.index == self._count_hold_seat
+            if now < self._count_hold_until:
+                if not holder:
+                    return
+                if (seat.zone_seen and self._count_hold_zone
+                        and seat.zone_seen != self._count_hold_zone):
+                    self._count_hold_until = 0.0
+                    seat.tel.note_questing(
+                        "countdown-hold-over",
+                        f"the zone changed while the script was held — the "
+                        f"sigil counted down and fired. This is the entry "
+                        f"the script's own loop kept cancelling")
+                    self._say(seat, "the sigil fired — script released")
+                return
+            self._count_hold_until = 0.0
+            if holder:
+                seat.tel.note_questing(
+                    "countdown-hold-over",
+                    f"held {self.COUNT_HOLD:.0f}s and no zone change came — "
+                    f"not a counting sigil (or the countdown was already "
+                    f"lost). The script gets the wheel back")
+            return
+
+        if seat.count_hold_spot and seat.progress != seat.count_hold_spot:
+            # Left the stamped spot -- a return is a fresh visit. Ahead
+            # of the gate below, because "left" is usually noticed on a
+            # tick when the marker reads far, which the gate ends.
+            seat.count_hold_spot = None
+        away = seat.marker_away
+        goal = (seat.goal or "").strip().lower()
+        if (away is None or away > self.AT_THE_MARKER or not goal
+                or seat.progress is None
+                or any(goal.startswith(w) for w in self.FIGHT_GOALS)
+                or questing.is_collect_goal(seat.goal)):
+            seat.count_hold_seen = None
+            return
+        if seat.count_hold_spot == seat.progress:
+            return                       # already guarded this visit
+        if now - self._count_hold_last < self.COUNT_HOLD_EVERY:
+            return
+        if seat.count_hold_seen is None:
+            seat.count_hold_seen = now   # first look arms; second holds
+            return
+        if now - seat.count_hold_seen < self.COUNT_HOLD_ARM:
+            return
+        if await questing.in_dialogue(seat.client):
+            seat.count_hold_seen = None
+            return
+        if await questing.near_interactable(seat.client):
+            # The prompt is up: NOT a joined sigil. The script's own
+            # check reads this state correctly and presses X itself.
+            seat.count_hold_seen = None
+            return
+        try:
+            if await seat.client.is_loading():
+                return
+        except Exception:
+            pass
+
+        seat.count_hold_spot = seat.progress
+        seat.count_hold_seen = None
+        self._count_hold_last = now
+        self._count_hold_until = now + self.COUNT_HOLD
+        self._count_hold_zone = seat.zone_seen
+        self._count_hold_seat = seat.index
+        seat.tel.note_questing(
+            "countdown-hold",
+            f"standing at the quest marker ({away:,.0f} away) with no "
+            f"press-X prompt — the joined-sigil state the script cannot "
+            f"see. Script held up to {self.COUNT_HOLD:.0f}s so its next "
+            f"teleport cannot cancel a running countdown; a zone change "
+            f"releases it early")
+        self._say(seat,
+                  f"{seat.name} may be standing on a counting sigil — "
+                  f"holding the script and gathering the party onto it")
+
+        # A sigil admits exactly the wizards STANDING ON it when the
+        # counter fires. The follow's own sigil rule keys on the
+        # leader's press-X prompt, which a JOINED leader no longer
+        # shows -- so the gather here is the joined case's version.
+        try:
+            here = await seat.client.body.position()
+        except Exception:
+            here = None
+        if here is None:
+            return
+        for other in self.seats:
+            if other is seat or other.client is None:
+                continue
+            if other.zone_seen != seat.zone_seen:
+                continue                 # cross-zone is the follow's job
+            try:
+                if await questing.in_battle(other.client):
+                    continue
+                at = await other.client.body.position()
+                gap = ((at.x - here.x) ** 2 + (at.y - here.y) ** 2) ** 0.5
+                if gap <= self.COUNT_HOLD_GATHER:
+                    continue
+                await other.client.teleport(here)
+                other.tel.note_questing(
+                    "countdown-hold",
+                    f"stepped onto {seat.name}'s spot — a sigil admits "
+                    f"only the wizards standing on it when the countdown "
+                    f"fires, and each join restarts the counter once")
+                self._say(other,
+                          f"{other.name} steps onto {seat.name}'s sigil")
+            except Exception:
+                continue
 
     #: how long the quest position must be continuously unreadable --
     #: goal line reading fine the whole time -- before the hook counts
