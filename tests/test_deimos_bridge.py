@@ -1648,3 +1648,35 @@ def test_the_lookahead_reaches_the_heal_rather_than_passing():
     card, _target = _split(greedy_ttk()(sim, s))
     assert card is not None, "six rounds of doing nothing on 20% health"
     assert card.kind == "heal"
+
+
+def test_the_sigil_wait_outlasts_a_reset_counter():
+    """The presets enter dungeons with `sendkey X ×30, sleep 10, call
+    Load` — a bet that the countdown runs exactly once. A second wizard
+    stepping on late RESTARTS the counter, and in a booster party the
+    booster always arrives late (wizAi's follow brings it), so the
+    sleep expired mid-countdown and the main loop's next safe-area
+    teleport pulled both wizards off the sigil. The operator watched
+    "the counter starts, then both characters teleport away and it
+    never goes in". The transform turns the bet into a bounded loop in
+    the preset's own idiom, on every vendored preset, idempotently,
+    with CRLF and brace balance intact."""
+    import glob
+
+    from deimos_bridge import scripts
+
+    presets = sorted(glob.glob("deimos_bridge/data/scripts/TTS *.txt"))
+    assert len(presets) >= 6
+    for path in presets:
+        src = open(path, newline="").read()
+        out, changed = scripts.steady_sigil(src)
+        assert changed, f"{path}: the Enter_Sigil tail was not found"
+        assert out.count("{") == out.count("}"), f"{path}: braces broken"
+        assert src.count("\r\n") and out.count("\r\n") > src.count("\r\n"), \
+            f"{path}: the preset's CRLF endings did not survive"
+        block = out[out.find("block Enter_Sigil"):][:900]
+        assert "times 3 {" in block and "break" in block, block
+        assert block.count("sendkey X") == 2, \
+            f"{path}: the re-join press is missing"
+        again, changed2 = scripts.steady_sigil(out)
+        assert not changed2 and again == out, f"{path}: not idempotent"

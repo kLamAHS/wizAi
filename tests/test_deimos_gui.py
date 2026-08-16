@@ -11547,8 +11547,12 @@ def test_a_teleport_that_did_not_land_is_reported_to_every_seat(monkeypatch):
 
     worker._watch_waitfor(worker.seats[0])
     got[0](True, "direct", "Olde Town")             # a teleport that worked
-    assert all(not s.tel.questing for s in worker.seats), \
-        "a run makes thousands of these; only the failures are worth a line"
+    # A landing is recorded too now -- thinned per outcome kind, so the
+    # first says so and the next nineteen do not (see
+    # test_teleport_landings_are_counted_and_thinned; rev dbced750's
+    # stall was twenty "successful" landings the export never saw).
+    for s in worker.seats:
+        assert [e["kind"] for e in s.tel.questing] == ["teleport-landed"]
 
     got[0](False, "the client was not free to teleport", "Olde Town")
     for seat in worker.seats:
@@ -19606,3 +19610,74 @@ def test_quest_mode_changes_reach_the_running_worker(qapp):
     assert fake.leader == 0
     win.leader_pick.setCurrentIndex(3)
     assert fake.leader == 1, "a Leader beyond the party was not clamped"
+
+
+def test_a_booster_partys_journals_are_not_compared():
+    """A booster's journal points wherever it was left — diverging from
+    the quester is the design — and at rev dbced750 the desync watchdog
+    spent a run reporting the booster "behind" on a quest nobody was
+    questing."""
+    import time
+
+    worker = _party_on_quests(
+        ["Gather the Troops", "Payback"],
+        ["Talk To Private Farnsworth in Palace of Fire",
+         "Defeat Flame Guardian in Palace of Fire (0 of 3)"])
+    worker.booster_party = True
+    worker._check_in_step(worker.seats[0])
+    worker._in_step_since = time.monotonic() - 600
+    worker._check_in_step(worker.seats[0])
+    assert not [e for e in worker.seats[0].tel.questing
+                if e["kind"] == "quest-desync"], \
+        "a booster party is being nagged about its boosters' journals"
+
+    worker.booster_party = False
+    worker._check_in_step(worker.seats[0])
+    assert [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "quest-desync"], "the check itself stopped biting"
+
+
+def test_teleport_landings_are_counted_and_thinned():
+    """"Only the failures" left the rev dbced750 stall undiagnosable:
+    twenty quest-teleports each landed "successfully" somewhere useless
+    and the export had no record of any of them, or of which path —
+    collision solve, retreat, navmap fallback — kept doing it. Landings
+    are recorded now, thinned per outcome kind so a run of thousands
+    stays a handful of lines."""
+    worker = _party_on_quests(["Gather the Troops", "Gather the Troops"])
+    for _ in range(25):
+        worker._teleport_outcome(True, "collision (grid_node)",
+                                 "MB_KnightsCourt")
+    landed = [e for e in worker.seats[0].tel.questing
+              if e["kind"] == "teleport-landed"]
+    assert len(landed) == 2, [e["detail"] for e in landed]
+    assert "collision (grid_node)" in landed[0]["detail"]
+    assert "MB_KnightsCourt" in landed[0]["detail"]
+    assert "25" not in landed[-1]["detail"] and "20 so far" in \
+        landed[-1]["detail"]
+
+    worker._teleport_outcome(False, "the game refused it", "MB_Hub")
+    failed = [e for e in worker.seats[0].tel.questing
+              if e["kind"] == "teleport-failed"]
+    assert failed and "did not land" in failed[0]["detail"]
+
+
+def test_the_heartbeat_says_how_far_the_marker_is():
+    """The rev dbced750 stall read "Defeat Jacques the Scratcher ·
+    moving" for four minutes with no way to tell a wizard working the
+    quest from one parked a zone away. The marker distance is the
+    number that tells them apart."""
+    import asyncio
+
+    worker, seat = _beating()
+    seat.goal = "Defeat Jacques the Scratcher"
+    seat.marker_away = 1234.0
+
+    async def half(_seat):
+        return 0.5
+
+    worker._health_left = half
+    asyncio.run(worker._heartbeat(seat, driven=False))
+    beat = [e for e in seat.tel.questing if e["kind"] == "heartbeat"]
+    assert beat and "marker 1,234 away" in beat[0]["detail"], \
+        beat[0]["detail"]

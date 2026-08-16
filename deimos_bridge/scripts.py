@@ -57,6 +57,7 @@ deimoslang and do not compile; `expert_mode` says so rather than
 letting the compiler produce a baffling parse error on line 1.
 """
 import os
+import re
 
 from .deimos_path import DEIMOS_ROOT, ensure_path as _ensure_path, install_hint
 
@@ -679,6 +680,61 @@ def restart_source(source: str):
             source = new
             skipped.append(name)
     return source, skipped
+
+
+#: the sigil tail this hardens: the X-spam that joins the sigil,
+#: followed by the preset's fixed bet that one countdown is enough.
+_SIGIL_TAIL = re.compile(
+    r"(times 30 \{[^{}]*sendkey X, \.1[^{}]*\})"
+    r"(\r?\n)([\t ]+)sleep 10"
+    r"\2\3call Load")
+
+
+def steady_sigil(source: str):
+    """(source, changed) — hold the wizard on a sigil through a reset.
+
+    The presets enter a dungeon with `Enter_Sigil`: spam X onto the
+    sigil, `sleep 10`, `call Load`. The 10 is the countdown — and a bet
+    that the counter runs once. It loses whenever a second wizard steps
+    on late, because the game RESTARTS the counter for the join: in a
+    booster party the booster arrives by wizAi's follow, seconds behind
+    the scripted quester, so the reset is the normal case, the sleep
+    expires mid-countdown, and the main loop's next safe-area teleport
+    yanks the quester off the sigil — the booster follows, and the
+    operator watches "the counter starts, then both characters teleport
+    away and it never goes in".
+
+    So the bet becomes a loop, in the preset's own idiom: sleep, Load,
+    and then — if the TeamUp window is STILL up, meaning still parked
+    at the sigil un-zoned — press X again and wait again, three rounds
+    before giving the loop back. A wizard that zoned breaks out on the
+    vanished window; a wizard that missed the sigil entirely is no
+    worse off than the single-shot version left it.
+
+    Idempotent: the rewritten tail no longer matches the pattern.
+    Line endings and indentation are taken from the matched text, so
+    the presets' CRLF survives.
+    """
+    def loop(m):
+        spam, eol, ind = m.group(1), m.group(2), m.group(3)
+        deep = ind + "\t"
+        deeper = deep + "\t"
+        return (
+            spam
+            + f"{eol}{ind}times 3 {{"
+            + f"{eol}{deep}sleep 10"
+            + f"{eol}{deep}call Load"
+            + f"{eol}{deep}if NOT any windowvisible ['WorldView', "
+              f"'NPCRangeWin', 'imgBackground', 'TeamUpButton'] {{"
+            + f"{eol}{deeper}break"
+            + f"{eol}{deep}}}"
+            + f"{eol}{deep}times 10 {{"
+            + f"{eol}{deeper}sendkey X, .1"
+            + f"{eol}{deep}}}"
+            + f"{eol}{ind}}}")
+
+    out, n = _SIGIL_TAIL.subn(loop, source)
+    return (out, True) if n else (source, False)
 
 
 def set_pacing(source: str, step=None, dialog=None):

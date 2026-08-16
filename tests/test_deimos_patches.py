@@ -1324,3 +1324,19 @@ def test_the_314_collision_stack_is_vendored():
     for rel in ("Deimos/src/questing.py", "Deimos/src/sigil.py"):
         assert "collision_tp(" in _source(rel), \
             f"{rel} did not take the 3.14 navmap->collision swaps"
+
+
+def test_the_collision_walk_floor_is_aggro_range_not_interaction_range():
+    """Upstream's collision teleport skips the final walk inside 120
+    units — "already in range", meaning INTERACTION range. A defeat
+    quest needs the wizard inside the mobs' AGGRO radius, and the
+    collision landing is by construction the nearest CLEAR point,
+    systematically outside the pack: rev dbced750 looped "Defeat
+    Jacques the Scratcher" teleports for four minutes, every landing a
+    reported success ~a hundred units short, no mob ever pulled. The
+    floor is wizAi's own 20 — inside both ranges — and an upstream
+    re-port that restores 120 restores the stall."""
+    src = _source(TP)
+    assert "_WALK_GAP_MIN = 20.0" in src, \
+        "the walk floor went back above aggro range"
+    assert "_WALK_GAP_MIN = 120.0" not in src
