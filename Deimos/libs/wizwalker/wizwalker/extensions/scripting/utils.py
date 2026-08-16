@@ -91,10 +91,27 @@ async def _cycle_to_online_friends(client, friends_list):
 
     right_button = await _maybe_get_named_window(friends_list, "btnListTypeRight")
 
-    while (current_page := await _get_text()) != "Online Friends":
+    # wizAi patch: bounded. Upstream's `while ... != "Online Friends"`
+    # has no exit, so a list whose label never reads exactly that --
+    # a click that does not land, a label that reads empty, a different
+    # tab layout -- parks the caller here for the rest of the run and
+    # every failure surfaces as an opaque outer timeout. The tab
+    # carousel is a handful of entries; twelve clicks is two full laps,
+    # and a label that has not read "Online Friends" by then never
+    # will. Raising names the actual failure, and the caller's retry
+    # loops treat it like any other failed attempt.
+    for _ in range(12):
+        current_page = await _get_text()
+        if current_page == "Online Friends":
+            break
         await client.mouse_handler.click_window(right_button)
         await maybe_wait_for_value_with_timeout(
             _get_text, value=current_page, inverse_value=True, timeout=5
+        )
+    else:
+        raise ValueError(
+            f"the friends list never showed 'Online Friends' after 12 "
+            f"page clicks — it reads {await _get_text()!r}"
         )
 
 
