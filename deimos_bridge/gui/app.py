@@ -2270,6 +2270,8 @@ class MainWindow(QMainWindow):
          "fight and turn in their own steps", (False, True, True, False)),
         ("Booster party — the leader quests (wizAi's navigator); the "
          "others only join its fights", (True, False, False, True)),
+        ("Booster party + script — the script quests the leader; the "
+         "others only join its fights", (False, True, True, True)),
     )
 
     def _build_questing_tab(self):

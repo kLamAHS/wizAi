@@ -19478,3 +19478,53 @@ def test_a_member_level_school_answer_still_wins():
     read = asyncio.new_event_loop().run_until_complete(
         read_state(combat, NameResolver(cards), "ice"))
     assert read.client_school == "ice"
+
+
+def test_a_booster_party_with_a_script_is_solo_pilot_wiring(qapp):
+    """The operator's requirement, verbatim: "I want booster mode to
+    work with script questing, since auto quester (non scripts) is
+    essentially useless." A script normally makes EVERY seat
+    script-driven, which starves the booster branch of the tick — and
+    at rev 8a48fd42 each mass `tp quest` scattered the booster to its
+    own stale journal, through the world teleporter to Krokotopia
+    while its quester fought in Marleybone. Booster party + script
+    therefore MEANS solo-pilot wiring: the script quests the leader
+    alone, and the boosters are wizAi's — forced even when the solo
+    checkbox was left off, because the raw checkboxes can spell the
+    combination no mode names."""
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    w = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1,
+                   seats=[SeatConfig(school="fire")], booster_party=True,
+                   script="teleport quest", leader=1)
+    assert w.solo_script and w._booster_solo_forced
+    assert w._solo_pilot()
+    assert [w._is_booster(s) for s in w.seats] == [True, False]
+    assert [w._follows(s) for s in w.seats] == [True, False]
+
+    explicit = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1,
+                          seats=[SeatConfig(school="fire")],
+                          booster_party=True, script="teleport quest",
+                          solo_script=True)
+    assert explicit.solo_script and not explicit._booster_solo_forced
+
+    unscripted = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1,
+                            seats=[SeatConfig(school="fire")],
+                            booster_party=True)
+    assert not unscripted.solo_script, \
+        "forcing solo without a script would change plain booster mode"
+
+
+def test_the_booster_script_mode_is_offered_and_distinct(qapp):
+    """The dropdown row for it, with the booster flag distinguishing
+    it from plain solo pilot in `_sync_quest_mode`'s reverse map — the
+    two have identical checkbox flags, so without the fourth flag the
+    dropdown would snap to whichever row comes first."""
+    from deimos_bridge.gui.app import MainWindow
+
+    flags = [mode for _name, mode in MainWindow.QUEST_MODES]
+    assert (False, True, True, True) in flags, "booster + script mode gone"
+    assert (False, True, True, False) in flags, "solo pilot mode gone"
+    assert len(flags) == len(set(flags)), \
+        "two quest modes share one flag tuple — the reverse map cannot " \
+        "tell them apart"
