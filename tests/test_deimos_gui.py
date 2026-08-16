@@ -10369,6 +10369,61 @@ def test_a_follower_still_does_not_teleport_for_nothing():
     assert follower.tped == [] and not moved and why == ""
 
 
+def test_a_leader_at_a_prompt_pulls_the_follower_onto_its_spot(monkeypatch):
+    """A dungeon sigil admits exactly the wizards STANDING ON it when
+    the countdown fires. Rev e786b716: the leader entered Knight's
+    Court T2 alone while the booster stood "together" a few hundred
+    units up the street — "the non leader also doesnt even queue up for
+    the dungeon" — and only reached the fight a round late through the
+    friends-list teleport. A leader whose press-X prompt is up ends the
+    street-sized definition of together."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    follower = _party_client(pos=(100, 0, 0))
+    leader = _party_client(pos=(700, 0, 0))   # inside 900, off the sigil
+
+    async def prompt_up(_c):
+        return True
+
+    monkeypatch.setattr(party, "at_a_prompt", prompt_up)
+    moved, why = asyncio.run(party.follow(follower, leader))
+    assert follower.tped == [(700, 0, 0)], \
+        "the follower did not step onto the leader's sigil"
+    assert moved and "sigil" in why
+
+
+def test_a_follower_already_on_the_sigil_stays_put(monkeypatch):
+    """Standing on the spot already: re-teleporting every tick would
+    restart the countdown forever."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    follower = _party_client(pos=(650, 0, 0))
+    leader = _party_client(pos=(700, 0, 0))   # 50 apart — both on it
+
+    async def prompt_up(_c):
+        return True
+
+    monkeypatch.setattr(party, "at_a_prompt", prompt_up)
+    moved, why = asyncio.run(party.follow(follower, leader))
+    assert follower.tped == [] and not moved and why == ""
+
+
+def test_an_unreadable_prompt_is_not_a_prompt():
+    """`at_a_prompt` reads the leader's window tree, and a client that
+    cannot answer must read as "no prompt" rather than dragging the
+    party around on an exception."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    # _party_client has no root_window at all — the read raises inside.
+    assert asyncio.run(party.at_a_prompt(_party_client())) is False
+
+
 def test_wisps_wait_when_the_leader_is_already_fighting(qapp):
     """The chores set `in_upkeep`, and the service task skips its whole
     tick while that is set — so a follower that started a wisp sweep as

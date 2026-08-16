@@ -1257,8 +1257,10 @@ def test_collision_tp_answers_and_reports_like_navmap_tp():
     assert not bare, f"collision_tp has bare returns again: {bare}"
     assert body.count("return await navmap_tp(") == 2, \
         "blocked entry and no-solution fallback must both delegate to navmap_tp"
-    assert body.count("_tp_result(") >= 4, \
+    assert body.count("_tp_result(") >= 3, \
         "not every collision landing reports a result"
+    assert body.count("await _landed(") == 3, \
+        "the three landing paths must all funnel through the landing check"
 
 
 def test_the_collision_solver_stays_optional():
@@ -1367,3 +1369,54 @@ def test_a_marker_inside_the_bouncing_volume_is_a_door_not_a_statue():
     # the volume — an unconditional truncation is the rev 66a4fe5b bug.
     gate = body[:truncation]
     assert gate.count("fp.contains(_Point(target_xyz.x, target_xyz.y))") == 1
+
+
+def test_a_landing_far_from_the_target_is_finished_on_foot_and_named():
+    """The teleport's contract to the script is not "a teleport
+    happened" — it is "the wizard now stands at the objective", because
+    the script's next instruction assumes it. Rev e786b716: the preset
+    teleported to a dungeon sigil, immediately checked the press-X
+    prompt to classify the interactable, read nothing (the heartbeat
+    put the wizard 270 units out), declared "not a dungeon", and its
+    next loop iteration teleported everyone away to the safe area —
+    three cycles of ~13s before one stuck. The operator: "it shouldnt
+    take a billion attempts to enter a dungeon". So every landing path
+    measures the wizard's ACTUAL distance to the target afterwards,
+    closes an open gap on foot once (unless the walk deliberately
+    stopped short — a statue truncation is a decision), and reports a
+    landing still out as its own outcome kind, 'collision-short', so
+    the export shows the first one instead of thinning it under the
+    successes."""
+    src = _source(TP)
+    assert "_LANDED_NEAR = 60.0" in src, \
+        "the landed-near threshold moved — the sigil press-X check needs it"
+    assert "_LANDED_WALK_CAP = 800.0" in src, \
+        "the cap that stops a blind cross-zone hike is gone"
+    body = src.split("async def collision_tp", 1)[1].split("\ndef ", 1)[0]
+    assert "collision-short (" in body, \
+        "short landings are no longer their own reported kind"
+    assert "await client.goto(target_xyz.x, target_xyz.y)" in body, \
+        "the final on-foot approach is gone from the landing check"
+    assert "not walked_short" in body, \
+        "the final approach must respect a walk that chose to stop short"
+    assert "_LANDED_NEAR < gap <= _LANDED_WALK_CAP" in body, \
+        "the final approach lost its distance gates"
+
+
+def test_the_walk_owns_its_stop_decisions():
+    """`_walk_remaining_to_target` answers whether it DELIBERATELY
+    stopped short — truncated at a statue's footprint, target on a
+    static collider, no on-foot path, or an error — so the landing
+    check knows when a still-open gap may be closed with a straight
+    approach and when the stop was a decision to honour."""
+    src = _source(TP)
+    head, walk = src.split("async def _walk_remaining_to_target", 1)
+    assert "-> bool" in walk.split('"""', 1)[0], \
+        "the walk no longer declares its stopped-short answer"
+    walk = walk.split("\nasync def ", 1)[0]
+    assert walk.count("return True") >= 3, \
+        "the deliberate stops (collider/no-path/error) must answer True"
+    assert "return False" in walk, \
+        "a walk that finished (or had nothing to do) must answer False"
+    assert "return not refine" in walk, \
+        "a truncated walk must answer stopped-short through `refine`"
