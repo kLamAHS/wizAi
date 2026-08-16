@@ -14980,15 +14980,92 @@ def test_the_prompt_up_case_belongs_to_the_scripts_own_check(monkeypatch):
     assert other.client.tped == []
 
 
-def test_a_defeat_marker_is_not_a_counting_sigil(monkeypatch):
-    """A defeat step's marker sits on the mob pack. Holding the script
-    there guards nothing and delays the pull."""
+def test_a_defeat_marker_at_a_dungeon_holds_but_never_sweeps(monkeypatch):
+    """"Defeat Maito in Tatakai Outpost" is a boss INSIDE a dungeon:
+    the marker sits at the sigil, and the first cut's fight-goal
+    exclusion let the script yank the wizard mid-count — the
+    operator's screenshot, counter at 6 and all. Fight goals hold now;
+    what they never do is sweep, because walking through a mob pack
+    answers nothing."""
     import asyncio
+    import time
 
     worker, seat, other = _at_the_sigil(
-        monkeypatch, goal="Defeat Deadly Scratcher in Knight's Court")
+        monkeypatch, goal="Defeat Maito in Tatakai Outpost",
+        crosses_on_leg=1)
     asyncio.run(worker._maybe_count_hold(seat))
-    assert not worker._countdown_held()
+    assert worker._countdown_held(), "the dungeon-boss hold was refused"
+    worker._count_hold_until = time.monotonic() - 1.0
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert seat.client.legs == [], "swept through a fight marker"
+
+
+def test_a_boosters_prompt_beside_the_leader_is_a_sigil_sensor(monkeypatch):
+    """"Talk To Hoi Mang in Crimson Fields" reads its marker from
+    INSIDE the dungeon — past every distance gate — while the party
+    stands at the sigil outside. The party itself is the detector: a
+    joined leader shows no press-X prompt and the unjoined booster
+    beside it shows one, which is the state the operator photographed
+    twice. The hold engages on that asymmetry alone, and the booster
+    gets its X."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, seat, other = _at_the_sigil(
+        monkeypatch, goal="Talk To Hoi Mang in Crimson Fields")
+    worker.booster_party = True
+    worker.leader = seat.index
+    seat.marker_away = None            # the marker reads from inside
+    other.client = _SigilClient(pos=(400.0, 200.0, 0.0))
+
+    async def near(c):
+        return c is other.client       # booster at the prompt; leader not
+
+    pressed = []
+
+    async def press(c):
+        pressed.append(c)
+        return True, ""
+
+    monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "press_x", press)
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held(), "the sensor did not trigger the hold"
+    assert pressed == [other.client], "the booster never joined the sigil"
+    holds = [e for e in seat.tel.questing if e["kind"] == "countdown-hold"]
+    assert holds and "mid-entry" in holds[0]["detail"]
+    joins = [e for e in other.tel.questing
+             if e["kind"] == "countdown-hold" and "pressed X" in e["detail"]]
+    assert joins, "the join was not written down"
+
+
+def test_the_gather_presses_x_on_the_unjoined(monkeypatch):
+    """Standing on a sigil is not joining it — the operator's booster
+    stood at "Press X to Enter" through two full countdowns and entered
+    nothing. After the gather teleports a helper on, a prompt still
+    showing gets X."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+
+    async def near(c):
+        return c is other.client
+
+    pressed = []
+
+    async def press(c):
+        pressed.append(c)
+        return True, ""
+
+    monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "press_x", press)
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held()
+    assert other.client.tped, "the gather did not teleport the helper"
+    assert pressed == [other.client], "the gathered helper never pressed X"
 
 
 def test_the_zone_change_releases_the_hold_as_a_fired_sigil(monkeypatch):

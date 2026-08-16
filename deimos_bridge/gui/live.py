@@ -4693,6 +4693,11 @@ class LiveWorker(QThread):
     #: wizard that has stood still past this has no countdown running
     #: and gets the walk-through sweep directly.
     COUNT_HOLD_STALE = 45.0
+    #: how far from the leader a helper's visible press-X prompt still
+    #: counts as "the same sigil". The sigil circles span ~150 and the
+    #: prompt shows within a few hundred; 600 is comfortably past both
+    #: and short of the next street interactable.
+    COUNT_HOLD_SENSE = 600.0
     #: how close the gathered party is brought to the (possibly)
     #: counting sigil. Inside the sigil circle, and far enough that a
     #: wizard already standing on it is not re-teleported -- every
@@ -4825,10 +4830,32 @@ class LiveWorker(QThread):
             seat.count_hold_spot = None
         away = seat.marker_away
         goal = (seat.goal or "").strip().lower()
-        if (away is None or away > self.AT_THE_MARKER or not goal
-                or seat.progress is None
-                or any(goal.startswith(w) for w in self.FIGHT_GOALS)
-                or questing.is_collect_goal(seat.goal)):
+        fight = any(goal.startswith(w) for w in self.FIGHT_GOALS)
+        # The marker case. Fight goals are IN, deliberately: the first
+        # cut excluded them ("a defeat marker sits on the mob pack"),
+        # and the operator's screenshot answered it -- "Defeat Maito in
+        # Tatakai Outpost" is a boss INSIDE a dungeon, its marker sits
+        # at the sigil, and the excluded hold let the script yank the
+        # wizard mid-count. A street-pack defeat pays one 20s hold per
+        # visit for that, and usually not even that: the pack pulls the
+        # wizard into a duel long before the hold expires. Fight goals
+        # stay OUT of the sweeps -- walking through a mob pack answers
+        # nothing.
+        marker_case = (away is not None and away <= self.AT_THE_MARKER
+                       and bool(goal)
+                       and not questing.is_collect_goal(seat.goal))
+        # The booster-as-sensor case, and it needs no marker at all:
+        # "Talk To Hoi Mang in Crimson Fields" reads its marker from
+        # INSIDE the dungeon -- past every distance gate -- while the
+        # party stands at the sigil. But the party itself is the
+        # detector: a JOINED leader shows no press-X prompt, and an
+        # unjoined helper standing beside it shows one. That asymmetry
+        # is the sigil-mid-entry state, photographed twice by the
+        # operator.
+        mates = [s for s in self.seats
+                 if s is not seat and s.client is not None
+                 and self._follows(s) and s.zone_seen == seat.zone_seen]
+        if seat.progress is None or (not marker_case and not mates):
             seat.count_hold_seen = None
             return
         if seat.count_hold_spot == seat.progress:
@@ -4854,17 +4881,43 @@ class LiveWorker(QThread):
         except Exception:
             pass
 
-        if seat.progress_at and now - seat.progress_at > self.COUNT_HOLD_STALE:
+        try:
+            here = await seat.client.body.position()
+        except Exception:
+            here = None
+        sensed = []
+        if here is not None:
+            for other in mates:
+                try:
+                    if await questing.in_battle(other.client):
+                        continue
+                    at = await other.client.body.position()
+                    gap = ((at.x - here.x) ** 2
+                           + (at.y - here.y) ** 2) ** 0.5
+                    if (gap <= self.COUNT_HOLD_SENSE
+                            and await questing.near_interactable(
+                                other.client)):
+                        sensed.append(other)
+                except Exception:
+                    continue
+        if not marker_case and not sensed:
+            return
+
+        if (marker_case and not sensed and seat.progress_at
+                and now - seat.progress_at > self.COUNT_HOLD_STALE):
             # Standing on this spot for this long already means no
             # countdown is running -- one fires in ten to twenty
             # seconds, not a minute. Rev d3ed4d3c: "marker 0 away ·
             # unchanged for 2 min" at the Emperor's Palace door, and a
             # hold there guards a countdown that provably is not
-            # happening. Straight to the walk.
+            # happening. Straight to the walk -- except at a fight
+            # marker, where walking through the pack answers nothing.
             seat.count_hold_spot = seat.progress
             seat.count_hold_seen = None
             self._count_hold_last = now
-            if now - seat.walked_through_at >= self.WALK_THROUGH_EVERY:
+            if (not fight
+                    and now - seat.walked_through_at
+                    >= self.WALK_THROUGH_EVERY):
                 await self._sweep_through(
                     seat, away,
                     f"parked {(now - seat.progress_at) / 60:.0f} min with "
@@ -4877,27 +4930,30 @@ class LiveWorker(QThread):
         self._count_hold_until = now + self.COUNT_HOLD
         self._count_hold_zone = seat.zone_seen
         self._count_hold_seat = seat.index
+        if sensed:
+            spotted = ", ".join(o.name for o in sensed)
+            saw = (f"{spotted} is standing at a press-X prompt beside "
+                   f"this wizard, whose own prompt is hidden — the party "
+                   f"is at a sigil mid-entry")
+        else:
+            saw = (f"standing at the quest marker ({away:,.0f} away) "
+                   f"with no press-X prompt — the joined-sigil state "
+                   f"the script cannot see")
         seat.tel.note_questing(
             "countdown-hold",
-            f"standing at the quest marker ({away:,.0f} away) with no "
-            f"press-X prompt — the joined-sigil state the script cannot "
-            f"see. Script held up to {self.COUNT_HOLD:.0f}s so its next "
-            f"teleport cannot cancel a running countdown; a zone change "
-            f"releases it early")
+            f"{saw}. Script held up to {self.COUNT_HOLD:.0f}s so its "
+            f"next teleport cannot cancel a running countdown; a zone "
+            f"change releases it early")
         self._say(seat,
                   f"{seat.name} may be standing on a counting sigil — "
                   f"holding the script and gathering the party onto it")
 
-        # A sigil admits exactly the wizards STANDING ON it when the
-        # counter fires. The follow's own sigil rule keys on the
-        # leader's press-X prompt, which a JOINED leader no longer
-        # shows -- so the gather here is the joined case's version.
-        try:
-            here = await seat.client.body.position()
-        except Exception:
-            here = None
-        if here is None:
-            return
+        # A sigil admits exactly the wizards that JOINED it before the
+        # counter fires -- and standing on it is not joining it, the
+        # operator's screenshots say so: the booster stood at "Press X
+        # to Enter" through the whole countdown, twice, and entered
+        # nothing. So the gather does both halves: onto the spot, then
+        # X on every helper whose prompt still shows.
         for other in self.seats:
             if other is seat or other.client is None:
                 continue
@@ -4906,18 +4962,33 @@ class LiveWorker(QThread):
             try:
                 if await questing.in_battle(other.client):
                     continue
-                at = await other.client.body.position()
-                gap = ((at.x - here.x) ** 2 + (at.y - here.y) ** 2) ** 0.5
-                if gap <= self.COUNT_HOLD_GATHER:
-                    continue
-                await other.client.teleport(here)
-                other.tel.note_questing(
-                    "countdown-hold",
-                    f"stepped onto {seat.name}'s spot — a sigil admits "
-                    f"only the wizards standing on it when the countdown "
-                    f"fires, and each join restarts the counter once")
-                self._say(other,
-                          f"{other.name} steps onto {seat.name}'s sigil")
+                if here is not None:
+                    at = await other.client.body.position()
+                    gap = ((at.x - here.x) ** 2
+                           + (at.y - here.y) ** 2) ** 0.5
+                    if gap > self.COUNT_HOLD_GATHER:
+                        await other.client.teleport(here)
+                        other.tel.note_questing(
+                            "countdown-hold",
+                            f"stepped onto {seat.name}'s spot — a sigil "
+                            f"admits only the wizards standing on it when "
+                            f"the countdown fires, and each join restarts "
+                            f"the counter once")
+                        self._say(other,
+                                  f"{other.name} steps onto "
+                                  f"{seat.name}'s sigil")
+                        await asyncio.sleep(1.0)   # land; prompt renders
+                if await questing.near_interactable(other.client):
+                    ok, _why = await questing.press_x(other.client)
+                    if ok:
+                        other.tel.note_questing(
+                            "countdown-hold",
+                            f"pressed X to join {seat.name}'s sigil — "
+                            f"standing on a sigil is not joining it, the "
+                            f"prompt is")
+                        self._say(other,
+                                  f"{other.name} presses X to join the "
+                                  f"sigil")
             except Exception:
                 continue
 
