@@ -483,16 +483,36 @@ async def read_school(member, default="balance") -> str:
     in the game. An ice wizard was therefore planning every fight against
     mobs that were, as far as the simulator knew, ice.
 
+    The id is asked of the member first and then of its PARTICIPANT,
+    because `CombatMember` -- in the vendored wizwalker AND in the fork
+    the live venv actually installs -- has no `primary_magic_school_id`
+    at all: the field lives on `CombatParticipant`. Asking only the
+    member meant this function had never once returned a real answer
+    off a live client. Every enemy on every board read as the balance
+    fallback, and the client's own answer (`read.client_school`) was
+    always empty -- so `_check_school`'s misconfiguration alarm could
+    only ever fire off the hand heuristic, which a two-damage-card
+    booster deck never satisfies. That is how a max-level storm wizard
+    ran a whole fight priced as the fire wizard its seat was configured
+    as, at rev 8a48fd42.
+
     Falls back to balance rather than to anything school-shaped: balance
     is neutral in both directions, so an unreadable school costs
     accuracy, not a fabricated resistance.
     """
     from .deimos_damage import SCHOOL_TO_STR
 
+    sid = None
     try:
         sid = int(await member.primary_magic_school_id())
     except Exception:
-        return default
+        sid = None
+    if sid is None:
+        try:
+            part = await member.get_participant()
+            sid = int(await part.primary_magic_school_id())
+        except Exception:
+            return default
     name = SCHOOL_TO_STR.get(sid)
     if name is None:
         return default
@@ -630,19 +650,46 @@ async def read_state(combat, resolver: NameResolver, school: str,
     async def _school_rack(m):
         """Archmastery pips, {school: count}, or {} when unreadable.
 
-        Read defensively on purpose: mocks and older builds have no
-        `school_pips`, and a rack that cannot be read must degrade to
+        Two doors, because the wizwalker that is actually RUNNING is
+        not the one that was patched: `school_pips()` was added to the
+        vendored member, but the live venv installs a different
+        wizwalker fork whose member never grew it -- so a fold that
+        asked only the member read zero rack for a whole fight while
+        the wizard's converted pips sat unread at the same participant
+        offsets both trees share (rev 8a48fd42: a max-level storm
+        wizard frozen at 1 normal + 1 power for every round, buffing
+        and passing). The participant's `pip_count` object is the
+        common ground, so it is the fallback whenever the member
+        cannot answer.
+
+        Read defensively throughout: mocks and older builds may have
+        neither door, and a rack that cannot be read must degrade to
         the pre-archmastery arithmetic, not to an exception that costs
         the whole board read.
         """
         reader = getattr(m, "school_pips", None)
-        if reader is None:
-            return {}
+        if reader is not None:
+            try:
+                rack = await reader()
+            except Exception:
+                rack = None
+            if rack is not None:
+                return {k: int(v) for k, v in dict(rack).items()
+                        if int(v) > 0}
         try:
-            rack = await reader()
+            part = await m.get_participant()
+            counts = await part.pip_count()
+            if counts is None:
+                return {}
+            rack = {}
+            for name in ("balance", "death", "fire", "ice", "life",
+                         "myth", "storm"):
+                n = int(await getattr(counts, f"{name}_pips")())
+                if n > 0:
+                    rack[name] = n
+            return rack
         except Exception:
             return {}
-        return {k: int(v) for k, v in dict(rack or {}).items() if int(v) > 0}
 
     async def _mk_actor(m, team):
         who = school if team == 0 else await read_school(m)

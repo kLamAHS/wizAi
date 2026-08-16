@@ -19400,3 +19400,81 @@ def test_the_hop_prefers_the_collision_teleport(monkeypatch):
     del fake.collision_tp
     assert questing._navmap_tp() is navmap_tp, \
         "an older Deimos without collision_tp must still hand back navmap_tp"
+
+
+def test_the_rack_reads_through_the_participant_when_the_member_lacks_it():
+    """The regression that made the archmastery fix a no-op in
+    production: `school_pips()` was added to the VENDORED wizwalker's
+    member, but the live venv installs a different fork whose member
+    never grew it — so the fold read zero rack for a whole fight while
+    the wizard's converted pips sat at the participant offsets both
+    trees share (rev 8a48fd42: Oz frozen at 1 normal + 1 power every
+    round, buffing and passing, exactly the fight the fix was built
+    for). The participant's `pip_count` object is the common ground,
+    and this mock is shaped exactly like the live fork: NO school_pips
+    on the member, the rack on the participant."""
+    import asyncio
+
+    from data_full import load_spells_full
+    from deimos_bridge.live_state import NameResolver, read_state
+    from deimos_bridge.mock_client import MockCard, MockCombat, MockMember
+
+    cards = load_spells_full()
+    me = MockMember("Oz", 10008, client=True, normal_pips=1, power_pips=1,
+                    participant_school_pips={"storm": 3})
+    mob = MockMember("Lost Soul", 55, monster=True)
+    combat = MockCombat([me, mob], [MockCard("Stormblade")])
+    read = asyncio.new_event_loop().run_until_complete(
+        read_state(combat, NameResolver(cards), "storm"))
+    p = read.state.player
+    assert (p.school_pips, p.norm_pips, p.pow_pips) == (3, 1, 1)
+
+
+def test_the_school_reads_through_the_participant_too():
+    """`primary_magic_school_id` does not exist on CombatMember in ANY
+    wizwalker this project runs — vendored or fork — it lives on the
+    participant. Asking only the member meant read_school had never
+    returned a real answer off a live client: every enemy was the
+    balance fallback, and the client's own answer was empty, which
+    starved `_check_school`'s misconfiguration alarm — a storm booster
+    configured as fire stayed fire for the whole fight."""
+    import asyncio
+
+    from data_full import load_spells_full
+    from deimos_bridge.deimos_damage import school_id
+    from deimos_bridge.live_state import NameResolver, read_state
+    from deimos_bridge.mock_client import MockCard, MockCombat, MockMember
+
+    cards = load_spells_full()
+    me = MockMember("Oz", 10008, client=True,
+                    participant_school_id=school_id("storm"))
+    mob = MockMember("Firebrand", 500, monster=True,
+                     participant_school_id=school_id("fire"))
+    combat = MockCombat([me, mob], [MockCard("Stormblade")])
+    read = asyncio.new_event_loop().run_until_complete(
+        read_state(combat, NameResolver(cards), "fire"))
+    assert read.client_school == "storm", \
+        "the client's own school answer is empty again"
+    assert read.state.enemies[0].school == "fire", \
+        "enemy schools are the balance fallback again"
+
+
+def test_a_member_level_school_answer_still_wins():
+    """The member-first order is load-bearing for older tests and any
+    build that DOES answer at the member — the participant is the
+    fallback, not a replacement."""
+    import asyncio
+
+    from data_full import load_spells_full
+    from deimos_bridge.deimos_damage import school_id
+    from deimos_bridge.live_state import NameResolver, read_state
+    from deimos_bridge.mock_client import MockCard, MockCombat, MockMember
+
+    cards = load_spells_full()
+    me = MockMember("W", 800, client=True, school_id=school_id("ice"),
+                    participant_school_id=school_id("fire"))
+    mob = MockMember("m", 180, monster=True)
+    combat = MockCombat([me, mob], [MockCard("Frost Beetle")])
+    read = asyncio.new_event_loop().run_until_complete(
+        read_state(combat, NameResolver(cards), "ice"))
+    assert read.client_school == "ice"

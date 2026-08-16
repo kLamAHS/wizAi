@@ -50,10 +50,25 @@ class MockEffect:
 
 
 class MockParticipant:
-    def __init__(self, hangings=None, auras=None, team_id=0):
+    def __init__(self, hangings=None, auras=None, team_id=0,
+                 school_id=None, school_pips=None):
         _attrs(self, {"hanging_effects": list(hangings or []),
                       "aura_effects": list(auras or []),
                       "team_id": team_id})
+        # The shapes the live wizwalker fork actually has: the member
+        # carries neither the school id nor the archmastery rack -- both
+        # live HERE, on the participant. Optional so the default mock
+        # reproduces a participant that answers neither.
+        if school_id is not None:
+            _attrs(self, {"primary_magic_school_id": school_id})
+        if school_pips is not None:
+            import types
+            rack = dict(school_pips)
+            counts = types.SimpleNamespace(**{
+                f"{s}_pips": _Awaitable(rack.get(s, 0))
+                for s in ("balance", "death", "fire", "ice", "life",
+                          "myth", "storm")})
+            _attrs(self, {"pip_count": counts})
 
 
 class MockMember:
@@ -61,12 +76,15 @@ class MockMember:
                  boss=False, client=False, dead=False, level=1,
                  normal_pips=0, power_pips=0, shadow_pips=0, hangings=None,
                  minion=False, team_id=None, school_id=None,
-                 school_pips=None):
+                 school_pips=None, participant_school_id=None,
+                 participant_school_pips=None):
         # Default the team from the side, so existing callers keep working;
         # pass team_id explicitly to build a minion on either side.
         if team_id is None:
             team_id = 1 if monster else 0
-        self._participant = MockParticipant(hangings, team_id=team_id)
+        self._participant = MockParticipant(
+            hangings, team_id=team_id, school_id=participant_school_id,
+            school_pips=participant_school_pips)
         _attrs(self, {
             "name": name,
             "health": health,
