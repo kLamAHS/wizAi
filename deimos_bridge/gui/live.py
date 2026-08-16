@@ -2538,6 +2538,18 @@ class LiveWorker(QThread):
             if paced:
                 self._say(seat, "script pacing — " + ", ".join(
                     f"{n} = {v}s" for n, v in paced))
+            source, steadied = scripts.steady_sigil(source)
+            if steadied:
+                self._say_once(
+                    seat, "sigil-steadied",
+                    "sigil entry hardened — the preset's fixed 10s "
+                    "countdown wait becomes a loop that re-joins while "
+                    "the TeamUp window is still up, because a second "
+                    "wizard stepping on late RESTARTS the counter (a "
+                    "booster arrives by the follow, so that is the "
+                    "normal case) and the single sleep expired "
+                    "mid-countdown — the main loop then teleported "
+                    "everyone off the sigil")
             if self._solo_pilot():
                 # The pilot's client and nobody else's. `solo_source`
                 # puts the account settings back to their placeholders
