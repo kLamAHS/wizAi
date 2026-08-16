@@ -10369,6 +10369,61 @@ def test_a_follower_still_does_not_teleport_for_nothing():
     assert follower.tped == [] and not moved and why == ""
 
 
+def test_a_leader_at_a_prompt_pulls_the_follower_onto_its_spot(monkeypatch):
+    """A dungeon sigil admits exactly the wizards STANDING ON it when
+    the countdown fires. Rev e786b716: the leader entered Knight's
+    Court T2 alone while the booster stood "together" a few hundred
+    units up the street — "the non leader also doesnt even queue up for
+    the dungeon" — and only reached the fight a round late through the
+    friends-list teleport. A leader whose press-X prompt is up ends the
+    street-sized definition of together."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    follower = _party_client(pos=(100, 0, 0))
+    leader = _party_client(pos=(700, 0, 0))   # inside 900, off the sigil
+
+    async def prompt_up(_c):
+        return True
+
+    monkeypatch.setattr(party, "at_a_prompt", prompt_up)
+    moved, why = asyncio.run(party.follow(follower, leader))
+    assert follower.tped == [(700, 0, 0)], \
+        "the follower did not step onto the leader's sigil"
+    assert moved and "sigil" in why
+
+
+def test_a_follower_already_on_the_sigil_stays_put(monkeypatch):
+    """Standing on the spot already: re-teleporting every tick would
+    restart the countdown forever."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    follower = _party_client(pos=(650, 0, 0))
+    leader = _party_client(pos=(700, 0, 0))   # 50 apart — both on it
+
+    async def prompt_up(_c):
+        return True
+
+    monkeypatch.setattr(party, "at_a_prompt", prompt_up)
+    moved, why = asyncio.run(party.follow(follower, leader))
+    assert follower.tped == [] and not moved and why == ""
+
+
+def test_an_unreadable_prompt_is_not_a_prompt():
+    """`at_a_prompt` reads the leader's window tree, and a client that
+    cannot answer must read as "no prompt" rather than dragging the
+    party around on an exception."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    # _party_client has no root_window at all — the read raises inside.
+    assert asyncio.run(party.at_a_prompt(_party_client())) is False
+
+
 def test_wisps_wait_when_the_leader_is_already_fighting(qapp):
     """The chores set `in_upkeep`, and the service task skips its whole
     tick while that is set — so a follower that started a wisp sweep as
@@ -14642,6 +14697,184 @@ def test_the_walk_through_is_on_the_service_ladder(monkeypatch):
                src.index('"walking through the door"')]
     assert "not self._is_booster(seat)" in rung, \
         "a booster parked at the quester's marker must not wander off"
+
+
+# ------------------------------ the sigil countdown the script cannot see
+#
+# The operator's correction, rev e786b716: "konstantin literally had the
+# sigil countdown running, and was still teleporting away". A wizard
+# standing on a JOINED sigil shows no press-X prompt — the same fact
+# that broke the first steady_sigil cut — so the preset's dungeon test
+# (`NPCRangeWin` + `TeamUpButton` visible) reads nothing, concludes
+# "not a dungeon", and its next main-loop iteration teleports everyone
+# to the safe area, cancelling the countdown it was standing in.
+
+class _SigilClient:
+    def __init__(self, pos=(0.0, 0.0, 0.0)):
+        self.tped = []
+        x, y, z = pos
+
+        class _Body:
+            async def position(_s):
+                from types import SimpleNamespace
+                return SimpleNamespace(x=x, y=y, z=z)
+
+        self.body = _Body()
+
+    async def is_loading(self):
+        return False
+
+    async def teleport(self, xyz):
+        self.tped.append((xyz.x, xyz.y, xyz.z))
+
+
+def _at_the_sigil(monkeypatch, goal="Go To Amy Brooks' Place in Knight's Court",
+                  away=8.0, prompt=False, dialogue=False, armed=True):
+    """A scripted quester parked at its marker, partner up the street."""
+    import time
+
+    from deimos_bridge import questing
+
+    worker, _read = _zoned_party(["MB_KnightsCourt", "MB_KnightsCourt"])
+    seat, other = worker.seats
+    seat.client = _SigilClient(pos=(100.0, 200.0, 0.0))
+    other.client = _SigilClient(pos=(900.0, 200.0, 0.0))
+    for s in (seat, other):
+        s.zone_seen = "MB_KnightsCourt"
+    seat.goal = goal
+    seat.marker_away = away
+    seat.progress = ("MB_KnightsCourt", (2, 4, 0), goal)
+    if armed:
+        seat.count_hold_seen = time.monotonic() - 1.0
+
+    async def in_dialogue(_c):
+        return dialogue
+
+    async def near(_c):
+        return prompt
+
+    async def in_battle(_c):
+        return False
+
+    monkeypatch.setattr(questing, "in_dialogue", in_dialogue)
+    monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "in_battle", in_battle)
+    return worker, seat, other
+
+
+def test_a_bare_marker_with_no_prompt_holds_the_script_and_gathers(
+        monkeypatch):
+    """On the marker, out of combat, no dialogue, no press-X prompt:
+    either a joined sigil counting down or a door — and in both cases
+    the wrong move is teleporting away. The partner is brought onto the
+    spot, because a sigil admits only the wizards standing on it."""
+    import asyncio
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held(), "the script was not held"
+    assert other.client.tped == [(100.0, 200.0, 0.0)], \
+        "the partner was not gathered onto the sigil"
+    assert "countdown-hold" in [e["kind"] for e in seat.tel.questing]
+    assert "countdown-hold" in [e["kind"] for e in other.tel.questing]
+
+
+def test_the_prompt_up_case_belongs_to_the_scripts_own_check(monkeypatch):
+    """A visible press-X prompt means NOT joined — the state the
+    preset's check classifies correctly and answers with X itself."""
+    import asyncio
+
+    worker, seat, other = _at_the_sigil(monkeypatch, prompt=True)
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert not worker._countdown_held()
+    assert other.client.tped == []
+
+
+def test_a_defeat_marker_is_not_a_counting_sigil(monkeypatch):
+    """A defeat step's marker sits on the mob pack. Holding the script
+    there guards nothing and delays the pull."""
+    import asyncio
+
+    worker, seat, other = _at_the_sigil(
+        monkeypatch, goal="Defeat Deadly Scratcher in Knight's Court")
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert not worker._countdown_held()
+
+
+def test_the_zone_change_releases_the_hold_as_a_fired_sigil(monkeypatch):
+    import asyncio
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held()
+    seat.zone_seen = "Interiors/MB_KnightsCourt_T2"
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert not worker._countdown_held(), "the fired sigil did not release"
+    over = [e for e in seat.tel.questing if e["kind"] == "countdown-hold-over"]
+    assert over and "fired" in over[0]["detail"]
+
+
+def test_one_countdown_hold_per_visit_and_a_return_rearms(monkeypatch):
+    """A spot that produced nothing is not re-held while the wizard
+    stands there — but the script yanking him away and teleporting him
+    back is a NEW visit, and standing on a sigil restarts its
+    countdown, so the second visit is exactly as protectable."""
+    import asyncio
+    import time
+
+    from deimos_bridge.gui.live import NEVER
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held()
+    # ...the hold expires with no zone change: not a sigil after all.
+    worker._count_hold_until = time.monotonic() - 1.0
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert not worker._countdown_held()
+    worker._count_hold_last = NEVER          # cooldown out of the way
+    seat.count_hold_seen = time.monotonic() - 1.0
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert not worker._countdown_held(), \
+        "the same visit was guarded twice"
+    # The yank: off the spot, marker far...
+    seat.progress = ("MB_KnightsCourt", (90, 90, 0), seat.goal)
+    seat.marker_away = 5000.0
+    asyncio.run(worker._maybe_count_hold(seat))
+    # ...and back on it: a fresh visit gets a fresh hold.
+    seat.progress = ("MB_KnightsCourt", (2, 4, 0), seat.goal)
+    seat.marker_away = 8.0
+    asyncio.run(worker._maybe_count_hold(seat))     # arms
+    seat.count_hold_seen = time.monotonic() - 1.0
+    asyncio.run(worker._maybe_count_hold(seat))     # holds
+    assert worker._countdown_held(), "the return visit was not guarded"
+
+
+def test_the_first_look_only_arms_the_countdown_guard(monkeypatch):
+    """The press-X prompt takes a beat to render after a landing;
+    holding on the first look would classify every fresh arrival at a
+    Talk NPC as a possible sigil."""
+    import asyncio
+
+    worker, seat, other = _at_the_sigil(monkeypatch, armed=False)
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert not worker._countdown_held()
+    assert seat.count_hold_seen is not None, "the first look did not arm"
+
+
+def test_the_countdown_guard_sits_ahead_of_the_script_step():
+    """The whole point is beating the script's next teleport to the
+    punch: the guard must run before the step, and the step must
+    consult the hold."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._service_loop)
+    assert '"guarding a sigil countdown"' in src
+    assert (src.index('"guarding a sigil countdown"')
+            < src.index("self._countdown_held()")
+            < src.index('"script step"')), \
+        "the guard and its gate must both sit ahead of the script step"
 
 
 # --------------------------- a wedged dialogue clears on the fast lane

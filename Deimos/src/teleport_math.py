@@ -731,9 +731,27 @@ async def teleport_collision_verified(client: Client, dest: XYZ, anchor: XYZ,
 # nothing measurable at these distances.
 _WALK_GAP_MIN = 20.0
 
+#: wizAi: how far from the TARGET a finished collision teleport may leave the wizard
+#: before the landing counts as SHORT. The teleport's contract to the script is not
+#: "a teleport happened" -- it is "the wizard now stands at the objective", because the
+#: script's very next instruction assumes it: rev e786b716's preset teleported to a
+#: dungeon sigil, immediately checked the press-X prompt to classify the interactable,
+#: read nothing (the wizard's heartbeat put him 270 units out), declared "not a
+#: dungeon", and opened its next loop iteration by teleporting everyone away to its
+#: safe area -- three times over, ~13s each, before one attempt happened to stick.
+#: The operator: "it shouldnt take a billion attempts to enter a dungeon". 60 is
+#: comfortably inside interaction range and outside the landing scatter a verified
+#: teleport normally produces.
+_LANDED_NEAR = 60.0
+#: ...and the farthest a landing check will WALK to close the gap. Beyond this the
+#: landing did not merely scatter -- something rejected or relocated the wizard -- and
+#: a blind cross-zone hike toward the marker is how wizards die in the street. The
+#: gap is reported instead ('collision-short'), where the export makes it visible.
+_LANDED_WALK_CAP = 800.0
+
 
 async def _walk_remaining_to_target(client: Client, target_xyz: XYZ, world, zone_name: str,
-                                    player_radius: float, avoid=None) -> None:
+                                    player_radius: float, avoid=None) -> bool:
     """Walk the final stretch on foot when the teleport had to stop short of a target that
     is itself walk-reachable.
 
@@ -753,12 +771,18 @@ async def _walk_remaining_to_target(client: Client, target_xyz: XYZ, world, zone
     A* path runs straight through it and the final ``goto`` drives into it. When ``avoid`` is
     given we stop at the last waypoint outside those footprints and skip the exact-target
     refinement. It is only ever passed after the game has rejected a landing, so ordinary
-    teleports keep the full walk."""
+    teleports keep the full walk.
+
+    wizAi patch: RETURNS whether the walk DELIBERATELY stopped short of the target --
+    truncated at an avoid footprint, target on a static collider, no on-foot path, or a
+    read/plan error. The caller uses this to decide whether a still-open gap may be closed
+    with one last straight approach (see ``collision_tp``'s landing check): a walk that chose
+    to stop must not be overridden, a walk that believed it finished may be."""
     try:
         pos = await client.body.position()
         gap = ((pos.x - target_xyz.x) ** 2 + (pos.y - target_xyz.y) ** 2) ** 0.5
         if gap <= _WALK_GAP_MIN:
-            return
+            return False
         from src.collision_math import get_walk_grid
         from src import entity_collision
 
@@ -779,13 +803,13 @@ async def _walk_remaining_to_target(client: Client, target_xyz: XYZ, world, zone
                 f"[collision_tp] {client.title}: target not walk-reachable (static collider); "
                 f"staying at the teleport landing {gap:.0f}u out"
             )
-            return
+            return True
         if not path:
             logger.debug(
                 f"[collision_tp] {client.title}: {gap:.0f}u short of target but no on-foot path; "
                 f"staying at the teleport point"
             )
-            return
+            return True
         walk = path[1:]  # skip the start node (~ current position)
         refine = True
         if avoid:
@@ -833,12 +857,14 @@ async def _walk_remaining_to_target(client: Client, target_xyz: XYZ, world, zone
         )
         for (wx, wy, _wz) in walk:
             if not await is_free(client):
-                return
+                return True
             await client.goto(wx, wy)
         if refine and await is_free(client):  # refine onto the exact (walk-reachable) target
             await client.goto(target_xyz.x, target_xyz.y)
+        return not refine
     except Exception as e:
         logger.debug(f"[collision_tp] {client.title}: final walk skipped ({e!r})")
+        return True
 
 
 # Zones whose collision/walkability caches are built or being built, so the background
@@ -948,6 +974,44 @@ async def collision_tp(client: Client, xyz: XYZ = None, leader_client: Client = 
         logger.debug(f"[collision_tp] {client.title}: collision solve errored ({e!r}); using navmap TP")
         safe_xyz = None
 
+    async def _landed(label, walked_short=False):
+        # wizAi: the landing check. A verified teleport plus a finished walk
+        # is still not the contract -- STANDING AT the target is, and the
+        # game can undo either after the fact: a sigil area that rubber-bands
+        # a landing a beat after the verify window closes leaves the wizard
+        # hundreds of units out while this function reports success. So
+        # measure, and when the wizard is not there -- and the walk did not
+        # deliberately stop short (a statue truncation is a decision, not a
+        # failure) -- close the gap the way a player would, on foot, once.
+        # Whatever gap remains is reported: a short landing becomes its own
+        # outcome kind ('collision-short'), so the export shows the first one
+        # instead of thinning it away under the successes.
+        gap = None
+        try:
+            pos = await client.body.position()
+            gap = ((pos.x - target_xyz.x) ** 2
+                   + (pos.y - target_xyz.y) ** 2) ** 0.5
+        except Exception:
+            pass
+        if (gap is not None and _LANDED_NEAR < gap <= _LANDED_WALK_CAP
+                and not walked_short and await is_free(client)):
+            logger.debug(
+                f"[collision_tp] {client.title}: landed {gap:.0f}u from the "
+                f"target after the walk; final approach on foot"
+            )
+            try:
+                await client.goto(target_xyz.x, target_xyz.y)
+                pos = await client.body.position()
+                gap = ((pos.x - target_xyz.x) ** 2
+                       + (pos.y - target_xyz.y) ** 2) ** 0.5
+            except Exception:
+                pass
+        if gap is not None and gap > _LANDED_NEAR:
+            return _tp_result(
+                True, f"collision-short ({label}, {gap:.0f} from the target)",
+                zone_name, client)
+        return _tp_result(True, f"collision ({label})", zone_name, client)
+
     if safe_xyz is not None:
         moved = ((safe_xyz.x - target_xyz.x) ** 2 + (safe_xyz.y - target_xyz.y) ** 2) ** 0.5
         logger.debug(
@@ -955,8 +1019,8 @@ async def collision_tp(client: Client, xyz: XYZ = None, leader_client: Client = 
             f"{safe_xyz} (moved {moved:.0f}u from target)"
         )
         if await _teleport_once_verified(client, safe_xyz, starting_xyz, zone_name):
-            await _walk_remaining_to_target(client, target_xyz, world, zone_name, player_radius)
-            return _tp_result(True, f"collision ({reason})", zone_name, client)
+            short = await _walk_remaining_to_target(client, target_xyz, world, zone_name, player_radius)
+            return await _landed(reason, short)
 
         # The game refused a point the geometry called clear, so something solid is there
         # that the solve excused: ``ground_z_at`` ignores a volume whose vertical band contains
@@ -987,17 +1051,16 @@ async def collision_tp(client: Client, xyz: XYZ = None, leader_client: Client = 
                     avoid = await asyncio.to_thread(_blockers)
                 except Exception:
                     avoid = None
-                await _walk_remaining_to_target(
+                short = await _walk_remaining_to_target(
                     client, target_xyz, world, zone_name, player_radius, avoid=avoid
                 )
-                return _tp_result(True, "collision (strict re-solve)", zone_name,
-                                  client)
+                return await _landed("strict re-solve", short)
 
         # Still bounced: an unmodeled warp volume rather than a mis-excused wall. Back off
         # along the approach line before giving up on the geometry entirely.
         if await _retreat_toward(client, safe_xyz, starting_xyz, zone_name):
-            await _walk_remaining_to_target(client, target_xyz, world, zone_name, player_radius)
-            return _tp_result(True, "collision (retreat)", zone_name, client)
+            short = await _walk_remaining_to_target(client, target_xyz, world, zone_name, player_radius)
+            return await _landed("retreat", short)
         logger.debug(
             f"[collision_tp] {client.title}: collision point never landed (unmodeled collider "
             f"or rejected teleport); falling back to navmap TP"

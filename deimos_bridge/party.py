@@ -42,6 +42,16 @@ one status line, not the run.
 #: every tick would spend the fight teleporting instead of fighting.
 FOLLOW_RADIUS = 900.0
 
+#: How close a follower must stand once the leader is at a press-X
+#: prompt. A dungeon sigil admits exactly the wizards STANDING ON it
+#: when its countdown fires -- rev e786b716: the leader entered Knight's
+#: Court T2 alone while the booster stood "together" a few hundred units
+#: up the street, and only reached the fight a round late through the
+#: friends-list teleport. Standing on the sigil restarts the countdown
+#: once and puts both wizards in the dungeon -- and the duel -- from
+#: round one, which is the booster's whole job.
+SIGIL_RADIUS = 200.0
+
 #: How long one friends-list teleport attempt may take.
 #:
 #: wizwalker's `teleport_to_friend_from_list` opens with
@@ -96,6 +106,22 @@ def _distance(a, b):
 
 async def in_battle(client) -> bool:
     return bool(await _safe(client.in_battle, False))
+
+
+async def at_a_prompt(client) -> bool:
+    """Is this client showing the game's press-X prompt?
+
+    Read for the LEADER, from a follower's follow tick: a leader whose
+    client shows `NPCRangeWin` is standing at an interactable -- a
+    dungeon sigil, most importantly -- and "near the leader" stops
+    being good enough for the follower (see `follow`). Best-effort: a
+    window that will not read is not a prompt.
+    """
+    try:
+        from . import questing
+        return bool(await questing.near_interactable(client))
+    except Exception:
+        return False
 
 
 async def wizard_name(client):
@@ -413,6 +439,19 @@ async def follow(follower, leader, leader_name=None,
     gap = _distance(await position(follower), target)
     leader_fighting = await in_battle(leader)
     if gap is not None and gap <= radius and not leader_fighting:
+        # "Together" is street-sized -- until the leader stands at a
+        # press-X prompt. A sigil only admits the wizards ON it, so a
+        # follower keeping a polite 900-unit distance queues for
+        # nothing and enters the dungeon a round late (or not at all).
+        if gap > SIGIL_RADIUS and await at_a_prompt(leader):
+            try:
+                await follower.teleport(target)
+            except Exception as exc:
+                return False, (f"could not join the leader at its prompt "
+                               f"({type(exc).__name__}: {exc})")
+            return True, ("stepped onto the leader's spot — its press-X "
+                          "prompt is up, and a sigil admits only the "
+                          "wizards standing on it")
         return False, ""              # already together, nothing to do
 
     # Onto the leader whenever they are fighting, however close this
