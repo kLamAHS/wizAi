@@ -586,10 +586,11 @@ async def teleport_to_quest(client, tries: int = None, on_status=None):
     are not stylistic. A quest teleport fails often enough that a loop
     around it is the normal way to write one.
 
-    So: `navmap_tp` where Deimos is importable, retried, menus closed
-    between attempts because a window left open blocks the next one and
-    reads as a loading screen, and the out-of-bounds bump once a plain
-    attempt has not moved the wizard.
+    So: Deimos's best teleport where it is importable -- `collision_tp`
+    since the 3.14 port, `navmap_tp` before it; see `_navmap_tp` --
+    retried, menus closed between attempts because a window left open
+    blocks the next one and reads as a loading screen, and the
+    out-of-bounds bump once a plain attempt has not moved the wizard.
     """
     position, reason = await read_quest_position(client)
     if position is None:
@@ -624,18 +625,28 @@ async def teleport_to_quest(client, tries: int = None, on_status=None):
 
 
 def _navmap_tp():
-    """Deimos's `navmap_tp`, or None if Deimos is not importable.
+    """Deimos's best teleport, or None if Deimos is not importable.
 
-    Worth reaching for rather than teleporting raw: it carries the nav
-    mesh, the midpoint and spiral fallbacks, and wizAi's own patches to
-    the loading gate. Optional, because `questing` is the module that is
-    meant to work on plain wizwalker.
+    Since the 3.14 port that is `collision_tp`: it solves the zone's
+    collision geometry for a landing spot that clears every wall -- the
+    lands-in-a-wall, rubber-banded-back class of failure this module's
+    retry loop exists to absorb -- and falls back BY ITSELF to
+    `navmap_tp` when a zone has no collision data or shapely/numpy are
+    not installed. `navmap_tp` remains the answer on a Deimos old
+    enough not to have it. Either way the callable carries wizAi's own
+    patches: the loading gate, the landed/not answer, and
+    `on_teleport_result` into the run's log. Optional, because
+    `questing` is the module that is meant to work on plain wizwalker.
     """
     try:
         from .deimos_path import ensure_path
         ensure_path()
-        from src.teleport_math import navmap_tp
-        return navmap_tp
+        try:
+            from src.teleport_math import collision_tp
+            return collision_tp
+        except ImportError:
+            from src.teleport_math import navmap_tp
+            return navmap_tp
     except Exception:
         return None
 

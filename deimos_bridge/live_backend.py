@@ -547,6 +547,11 @@ class WizAiBackend:
         if move.note == "held":
             decision.reason = ("held this card — the rest of the party "
                                "already has this board dead this round")
+        elif move.note == "booster":
+            decision.reason += (" (the party's count already has this board "
+                                "dead — a booster fires anyway, because the "
+                                "count is a prediction and its job is the "
+                                "fight ending)")
         elif getattr(move, "buff_ally", ""):
             decision.ally_name = move.buff_ally
             decision.target_index = None

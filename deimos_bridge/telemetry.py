@@ -517,6 +517,11 @@ class RoundRecord:
     player_max_hp: float = 0.0
     norm_pips: int = 0
     pow_pips: int = 0
+    #: archmastery pips of the wizard's own school. Zero for most of a
+    #: levelling wizard's career and the whole rack for a max-level one
+    #: -- which is why a round record without this column once showed a
+    #: booster "at 0 pips" for 22 straight rounds of passing.
+    school_pips: int = 0
     player_charms: list = field(default_factory=list)
     enemies: list = field(default_factory=list)
     #: castable cards this round the policy could not see at all
@@ -766,6 +771,7 @@ class Telemetry:
             player_max_hp=s.player.max_hp,
             norm_pips=s.norm_pips,
             pow_pips=s.pow_pips,
+            school_pips=int(getattr(s.player, "school_pips", 0) or 0),
             player_charms=[describe_hanging(h) for h in s.player.charms],
             enemies=[EnemyView(e.name, e.hp, e.max_hp,
                                [describe_hanging(h) for h in e.charms],

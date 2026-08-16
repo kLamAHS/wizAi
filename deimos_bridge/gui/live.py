@@ -413,7 +413,8 @@ class LiveWorker(QThread):
                  coordinate=True, passes=2, barrier=None,
                  follow_leader=True, leader=0, label_windows=True,
                  solo_script=False, script_step_delay=None,
-                 script_dialog_delay=None, script_debug=False):
+                 script_dialog_delay=None, script_debug=False,
+                 booster_party=False):
         super().__init__()
         # Seat 0 is always the arguments this was called with, so the
         # single-wizard signature is untouched; `seats` adds the rest.
@@ -473,6 +474,16 @@ class LiveWorker(QThread):
         #: see `deimos_bridge/party.py`.
         self.leader = max(0, min(int(leader), len(self.seats) - 1))
         self.follow_leader = bool(follow_leader)
+        #: booster party: the leader is the QUESTER -- the one wizard
+        #: whose questline the run levels -- and every other seat is a
+        #: BOOSTER, there to join the quester's fights and end them in
+        #: fewer rounds. A booster does not quest, does not doctor its
+        #: own quest tracker (its journal points wherever its book was
+        #: left), and is never held back by the overkill guard. The
+        #: operator's framing, verbatim: "the booster needs to join
+        #: combats to beat them as quick as possible (but the booster
+        #: doesnt need to quest)".
+        self.booster_party = bool(booster_party)
         #: solo-pilot mode: the script drives ONLY the leader, and the
         #: rest of the party follows it and joins its fights. The whole
         #: class of failure this run has been fighting -- friend
@@ -908,7 +919,7 @@ class LiveWorker(QThread):
                                       self._resolve_party_names(seat),
                                       wheel=True, limit=90)
 
-                if driven or self.auto_quest:
+                if (driven or self.auto_quest) and not self._is_booster(seat):
                     # The one rung that does not need the marker,
                     # because it exists for the state where the marker
                     # is DEAD: quest position unreadable for minutes
@@ -916,12 +927,17 @@ class LiveWorker(QThread):
                     # line aims a teleport, and none of them can aim
                     # until this fires. Gated inside on `_marker_dead`,
                     # so the stage costs one time check on a healthy
-                    # tick.
+                    # tick. Boosters skip this rung and the two below:
+                    # a booster's own tracker points wherever its book
+                    # was left, so "curing" it pages the quest book and
+                    # hops realms -- stealing the wheel, and possibly
+                    # the wizard, exactly when the quester's fight
+                    # needs it.
                     await self._stage(seat, "re-arming the quest arrow",
                                       self._maybe_rearm_quest_arrow(seat),
                                       wheel=True, limit=90)
 
-                if driven or self.auto_quest:
+                if (driven or self.auto_quest) and not self._is_booster(seat):
                     # The other lost-tracker state, and the opposite
                     # one: the hook is written perfectly and pointed at
                     # a side quest, so every teleport below aims
@@ -932,7 +948,7 @@ class LiveWorker(QThread):
                                       self._maybe_recover_questline(seat),
                                       wheel=True, limit=90)
 
-                if driven or self.auto_quest:
+                if (driven or self.auto_quest) and not self._is_booster(seat):
                     # The rung above the desperate teleport: a Collect
                     # goal parked at its own marker for eight minutes is
                     # a crowded realm, not a wedged wizard. Cheap gates
@@ -963,6 +979,18 @@ class LiveWorker(QThread):
                     # of the script's instructions, which is how a
                     # scripted run ends up standing in a doorway.
                     pass
+                elif self._is_booster(seat):
+                    # A booster's whole job fits in one rung: be where
+                    # the quester is, and when the quester is fighting,
+                    # be IN the fight. `party.follow` already does both
+                    # -- cross-zone teleport, land on the leader, step
+                    # into the duel -- so the rung is the follow, under
+                    # a name that says why. Deliberately NOT
+                    # `_sync_follower`: a booster is not levelling this
+                    # questline and has no step of its own to turn in.
+                    await self._stage(seat, "boosting the quester",
+                                      self._follow_step(client, seat),
+                                      wheel=True)
                 elif self._follows(seat) and self._solo_pilot():
                     # A solo-pilot follower is not merely an escort: it
                     # is levelling the SAME questline. It turns its own
@@ -2543,6 +2571,15 @@ class LiveWorker(QThread):
             seat.runner = None
             self._say(seat, f"script not loaded: {exc}")
 
+    def _is_booster(self, seat):
+        """Is this seat a booster -- muscle for the quester's fights?
+
+        Only ever true in booster-party mode, and never of the leader:
+        the leader IS the quester the boosters exist for.
+        """
+        return (self.booster_party and len(self.seats) > 1
+                and seat.index != self.leader)
+
     def _follows(self, seat):
         """Is this seat a follower rather than the one setting the pace?
 
@@ -2550,7 +2587,11 @@ class LiveWorker(QThread):
         follow checkbox says -- following IS the mode. A follower that
         stood still would just watch the pilot walk away, and one that
         took its own quest would coordinate beautifully with nobody.
+        A booster follows for the same reason with the same force: a
+        booster that does not chase the quester boosts nothing.
         """
+        if self._is_booster(seat):
+            return True
         if self._solo_pilot():
             return seat.index != self.leader
         return (self.follow_leader and len(self.seats) > 1
@@ -2827,7 +2868,9 @@ class LiveWorker(QThread):
 
         hive = Hivemind(passes=self.passes,
                         on_status=self.status.emit,
-                        on_plan=self._on_plan)
+                        on_plan=self._on_plan,
+                        boosters={s.index for s in self.seats
+                                  if self._is_booster(s)})
         if self.barrier is not None:
             hive.timeout = float(self.barrier)
         for seat in self.seats:
@@ -3449,11 +3492,14 @@ class LiveWorker(QThread):
             doing = "pilot (script)" if self._solo_pilot() else "script"
         elif seat in self._catching_up():
             doing = "catching up"
+        elif self._is_booster(seat):
+            doing = "boosting"
         elif self._follows(seat):
             doing = ("following + own steps" if self._solo_pilot()
                      else "following")
         elif self.auto_quest:
-            doing = "questing"
+            doing = ("questing (boosted)" if self.booster_party
+                     else "questing")
         else:
             doing = "idle"
         return {
@@ -5009,12 +5055,16 @@ class LiveWorker(QThread):
         for seat, place in zip(self.seats, places):
             if seat.client is None:
                 continue
-            if self._solo_pilot() and seat.index != self.leader:
+            if ((self._solo_pilot() or self.booster_party)
+                    and seat.index != self.leader):
                 # A follower's tracker drifting is expected -- nothing
                 # is questing it. The PILOT is still checked: it is the
                 # one wizard whose lost questline stalls the run, and
                 # the preset's own Auto_Find_Quest only kicks in after
-                # several full loops.
+                # several full loops. Boosters get the same exemption
+                # for the same reason, and more so: their recovery
+                # rungs are off by design, so a warning here would
+                # nag about a state nothing is ever going to cure.
                 continue
             if place.on_main:
                 # The last place on the line this wizard actually held,

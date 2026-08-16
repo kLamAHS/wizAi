@@ -19157,3 +19157,246 @@ def test_the_recovery_selects_a_real_quest_for_a_quest_finder_journal(
     said = [e for e in lost.tel.questing
             if e["kind"] == "questline-recovered"]
     assert said and "'Quest Finder'" in said[0]["detail"]
+
+
+# ---------------------------------------------------- archmastery school pips
+def test_archmastery_school_pips_are_read_into_the_actor():
+    """A max-level wizard's rack converts to SCHOOL pips — neither
+    normal nor power — and a read that ignored them priced the storm
+    booster Oz at 0 pips for 22 straight rounds of passing while the
+    game showed every card in his hand castable. Own-school pips land
+    in the sim's `school_pips` (worth 2 there and nothing elsewhere —
+    the archmastery lock `Ruleset.afford` already models); pips of any
+    other school spend like white pips, so they fold into norm_pips."""
+    import asyncio
+
+    from data_full import load_spells_full
+    from deimos_bridge.live_state import NameResolver, read_state
+    from deimos_bridge.mock_client import MockCard, MockCombat, MockMember
+
+    cards = load_spells_full()
+    me = MockMember("Oz", 10008, client=True, normal_pips=0, power_pips=0,
+                    school_pips={"storm": 3, "balance": 1})
+    mob = MockMember("Grave Phantom", 625, monster=True)
+    combat = MockCombat([me, mob], [MockCard("Stormblade")])
+    read = asyncio.new_event_loop().run_until_complete(
+        read_state(combat, NameResolver(cards), "storm"))
+    p = read.state.player
+    assert (p.school_pips, p.norm_pips, p.pow_pips) == (3, 1, 0)
+
+
+def test_a_member_without_an_archmastery_rack_reads_as_before():
+    """Mocks and older builds have no `school_pips` accessor, and that
+    absence must cost nothing — the two familiar counters carry on."""
+    import asyncio
+
+    from data_full import load_spells_full
+    from deimos_bridge.live_state import NameResolver, read_state
+    from deimos_bridge.mock_client import MockCard, MockCombat, MockMember
+
+    cards = load_spells_full()
+    me = MockMember("W", 800, client=True, normal_pips=2, power_pips=1)
+    mob = MockMember("m", 180, monster=True)
+    combat = MockCombat([me, mob], [MockCard("Fireblade")])
+    read = asyncio.new_event_loop().run_until_complete(
+        read_state(combat, NameResolver(cards), "fire"))
+    p = read.state.player
+    assert (p.school_pips, p.norm_pips, p.pow_pips) == (0, 2, 1)
+
+
+def test_an_enemys_rack_folds_by_its_own_school():
+    """The rack is read for everyone on the board, and "own school"
+    means the ACTOR's school, not the client's: a fire mob's fire pips
+    are its power currency, and its stray storm pip spends like a white
+    pip. The enemy rack matters for the same reason enemy pips were
+    un-zeroed here in the first place — "the boss has six pips" decides
+    whether to shield this round or next."""
+    import asyncio
+
+    from data_full import load_spells_full
+    from deimos_bridge.deimos_damage import school_id
+    from deimos_bridge.live_state import NameResolver, read_state
+    from deimos_bridge.mock_client import MockCard, MockCombat, MockMember
+
+    cards = load_spells_full()
+    me = MockMember("W", 800, client=True, normal_pips=1)
+    mob = MockMember("Firebrand", 500, monster=True,
+                     school_id=school_id("fire"), normal_pips=1,
+                     school_pips={"fire": 2, "storm": 1})
+    combat = MockCombat([me, mob], [MockCard("Fireblade")])
+    read = asyncio.new_event_loop().run_until_complete(
+        read_state(combat, NameResolver(cards), "ice"))
+    e = read.state.enemies[0]
+    assert (e.school_pips, e.norm_pips) == (2, 2)
+
+
+def test_a_round_record_carries_the_archmastery_rack():
+    """The 22-round pass-fest was only diagnosable because the round
+    records showed the pips the POLICY believed. The rack it was blind
+    to has to be in the same place, or the next blindness is invisible
+    again."""
+    tel = Telemetry()
+    read = _read(2000, 1, hand=("Fireblade",))
+    read.state.player.school_pips = 3
+    tel.observe(_Decision("Fireblade"), read)
+    assert tel.rounds[-1].school_pips == 3
+
+
+# ------------------------------------------------------------- booster party
+def test_a_booster_party_makes_every_non_leader_a_booster(qapp):
+    """The leader is the QUESTER — the one wizard whose questline the
+    run levels — and everyone else is muscle for its fights. Following
+    is the mode, not the checkbox: a booster that does not chase the
+    quester boosts nothing."""
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    w = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1,
+                   seats=[SeatConfig(school="fire"),
+                          SeatConfig(school="storm")],
+                   booster_party=True, leader=1)
+    assert [w._is_booster(s) for s in w.seats] == [True, False, True]
+    w.follow_leader = False
+    assert [w._follows(s) for s in w.seats] == [True, False, True]
+
+
+def test_without_the_mode_or_alone_nobody_boosts(qapp):
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    plain = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1,
+                       seats=[SeatConfig(school="fire")])
+    assert not any(plain._is_booster(s) for s in plain.seats)
+
+    alone = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1,
+                       booster_party=True)
+    assert not alone._is_booster(alone.seats[0])
+
+
+def test_the_hive_is_told_which_seats_are_boosters(qapp):
+    """The overkill guard never holds a booster — its redundant hit is
+    the party's insurance against the ledger's kill being a prediction
+    — and the guard lives in the hivemind, so the hivemind has to know
+    which seats those are."""
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    w = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1,
+                   seats=[SeatConfig(school="fire"),
+                          SeatConfig(school="storm")],
+                   booster_party=True)
+    hive = w._make_hive()
+    assert hive is not None and hive.boosters == {1, 2}
+
+    plain = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1,
+                       seats=[SeatConfig(school="fire")])
+    assert plain._make_hive().boosters == set()
+
+
+def test_the_service_tick_gates_the_tracker_cures_off_boosters():
+    """A booster's own quest tracker points wherever its book was left,
+    so "curing" it pages the quest book, changes realms, and steals the
+    wheel exactly when the quester's fight starts. The three cure rungs
+    are gated off boosters in the tick itself, and the booster's own
+    rung is the follow — never `_sync_follower`, because a booster is
+    not levelling this questline."""
+    import ast
+    import inspect
+    import textwrap
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = textwrap.dedent(inspect.getsource(LiveWorker._service_loop))
+    tree = ast.parse(src)
+    guards = {}
+
+    class Walk(ast.NodeVisitor):
+        def visit_If(self, node):
+            test = ast.unparse(node.test)
+            for sub in node.body:
+                for call in ast.walk(sub):
+                    if (isinstance(call, ast.Call)
+                            and getattr(call.func, "attr", "") == "_stage"
+                            and len(call.args) >= 2
+                            and isinstance(call.args[1], ast.Constant)):
+                        guards.setdefault(call.args[1].value, []).append(
+                            (test, ast.unparse(sub)))
+            self.generic_visit(node)
+
+    Walk().visit(tree)
+    for label in ("re-arming the quest arrow",
+                  "recovering the main questline", "changing realms"):
+        assert any("_is_booster" in test for test, _b in guards[label]), \
+            f"{label!r} runs for boosters"
+    booster_rung = [b for test, b in guards["boosting the quester"]
+                    if "_is_booster" in test]
+    assert booster_rung, "no booster rung in the tick"
+    assert all("_sync_follower" not in b for b in booster_rung)
+    assert all("_follow_step" in b for b in booster_rung)
+
+
+def test_a_booster_row_reads_boosting(qapp):
+    """The Questing tab is the answer to "what is it doing right now",
+    and for a booster the honest answer is neither questing nor plain
+    following."""
+    import time
+
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    w = LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1,
+                   seats=[SeatConfig(school="fire")], booster_party=True,
+                   auto_quest=True)
+    now = time.monotonic()
+    assert w._quest_row(w.seats[1], "WC_Streets", now)["doing"] == "boosting"
+    assert w._quest_row(w.seats[0], "WC_Streets", now)["doing"] == \
+        "questing (boosted)"
+
+
+def test_a_boosters_wandering_journal_is_left_alone():
+    """A booster's tracker drifting is expected — nothing is questing
+    it, and its cure rungs are off by design, so a warning here would
+    nag about a state nothing is ever going to cure. The QUESTER is
+    still checked: its lost questline is the one that stalls the run."""
+    import time
+
+    worker, lost = _off_the_line()
+    worker.booster_party = True
+    worker.leader = 0
+    lost.off_line_since = time.monotonic() - 400
+    worker._check_on_questline()
+    kinds = [e["kind"] for e in lost.tel.questing]
+    assert "off-questline" not in kinds
+
+    worker.booster_party = False
+    worker._check_on_questline()
+    kinds = [e["kind"] for e in lost.tel.questing]
+    assert "off-questline" in kinds, "the check itself stopped biting"
+
+
+def test_the_hop_prefers_the_collision_teleport(monkeypatch):
+    """wizAi's own quest-marker hop rides Deimos's best teleport. Since
+    the 3.14 port that is collision_tp -- the geometry-solved landing
+    that ends the lands-in-a-wall class this hop's retry loop was
+    absorbing -- with navmap_tp still the answer on a Deimos old enough
+    not to have it, and None when Deimos is not importable at all."""
+    import sys
+    import types
+
+    from deimos_bridge import questing
+
+    fake = types.ModuleType("src.teleport_math")
+
+    async def collision_tp(client, xyz=None, leader_client=None):
+        return True
+
+    async def navmap_tp(client, xyz=None, leader_client=None):
+        return True
+
+    fake.collision_tp = collision_tp
+    fake.navmap_tp = navmap_tp
+    pkg = types.ModuleType("src")
+    pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, "src", pkg)
+    monkeypatch.setitem(sys.modules, "src.teleport_math", fake)
+    assert questing._navmap_tp() is collision_tp
+
+    del fake.collision_tp
+    assert questing._navmap_tp() is navmap_tp, \
+        "an older Deimos without collision_tp must still hand back navmap_tp"

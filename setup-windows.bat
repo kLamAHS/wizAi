@@ -56,9 +56,15 @@ if errorlevel 1 (
 
 echo.
 echo Installing wizAi's own requirements ...
-"%PY%" -m pip install --quiet numpy PyQt6
+REM shapely (with numpy) is the collision-teleport solver from the
+REM Deimos 3.14 port: teleports are solved against the zone's collision
+REM geometry for a landing spot that clears every wall. Without it
+REM nothing breaks -- every teleport quietly falls back to the old
+REM navmap behaviour -- which is exactly why it is installed here rather
+REM than left optional: a silent fallback would make the fix invisible.
+"%PY%" -m pip install --quiet numpy shapely PyQt6
 if errorlevel 1 (
-    echo ERROR: installing numpy/PyQt6 failed.
+    echo ERROR: installing numpy/shapely/PyQt6 failed.
     pause
     exit /b 1
 )
@@ -80,7 +86,13 @@ REM deimos_bridge/deimos_path.py puts them on the path at import time
 REM instead, so only genuine PyPI packages are installed below. `lark` is
 REM among them because wizsprinter needs it and nothing is resolving its
 REM dependencies for us now.
-"%PY%" -m pip install --quiet lark thefuzz loguru pyyaml requests pypresence pyperclip
+REM katsuba + wiztype belong to the collision teleport's PRECISE layer
+REM (exact teleporter-pad/boat colliders and player radius). That layer
+REM only switches on when upstream Deimos's Rust extension `kinif` is
+REM ALSO importable, which is not on PyPI -- so these two are installed
+REM ready for it, and until then entity_collision quietly reports no
+REM colliders and collision teleports work without that refinement.
+"%PY%" -m pip install --quiet lark thefuzz loguru pyyaml requests pypresence pyperclip katsuba wiztype
 if errorlevel 1 (
     echo.
     echo NOTE: Deimos's questing requirements did not install. That is not
@@ -91,7 +103,7 @@ if errorlevel 1 (
 )
 
 echo.
-"%PY%" -c "import wizwalker, numpy, PyQt6; print('all imports OK')"
+"%PY%" -c "import wizwalker, numpy, shapely, PyQt6; print('all imports OK')"
 if errorlevel 1 (
     echo ERROR: something did not install cleanly.
     pause

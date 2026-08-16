@@ -9,7 +9,7 @@ from wizwalker.extensions.wizsprinter import SprintyClient
 from wizwalker.extensions.wizsprinter.wiz_sprinter import Coroutine, upgrade_clients
 from wizwalker.extensions.wizsprinter.wiz_navigator import toZone
 from wizwalker.extensions.scripting.deck_builder import DeckBuilder
-from src.teleport_math import navmap_tp, calc_Distance
+from src.teleport_math import navmap_tp, collision_tp, calc_Distance
 from src.deck_encoder import DeckEncoderDecoder
 
 from wizwalker.extensions.scripting.utils import _maybe_get_named_window, _cycle_to_online_friends, _click_on_friend, _friend_list_entry
@@ -1528,7 +1528,7 @@ class VM:
                                     if entity:
                                         pos = await entity.location()
                                         if use_navmap:
-                                            await navmap_tp(client, pos)
+                                            await collision_tp(client, pos)
                                         else:
                                             await client.teleport(pos)
                                 tg.create_task(tp_to_entity(client))
@@ -1546,7 +1546,7 @@ class VM:
                                     if entity:
                                         pos = await entity.location()
                                         if use_navmap:
-                                            await navmap_tp(client, pos)
+                                            await collision_tp(client, pos)
                                         else:
                                             await client.teleport(pos)
                                 tg.create_task(tp_to_vague_entity(client))
@@ -1567,7 +1567,7 @@ class VM:
                             # not move" costs the most.
                             async def tp_to_quest(client):
                                 pos = await client.quest_position.position()
-                                await navmap_tp(client, pos)
+                                await collision_tp(client, pos)
                             for client in clients:
                                 tg.create_task(tp_to_quest(client))
                         case TeleportKind.friend_icon:

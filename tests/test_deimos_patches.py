@@ -1148,3 +1148,179 @@ def test_a_stuck_should_update_flag_no_longer_latches_teleports_off():
         "it catches the timeout but never clears the flag it timed out on"
 
 
+
+
+# ------------------------------------------------- archmastery school pips
+MEMBER = "Deimos/libs/wizwalker/wizwalker/combat/member.py"
+
+
+def _load_ww_member():
+    """The vendored wizwalker combat member, importable on Linux.
+
+    Its only module-level import is the `wizwalker` package itself,
+    used at runtime for `MemoryInvalidated` and in annotation strings —
+    so one stub module lets the real class load. Same throwaway-
+    namespace discipline as `_load_ww_utils`.
+    """
+    import sys
+    import types
+
+    ww = types.ModuleType("wizwalker")
+    ww.MemoryInvalidated = type("MemoryInvalidated", (Exception,), {})
+    saved = sys.modules.get("wizwalker")
+    try:
+        sys.modules["wizwalker"] = ww
+        namespace = {"__name__": "_ww_combat_member"}
+        exec(compile(_source(MEMBER), MEMBER, "exec"), namespace)
+    finally:
+        if saved is None:
+            sys.modules.pop("wizwalker", None)
+        else:
+            sys.modules["wizwalker"] = saved
+    return types.SimpleNamespace(**namespace)
+
+
+def _member_with_rack(counts):
+    """A CombatMember whose participant's pip rack is `counts`.
+
+    `counts` is {school: n} or None for a participant whose pip-count
+    object is unreadable (older builds return None there).
+    """
+    import types
+
+    mod = _load_ww_member()
+    member = mod.CombatMember.__new__(mod.CombatMember)
+
+    schools = ("balance", "death", "fire", "ice", "life", "myth", "storm")
+    rack = None
+    if counts is not None:
+        async def _n(school):
+            return counts.get(school, 0)
+        rack = types.SimpleNamespace(
+            **{f"{s}_pips": (lambda s=s: _n(s)) for s in schools})
+
+    async def pip_count():
+        return rack
+
+    participant = types.SimpleNamespace(pip_count=pip_count)
+
+    async def get_participant():
+        return participant
+
+    member.get_participant = get_participant
+    return member
+
+
+def test_the_member_reads_the_whole_archmastery_rack():
+    """Oz, the two-account run at rev f2b8101f: a max-level storm
+    wizard read 0 normal + 0 power pips for 22 consecutive rounds while
+    the game showed his 7-pip Storm Lord castable, because his rack had
+    converted to archmastery STORM pips — a third kind of pip stored in
+    per-school counters this member never exposed. The policy priced
+    him pip-starved, bought only zero-pip buffs, and passed the rest of
+    the fight."""
+    import asyncio
+
+    member = _member_with_rack({"storm": 4, "balance": 1})
+    rack = asyncio.run(member.school_pips())
+    assert rack == {"balance": 1, "death": 0, "fire": 0, "ice": 0,
+                    "life": 0, "myth": 0, "storm": 4}
+
+
+def test_an_unreadable_pip_rack_reads_as_empty_not_as_an_error():
+    """`pip_count()` is Optional in the vendored participant. A member
+    on a build without the rack must degrade to the pre-archmastery
+    arithmetic, not take the whole board read down with it."""
+    import asyncio
+
+    member = _member_with_rack(None)
+    assert asyncio.run(member.school_pips()) == {}
+
+
+# ------------------------------------------------- Deimos 3.14 collision tp
+def test_collision_tp_answers_and_reports_like_navmap_tp():
+    """The 3.14 port kept wizAi's contract: a teleport primitive that
+    RETURNS whether it landed and reports through `on_teleport_result`.
+    Upstream's collision_tp is bare-return like its navmap_tp was --
+    success, failure and never-attempted all the same answer -- and a
+    blocked client is silently dropped on the first line, the exact
+    lost-instruction bug the navmap patch exists for. Here the blocked
+    entry and the no-solution path both DELEGATE to navmap_tp, whose
+    wait machinery and reporting answer for them."""
+    src = _source(TP)
+    assert "async def collision_tp" in src, "the 3.14 collision teleport is gone"
+    head, body = src.split("async def collision_tp", 1)
+    body = body.split("\ndef ", 1)[0]
+    assert "-> bool" in body.split("\n", 1)[0], \
+        "collision_tp no longer declares the landed/not answer"
+    bare = [line for line in body.splitlines() if line.strip() == "return"]
+    assert not bare, f"collision_tp has bare returns again: {bare}"
+    assert body.count("return await navmap_tp(") == 2, \
+        "blocked entry and no-solution fallback must both delegate to navmap_tp"
+    assert body.count("_tp_result(") >= 4, \
+        "not every collision landing reports a result"
+
+
+def test_the_collision_solver_stays_optional():
+    """collision_tp imports the solver stack (shapely, numpy, the
+    collision modules) lazily, inside the function, inside a try -- so
+    a box without shapely still imports teleport_math and every
+    collision teleport degrades to navmap_tp instead of the module
+    failing to import at all. A top-level import here would take down
+    scripts.py's `from src.teleport_math import navmap_tp` and with it
+    every teleport in the program."""
+    import ast
+
+    tree = ast.parse(_source(TP))
+    banned = {"shapely", "numpy", "src.collision", "src.collision_math",
+              "src.entity_collision"}
+    top = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            top.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            top.add(node.module or "")
+    hits = {t for t in top if t in banned or t.split(".")[0] in banned}
+    assert not hits, f"solver imports moved to module top level: {hits}"
+
+
+VM_TELEPORTS = "Deimos/src/deimoslang/vm.py"
+
+
+def test_the_script_vms_teleports_solve_collision_first():
+    """Deimos 3.14's own change to the script VM: the `tp quest` /
+    `tp entity` instructions go through collision_tp (which falls back
+    to navmap_tp by itself). The arc scripts' most-used instruction,
+    and the one where a wall landing costs the most."""
+    src = _source(VM_TELEPORTS)
+    assert "from src.teleport_math import navmap_tp, collision_tp" in src, \
+        "vm.py no longer imports the collision teleport"
+    assert src.count("await collision_tp(client, pos)") == 3, \
+        "the entity/vague/quest teleports are not all on collision_tp"
+
+
+def test_the_314_collision_stack_is_vendored():
+    """The three modules collision_tp solves with, present and parsing.
+    Parse-only on purpose: collision_math imports shapely/numpy at its
+    top, which this container does not carry -- exactly the situation
+    the lazy import above exists for. The precise static-entity layer
+    (teleporter pads, boats) additionally wants katsuba + wiztype +
+    kinif, and entity_collision probes for those at import and quietly
+    degrades to no colliders without them."""
+    for rel, needles in (
+        ("Deimos/src/collision.py",
+         ("def get_collision_data", "class CollisionWorld")),
+        ("Deimos/src/collision_math.py",
+         ("def find_walkable_teleport_point", "def get_walk_grid",
+          "def blocking_volumes_at")),
+        ("Deimos/src/entity_collision.py",
+         ("def build_zone_static_shapes", "def get_object_collider_radius",
+          "_PRECISE_AVAILABLE = False")),
+    ):
+        src = _source(rel)
+        compile(src, rel, "exec")
+        for needle in needles:
+            assert needle in src, f"{rel} lost {needle!r}"
+    for rel in ("Deimos/src/questing.py", "Deimos/src/sigil.py"):
+        assert "collision_tp(" in _source(rel), \
+            f"{rel} did not take the 3.14 navmap->collision swaps"

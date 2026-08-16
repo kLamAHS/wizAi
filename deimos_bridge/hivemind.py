@@ -512,7 +512,7 @@ class Hivemind:
 
     def __init__(self, timeout=None, passes=2, overkill_guard=True,
                  margin=1.0, budget=6.0, on_status=None, on_plan=None,
-                 kill_confidence=KILL_CONFIDENCE):
+                 kill_confidence=KILL_CONFIDENCE, boosters=()):
         #: coordination passes after the solo baseline. 0 reproduces
         #: uncoordinated play exactly, which is what the A/B measures
         #: against; 2 settles the two-wizards-one-mob case.
@@ -531,6 +531,9 @@ class Hivemind:
         self.budget = float(budget)
         self.on_status = on_status
         self.on_plan = on_plan
+        #: seats whose job is ending fights, not conserving cards. See
+        #: `_decide_alone`: the overkill guard never holds these seats.
+        self.boosters = set(boosters or ())
 
         self._lock = threading.Lock()
         self._seats = {}           # seat -> name
@@ -967,6 +970,27 @@ class Hivemind:
             return self._decide_alone(sub, board, ledger, step)
 
     def _decide_alone(self, sub, board, ledger, step):
+        if step and ledger.casts and sub.seat in self.boosters:
+            # A booster never banks the party's kill. The guard below
+            # trades this round for a card the NEXT fight will want,
+            # and a booster has no next fight of its own -- it exists
+            # so the quester's fights end in fewer rounds. Skipping the
+            # hold is not enough, though: the policy plans against the
+            # ledger-applied board, and on a board the ledger calls
+            # dead it passes all by itself -- the hold is just that
+            # pass with a name. So when the counted damage says the
+            # board is finished, the booster decides against the REAL
+            # board instead: its redundant hit is the party's insurance
+            # against the count being a prediction, which is exactly
+            # the bet `_hold_was_kept` polices after the fact, declined
+            # up front.
+            alive_now = any(e.alive for e in board.enemies)
+            alive_before = any(e.alive for e in sub.state.enemies)
+            if alive_before and not alive_now:
+                try:
+                    return sub.policy(sub.sim, sub.state), "booster"
+                except Exception as exc:
+                    return None, f"policy raised {type(exc).__name__}: {exc}"
         if step and self.overkill_guard and ledger.casts:
             alive_now = any(e.alive for e in board.enemies)
             alive_before = any(e.alive for e in sub.state.enemies)
