@@ -284,7 +284,7 @@ block First_Run_Settings {
 	times 4 {
 		times 300 {
 			if NOT any windowvisible ['WorldView', 'DeckConfiguration', 'SettingPage', 'QuitButton'] {
-				sameany sendkey ESC, .1
+				mass sendkey ESC, .1
 			} else {
 				break
 			}
@@ -451,8 +451,8 @@ block Retrieve_Lost_Quests {
 	block Enter_Sigil {
 		times 5 {
 			if NOT any windowvisible ['WorldView', 'NPCRangeWin', 'imgBackground', 'TeamUpButton'] {
-				sameany minustp XYZ(0,0,1000)
-				sameany plustp XYZ(0,0,1000)
+				mass minustp XYZ(0,0,1000)
+				mass plustp XYZ(0,0,1000)
 				sleep 2
 			} else {
 				break
@@ -3736,6 +3736,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				p1 turncam 4.83
 				call Check_X_Key_Type_For_P1
 				sleep 1
+			} else {
+				break
 			}
 		}
 	}
@@ -3873,6 +3875,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 						sameany sendkey SPACEBAR, .1
 					}
 				}
+			} else {
+				break
 			}
 		}
 	}
@@ -4164,6 +4168,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				p1 tp XYZ(-750.4791870117188, -19761.77734375, -0.4017333984375)
 				call Check_X_Key_Type_For_P1
 				sleep 1
+			} else {
+				break
 			}
 		}
 	}
@@ -4191,6 +4197,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 					p1 tp p1
 				}
 				p1 waitforcombat completion
+			} else {
+				break
 			}
 		}
 	}
@@ -4209,6 +4217,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(9965.517578125, -44040.296875, 9.99993896484375)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -4799,6 +4809,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 					}
 				}
 				sleep 1
+			} else {
+				break
 			}
 		}
 	}
@@ -5517,6 +5529,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				p2 turncam 4.83
 				call Check_X_Key_Type_For_P2
 				sleep 1
+			} else {
+				break
 			}
 		}
 	}
@@ -5660,6 +5674,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 						sameany sendkey SPACEBAR, .1
 					}
 				}
+			} else {
+				break
 			}
 		}
 	}
@@ -5957,6 +5973,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				p2 tp XYZ(-750.4791870117188, -19761.77734375, -0.4017333984375)
 				call Check_X_Key_Type_For_P2
 				sleep 1
+			} else {
+				break
 			}
 		}
 	}
@@ -6003,6 +6021,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(9965.517578125, -44040.296875, 9.99993896484375)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -6594,6 +6614,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 					}
 				}
 				sleep 1
+			} else {
+				break
 			}
 		}
 	}
@@ -7302,6 +7324,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				p3 turncam 4.83
 				call Check_X_Key_Type_For_P3
 				sleep 1
+			} else {
+				break
 			}
 		}
 	}
@@ -7445,6 +7469,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 						sameany sendkey SPACEBAR, .1
 					}
 				}
+			} else {
+				break
 			}
 		}
 	}
@@ -7736,6 +7762,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				p3 tp XYZ(-750.4791870117188, -19761.77734375, -0.4017333984375)
 				call Check_X_Key_Type_For_P3
 				sleep 1
+			} else {
+				break
 			}
 		}
 	}
@@ -7782,6 +7810,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(9965.517578125, -44040.296875, 9.99993896484375)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -8373,6 +8403,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 					}
 				}
 				sleep 1
+			} else {
+				break
 			}
 		}
 	}
@@ -9081,6 +9113,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				p4 turncam 4.83
 				call Check_X_Key_Type_For_P4
 				sleep 1
+			} else {
+				break
 			}
 		}
 	}
@@ -9224,6 +9258,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 						sameany sendkey SPACEBAR, .1
 					}
 				}
+			} else {
+				break
 			}
 		}
 	}
@@ -9515,6 +9551,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				p4 tp XYZ(-750.4791870117188, -19761.77734375, -0.4017333984375)
 				call Check_X_Key_Type_For_P4
 				sleep 1
+			} else {
+				break
 			}
 		}
 	}
@@ -9561,6 +9599,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(9965.517578125, -44040.296875, 9.99993896484375)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -10152,6 +10192,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 					}
 				}
 				sleep 1
+			} else {
+				break
 			}
 		}
 	}

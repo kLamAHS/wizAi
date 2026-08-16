@@ -1667,9 +1667,19 @@ def test_the_sigil_wait_outlasts_a_reset_counter():
 
     presets = sorted(glob.glob("deimos_bridge/data/scripts/TTS *.txt"))
     assert len(presets) >= 6
+    steadied = 0
     for path in presets:
         src = open(path, newline="").read()
         out, changed = scripts.steady_sigil(src)
+        if "block Enter_Sigil" not in src:
+            # The 2026-08 Side Worlds dropped the block entirely -- its
+            # dungeon entry is inline per-player checks now. Nothing to
+            # steady, and those paths are covered live by the worker's
+            # countdown hold (`LiveWorker._maybe_count_hold`).
+            assert not changed and out == src, \
+                f"{path}: changed a preset with no Enter_Sigil block"
+            continue
+        steadied += 1
         assert changed, f"{path}: the Enter_Sigil tail was not found"
         assert out.count("{") == out.count("}"), f"{path}: braces broken"
         assert src.count("\r\n") and "waitforzonechange completion\r\n" \
@@ -1680,3 +1690,5 @@ def test_the_sigil_wait_outlasts_a_reset_counter():
             f"{path}: the countdown bet is back"
         again, changed2 = scripts.steady_sigil(out)
         assert not changed2 and again == out, f"{path}: not idempotent"
+    assert steadied >= 5, \
+        "the Enter_Sigil transform is matching almost nothing"

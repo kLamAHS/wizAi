@@ -283,7 +283,7 @@ block First_Run_Settings {
 	times 4 {
 		times 300 {
 			if NOT any windowvisible ['WorldView', 'DeckConfiguration', 'SettingPage', 'QuitButton'] {
-				sameany sendkey ESC, .1
+				mass sendkey ESC, .1
 			} else {
 				break
 			}
@@ -450,8 +450,8 @@ block Retrieve_Lost_Quests {
 	block Enter_Sigil {
 		times 5 {
 			if NOT any windowvisible ['WorldView', 'NPCRangeWin', 'imgBackground', 'TeamUpButton'] {
-				sameany minustp XYZ(0,0,1000)
-				sameany plustp XYZ(0,0,1000)
+				mass minustp XYZ(0,0,1000)
+				mass plustp XYZ(0,0,1000)
 				sleep 2
 			} else {
 				break
@@ -4142,6 +4142,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				p1 tp XYZ(797.919, -7568.238, 32.000)
 				sleep 2
 				call Dust_X_Press
+			} else {
+				break
 			}
 		}
 		if p1 tracking_goal "follow broken branch in graveholm" {
@@ -4664,6 +4666,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 					p1 sendkey X, .1
 				}
 				sleep 1
+			} else {
+				break
 			}
 		}
 	}
@@ -4679,6 +4683,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 					sendkey X, .1
 				}
 			}
+		} else {
+			break
 		}
 	}	
 	if p1 tracking_goal "talk to runa in howling lands" {
@@ -5346,6 +5352,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				p1 tp XYZ(-2876.686, 8098.161, -543.607)
 				p1 entitytp KT-SE-FreshFruit
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 		if p1 tracking_goal "plant the pure seeds in font of germination in vivarium" {
@@ -6246,6 +6254,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				p2 tp XYZ(797.919, -7568.238, 32.000)
 				sleep 2
 				call Dust_X_Press
+			} else {
+				break
 			}
 		}
 		if p2 tracking_goal "follow broken branch in graveholm" {
@@ -6767,6 +6777,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 					p2 sendkey X, .1
 				}
 				sleep 1
+			} else {
+				break
 			}
 		}
 	}
@@ -6782,6 +6794,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 					sendkey X, .1
 				}
 			}
+		} else {
+			break
 		}
 	}	
 	if p2 tracking_goal "talk to runa in howling lands" {
@@ -7451,6 +7465,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				p2 tp XYZ(-2876.686, 8098.161, -543.607)
 				p2 entitytp KT-SE-FreshFruit
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 		if p2 tracking_goal "plant the pure seeds in font of germination in vivarium" {
@@ -8351,6 +8367,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				p3 tp XYZ(797.919, -7568.238, 32.000)
 				sleep 2
 				call Dust_X_Press
+			} else {
+				break
 			}
 		}
 		if p3 tracking_goal "follow broken branch in graveholm" {
@@ -8871,6 +8889,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 					p3 sendkey X, .1
 				}
 				sleep 1
+			} else {
+				break
 			}
 		}
 	}
@@ -8886,6 +8906,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 					sendkey X, .1
 				}
 			}
+		} else {
+			break
 		}
 	}	
 	if p3 tracking_goal "talk to runa in howling lands" {
@@ -9555,6 +9577,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				p3 tp XYZ(-2876.686, 8098.161, -543.607)
 				p3 entitytp KT-SE-FreshFruit
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 		if p3 tracking_goal "plant the pure seeds in font of germination in vivarium" {
@@ -10453,6 +10477,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				p4 tp XYZ(797.919, -7568.238, 32.000)
 				sleep 2
 				call Dust_X_Press
+			} else {
+				break
 			}
 		}
 		if p4 tracking_goal "follow broken branch in graveholm" {
@@ -10973,6 +10999,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 					p4 sendkey X, .1
 				}
 				sleep 1
+			} else {
+				break
 			}
 		}
 	}
@@ -10988,6 +11016,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 					sendkey X, .1
 				}
 			}
+		} else {
+			break
 		}
 	}	
 	if p4 tracking_goal "talk to runa in howling lands" {
@@ -11648,6 +11678,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				p4 tp XYZ(-2876.686, 8098.161, -543.607)
 				p4 entitytp KT-SE-FreshFruit
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 		if p4 tracking_goal "plant the pure seeds in font of germination in vivarium" {
