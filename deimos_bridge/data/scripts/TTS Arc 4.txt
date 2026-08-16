@@ -283,7 +283,7 @@ block First_Run_Settings {
 	times 4 {
 		times 300 {
 			if NOT any windowvisible ['WorldView', 'DeckConfiguration', 'SettingPage', 'QuitButton'] {
-				sameany sendkey ESC, .1
+				mass sendkey ESC, .1
 			} else {
 				break
 			}
@@ -450,8 +450,8 @@ block Retrieve_Lost_Quests {
 	block Enter_Sigil {
 		times 5 {
 			if NOT any windowvisible ['WorldView', 'NPCRangeWin', 'imgBackground', 'TeamUpButton'] {
-				sameany minustp XYZ(0,0,1000)
-				sameany plustp XYZ(0,0,1000)
+				mass minustp XYZ(0,0,1000)
+				mass plustp XYZ(0,0,1000)
 				sleep 2
 			} else {
 				break
@@ -4091,6 +4091,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(1818.73779296875, -10474.4560546875, -546.1817626953125)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -4634,6 +4636,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				p1 tp XYZ(-3643.99462890625, 5296.03466796875, 334.2881164550781)
 				p1 entitytp DurianFruit
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -4643,6 +4647,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				p1 tp XYZ(-840.010498046875, -3742.02978515625, -63.50469970703125)
 				p1 entitytp nav LM_Driftwood
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -4680,6 +4686,8 @@ block Dungeons_And_Broken_Quests_For_P1 {
 				call Check_X_Key_Type_For_P1
 				p1 tp XYZ(-17262.009765625, 18108.513671875, -2061.833740234375)
 				call Check_X_Key_Type_For_P1
+			} else {
+				break
 			}
 		}
 	}
@@ -5464,6 +5472,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(1818.73779296875, -10474.4560546875, -546.1817626953125)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -5998,6 +6008,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				p2 tp XYZ(-3643.99462890625, 5296.03466796875, 334.2881164550781)
 				p2 entitytp DurianFruit
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -6007,6 +6019,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				p2 tp XYZ(-840.010498046875, -3742.02978515625, -63.50469970703125)
 				p2 entitytp nav LM_Driftwood
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -6044,6 +6058,8 @@ block Dungeons_And_Broken_Quests_For_P2 {
 				call Check_X_Key_Type_For_P2
 				p2 tp XYZ(-17262.009765625, 18108.513671875, -2061.833740234375)
 				call Check_X_Key_Type_For_P2
+			} else {
+				break
 			}
 		}
 	}
@@ -6837,6 +6853,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(1818.73779296875, -10474.4560546875, -546.1817626953125)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -7380,6 +7398,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				p3 tp XYZ(-3643.99462890625, 5296.03466796875, 334.2881164550781)
 				p3 entitytp DurianFruit
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -7389,6 +7409,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				p3 tp XYZ(-840.010498046875, -3742.02978515625, -63.50469970703125)
 				p3 entitytp nav LM_Driftwood
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -7426,6 +7448,8 @@ block Dungeons_And_Broken_Quests_For_P3 {
 				call Check_X_Key_Type_For_P3
 				p3 tp XYZ(-17262.009765625, 18108.513671875, -2061.833740234375)
 				call Check_X_Key_Type_For_P3
+			} else {
+				break
 			}
 		}
 	}
@@ -8210,6 +8234,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(1818.73779296875, -10474.4560546875, -546.1817626953125)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -8753,6 +8779,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				p4 tp XYZ(-3643.99462890625, 5296.03466796875, 334.2881164550781)
 				p4 entitytp DurianFruit
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -8762,6 +8790,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				p4 tp XYZ(-840.010498046875, -3742.02978515625, -63.50469970703125)
 				p4 entitytp nav LM_Driftwood
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}
@@ -8799,6 +8829,8 @@ block Dungeons_And_Broken_Quests_For_P4 {
 				call Check_X_Key_Type_For_P4
 				p4 tp XYZ(-17262.009765625, 18108.513671875, -2061.833740234375)
 				call Check_X_Key_Type_For_P4
+			} else {
+				break
 			}
 		}
 	}

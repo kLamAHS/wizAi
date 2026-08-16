@@ -15314,8 +15314,19 @@ def test_the_real_quester_fills_completely_and_stays_filled():
     assert [n for n, _v in filled] == before, (before, filled)
     assert scripts.unfilled(out, 3) == [], \
         "a fully configured script still reads as unconfigured"
-    assert 'if NOT Main_Account = "QuestingAccountName"' in out, \
-        "the guard the script tests itself with was rewritten"
+    # Only `var` lines may change. The old template tested itself with
+    # `if NOT Main_Account = "QuestingAccountName"` guards and rewriting
+    # one turned it permanently false; the 2026-08 template has no
+    # guards at all, so the promise is stated directly: every changed
+    # line is an assignment.
+    changed = [a for a, b in zip(source.split("\n"), out.split("\n"))
+               if a != b]
+    assert changed and all(a.lstrip().startswith("var ") for a in changed), \
+        "configure rewrote something other than a var assignment"
+    guard = 'if NOT Main_Account = "QuestingAccountName"'
+    if guard in source:
+        assert guard in out, \
+            "the guard the script tests itself with was rewritten"
 
 
 def test_the_fill_waits_for_every_seat_to_have_a_name():

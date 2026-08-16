@@ -283,7 +283,7 @@ block First_Run_Settings {
 	times 4 {
 		times 300 {
 			if NOT any windowvisible ['WorldView', 'DeckConfiguration', 'SettingPage', 'QuitButton'] {
-				sameany sendkey ESC, .1
+				mass sendkey ESC, .1
 			} else {
 				break
 			}

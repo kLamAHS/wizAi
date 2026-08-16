@@ -257,6 +257,18 @@ def unconfigured(source: str):
     it dispatches ON is vocabulary. The old rule stays as the fallback
     for a variable with no negative guard at all, where a positive
     `if X = "unset"` is the only evidence available.
+
+    ...and one hardcoded fallback after all. The 2026-08 template
+    refresh dropped the guards entirely -- the new scripts gate their
+    multi-client branches on `playercount` and use the account vars
+    directly (`p2 selectfriend $Main_Account`), so nothing ever
+    compares a var against its placeholder and the general rule has no
+    evidence to read. The template's own placeholders are stable and
+    documented on their `var` lines, so a var still ASSIGNED one of
+    them is unconfigured even with nothing comparing it. Worse than
+    before, in fact: with the guards gone, an unfilled name is no
+    longer silently skipped -- `selectfriend "QuestingAccountName"`
+    actively runs and fails.
     """
     import re
 
@@ -268,6 +280,8 @@ def unconfigured(source: str):
         pattern = rf'{re.escape(name)}\s*=\s*"{re.escape(value)}"'
         # More than one is the `var` line plus at least one comparison.
         if len(re.findall(pattern, source)) <= 1:
+            if value in TEMPLATE_PLACEHOLDERS:
+                found.append((name, value))
             continue
         negated = re.findall(rf'\bNOT\s+{re.escape(name)}\s*=\s*"([^"]*)"',
                              source)
@@ -333,6 +347,13 @@ def read_preset(path: str) -> str:
 ACCOUNT_VARS = ("Main_Account", "Questee2", "Questee3", "Questee4")
 SCHOOL_VARS = ("Main_Account_School", "Questee2_School",
                "Questee3_School", "Questee4_School")
+
+#: The TTS template's own placeholder literals, verbatim. The general
+#: assigned-AND-compared rule in `unconfigured` needs no such list --
+#: but the 2026-08 template refresh removed every guard comparison, so
+#: for those scripts the literals themselves are the only evidence a
+#: var was never filled in. See `unconfigured` and `solo_source`.
+TEMPLATE_PLACEHOLDERS = ("QuestingAccountName", "SchoolGoesHere")
 
 
 def unfilled(source: str, party_size=None):
@@ -568,9 +589,19 @@ def solo_source(source: str):
         # the assignment itself ('var ' before the name).
         guards = re.findall(rf'(?<!var ){re.escape(name)}\s*=\s*"([^"]*)"',
                             source or "")
-        if not guards:
-            continue
-        placeholder = Counter(guards).most_common(1)[0][0]
+        if guards:
+            placeholder = Counter(guards).most_common(1)[0][0]
+        else:
+            # The 2026-08 template has no guard comparisons at all --
+            # its multi-client branches are gated on `playercount`
+            # instead -- so the placeholder is not recoverable from the
+            # text. It does not need to be: the template's own literals
+            # are stable, and writing one back is still the right reset
+            # (a solo VM's playercount already keeps the p2..p4
+            # branches cold; the placeholder keeps any name-keyed path
+            # cold too, same as the file ships).
+            placeholder = ("SchoolGoesHere" if name in SCHOOL_VARS
+                           else "QuestingAccountName")
         new, n = re.subn(rf'(^\s*var\s+{re.escape(name)}\s*=\s*)"[^"]*"',
                          lambda m: f'{m.group(1)}"{placeholder}"',
                          source, count=1, flags=re.MULTILINE)
