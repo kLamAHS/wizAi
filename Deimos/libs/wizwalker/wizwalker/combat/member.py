@@ -158,6 +158,30 @@ class CombatMember:
         part = await self.get_participant()
         return await part.num_shadow_pips()
 
+    async def school_pips(self) -> dict:
+        """
+        Archmastery school pips, as {school name: count}.
+
+        These are neither normal nor power pips: past a certain level the
+        game converts a wizard's incoming pips into pips of a chosen
+        school, stored in their own per-school counters. A reader that
+        only asks for normal_pips/power_pips sees such a wizard at zero
+        for an entire fight while the game happily lets them cast.
+        """
+        part = await self.get_participant()
+        counts = await part.pip_count()
+        if counts is None:
+            return {}
+        return {
+            "balance": int(await counts.balance_pips()),
+            "death": int(await counts.death_pips()),
+            "fire": int(await counts.fire_pips()),
+            "ice": int(await counts.ice_pips()),
+            "life": int(await counts.life_pips()),
+            "myth": int(await counts.myth_pips()),
+            "storm": int(await counts.storm_pips()),
+        }
+
     async def health(self) -> int:
         """
         The amount of health this member has

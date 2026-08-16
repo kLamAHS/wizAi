@@ -627,7 +627,37 @@ async def read_state(combat, resolver: NameResolver, school: str,
     members = list(await combat.get_members())
     me = await combat.get_client_member()
 
+    async def _school_rack(m):
+        """Archmastery pips, {school: count}, or {} when unreadable.
+
+        Read defensively on purpose: mocks and older builds have no
+        `school_pips`, and a rack that cannot be read must degrade to
+        the pre-archmastery arithmetic, not to an exception that costs
+        the whole board read.
+        """
+        reader = getattr(m, "school_pips", None)
+        if reader is None:
+            return {}
+        try:
+            rack = await reader()
+        except Exception:
+            return {}
+        return {k: int(v) for k, v in dict(rack or {}).items() if int(v) > 0}
+
     async def _mk_actor(m, team):
+        who = school if team == 0 else await read_school(m)
+        # Archmastery pips are the third rack, and the one this read
+        # spent a fight ignoring: a max-level storm wizard whose rack
+        # had converted to storm pips scored 0 normal + 0 power for 22
+        # consecutive rounds while the game showed every card castable,
+        # so the policy could only "afford" its zero-pip buffs and then
+        # passed the rest of the fight. Own-school pips go to the
+        # sim's `school_pips` (worth 2 there, nothing elsewhere --
+        # `Ruleset.afford`); pips of any OTHER school spend like a
+        # white pip for what this wizard actually casts, so they fold
+        # into norm_pips.
+        rack = await _school_rack(m)
+        own_school_pips = int(rack.pop(who, 0))
         return Actor(
             name=await m.name(),
             # Read, not assumed. `"ice"` was hardcoded here for every
@@ -635,7 +665,7 @@ async def read_state(combat, resolver: NameResolver, school: str,
             # simulator each mob resisted 40% of an ice wizard's damage
             # -- so the rollout planned every fight against the worst
             # matchup in the game and concluded nothing could be killed.
-            school=school if team == 0 else await read_school(m),
+            school=who,
             hp=float(await m.health()),
             max_hp=float(await m.max_health()) or 1.0,
             team=team,
@@ -645,8 +675,9 @@ async def read_state(combat, resolver: NameResolver, school: str,
             # this round and shielding after the Wraith lands: with the
             # catalog spell pool on the enemy (live_backend._apply_pool)
             # the rollout knows exactly which casts are legal RIGHT NOW.
-            norm_pips=int(await m.normal_pips()),
+            norm_pips=int(await m.normal_pips()) + sum(rack.values()),
             pow_pips=int(await m.power_pips()),
+            school_pips=own_school_pips,
         )
 
     unreadable = []

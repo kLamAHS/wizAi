@@ -60,7 +60,8 @@ class MockMember:
     def __init__(self, name, health, max_health=None, *, monster=False,
                  boss=False, client=False, dead=False, level=1,
                  normal_pips=0, power_pips=0, shadow_pips=0, hangings=None,
-                 minion=False, team_id=None, school_id=None):
+                 minion=False, team_id=None, school_id=None,
+                 school_pips=None):
         # Default the team from the side, so existing callers keep working;
         # pass team_id explicitly to build a minion on either side.
         if team_id is None:
@@ -92,6 +93,11 @@ class MockMember:
         # reproduce -- so it stays the default.
         if school_id is not None:
             _attrs(self, {"primary_magic_school_id": school_id})
+        # Same rule for the archmastery rack: absent by default, because
+        # a member without the accessor (an older build, a mock) is a
+        # real state the reader has to survive.
+        if school_pips is not None:
+            _attrs(self, {"school_pips": dict(school_pips)})
 
 
 class MockCard:

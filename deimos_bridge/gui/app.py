@@ -2253,18 +2253,23 @@ class MainWindow(QMainWindow):
                 names[i] = getattr(seat, "wizard_name", None) or ""
         return list(zip(names, schools))
 
-    #: the Questing tab's modes, as (auto_quest, use_script, solo_script).
-    #: One dropdown instead of three checkboxes scattered across the
-    #: config box, because the checkboxes compose into nonsense —
-    #: auto-quest AND a script is two things walking one wizard — and
-    #: the tab is where somebody decides HOW the party quests.
+    #: the Questing tab's modes, as (auto_quest, use_script,
+    #: solo_script, booster_party). One dropdown instead of checkboxes
+    #: scattered across the config box, because the checkboxes compose
+    #: into nonsense — auto-quest AND a script is two things walking
+    #: one wizard — and the tab is where somebody decides HOW the party
+    #: quests. The booster flag is part of the tuple so the reverse map
+    #: in `_sync_quest_mode` can tell "Each wizard quests itself" from
+    #: "Booster party": their checkbox flags are identical.
     QUEST_MODES = (
-        ("No questing — combat only", (False, False, False)),
+        ("No questing — combat only", (False, False, False, False)),
         ("Each wizard quests itself (wizAi's navigator)",
-         (True, False, False)),
-        ("Script drives the whole party", (False, True, False)),
+         (True, False, False, False)),
+        ("Script drives the whole party", (False, True, False, False)),
         ("Solo pilot — script drives the leader; the others follow, "
-         "fight and turn in their own steps", (False, True, True)),
+         "fight and turn in their own steps", (False, True, True, False)),
+        ("Booster party — the leader quests (wizAi's navigator); the "
+         "others only join its fights", (True, False, False, True)),
     )
 
     def _build_questing_tab(self):
@@ -2292,8 +2297,10 @@ class MainWindow(QMainWindow):
         for i in range(MAX_WIZARDS):
             self.leader_pick.addItem(f"wizard {i + 1}")
         self.leader_pick.setToolTip(
-            "Who sets the pace: the solo pilot's scripted wizard, and the "
-            "wizard followers chase. Read at Play live.")
+            "Who sets the pace: the solo pilot's scripted wizard, the "
+            "wizard followers chase, and the booster party's quester — "
+            "the one wizard whose questline a booster run levels. "
+            "Read at Play live.")
         row.addWidget(self.leader_pick)
         self.quest_script_btn = QPushButton("Choose script…")
         self.quest_script_btn.clicked.connect(self.on_edit_script)
@@ -2353,21 +2360,31 @@ class MainWindow(QMainWindow):
 
         # The checkboxes stay the source of truth — flipping one
         # anywhere updates the dropdown, and the dropdown sets them.
+        # Booster party is the exception: no checkbox spells it, so the
+        # flag lives here and only the dropdown (or a loaded config)
+        # changes it.
+        self.booster_party = False
         for box in (self.auto_quest, self.use_script, self.solo_script):
             box.toggled.connect(self._sync_quest_mode)
         self._sync_quest_mode()
         return panel
 
     def on_quest_mode(self, index):
-        auto, script, solo = self.QUEST_MODES[index][1]
+        auto, script, solo, booster = self.QUEST_MODES[index][1]
+        # Before the checkboxes: each setChecked fires _sync_quest_mode,
+        # and the reverse map has to see the booster flag this mode is
+        # switching TO, not the one it is leaving.
+        self.booster_party = booster
         self.auto_quest.setChecked(auto)
         self.use_script.setChecked(script)
         self.solo_script.setChecked(solo)
+        self._sync_quest_mode()
 
     def _sync_quest_mode(self, _on=None):
         """Point the dropdown at whatever the checkboxes now say."""
         flags = (self.auto_quest.isChecked(), self.use_script.isChecked(),
-                 self.solo_script.isChecked())
+                 self.solo_script.isChecked(),
+                 getattr(self, "booster_party", False))
         for i, (_name, mode) in enumerate(self.QUEST_MODES):
             if mode == flags:
                 self.quest_mode.blockSignals(True)
@@ -2573,6 +2590,8 @@ class MainWindow(QMainWindow):
                                seats=rest,
                                follow_leader=self.follow_leader.isChecked(),
                                solo_script=self.solo_script.isChecked(),
+                               booster_party=getattr(self, "booster_party",
+                                                     False),
                                leader=self.leader_pick.currentIndex(),
                                script_step_delay=(
                                    self.pace_step.value()

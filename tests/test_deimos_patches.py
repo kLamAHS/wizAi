@@ -1148,3 +1148,90 @@ def test_a_stuck_should_update_flag_no_longer_latches_teleports_off():
         "it catches the timeout but never clears the flag it timed out on"
 
 
+
+
+# ------------------------------------------------- archmastery school pips
+MEMBER = "Deimos/libs/wizwalker/wizwalker/combat/member.py"
+
+
+def _load_ww_member():
+    """The vendored wizwalker combat member, importable on Linux.
+
+    Its only module-level import is the `wizwalker` package itself,
+    used at runtime for `MemoryInvalidated` and in annotation strings —
+    so one stub module lets the real class load. Same throwaway-
+    namespace discipline as `_load_ww_utils`.
+    """
+    import sys
+    import types
+
+    ww = types.ModuleType("wizwalker")
+    ww.MemoryInvalidated = type("MemoryInvalidated", (Exception,), {})
+    saved = sys.modules.get("wizwalker")
+    try:
+        sys.modules["wizwalker"] = ww
+        namespace = {"__name__": "_ww_combat_member"}
+        exec(compile(_source(MEMBER), MEMBER, "exec"), namespace)
+    finally:
+        if saved is None:
+            sys.modules.pop("wizwalker", None)
+        else:
+            sys.modules["wizwalker"] = saved
+    return types.SimpleNamespace(**namespace)
+
+
+def _member_with_rack(counts):
+    """A CombatMember whose participant's pip rack is `counts`.
+
+    `counts` is {school: n} or None for a participant whose pip-count
+    object is unreadable (older builds return None there).
+    """
+    import types
+
+    mod = _load_ww_member()
+    member = mod.CombatMember.__new__(mod.CombatMember)
+
+    schools = ("balance", "death", "fire", "ice", "life", "myth", "storm")
+    rack = None
+    if counts is not None:
+        async def _n(school):
+            return counts.get(school, 0)
+        rack = types.SimpleNamespace(
+            **{f"{s}_pips": (lambda s=s: _n(s)) for s in schools})
+
+    async def pip_count():
+        return rack
+
+    participant = types.SimpleNamespace(pip_count=pip_count)
+
+    async def get_participant():
+        return participant
+
+    member.get_participant = get_participant
+    return member
+
+
+def test_the_member_reads_the_whole_archmastery_rack():
+    """Oz, the two-account run at rev f2b8101f: a max-level storm
+    wizard read 0 normal + 0 power pips for 22 consecutive rounds while
+    the game showed his 7-pip Storm Lord castable, because his rack had
+    converted to archmastery STORM pips — a third kind of pip stored in
+    per-school counters this member never exposed. The policy priced
+    him pip-starved, bought only zero-pip buffs, and passed the rest of
+    the fight."""
+    import asyncio
+
+    member = _member_with_rack({"storm": 4, "balance": 1})
+    rack = asyncio.run(member.school_pips())
+    assert rack == {"balance": 1, "death": 0, "fire": 0, "ice": 0,
+                    "life": 0, "myth": 0, "storm": 4}
+
+
+def test_an_unreadable_pip_rack_reads_as_empty_not_as_an_error():
+    """`pip_count()` is Optional in the vendored participant. A member
+    on a build without the rack must degrade to the pre-archmastery
+    arithmetic, not take the whole board read down with it."""
+    import asyncio
+
+    member = _member_with_rack(None)
+    assert asyncio.run(member.school_pips()) == {}

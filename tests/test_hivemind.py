@@ -2336,3 +2336,25 @@ def test_a_hand_with_one_attack_left_in_it_is_still_held():
     _actions, plan_ = hive.plan(subs)
     assert [m for m in plan_.moves if m.note == "held"], \
         "a nuke on a dead board is the case the guard was written for"
+
+
+def test_a_booster_is_never_held_by_the_overkill_guard():
+    """One 50 HP mob, two wizards each holding a lethal hit. The plain
+    party saves the second card — correct thrift for two questers. A
+    party whose second seat is a BOOSTER fires both: the booster has no
+    next fight of its own to save a card for, and its redundant hit is
+    the insurance against the ledger's kill being a prediction — the
+    bet `_hold_was_kept` polices after the fact, declined up front.
+    Oz at rev f2b8101f is why the after-the-fact police is not enough:
+    the quester's counted kill missed, and the fight it was booked to
+    end ran 29 rounds."""
+    _, joint = plan(n=2, passes=2, board=((50, "ice"),))
+    held_without = {m.seat for m in joint.moves if m.note == "held"}
+    assert held_without, "the baseline no longer holds anyone"
+
+    hive = Hivemind(passes=2, boosters=held_without)
+    _, boosted = hive.plan(party(2, board=((50, "ice"),)))
+    for seat in held_without:
+        move = next(m for m in boosted.moves if m.seat == seat)
+        assert move.note != "held"
+        assert move.card, "exempt from the hold but still not casting"
