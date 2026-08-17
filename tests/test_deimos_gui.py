@@ -14918,6 +14918,10 @@ def _at_the_sigil(monkeypatch, goal="Go To Amy Brooks' Place in Knight's Court",
     from deimos_bridge import questing
 
     worker, _read = _zoned_party(["MB_KnightsCourt", "MB_KnightsCourt"])
+    # The live polls pace at half a second apiece; the tests only care
+    # about order and outcome.
+    worker.COUNT_HOLD_POLL_GAP = 0.01
+    worker.COUNT_HOLD_REFRESH_WAIT = 0.01
     seat, other = worker.seats
     seat.client = _SigilClient(pos=(100.0, 200.0, 0.0),
                                crosses_on_leg=crosses_on_leg)
@@ -15006,8 +15010,8 @@ def test_a_boosters_prompt_beside_the_leader_is_a_sigil_sensor(monkeypatch):
     stands at the sigil outside. The party itself is the detector: a
     joined leader shows no press-X prompt and the unjoined booster
     beside it shows one, which is the state the operator photographed
-    twice. The hold engages on that asymmetry alone, and the booster
-    gets its X."""
+    twice. The hold engages on that asymmetry alone, the leader boards
+    first, and the booster gets its X."""
     import asyncio
 
     from deimos_bridge import questing
@@ -15020,7 +15024,8 @@ def test_a_boosters_prompt_beside_the_leader_is_a_sigil_sensor(monkeypatch):
     other.client = _SigilClient(pos=(400.0, 200.0, 0.0))
 
     async def near(c):
-        return c is other.client       # booster at the prompt; leader not
+        # Booster at the prompt; the leader's renders once re-planted.
+        return c is other.client or bool(seat.client.tped)
 
     pressed = []
 
@@ -15032,7 +15037,8 @@ def test_a_boosters_prompt_beside_the_leader_is_a_sigil_sensor(monkeypatch):
     monkeypatch.setattr(questing, "press_x", press)
     asyncio.run(worker._maybe_count_hold(seat))
     assert worker._countdown_held(), "the sensor did not trigger the hold"
-    assert pressed == [other.client], "the booster never joined the sigil"
+    assert pressed == [seat.client, other.client], \
+        "the leader boards first, then the booster joins"
     holds = [e for e in seat.tel.questing if e["kind"] == "countdown-hold"]
     assert holds and "mid-entry" in holds[0]["detail"]
     joins = [e for e in other.tel.questing
@@ -15040,11 +15046,14 @@ def test_a_boosters_prompt_beside_the_leader_is_a_sigil_sensor(monkeypatch):
     assert joins, "the join was not written down"
 
 
-def test_the_gather_presses_x_on_the_unjoined(monkeypatch):
-    """Standing on a sigil is not joining it — the operator's booster
-    stood at "Press X to Enter" through two full countdowns and entered
-    nothing. After the gather teleports a helper on, a prompt still
-    showing gets X."""
+def test_no_helper_x_while_the_leader_cannot_board(monkeypatch):
+    """Rev 1b1f499c, the Kyuto tower: the booster's X went first, the
+    leader's prompt never rendered on the pad, and Oz rode five
+    countdowns into the tower ALONE while the wizard whose quest it
+    was stood outside for nineteen minutes. The invariant now: no
+    helper is pressed into a sigil until the holder's own prompt was
+    seen and its own X went — a booster inside a dungeon without its
+    quester helps nobody."""
     import asyncio
 
     from deimos_bridge import questing
@@ -15052,7 +15061,7 @@ def test_the_gather_presses_x_on_the_unjoined(monkeypatch):
     worker, seat, other = _at_the_sigil(monkeypatch)
 
     async def near(c):
-        return c is other.client
+        return c is other.client       # the leader's prompt is dead
 
     pressed = []
 
@@ -15065,7 +15074,128 @@ def test_the_gather_presses_x_on_the_unjoined(monkeypatch):
     asyncio.run(worker._maybe_count_hold(seat))
     assert worker._countdown_held()
     assert other.client.tped, "the gather did not teleport the helper"
-    assert pressed == [other.client], "the gathered helper never pressed X"
+    assert pressed == [], "a helper was pressed in without the leader"
+    # Everything was still TRIED for the leader: the re-plant onto the
+    # pad, then the off-and-back refresh (out, and back) — 3 teleports.
+    assert len(seat.client.tped) == 3, \
+        "the re-plant and the off-and-back refresh were not both tried"
+    dead = [e for e in seat.tel.questing
+            if e["kind"] == "countdown-hold"
+            and "never rendered" in e["detail"]]
+    assert dead, "the dead prompt was not written down"
+
+
+def test_a_dead_prompt_is_walked_off_the_sigil_and_back(monkeypatch):
+    """The cure for the dead prompt: a plain re-plant provably does
+    not revive it (rev 1b1f499c: five re-plants, zero prompts), so the
+    holder is stepped out past the prompt's whole range and back to
+    make the client re-trigger the range window. Once its own X goes,
+    the helpers get theirs LAST, so the party rides the final count
+    down together."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+
+    async def near(c):
+        if c is other.client:
+            return True
+        # The leader's prompt revives only after out-and-back: the
+        # re-plant is teleport 1, the refresh is 2 (out) and 3 (back).
+        return len(seat.client.tped) >= 3
+
+    pressed = []
+
+    async def press(c):
+        pressed.append(c)
+        return True, ""
+
+    monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "press_x", press)
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert len(seat.client.tped) == 3, "no out-and-back refresh"
+    assert pressed == [seat.client, other.client], \
+        "the leader must board first and the helper join last"
+    refreshed = [e for e in seat.tel.questing
+                 if e["kind"] == "countdown-hold"
+                 and "off the sigil and back" in e["detail"]]
+    assert refreshed, "the refresh was not written down"
+
+
+def test_a_mate_that_crossed_alone_releases_the_hold(monkeypatch):
+    """Oz's zone flips to the tower mid-hold while Konstantin's does
+    not: the countdown fired WITHOUT the holder. Rev 1b1f499c burned
+    the rest of a 45s hold plus two replays on that state, five times
+    over. Released at once, with the visit stamp cleared so a fresh
+    gather can retry the moment the follow drags the mate back."""
+    import asyncio
+
+    from deimos_bridge import questing
+    from deimos_bridge.gui.live import NEVER
+
+    worker, seat, other = _at_the_sigil(
+        monkeypatch, goal="Talk To Hoi Mang in Crimson Fields")
+    worker.booster_party = True
+    worker.leader = seat.index
+    seat.marker_away = None
+    other.client = _SigilClient(pos=(400.0, 200.0, 0.0))
+
+    async def near(c):
+        return c is other.client
+
+    async def press(c):
+        return True, ""
+
+    monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "press_x", press)
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held()
+    other.zone_seen = "Interiors/MS_Plague2_T4"
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert not worker._countdown_held(), \
+        "the hold outlived the countdown that fired without its wizard"
+    over = [e for e in seat.tel.questing
+            if e["kind"] == "countdown-hold-over"]
+    assert over and "without" in over[0]["detail"]
+    assert seat.count_hold_spot is None, "the visit stamp was not cleared"
+    assert worker._count_hold_last == NEVER, \
+        "the retry would still wait out the worker-wide cooldown"
+
+
+def test_a_prompt_that_renders_after_the_hold_gets_the_leaders_x(
+        monkeypatch):
+    """The pre-hold gate saw no prompt — that is why it held — but a
+    prompt can render a beat later, and the script is now frozen and
+    cannot press it. The gather presses the holder's own X, with no
+    re-plant: the wizard is already exactly where a prompt shows."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+    calls = []
+
+    async def near(c):
+        if c is seat.client:
+            # Call 1 is the pre-hold gate (hidden); call 2 is the
+            # gather's own look (rendered).
+            calls.append(c)
+            return len(calls) >= 2
+        return False
+
+    pressed = []
+
+    async def press(c):
+        pressed.append(c)
+        return True, ""
+
+    monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "press_x", press)
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held()
+    assert pressed == [seat.client], "the late prompt never got its X"
+    assert seat.client.tped == [], "a visible prompt needs no re-plant"
 
 
 def test_the_leader_is_replanted_onto_the_sensed_sigil(monkeypatch):
@@ -15073,7 +15203,8 @@ def test_the_leader_is_replanted_onto_the_sensed_sigil(monkeypatch):
     prompt as "joined", the booster pressed X, the counter fired — and
     Oz entered ALONE, because a hidden prompt can also mean misplaced.
     A helper's just-seen prompt marks the pad exactly; a promptless
-    leader is re-planted on it and pressed too."""
+    leader is re-planted on it and pressed — FIRST, so the helper's
+    press is the last join and the party rides the count together."""
     import asyncio
 
     from deimos_bridge import questing
@@ -15102,8 +15233,8 @@ def test_the_leader_is_replanted_onto_the_sensed_sigil(monkeypatch):
     asyncio.run(worker._maybe_count_hold(seat))
     assert seat.client.tped == [(400.0, 200.0, 0.0)], \
         "the leader was not re-planted on the pad"
-    assert pressed == [other.client, seat.client], \
-        "both wizards must join — the helper AND the leader"
+    assert pressed == [seat.client, other.client], \
+        "both wizards must join — the leader FIRST, then the helper"
 
 
 def test_an_evidenced_sigil_hold_rearms_instead_of_sweeping(monkeypatch):
