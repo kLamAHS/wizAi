@@ -284,10 +284,12 @@ class _Seat:
         #: walk-in door signature. Cleared whenever the marker reads far
         #: or something changes. See `LiveWorker._maybe_walk_through`.
         self.through_since = None
-        #: the countdown guard's debounce and once-per-visit stamp. See
-        #: `LiveWorker._maybe_count_hold`.
+        #: the countdown guard's debounce and once-per-visit stamp, and
+        #: how many times an evidenced sigil's hold has re-armed here.
+        #: See `LiveWorker._maybe_count_hold`.
         self.count_hold_seen = None
         self.count_hold_spot = None
+        self.count_hold_replays = 0
         #: since when this follower's follow has been continuously
         #: failing, how many attempts that is, and when the stranding
         #: alarm last fired. See `LiveWorker.STRANDED_ALARM_EVERY`.
@@ -564,6 +566,10 @@ class LiveWorker(QThread):
         self._count_hold_zone = None
         self._count_hold_seat = -1
         self._count_hold_last = NEVER
+        #: whether the running hold has sigil EVIDENCE -- a helper's
+        #: press-X prompt seen (and pressed) at the spot. An evidenced
+        #: sigil is never swept and re-arms on expiry; see the rung.
+        self._count_hold_sigil = False
         #: when the party last changed realm, and which realms this run
         #: has already tried. See `_realm_hop_party`.
         self._realm_hopped_at = NEVER
@@ -4676,11 +4682,19 @@ class LiveWorker(QThread):
         return bool(zone) and bool(start_zone) and zone != start_zone
 
     #: how long the script is held for a possible sigil countdown. The
-    #: countdown itself is ~10s and RESTARTS once when the rest of the
-    #: party is brought onto the sigil, so 20 covers the restart with
-    #: margin; a spot that produces no zone change in 20s is not a
-    #: counting sigil and the script gets the wheel back.
-    COUNT_HOLD = 20.0
+    #: countdown is ~10s and RESTARTS on every late join -- and the
+    #: gather's teleports, prompt polls and X presses ARE late joins,
+    #: then the instance load takes seconds more. Rev 7e1980b5: a 20s
+    #: hold expired at t+20.0 and the script's safe-area teleport
+    #: landed at t+20.1, one tick after, mid-entry. The release on a
+    #: zone change is immediate, so a too-long hold at a real sigil
+    #: costs nothing; only a hold at a non-sigil pays the full length,
+    #: once per visit.
+    COUNT_HOLD = 45.0
+    #: how many times an EVIDENCED sigil (a helper's prompt seen and
+    #: pressed) re-arms its hold after expiring unfired, before the
+    #: spot is left to the script's own entry machinery.
+    COUNT_HOLD_REPLAYS = 2
     #: how long between holds, worker-wide.
     COUNT_HOLD_EVERY = 30.0
     #: the debounce between the first qualifying look and the hold. The
@@ -4796,6 +4810,7 @@ class LiveWorker(QThread):
                 if (seat.zone_seen and self._count_hold_zone
                         and seat.zone_seen != self._count_hold_zone):
                     self._count_hold_until = 0.0
+                    seat.count_hold_replays = 0
                     seat.tel.note_questing(
                         "countdown-hold-over",
                         f"the zone changed while the script was held — a "
@@ -4806,6 +4821,35 @@ class LiveWorker(QThread):
                 return
             self._count_hold_until = 0.0
             if holder:
+                if self._count_hold_sigil:
+                    # A helper's prompt was SEEN and pressed here: this
+                    # is a sigil, not a door, and sweeping it is the
+                    # "walking out of the sigil for no reason" the
+                    # operator watched at rev 7e1980b5. An unfired
+                    # countdown at an evidenced sigil usually means a
+                    # late join restarted it, so the guard re-arms at
+                    # once -- bounded, because a sigil that will not
+                    # fire twice running is not going to on the third.
+                    seat.count_hold_replays += 1
+                    if seat.count_hold_replays < self.COUNT_HOLD_REPLAYS:
+                        seat.count_hold_spot = None
+                        self._count_hold_last = NEVER
+                        seat.tel.note_questing(
+                            "countdown-hold-over",
+                            f"held {self.COUNT_HOLD:.0f}s at an evidenced "
+                            f"sigil and no zone change came — a late join "
+                            f"restarts the counter, so the guard re-arms "
+                            f"here instead of walking. No sweep touches a "
+                            f"live sigil")
+                    else:
+                        seat.count_hold_replays = 0
+                        seat.tel.note_questing(
+                            "countdown-hold-over",
+                            f"held at this sigil "
+                            f"{self.COUNT_HOLD_REPLAYS} times and it never "
+                            f"fired — leaving the entry to the script's "
+                            f"own machinery")
+                    return
                 seat.tel.note_questing(
                     "countdown-hold-over",
                     f"held {self.COUNT_HOLD:.0f}s and no zone change came — "
@@ -4813,13 +4857,14 @@ class LiveWorker(QThread):
                     f"lost). The state left standing is the walk-in door's "
                     f"exactly, so the sweep gets it before the script does")
                 # An expired hold IS the walk-through's evidence, already
-                # aged: at the marker, no prompt, 20s of proven nothing.
-                # Rev d3ed4d3c spent seven minutes at the Emperor's
-                # Palace door in MS_Hub while four holds expired one
-                # after another and the separate walk-through clock
-                # never ran 45s unbroken -- the script's yanks kept
-                # resetting it. Chaining here converts the wasted hold
-                # into the walk that enters the door.
+                # aged: at the marker, no prompt, the hold's length of
+                # proven nothing. Rev d3ed4d3c spent seven minutes at
+                # the Emperor's Palace door in MS_Hub while four holds
+                # expired one after another and the separate
+                # walk-through clock never ran 45s unbroken -- the
+                # script's yanks kept resetting it. Chaining here
+                # converts the wasted hold into the walk that enters
+                # the door.
                 await self._sweep_after_hold(seat)
             return
 
@@ -4930,6 +4975,7 @@ class LiveWorker(QThread):
         self._count_hold_until = now + self.COUNT_HOLD
         self._count_hold_zone = seat.zone_seen
         self._count_hold_seat = seat.index
+        self._count_hold_sigil = bool(sensed)
         if sensed:
             spotted = ", ".join(o.name for o in sensed)
             saw = (f"{spotted} is standing at a press-X prompt beside "
@@ -4953,7 +4999,11 @@ class LiveWorker(QThread):
         # operator's screenshots say so: the booster stood at "Press X
         # to Enter" through the whole countdown, twice, and entered
         # nothing. So the gather does both halves: onto the spot, then
-        # X on every helper whose prompt still shows.
+        # X on every helper whose prompt shows -- POLLED, because the
+        # prompt takes a beat to render after a landing and one fixed
+        # sleep missed it live (rev 7e1980b5's T5 hold gathered Oz and
+        # pressed nothing).
+        pad = None
         for other in self.seats:
             if other is seat or other.client is None:
                 continue
@@ -4977,20 +5027,69 @@ class LiveWorker(QThread):
                         self._say(other,
                                   f"{other.name} steps onto "
                                   f"{seat.name}'s sigil")
-                        await asyncio.sleep(1.0)   # land; prompt renders
-                if await questing.near_interactable(other.client):
-                    ok, _why = await questing.press_x(other.client)
-                    if ok:
-                        other.tel.note_questing(
-                            "countdown-hold",
-                            f"pressed X to join {seat.name}'s sigil — "
-                            f"standing on a sigil is not joining it, the "
-                            f"prompt is")
-                        self._say(other,
-                                  f"{other.name} presses X to join the "
-                                  f"sigil")
+                shows = False
+                for _ in range(6):
+                    if await questing.near_interactable(other.client):
+                        shows = True
+                        break
+                    await asyncio.sleep(0.5)
+                if not shows:
+                    continue
+                try:
+                    pad = await other.client.body.position() or pad
+                except Exception:
+                    pass
+                ok, _why = await questing.press_x(other.client)
+                if ok:
+                    other.tel.note_questing(
+                        "countdown-hold",
+                        f"pressed X to join {seat.name}'s sigil — "
+                        f"standing on a sigil is not joining it, the "
+                        f"prompt is")
+                    self._say(other,
+                              f"{other.name} presses X to join the "
+                              f"sigil")
             except Exception:
                 continue
+
+        # The missing half, from rev 7e1980b5's first tower: the sensor
+        # read the leader's hidden prompt as "joined", the booster got
+        # its X, the counter fired -- and OZ ENTERED ALONE, because a
+        # hidden prompt can also mean MISPLACED: near the marker, off
+        # the pad, out of the prompt's range. A helper whose prompt was
+        # just seen marks the pad exactly, so a promptless leader is
+        # re-planted on it and pressed too. If it genuinely was joined,
+        # this un-joins and re-joins it -- the counter restarts once,
+        # the longer hold covers that, and both wizards ride it down
+        # together, which is the whole point of a booster party.
+        if pad is None:
+            return
+        try:
+            if await questing.near_interactable(seat.client):
+                return
+            await seat.client.teleport(pad)
+            self._count_hold_sigil = True
+            seat.tel.note_questing(
+                "countdown-hold",
+                f"re-planted this wizard on the sigil pad its helper's "
+                f"prompt was seen from — its own prompt was hidden, "
+                f"which can mean joined or merely misplaced, and the "
+                f"first tower at rev 7e1980b5 fired with only the "
+                f"booster aboard")
+            for _ in range(6):
+                if await questing.near_interactable(seat.client):
+                    ok, _why = await questing.press_x(seat.client)
+                    if ok:
+                        seat.tel.note_questing(
+                            "countdown-hold",
+                            f"pressed X to join the sigil as the leader")
+                        self._say(seat,
+                                  f"{seat.name} presses X to join its "
+                                  f"own sigil")
+                    break
+                await asyncio.sleep(0.5)
+        except Exception:
+            pass
 
     #: how long the quest position must be continuously unreadable --
     #: goal line reading fine the whole time -- before the hook counts

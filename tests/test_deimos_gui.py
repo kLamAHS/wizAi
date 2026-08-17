@@ -15068,6 +15068,93 @@ def test_the_gather_presses_x_on_the_unjoined(monkeypatch):
     assert pressed == [other.client], "the gathered helper never pressed X"
 
 
+def test_the_leader_is_replanted_onto_the_sensed_sigil(monkeypatch):
+    """Rev 7e1980b5's first tower: the sensor read the leader's hidden
+    prompt as "joined", the booster pressed X, the counter fired — and
+    Oz entered ALONE, because a hidden prompt can also mean misplaced.
+    A helper's just-seen prompt marks the pad exactly; a promptless
+    leader is re-planted on it and pressed too."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, seat, other = _at_the_sigil(
+        monkeypatch, goal="Talk To Hoi Mang in Crimson Fields")
+    worker.booster_party = True
+    worker.leader = seat.index
+    seat.marker_away = None
+    other.client = _SigilClient(pos=(400.0, 200.0, 0.0))
+
+    async def near(c):
+        if c is other.client:
+            return True
+        # the leader's own prompt appears once it stands on the pad
+        return bool(seat.client.tped)
+
+    pressed = []
+
+    async def press(c):
+        pressed.append(c)
+        return True, ""
+
+    monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "press_x", press)
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert seat.client.tped == [(400.0, 200.0, 0.0)], \
+        "the leader was not re-planted on the pad"
+    assert pressed == [other.client, seat.client], \
+        "both wizards must join — the helper AND the leader"
+
+
+def test_an_evidenced_sigil_hold_rearms_instead_of_sweeping(monkeypatch):
+    """The "walking out of the sigil for no reason": a hold at a REAL
+    sigil expired unfired (a late join restarts the counter) and the
+    walk-in-door sweep walked the wizard off it. A helper's pressed
+    prompt is sigil evidence — no sweep, re-arm at once, and give the
+    spot back to the script after two unfired holds."""
+    import asyncio
+    import time
+
+    from deimos_bridge import questing
+
+    worker, seat, other = _at_the_sigil(
+        monkeypatch, goal="Talk To Hoi Mang in Crimson Fields",
+        crosses_on_leg=1)
+    worker.booster_party = True
+    worker.leader = seat.index
+    seat.marker_away = None
+    other.client = _SigilClient(pos=(400.0, 200.0, 0.0))
+
+    async def near(c):
+        return c is other.client
+
+    async def press(c):
+        return True, ""
+
+    monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "press_x", press)
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held()
+    worker._count_hold_until = time.monotonic() - 1.0
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert seat.client.legs == [], "swept a live sigil"
+    assert not worker._countdown_held()
+    over = [e for e in seat.tel.questing
+            if e["kind"] == "countdown-hold-over"]
+    assert over and "re-arms" in over[0]["detail"]
+    # ...the guard re-arms at once...
+    seat.count_hold_seen = time.monotonic() - 1.0
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held(), "the sigil guard did not re-arm"
+    # ...but not forever: the second unfired hold gives the spot back.
+    worker._count_hold_until = time.monotonic() - 1.0
+    asyncio.run(worker._maybe_count_hold(seat))
+    seat.count_hold_seen = time.monotonic() - 1.0
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert not worker._countdown_held(), \
+        "a sigil that never fires held the script forever"
+
+
 def test_the_zone_change_releases_the_hold_as_a_fired_sigil(monkeypatch):
     import asyncio
 
