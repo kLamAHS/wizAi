@@ -570,6 +570,9 @@ class LiveWorker(QThread):
         #: press-X prompt seen (and pressed) at the spot. An evidenced
         #: sigil is never swept and re-arms on expiry; see the rung.
         self._count_hold_sigil = False
+        #: when the running hold engaged, so a goal that advances AFTER
+        #: it releases it -- the turn-in-not-a-sigil case.
+        self._count_hold_began = 0.0
         #: when the party last changed realm, and which realms this run
         #: has already tried. See `_realm_hop_party`.
         self._realm_hopped_at = NEVER
@@ -4818,6 +4821,24 @@ class LiveWorker(QThread):
                         f"in flight crossed a door. Either way, this is "
                         f"the entry the script's own loop kept cancelling")
                     self._say(seat, "the sigil fired — script released")
+                    return
+                if seat.goal_at and seat.goal_at > self._count_hold_began:
+                    # The GOAL advancing is the zone change's equal: the
+                    # spot's business is done. Rev 672d1c79 engaged at
+                    # "marker 0 away" beside a Talk NPC mid-turn-in;
+                    # auto-dialogue clicked the conversation through, the
+                    # goal moved on within seconds — and the hold kept
+                    # the script frozen at the finished NPC for its full
+                    # 45s, which is the "waited so long at a dialogue"
+                    # the operator watched.
+                    self._count_hold_until = 0.0
+                    seat.count_hold_replays = 0
+                    seat.tel.note_questing(
+                        "countdown-hold-over",
+                        f"the goal advanced while the script was held — "
+                        f"the spot's business was a turn-in that "
+                        f"completed, not a sigil. Script released at once")
+                    self._say(seat, "the goal advanced — script released")
                 return
             self._count_hold_until = 0.0
             if holder:
@@ -4976,6 +4997,7 @@ class LiveWorker(QThread):
         self._count_hold_zone = seat.zone_seen
         self._count_hold_seat = seat.index
         self._count_hold_sigil = bool(sensed)
+        self._count_hold_began = now
         if sensed:
             spotted = ", ".join(o.name for o in sensed)
             saw = (f"{spotted} is standing at a press-X prompt beside "

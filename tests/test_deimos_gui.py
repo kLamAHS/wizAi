@@ -15155,6 +15155,28 @@ def test_an_evidenced_sigil_hold_rearms_instead_of_sweeping(monkeypatch):
         "a sigil that never fires held the script forever"
 
 
+def test_a_goal_advance_releases_the_countdown_hold(monkeypatch):
+    """Rev 672d1c79: the hold engaged at "marker 0 away" beside a Talk
+    NPC mid-turn-in, auto-dialogue clicked the conversation through,
+    the goal moved on within seconds — and the hold kept the script
+    frozen at the finished NPC for its full 45s. "It just waited so
+    long at a dialogue." The goal advancing is the zone change's
+    equal: the spot's business is done."""
+    import asyncio
+    import time
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held()
+    seat.goal_at = time.monotonic()          # the turn-in completed
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert not worker._countdown_held(), \
+        "the hold outlived the goal it was guarding"
+    over = [e for e in seat.tel.questing
+            if e["kind"] == "countdown-hold-over"]
+    assert over and "goal advanced" in over[0]["detail"]
+
+
 def test_the_zone_change_releases_the_hold_as_a_fired_sigil(monkeypatch):
     import asyncio
 
