@@ -2108,6 +2108,27 @@ def test_single_mob_boards_rank_identically_under_both_credits(monkeypatch):
     assert table("kills") == table("early-kills")
 
 
+def test_an_enchant_card_is_never_a_round_candidate():
+    """An enchantment upgrades a card in hand for free and the live
+    layer plays it BEFORE the read a decision is built from, so by the
+    time a hand reaches the policy its enchanting is done. As a
+    candidate it would be the free-rider disease again: 0 pips, banks
+    nothing, wins every thrift tie."""
+    from w101_sim import Card
+
+    from deimos_bridge import policies as P
+
+    sim, state = wizard(school="fire", hand=("Fire Cat", "Fireblade"),
+                        pips=3, board=((400, "ice"),))
+    state.player.hand.append(Card(name="Epic", school="sun", pips=0,
+                                  accuracy=1.0, kind="enchant"))
+    policy = P.greedy_ttk()
+    policy(sim, state)
+    assert policy.last_candidates, "the real cards were not ranked"
+    assert all(c.card != "Epic" for c in policy.last_candidates), \
+        "an enchantment was weighed as a round action"
+
+
 def test_the_ranking_is_total_enough_that_hand_order_does_not_decide():
     """A complete tie leaves `min` returning whatever the hand listed
     first, which is not a decision. Two copies of one card at different

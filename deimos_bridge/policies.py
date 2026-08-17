@@ -1633,6 +1633,15 @@ def greedy_ttk(max_turns: int = None, continuation=None):
         for card in s.hand:
             if card.name in seen:
                 continue
+            if getattr(card, "kind", "") == "enchant":
+                # An enchantment is not a round action: it upgrades a
+                # card in hand for free, and the live layer plays it
+                # BEFORE the read this decision was built from (see
+                # `live_backend`'s enchant pre-pass), so by the time a
+                # hand reaches this policy its enchanting is done. As a
+                # candidate it would be the free-rider disease again --
+                # 0 pips, banks nothing, wins every thrift tie.
+                continue
             # A self-buff or an AoE has one version of itself; only a
             # single-enemy card is worth rolling out once per mob.
             if _is_inert(card, s):

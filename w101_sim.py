@@ -240,6 +240,24 @@ ENCHANT_TAGS = ({t for _, _, t in PCT_ENCHANTS.values()}
                 | {n.lower() for n in DMG_ENCHANTS})
 _ENCHANTABLE_SOURCES = ("deck",)
 
+#: The game's own card names for the modeled enchantments -- what a
+#: live hand read produces -- mapped to the `enchant_card` key each
+#: applies. The printed card is "Sharpened Blade"; the key keeps the
+#: owner's original spelling because every derived card name and stack
+#: key is built from it, and renaming those would orphan existing
+#: decklists.
+ENCHANT_CARDS = {**{n: n for n in DMG_ENCHANTS},
+                 "Sharpen Blade": "Sharpen Blade",
+                 "Sharpened Blade": "Sharpen Blade",
+                 "Potent Trap": "Potent Trap"}
+
+
+def enchant_target_kinds(key):
+    """The card kinds enchantment `key` applies to."""
+    if key in PCT_ENCHANTS:
+        return (PCT_ENCHANTS[key][0],)
+    return ("damage", "drain")
+
 
 def _check_enchantable(card, enchant):
     if card.source not in _ENCHANTABLE_SOURCES:

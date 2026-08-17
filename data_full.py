@@ -420,6 +420,20 @@ def load_spells_full(path="spells_full.json",
         card.level = int(s["level_restriction"]) \
             if s.get("level_restriction") else 1   # null = no gate
         cards[key] = card
+    # Sun-school enchantment CARDS, synthesized. They are absent from
+    # the dump for a structural reason -- they modify a card in hand
+    # rather than producing a battle effect, so the effect parser has
+    # nothing to read -- which left a live hand holding "Epic" as an
+    # unresolvable name: hidden from the policy, never played, a dead
+    # slot all fight. The entry here is the card's identity only (the
+    # effect lives in `enchant_card`); kind "enchant" keeps it out of
+    # every castable-candidate enumeration.
+    from w101_sim import ENCHANT_CARDS
+    for ename in ENCHANT_CARDS:
+        if ename not in cards:
+            cards[ename] = Card(name=ename, school="sun", pips=0,
+                                accuracy=1.0, kind="enchant",
+                                confidence="synthetic-enchant")
     if report is not None:
         report["skipped"] = skipped
     return cards

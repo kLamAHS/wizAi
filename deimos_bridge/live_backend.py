@@ -39,7 +39,13 @@ from .policies import primary_target as _primary_target
 #: whose ops carry no `tgt` at all.
 _KIND_TARGETS = {"aura": "global", "global": "global", "blade": "self",
                  "shield": "self", "heal": "self", "util": "global",
-                 "damage": "enemy", "drain": "enemy"}
+                 "damage": "enemy", "drain": "enemy",
+                 # An enchantment's target is another CARD, which no
+                 # member click expresses -- and it must never reach
+                 # the enemy branch. The pre-pass is the only thing
+                 # that plays one; anything else holding one aims at
+                 # nothing, like an aura.
+                 "enchant": "global"}
 
 
 def _target_from_kind(card):
@@ -285,6 +291,24 @@ class WizAiBackend:
         decision = await self.decide()
         return self._to_priority_line(decision)
 
+    def card_spec(self, name):
+        """The catalog Card behind `name`, seeing through enchant names.
+
+        An enchanted card ("Sunbird - T02 - A+epic") exists only in the
+        hand it was enchanted in, never in the catalog, so a plain
+        `cards.get` on a decision's card name reads None for it -- and
+        every consumer of that lookup wants the TARGET semantics (self
+        or enemy, AoE or aimed), which an enchantment does not change.
+        The base card answers for both.
+        """
+        if not name:
+            return None
+        card = self.cards.get(name)
+        if card is None:
+            from w101_sim import enchant_base
+            card = self.cards.get(enchant_base(name))
+        return card
+
     # -- the actual decision ----------------------------------------------
     async def decide(self):
         """Read the board, ask the policy, return a `PolicyDecision`.
@@ -403,8 +427,7 @@ class WizAiBackend:
                        if getattr(c, "chosen", False)), None)
         if chosen is not None and (chosen.turns or 99) <= 1:
             return decision              # the kill ends the danger
-        spec = self.cards.get(decision.card_name) if decision.card_name \
-            else None
+        spec = self.card_spec(decision.card_name)
         if spec is not None and getattr(spec, "kind", "") == "heal":
             return decision              # the policy already chose one
 
@@ -616,7 +639,7 @@ class WizAiBackend:
         # A target index on a self-buff or an AoE is meaningless, and
         # carrying one would put a fabricated enemy name in the log --
         # the decision row would claim the blade went "on Bastilla".
-        card = card if card is not None else self.cards.get(name)
+        card = card if card is not None else self.card_spec(name)
         kind = _primary_target(card) if card is not None else "enemy"
         if kind != "enemy":
             target_index = None
@@ -1261,6 +1284,121 @@ class WizAiCombatHandler:
     # pass_button/in_combat; `read_state` only needs those, so `self` is a
     # valid `combat` for the backend.
 
+    #: `sleep_time` for the enchant's two clicks -- wizwalker's own
+    #: default rather than the shaved `cast_time`, because the second
+    #: click must land on a card window and an enchant happens at most
+    #: once a round; this is not where the fast timing was needed.
+    ENCHANT_CAST_TIME = 1.0
+
+    async def _maybe_enchant(self):
+        """Play one enchantment onto the best card in hand, before planning.
+
+        Wizard101's sun enchantments (Epic, Gargantuan, Sharpened
+        Blade, Potent Trap...) are FREE actions: played during the
+        selection phase onto another card in hand, they upgrade it --
+        +300 base damage from Epic, before blades and traps multiply --
+        without costing pips or the round. Until this pass the live
+        wizards could not play them at all: the names did not resolve,
+        so the cards sat hidden in hand for whole fights while every
+        nuke went out at its printed size.
+
+        It runs BEFORE `decide()`'s board read on purpose. The decision
+        is then made from a hand whose enchanted card carries its real
+        numbers -- `read_state` reconstitutes it via the resolver's
+        `enchanted_as` record -- so the TTK rollouts price the enchant
+        with no policy machinery at all: the lookahead simply sees a
+        645 Sunbird where a 345 one used to be, in this round's
+        candidates and every rollout line that draws it.
+
+        ONE enchant per round, deliberately: a cast reshuffles the hand
+        windows and every pointer this pass collected goes stale the
+        moment one goes out. The next round enchants the next card; a
+        fight long enough to want three enchants has the rounds.
+
+        Target choice is the human rule: a damage enchant onto the
+        biggest nuke, an AoE counted once per living enemy; Sharpened
+        Blade onto the biggest blade, Potent Trap onto the biggest
+        trap. Treasure cards, item cards and already-enchanted cards
+        are refused by the game and skipped here; a base name already
+        recorded under a DIFFERENT enchant is skipped too, because the
+        client's read says only THAT a card is enchanted, and two
+        enchantments on copies of one name could not be told apart.
+
+        Returns how many enchants were applied (0 or 1).
+        """
+        from w101_sim import (DMG_ENCHANTS, ENCHANT_CARDS,
+                              enchant_target_kinds)
+
+        resolver = getattr(self.backend, "resolver", None)
+        if resolver is None or not hasattr(resolver, "enchanted_as"):
+            return 0
+        try:
+            hand = await self.get_cards()
+        except Exception:
+            return 0
+        enchants, bases = [], []
+        for c in hand:
+            try:
+                if not await c.is_castable():
+                    continue
+                game_name = await c.name()
+                treasure = bool(await c.is_treasure_card())
+                item = bool(await c.is_item_card())
+                try:
+                    flagged = bool(await c.is_enchanted())
+                except Exception:
+                    flagged = False    # older wizwalker: assume plain
+            except Exception:
+                continue
+            key = ENCHANT_CARDS.get(game_name)
+            if key is not None:
+                enchants.append((c, key))
+                continue
+            if treasure or item or flagged:
+                continue
+            card = resolver.resolve(game_name, None)
+            if card is None or getattr(card, "source", "deck") != "deck":
+                continue
+            bases.append((c, card))
+        if not enchants or not bases:
+            return 0
+
+        # Strongest first: a hand holding Epic and Strong spends Epic's
+        # +300 on this round's best card. Percent enchants price 0 here
+        # and so go last, which is right -- a blade's +10 points is
+        # worth less than any damage enchant's flat hundreds.
+        enchants.sort(key=lambda ek: DMG_ENCHANTS.get(ek[1], 0.0),
+                      reverse=True)
+        living = 2                 # round 1 has no read; streets pack 2+
+        read = getattr(self.backend, "last_read", None)
+        state = getattr(read, "state", None)
+        if state is not None:
+            living = max(1, sum(1 for e in state.enemies if e.alive))
+
+        for c_enchant, key in enchants:
+            kinds = enchant_target_kinds(key)
+
+            def worth(entry):
+                _c, card = entry
+                if key in DMG_ENCHANTS:
+                    return card.damage * (living if card.aoe and living > 1
+                                          else 1)
+                return card.percent
+
+            legal = [b for b in bases
+                     if b[1].kind in kinds
+                     and resolver.enchanted_as.get(b[1].name, key) == key]
+            if not legal:
+                continue
+            c_base, card = max(legal, key=worth)
+            if worth((c_base, card)) <= 0:
+                continue
+            await c_enchant.cast(c_base,
+                                 sleep_time=self.ENCHANT_CAST_TIME)
+            resolver.enchanted_as[card.name] = key
+            return 1
+        return 0
+
     async def handle_round(self):
         """Time the round, then play it. See `_handle_round`.
 
@@ -1280,6 +1418,12 @@ class WizAiCombatHandler:
             # change and the walk to the sigil, not the game taking two
             # minutes over a planning phase.
             self._left_round_at = None
+            # A fresh duel deals a fresh hand: nothing in it is
+            # enchanted yet, so the record of what the pre-pass applied
+            # LAST fight must not reinterpret this one's cards.
+            resolver = getattr(self.backend, "resolver", None)
+            if resolver is not None:
+                getattr(resolver, "enchanted_as", {}).clear()
         waited = (None if self._left_round_at is None
                   else entered - self._left_round_at)
         self._planned = None
@@ -1328,6 +1472,12 @@ class WizAiCombatHandler:
         async with self.client.mouse_handler:
             import time
 
+            try:
+                await self._maybe_enchant()
+            except Exception:
+                # An enchant is an upgrade, never a prerequisite: any
+                # failure here must not cost the round's real cast.
+                pass
             began = time.monotonic()
             try:
                 decision = await self.backend.decide()
@@ -1366,7 +1516,7 @@ class WizAiCombatHandler:
 
             target = await self._resolve_target(
                 read, decision.target_index,
-                self.backend.cards.get(decision.card_name),
+                self._spec(decision.card_name),
                 ally=getattr(decision, "ally_name", ""))
             try:
                 # `sleep_time` is per pause and wizwalker pauses twice --
@@ -1467,7 +1617,7 @@ class WizAiCombatHandler:
                 return False
             target = await self._resolve_target(
                 read, decision.target_index,
-                self.backend.cards.get(decision.card_name),
+                self._spec(decision.card_name),
                 ally=getattr(decision, "ally_name", ""))
             held = await self._cards_in_hand()
             await card.cast(target, sleep_time=self.RETRY_CAST_TIME)
@@ -1532,7 +1682,7 @@ class WizAiCombatHandler:
                 f"the runner-up {pick.card} was no longer in hand either "
                 f"(weighed this round: {others})")
             return False
-        spec = self.backend.cards.get(pick.card)
+        spec = self._spec(pick.card)
         try:
             target = await self._resolve_target(read, pick.target, spec)
             held = await self._cards_in_hand()
@@ -1589,6 +1739,23 @@ class WizAiCombatHandler:
     #: `sleep_time` for the second attempt -- wizwalker's own default,
     #: which is what the fast one is a deliberate reduction from.
     RETRY_CAST_TIME = 1.0
+
+    def _spec(self, name):
+        """`WizAiBackend.card_spec`, through whatever backend this is.
+
+        The GUI's test stubs (and any older backend) carry only a
+        `.cards` dict; the enchant-aware lookup must not require the
+        richer class to exist.
+        """
+        spec = getattr(self.backend, "card_spec", None)
+        if callable(spec):
+            return spec(name)
+        cards = getattr(self.backend, "cards", None) or {}
+        card = cards.get(name) if name else None
+        if card is None and name:
+            from w101_sim import enchant_base
+            card = cards.get(enchant_base(name))
+        return card
 
     async def _cards_in_hand(self):
         """How many cards are in hand, or None if it will not read."""
@@ -1660,7 +1827,7 @@ class WizAiCombatHandler:
         those to fix three. If a single click turns out to be right in
         general, the next run says so and it can move.
         """
-        card = self.backend.cards.get(decision.card_name)
+        card = self._spec(decision.card_name)
         tgt = (_primary_target(card) or _target_from_kind(card)) if card \
             else None
         if tgt == "self":
@@ -1763,7 +1930,7 @@ class WizAiCombatHandler:
         failure being reported with its own.
         """
         bits = []
-        card = self.backend.cards.get(decision.card_name)
+        card = self._spec(decision.card_name)
         tgt = (_primary_target(card) or _target_from_kind(card)) if card \
             else None
         bits.append(f"aimed at {tgt or 'nothing'}")
