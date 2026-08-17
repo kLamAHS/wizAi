@@ -14967,7 +14967,11 @@ def test_a_bare_marker_with_no_prompt_holds_the_script_and_gathers(
     worker, seat, other = _at_the_sigil(monkeypatch)
     asyncio.run(worker._maybe_count_hold(seat))
     assert worker._countdown_held(), "the script was not held"
-    assert other.client.tped == [(100.0, 200.0, 0.0)], \
+    # Two landings on the same spot: the arrival pull, then the
+    # gather's re-check (the fixture's body position never moves, so
+    # the re-check reads the old gap; live it would be a no-op).
+    assert other.client.tped and all(
+        t == (100.0, 200.0, 0.0) for t in other.client.tped), \
         "the partner was not gathered onto the sigil"
     assert "countdown-hold" in [e["kind"] for e in seat.tel.questing]
     assert "countdown-hold" in [e["kind"] for e in other.tel.questing]
@@ -14975,13 +14979,58 @@ def test_a_bare_marker_with_no_prompt_holds_the_script_and_gathers(
 
 def test_the_prompt_up_case_belongs_to_the_scripts_own_check(monkeypatch):
     """A visible press-X prompt means NOT joined — the state the
-    preset's check classifies correctly and answers with X itself."""
+    preset's check classifies correctly and answers with X itself. No
+    hold — but the party is still pulled onto the marker, because the
+    countdown that X starts admits exactly the wizards standing there
+    when it fires."""
     import asyncio
 
     worker, seat, other = _at_the_sigil(monkeypatch, prompt=True)
     asyncio.run(worker._maybe_count_hold(seat))
     assert not worker._countdown_held()
-    assert other.client.tped == []
+    assert other.client.tped == [(100.0, 200.0, 0.0)], \
+        "the partner was not pulled in before the sigil starts"
+
+
+def test_the_party_is_pulled_in_the_moment_the_leader_arrives(monkeypatch):
+    """The operator's ask, rev 1b1f499c post-mortem: "why wouldn't we
+    move all of the accounts to the sigil at the same time so there's
+    no chance of them missing out on entering". The pull fires on the
+    leader's FIRST tick at a non-collect marker — before the debounce,
+    before any hold, prompt or no prompt — and once per visit, so a
+    working sigil's countdown never starts with the booster still up
+    the street."""
+    import asyncio
+
+    worker, seat, other = _at_the_sigil(monkeypatch, prompt=True)
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert other.client.tped == [(100.0, 200.0, 0.0)]
+    assert "party-pulled" in [e["kind"] for e in other.tel.questing]
+    # The same visit never pulls twice...
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert len(other.client.tped) == 1, "the same visit pulled twice"
+    # ...but leaving and coming back is a fresh visit, and a sigil
+    # yank-back needs the party brought in again.
+    seat.progress = ("MB_KnightsCourt", (90, 90, 0), seat.goal)
+    seat.marker_away = 5000.0
+    asyncio.run(worker._maybe_count_hold(seat))
+    seat.progress = ("MB_KnightsCourt", (2, 4, 0), seat.goal)
+    seat.marker_away = 8.0
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert len(other.client.tped) == 2, "the return visit pulled nobody"
+
+
+def test_a_collect_marker_pulls_nobody(monkeypatch):
+    """Reagent spots have no sigils, and a booster teleported onto
+    every mid-collect marker would just be dragged around the zone."""
+    import asyncio
+
+    worker, seat, other = _at_the_sigil(
+        monkeypatch,
+        goal="Collect Old Quack's Writings in Grand Exposition",
+        prompt=True)
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert other.client.tped == [], "a collect marker pulled the party"
 
 
 def test_a_defeat_marker_at_a_dungeon_holds_but_never_sweeps(monkeypatch):
