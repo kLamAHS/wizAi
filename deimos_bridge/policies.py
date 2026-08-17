@@ -860,7 +860,36 @@ def _split(action):
 #: The same runs also killed a hypothesis: buff rate is flat at 23-47%
 #: across ALL THREE rankings, so whatever drives over-buffing, it is
 #: not the losing-board objective.
-LOST_RANKING = "kills"
+#:
+#: "early-kills" is the third measurement, and the fight that forced it
+#: is rev 7b3d77a2's solo loss: Kakeda Shadow, a 700 HP storm minion
+#: chipping ~72 a round, sat at FULL HEALTH for all ten rounds while
+#: every damaging cast went into the 1,560 HP boss beside it, and the
+#: wizard died with the trap he had placed -- on the boss -- uncashed.
+#: The flat 0.4 cannot see why that is wrong: a line that kills the
+#: minion on turn 3 and a line that kills the boss on turn 11 both
+#: read "1 kill", and the tiebreak then banks more damage on the mob
+#: with more health to bank against, which is ALWAYS the boss. So the
+#: credit now scales with WHEN: a mob removed early protected the
+#: wizard for every remaining round, one removed at the horizon's edge
+#: protected nothing, and the early-killable mob is by definition the
+#: small one standing next to the boss. Same 0.4 ceiling per kill, so
+#: nothing about the sentinel buckets moves.
+#:
+#: Measured paired (n=200 per arm, same seed streams) on the fight's
+#: own board family -- the thin live-shaped fire deck vs Kakeda@700
+#: (flat 72 and 110) + catalog-casting Tomugawa@1560 -- and the
+#: guards. Minion-died-first rises in every cell (+2.5, +3.0, +1.5)
+#: with win rate a wash (-1.0/+0.0/+1.0, inside the ~2.4 noise floor),
+#: and the single-mob guard is BIT-IDENTICAL (95.5% both arms), which
+#: is the structural claim: a lone mob's death clears the board, so a
+#: sentinel line there has no kill for the timing to scale and the two
+#: modes cannot diverge. The full effect is bigger than the sim shows:
+#: the sim's boards are healthier than the live fight's (real TTS
+#: decks are thinner), so the sentinel regime rules more of a live
+#: fight than of these cells. The decision-level contract is in
+#: `tests/test_hivemind.py`'s early-kill tests.
+LOST_RANKING = "early-kills"
 
 #: The learned leaf value, if one is installed. `None` keeps the shipped
 #: behaviour bit-for-bit. When set, a rollout that runs out of horizon
@@ -1162,20 +1191,41 @@ def is_sentinel(turns, max_turns) -> bool:
     return turns > max_turns or float(turns) != int(turns)
 
 
-def _lost_score(rank, dealt, kills, turn):
+def _lost_score(rank, dealt, kills, turn, credit=None):
     """A 2-tuple, always: the caller unpacks (turns, neg_damage).
 
     The extra ordering rides in the RANK rather than as a third element,
     so the second stays real banked damage and the decision panel keeps
     showing a number that means something. The offsets are small enough
     that a lost line can never outrank a won one: at most 4 kills x 0.4
-    is 1.6, against the +1 that separates `stalled` from a clean win.
+    is 1.6, against the +1 that separates `stalled` from a clean win --
+    true of "early-kills" too, whose per-kill credit is capped at the
+    same 0.4.
+
+    `credit` is the timing-weighted kill credit `_rollout` computed for
+    "early-kills"; the other modes ignore it.
     """
-    if LOST_RANKING == "kills":
+    if LOST_RANKING == "early-kills" and credit is not None:
+        r = rank - credit
+        if credit and r <= _EARLY_KILL_HORIZON_GUARD and r == int(r):
+            # A continuous credit can land the rank on an exact integer
+            # at or below the horizon, which `is_sentinel`'s shape test
+            # would misread as a real turn count. Nudge it off; the
+            # ordering among sentinels moves by less than any credit
+            # difference the formula can produce.
+            r -= 1.0 / 1024.0
+        return (r, -dealt)
+    if LOST_RANKING in ("kills", "early-kills"):
         return (rank - 0.4 * kills, -dealt)
     if LOST_RANKING == "survive":
         return (rank - 0.05 * turn, -dealt)
     return (rank, -dealt)
+
+
+#: ranks at or under this that land on an exact integer get the nudge
+#: in `_lost_score` -- see the guard there. Horizons in live use are 6
+#: and 12; 40 covers anything `max_turns` is ever set to.
+_EARLY_KILL_HORIZON_GUARD = 40
 
 
 def _rollout(sim, state, first_action, max_turns=12, target=0,
@@ -1272,6 +1322,33 @@ def _rollout(sim, state, first_action, max_turns=12, target=0,
     def kills():
         return sum(1 for e in s.enemies if not e.alive)
 
+    #: which turn each enemy died on, in death order -- the raw material
+    #: of the "early-kills" ranking. Seeded with anything already dead
+    #: as a turn-1 kill so a corpse on the incoming board earns the
+    #: full 0.4 in every line identically (a wash, but a consistent
+    #: one, and the same 0.4 the flat mode gives it).
+    kill_turns = [1 for e in s.enemies if not e.alive]
+    _dead_seen = {i for i, e in enumerate(s.enemies) if not e.alive}
+
+    def note_kills(turn):
+        for i, e in enumerate(s.enemies):
+            if i not in _dead_seen and not e.alive:
+                _dead_seen.add(i)
+                kill_turns.append(turn)
+
+    def kill_credit():
+        """The flat 0.4-a-kill, scaled by how early each kill landed.
+
+        A mob removed on turn 2 stopped hitting this wizard for the
+        other ten turns of the horizon; one removed on the last turn
+        protected nothing, and rev 7b3d77a2's solo loss is what the
+        difference costs -- see `LOST_RANKING`. Capped at the same 0.4
+        a kill as the flat credit, so the sentinel buckets and
+        `is_sentinel`'s reasoning are untouched.
+        """
+        return sum(0.4 * (max_turns - t + 1) / max_turns
+                   for t in kill_turns)
+
     def died(turn=0):
         """Dying still banked whatever it banked.
 
@@ -1289,7 +1366,8 @@ def _rollout(sim, state, first_action, max_turns=12, target=0,
         one, so it is not an edge case -- it is a large fraction of every
         decision the lookahead makes.
         """
-        return _lost_score(max_turns + 2, dealt_now(), kills(), turn)
+        return _lost_score(max_turns + 2, dealt_now(), kills(), turn,
+                           credit=kill_credit())
 
     def stalled(turn=0):
         if _LEAF is not None:
@@ -1304,7 +1382,8 @@ def _rollout(sim, state, first_action, max_turns=12, target=0,
             except Exception:
                 worth = 0.0
             return (max_turns + 1, -(dealt_now() + worth * start_board))
-        return _lost_score(max_turns + 1, dealt_now(), kills(), turn)
+        return _lost_score(max_turns + 1, dealt_now(), kills(), turn,
+                           credit=kill_credit())
 
     # find the copied card matching the chosen one
     action = None
@@ -1337,12 +1416,14 @@ def _rollout(sim, state, first_action, max_turns=12, target=0,
             # by one round out of the horizon when a teammate is held or
             # casts nothing, which is the conservative direction.
             _allies_hit(s, allies, _ALLY_SCHOOLS, probe)
+        note_kills(turn)
         if not enemy_alive():
             return turn, -dealt_now(), -health_left()
         try:
             probe.end_round(s)
         except Exception:
             return stalled(turn) + (0.0,)
+        note_kills(turn)
         if not enemy_alive():
             # THIRD element, and it only ever has a value here: the board
             # is clear and what is left of this wizard is what the NEXT

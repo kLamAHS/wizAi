@@ -2022,6 +2022,92 @@ def test_a_stall_that_killed_three_mobs_is_still_a_stall(monkeypatch):
         f"turn count's clothes, and the thrifty branch fired on it")
 
 
+def test_an_early_kill_outranks_a_late_kill_on_a_losing_board(monkeypatch):
+    """Rev 7b3d77a2's solo loss, as a ranking fact. Two stalled lines,
+    one kill each: the line that removed the 700 HP minion on turn 3
+    banked LESS than the line that chipped the 1,560 HP boss down and
+    killed it at the horizon's edge -- more health to bank against --
+    and the flat 0.4-a-kill let banked damage decide. That is how the
+    minion sat at full health for ten rounds hitting ~72 a round while
+    the wizard died with 662 dealt. A mob removed early protects every
+    remaining round, so the credit scales with WHEN."""
+    from deimos_bridge import policies as P
+
+    monkeypatch.setattr(P, "LOST_RANKING", "early-kills")
+    horizon = 12
+    early = P._lost_score(13, 1232, 1, 0,
+                          credit=0.4 * (horizon - 3 + 1) / horizon)
+    late = P._lost_score(13, 1637, 1, 0,
+                         credit=0.4 * (horizon - 11 + 1) / horizon)
+    assert early < late, (
+        f"{early} vs {late}: the turn-3 minion kill lost to the "
+        f"turn-11 boss kill again")
+    # ...and under the flat credit the same two lines rank the other
+    # way, which is the recorded defect, kept visible on purpose.
+    monkeypatch.setattr(P, "LOST_RANKING", "kills")
+    assert P._lost_score(13, 1637, 1, 0) < P._lost_score(13, 1232, 1, 0)
+
+
+def test_the_early_kill_credit_cannot_fake_a_real_turn_count(monkeypatch):
+    """A continuous credit can land a sentinel rank on an exact integer
+    at or under the horizon -- e.g. three kills whose credits sum to
+    exactly 1.0 -- which `is_sentinel`'s shape test would misread as a
+    real turn count and hand to the in-horizon thrift key. The guard
+    nudges it off by less than any credit difference the formula can
+    produce."""
+    from deimos_bridge import policies as P
+
+    monkeypatch.setattr(P, "LOST_RANKING", "early-kills")
+    turns, _ = P._lost_score(13, 0.0, 3, 0, credit=1.0)
+    assert P.is_sentinel(turns, 12), (
+        f"rank {turns}: a stalled line with exactly 1.0 of kill credit "
+        f"read as a real in-horizon clear")
+
+
+def test_a_losing_board_removes_the_small_attacker_first(monkeypatch):
+    """The decision-level contract of "early-kills": on a board the
+    rollout cannot clear -- a small hitter beside a big boss -- the
+    damage goes to the mob that can actually be REMOVED early, not to
+    the one with the most health to bank damage against."""
+    from deimos_bridge import policies as P
+
+    monkeypatch.setattr(P, "LOST_RANKING", "early-kills")
+    sim, state = wizard(school="fire",
+                        hand=("Fire Cat", "Fire Elf", "Fireblade",
+                              "Fire Trap"),
+                        pips=3, hp=900, board=((120, "ice"), (2400, "ice")))
+    policy = P.greedy_ttk()
+    act = policy(sim, state)
+    assert all(P.is_sentinel(c.turns, c.horizon)
+               for c in policy.last_candidates), (
+        "this board was supposed to stall every line; the contract "
+        "under test is only about that regime")
+    card, tgt = act if isinstance(act, tuple) else (act, 0)
+    assert card is not None and card.kind in ("damage", "drain") \
+        and tgt == 0, (
+        f"played {getattr(card, 'name', card)!r} at enemy {tgt}: the "
+        f"120 HP attacker was left standing")
+
+
+def test_single_mob_boards_rank_identically_under_both_credits(monkeypatch):
+    """On one mob a sentinel line by definition killed nothing -- a dead
+    lone mob is a cleared board -- so the timing credit has nothing to
+    scale and the two modes must agree bit for bit. This is the guard
+    that keeps "early-kills" from touching any single-boss fight."""
+    from deimos_bridge import policies as P
+
+    def table(mode):
+        monkeypatch.setattr(P, "LOST_RANKING", mode)
+        sim, state = wizard(school="fire", hand=("Fire Cat", "Fireblade"),
+                            pips=2, hp=600, board=((2400, "ice"),))
+        policy = P.greedy_ttk()
+        policy(sim, state)
+        return [(c.card, c.target, c.turns, c.damage, c.chosen)
+                for c in policy.last_candidates]
+
+    assert table("kills") == table("early-kills")
+
+
 def test_the_ranking_is_total_enough_that_hand_order_does_not_decide():
     """A complete tie leaves `min` returning whatever the hand listed
     first, which is not a decision. Two copies of one card at different

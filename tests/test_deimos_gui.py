@@ -5933,19 +5933,22 @@ def test_search_does_not_stand_still_on_a_board_it_cannot_win():
 def test_the_losing_board_ranking_is_pluggable_and_defaults_to_shipped():
     """This branch fires on 17% of candidates on a level-5 board and on
     37-100% of them on a hard one, so it is worth keeping testable. The
-    default is "kills" since the live trace that posed the choice the
-    first measurement's boards never did: threat removal beat six
-    points of banked damage +2.4/+2.4/+1.2 across three paired
-    streams, and on boards without a kill on offer the credit is
-    provably decision-identical."""
+    default is "early-kills" since rev 7b3d77a2's solo loss: the flat
+    kill credit let banked damage keep every cast on the 1,560 HP boss
+    while the 700 HP minion chipped the wizard to death at full health,
+    because a turn-3 kill and a turn-11 kill both read "1 kill". Timing
+    the credit keeps the flat mode's own shipping argument -- upside
+    where threat removal is real, decision-identical where no kill is
+    on offer (single-mob boards measured bit-identical, n=200
+    paired)."""
     import deimos_bridge.policies as P
 
-    assert P.LOST_RANKING == "kills"
+    assert P.LOST_RANKING == "early-kills"
 
     original = P.LOST_RANKING
     try:
         P.LOST_RANKING = "damage"
-        # the previous shipped form: rank untouched, second element
+        # the oldest shipped form: rank untouched, second element
         # real banked damage
         assert P._lost_score(14, 250.0, 2, 5) == (14, -250.0)
 
@@ -5956,6 +5959,17 @@ def test_the_losing_board_ranking_is_pluggable_and_defaults_to_shipped():
         # A lost line can never outrank a won one: 4 kills is the most
         # the game offers and the win/stall gap is a whole point.
         assert P._lost_score(14, 0.0, 4, 0)[0] > 12
+
+        P.LOST_RANKING = "early-kills"
+        rank, dealt = P._lost_score(14, 250.0, 2, 5, credit=0.7)
+        assert dealt == -250.0, "damage must stay real for the panel"
+        assert rank == 14 - 0.7, "the timed credit rides in the rank"
+        # Same ceiling as the flat mode: 0.4 a kill at the earliest,
+        # so the lost/won separation argument carries over unchanged.
+        assert P._lost_score(14, 0.0, 4, 0, credit=1.6)[0] > 12
+        # Without a credit the mode degrades to the flat form rather
+        # than crashing -- callers outside `_rollout` predate it.
+        assert P._lost_score(14, 250.0, 2, 5) == (14 - 0.8, -250.0)
 
         P.LOST_RANKING = "survive"
         rank, dealt = P._lost_score(14, 250.0, 0, 9)
@@ -6830,16 +6844,17 @@ def test_a_casters_damage_is_not_billed_to_the_minion():
 
 
 def test_a_kill_outranks_slightly_more_banked_damage():
-    """The live trace that flipped LOST_RANKING: a dying board where
-    "bank the most damage" hit the full-health boss for 81 banked
+    """The live trace that first flipped LOST_RANKING: a dying board
+    where "bank the most damage" hit the full-health boss for 81 banked
     instead of removing a 75 HP attacker dealing ~50/round. The kill
-    credit prices threat removal; on boards without a kill on offer it
-    provably changes nothing."""
-    from deimos_bridge.policies import LOST_RANKING, _lost_score
+    credit prices threat removal, and the timed default keeps that
+    contract -- an actual kill still beats a few points of banked
+    damage, at every timing the credit can produce."""
+    from deimos_bridge.policies import _lost_score
 
-    assert LOST_RANKING == "kills"
-    kill_line = _lost_score(8, 75.0, 1, 4)      # kills the minion
-    bank_line = _lost_score(8, 81.0, 0, 4)      # 6 more banked, no kill
+    kill_line = _lost_score(8, 75.0, 1, 4,
+                            credit=0.4 * (6 - 4 + 1) / 6)
+    bank_line = _lost_score(8, 81.0, 0, 4, credit=0.0)
     assert min(kill_line, bank_line) == kill_line
 
 
