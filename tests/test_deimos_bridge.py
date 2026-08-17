@@ -647,6 +647,161 @@ def test_handler_targets_the_mob_the_policy_meant():
         f"aimed at {card.cast_log} instead of the summon"
 
 
+# ------------------------------------------------------------ enchantments
+def test_the_sun_enchant_cards_resolve():
+    """"Epic" in a live hand used to be an unresolvable name: hidden
+    from the policy, never played, a dead slot all fight. The catalog
+    now carries the sun enchantments as identity-only cards."""
+    from data_full import load_spells_full
+
+    r = NameResolver(load_spells_full())
+    for name in ("Epic", "Colossal", "Gargantuan", "Monstrous", "Giant",
+                 "Strong", "Sharpened Blade", "Sharpen Blade",
+                 "Potent Trap"):
+        card = r.resolve(name)
+        assert card is not None and card.kind == "enchant", name
+
+
+def test_the_enchant_pre_pass_upgrades_the_biggest_nuke():
+    """Epic goes onto the hand's best target BEFORE the round is
+    planned. AoE counts once per living enemy -- with no board read yet
+    the pass assumes a two-mob street -- so a 325 Meteor (650
+    effective) outranks a 555 Phoenix."""
+    be = _backend()
+    epic = MockCard("Epic")
+    meteor = MockCard("Meteor Strike")
+    phoenix = MockCard("Phoenix")
+    combat = MockCombat(
+        [MockMember("Wizard", 2000, client=True, normal_pips=4, team_id=0),
+         MockMember("Lost Soul", 900, monster=True, team_id=1)],
+        [epic, meteor, phoenix])
+    h = _Handler(combat, be)
+    assert run(h._maybe_enchant()) == 1
+    assert epic.cast_log == [meteor], "Epic went to the wrong card"
+    assert be.resolver.enchanted_as == {"Meteor Strike": "Epic"}
+    assert epic not in combat._hand, "the enchant was not consumed"
+
+
+def test_sharpened_blade_goes_to_the_blade():
+    be = _backend()
+    sharp = MockCard("Sharpened Blade")
+    blade = MockCard("Fireblade")
+    nuke = MockCard("Sunbird")
+    combat = MockCombat(
+        [MockMember("Wizard", 2000, client=True, normal_pips=4, team_id=0),
+         MockMember("Lost Soul", 900, monster=True, team_id=1)],
+        [sharp, blade, nuke])
+    h = _Handler(combat, be)
+    assert run(h._maybe_enchant()) == 1
+    assert sharp.cast_log == [blade]
+    assert be.resolver.enchanted_as == {"Fireblade": "Sharpen Blade"}
+
+
+def test_the_pre_pass_refuses_what_the_game_refuses():
+    """Treasure cards, item cards and already-enchanted cards are not
+    legal enchant targets; a hand offering only those keeps its
+    enchantment for a later round."""
+    be = _backend()
+    epic = MockCard("Epic")
+    combat = MockCombat(
+        [MockMember("Wizard", 2000, client=True, normal_pips=4, team_id=0),
+         MockMember("Lost Soul", 900, monster=True, team_id=1)],
+        [epic, MockCard("Sunbird", treasure=True),
+         MockCard("Sunbird", item=True),
+         MockCard("Sunbird", enchanted=True)])
+    h = _Handler(combat, be)
+    assert run(h._maybe_enchant()) == 0
+    assert epic.cast_log == []
+    assert be.resolver.enchanted_as == {}
+
+
+def test_one_enchant_per_round_strongest_first():
+    """Every cast reshuffles the hand's windows, so the pass applies
+    exactly one enchant a round -- and with Epic and Strong both in
+    hand, the +300 goes out first."""
+    be = _backend()
+    epic, strong = MockCard("Epic"), MockCard("Strong")
+    combat = MockCombat(
+        [MockMember("Wizard", 2000, client=True, normal_pips=4, team_id=0),
+         MockMember("Lost Soul", 900, monster=True, team_id=1)],
+        [epic, strong, MockCard("Sunbird"), MockCard("Meteor Strike")])
+    h = _Handler(combat, be)
+    assert run(h._maybe_enchant()) == 1
+    assert epic.cast_log and not strong.cast_log
+    assert be.resolver.enchanted_as == {"Meteor Strike": "Epic"}
+
+
+def test_read_state_reconstitutes_what_the_pre_pass_enchanted():
+    """The client's read says only THAT a card is enchanted; the
+    resolver's record of what the pre-pass applied says WHICH. The
+    policy's hand then carries the real, bigger card -- which is the
+    whole TTK integration: the rollouts price a 625 Sunbird where a
+    325 one used to be, with no policy machinery at all."""
+    from data_full import load_spells_full
+
+    r = NameResolver(load_spells_full())
+    r.enchanted_as["Sunbird"] = "Epic"
+    combat = MockCombat(
+        [MockMember("Wizard", 2000, client=True, team_id=0),
+         MockMember("Lost Soul", 900, monster=True, team_id=1)],
+        [MockCard("Sunbird", enchanted=True), MockCard("Sunbird")])
+    read = run(read_state(combat, r, "fire"))
+    names = sorted(c.name for c in read.state.hand)
+    assert names == ["Sunbird", "Sunbird+epic"]
+    plus = next(c for c in read.state.hand if c.name == "Sunbird+epic")
+    base = next(c for c in read.state.hand if c.name == "Sunbird")
+    assert plus.damage == base.damage + 300
+    assert "Sunbird+epic" in read.hand_cards, \
+        "the handler could not click the enchanted card by its name"
+
+
+def test_an_enchanted_card_nobody_registered_reads_as_its_base():
+    """A flagged card the pre-pass did not enchant -- a human clicked
+    one in -- resolves as its base rather than a guess: the damage
+    model's residual will say so, a stamped guess would not."""
+    from data_full import load_spells_full
+
+    r = NameResolver(load_spells_full())
+    combat = MockCombat(
+        [MockMember("Wizard", 2000, client=True, team_id=0),
+         MockMember("Lost Soul", 900, monster=True, team_id=1)],
+        [MockCard("Sunbird", enchanted=True)])
+    read = run(read_state(combat, r, "fire"))
+    assert [c.name for c in read.state.hand] == ["Sunbird"]
+
+
+def test_the_handler_casts_an_enchanted_card_at_the_enemy():
+    """The full loop. An enchanted name ("Sunbird+epic") exists only in
+    the hand it was enchanted in, never in the catalog -- the pick, the
+    target resolution and the cast all have to see through it."""
+    be = _backend(policy=lambda sim, s: "Sunbird+epic@0")
+    be.resolver.enchanted_as["Sunbird"] = "Epic"
+    enchanted = MockCard("Sunbird", enchanted=True)
+    boss = MockMember("Lost Soul", 900, monster=True, team_id=1)
+    combat = MockCombat(
+        [MockMember("Wizard", 2000, client=True, normal_pips=6, team_id=0),
+         boss],
+        [enchanted, MockCard("Fireblade")])
+    h = _Handler(combat, be)
+    # Mid-duel, not round 1: the enchant was applied in an earlier
+    # round of THIS fight, and a new duel would rightly clear it.
+    h._last_round_number = 0
+    run(h.handle_round())
+    assert enchanted.cast_log == [boss], \
+        f"the enchanted card went at {enchanted.cast_log}"
+    assert combat.passed == 0
+
+
+def test_a_new_duel_clears_the_enchant_registry():
+    """A fresh duel deals a fresh hand: nothing in it is enchanted yet,
+    so last fight's record must not reinterpret this one's cards."""
+    be = _backend(policy=lambda sim, s: None)
+    be.resolver.enchanted_as["Sunbird"] = "Epic"
+    h = _Handler(simple_fight(), be)
+    run(h.handle_round())
+    assert be.resolver.enchanted_as == {}
+
+
 def test_handler_survives_a_board_read_that_fails():
     """Memory reads fail mid-round when a duel ends under them. That
     costs a round; it must not end the fight."""

@@ -168,6 +168,14 @@ class NameResolver:
         self._reasons = catalog.get("reasons", {})
         self._known = catalog.get("known", set())
         self._langcodes = catalog.get("langcodes", {})
+        #: base card name -> enchant key applied to it THIS FIGHT, by
+        #: the enchant pre-pass. The client's card read exposes only a
+        #: boolean `is_enchanted` -- not which enchantment -- so the
+        #: layer that DID the enchanting records what it applied and
+        #: `read_state` reconstitutes the enchanted card from the pair.
+        #: Cleared by the combat handler at each new duel; an enchanted
+        #: card never survives its fight.
+        self.enchanted_as = {}
 
     # -- resolution -------------------------------------------------------
     def resolve(self, game_name: str, langcode: str = None,
@@ -788,6 +796,26 @@ async def read_state(combat, resolver: NameResolver, school: str,
             treasure=bool(await c.is_treasure_card()),
             item=bool(await c.is_item_card()),
         )
+        if card is not None:
+            try:
+                flagged = bool(await c.is_enchanted())
+            except Exception:
+                flagged = False   # older wizwalker; nothing to undo
+            if flagged:
+                # The read says only THAT it is enchanted; the pre-pass
+                # that applied it recorded WHICH (see
+                # `NameResolver.enchanted_as`). A flagged card nobody
+                # here enchanted -- a human clicked one in -- resolves
+                # as its base, which is exactly the pre-registry
+                # behaviour, and the damage model's residual will say
+                # so rather than a guess being stamped as a fact.
+                key = resolver.enchanted_as.get(card.name)
+                if key:
+                    try:
+                        from w101_sim import enchant_card
+                        card = enchant_card(card, key)
+                    except Exception:
+                        pass
         if card is None:
             # The card stays out of the policy's hand -- there is no wizAi
             # Card to reason about -- but it is *recorded*. Dropping it
