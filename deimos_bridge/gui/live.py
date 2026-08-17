@@ -570,6 +570,11 @@ class LiveWorker(QThread):
         #: press-X prompt seen (and pressed) at the spot. An evidenced
         #: sigil is never swept and re-arms on expiry; see the rung.
         self._count_hold_sigil = False
+        #: the seat indexes gathered under the running hold, so a mate
+        #: that crosses zones ALONE mid-hold -- the countdown fired
+        #: without the holder -- releases it at once instead of burning
+        #: out the clock. See `_maybe_count_hold`.
+        self._count_hold_party = ()
         #: when the running hold engaged, so a goal that advances AFTER
         #: it releases it -- the turn-in-not-a-sigil case.
         self._count_hold_began = 0.0
@@ -4720,12 +4725,184 @@ class LiveWorker(QThread):
     #: wizard already standing on it is not re-teleported -- every
     #: re-landing restarts the countdown.
     COUNT_HOLD_GATHER = 150.0
+    #: prompt polls for a gathered helper, at COUNT_HOLD_POLL_GAP
+    #: apiece -- the prompt takes a beat to render after a landing, and
+    #: one fixed sleep missed it live (rev 7e1980b5's T5 hold gathered
+    #: Oz and pressed nothing).
+    COUNT_HOLD_MATE_POLLS = 6
+    #: prompt polls for the holder itself once it is planted on the
+    #: pad. Longer than a helper's: rev 1b1f499c's leader got 3s five
+    #: times and rendered nothing in any of them, and the extra length
+    #: costs nothing inside a hold that is standing still anyway.
+    COUNT_HOLD_LEADER_POLLS = 8
+    #: seconds between prompt polls.
+    COUNT_HOLD_POLL_GAP = 0.5
+    #: how far the dead-prompt refresh steps the holder off the sigil
+    #: before bringing it back: past COUNT_HOLD_SENSE, where prompts
+    #: provably still show, so the client has actually LEFT the range
+    #: window and has to re-arm it on the way back in.
+    COUNT_HOLD_REFRESH = 800.0
+    #: how long the refreshed holder stands off the sigil before coming
+    #: back -- one beat, enough for the client to register the exit.
+    COUNT_HOLD_REFRESH_WAIT = 1.0
 
     def _countdown_held(self):
         """Is the script waiting out a possible sigil countdown?"""
         import time
 
         return time.monotonic() < self._count_hold_until
+
+    async def _press_on_prompt(self, seat, polls):
+        """Poll for this wizard's own press-X prompt; X when it shows.
+
+        True only when the prompt was SEEN and the press went -- the
+        proof `_join_leader` deals in.
+        """
+        from .. import questing
+
+        for _ in range(polls):
+            try:
+                if await questing.near_interactable(seat.client):
+                    ok, _why = await questing.press_x(seat.client)
+                    if ok:
+                        seat.tel.note_questing(
+                            "countdown-hold",
+                            "pressed X to join the sigil as the leader")
+                        self._say(seat,
+                                  f"{seat.name} presses X to join its "
+                                  f"own sigil")
+                        return True
+                    return False
+            except Exception:
+                return False
+            await asyncio.sleep(self.COUNT_HOLD_POLL_GAP)
+        return False
+
+    async def _join_leader(self, seat, here, pad):
+        """Put the holder aboard its own sigil: prompt seen, X pressed.
+
+        True only on that proof. Rev 1b1f499c is why nothing weaker
+        counts: five sensed holds at the Kyuto tower re-planted the
+        promptless leader on the exact pad the booster's prompt had
+        just been seen from, its own prompt never rendered once in 3s
+        of polling, and the booster -- whose X had already been pressed
+        -- rode every countdown in ALONE while the wizard whose quest
+        it was stood outside for nineteen minutes. The escalation:
+
+        1. Its own prompt is up (rendered after the hold armed): press
+           it. The script is frozen for the hold, so its Check_X_Key
+           cannot -- this X is the one nobody else will press.
+        2. Off the pad a helper's prompt was seen on: re-plant there
+           and poll. A hidden prompt off the pad usually just means
+           misplaced (rev 7e1980b5's first tower).
+        3. ON the pad and still promptless: the prompt is DEAD, and a
+           re-plant provably does not revive it (rev 1b1f499c: five
+           re-plants, zero prompts). Step out past the prompt's whole
+           range and back, so the client leaves the range window and
+           re-triggers it coming back in, then poll again. If the
+           wizard was in fact joined and counting, the step off
+           un-joins it -- and the X on the way back re-joins it with
+           proof, at the price of one counter restart, which the
+           mates' presses were about to cause anyway.
+        """
+        import math
+
+        from .. import questing
+
+        client = seat.client
+        try:
+            if await questing.near_interactable(client):
+                ok, _why = await questing.press_x(client)
+                if ok:
+                    seat.tel.note_questing(
+                        "countdown-hold",
+                        "this wizard's own press-X prompt rendered once "
+                        "the script was held — pressed X to join, which "
+                        "the frozen script could not")
+                    self._say(seat,
+                              f"{seat.name} presses X to join its own "
+                              f"sigil")
+                    return True
+        except Exception:
+            pass
+        if pad is None:
+            return False
+        gap = None
+        try:
+            if here is not None:
+                gap = math.hypot(pad.x - here.x, pad.y - here.y)
+        except Exception:
+            gap = None
+        if gap is None or gap > self.COUNT_HOLD_GATHER:
+            stood = (f"it stood {gap:,.0f} out" if gap is not None
+                     else "its own position would not read")
+            try:
+                await client.teleport(pad)
+            except Exception:
+                return False
+            seat.tel.note_questing(
+                "countdown-hold",
+                f"re-planted this wizard on the sigil pad its helper's "
+                f"prompt was seen from — {stood}, and a hidden prompt "
+                f"off the pad usually just means misplaced")
+            if await self._press_on_prompt(
+                    seat, self.COUNT_HOLD_LEADER_POLLS):
+                return True
+        # On the pad -- planted there or standing there all along --
+        # and the prompt still will not render: dead. Leave the range
+        # window entirely and come back in.
+        try:
+            marker, _why = await questing.read_quest_position(client)
+        except Exception:
+            marker = None
+        ux = uy = None
+        if marker is not None:
+            dx, dy = pad.x - marker.x, pad.y - marker.y
+            dist = math.hypot(dx, dy)
+            if dist >= 15.0:
+                # The marker sits inside the dungeon, so pad-minus-
+                # marker points back OUT of it, into the street the
+                # wizard came from.
+                ux, uy = dx / dist, dy / dist
+        if ux is None:
+            # Marker unreadable or sitting on the pad itself. The
+            # wizard still FACES the way it came at the sigil, so
+            # backward along its yaw leads back out (forward is the
+            # `- sin/cos` pair, see `_sweep_through`).
+            try:
+                yaw = await client.body.yaw()
+                ux, uy = math.sin(yaw), math.cos(yaw)
+            except Exception:
+                ux, uy = 1.0, 0.0
+        ox = pad.x + ux * self.COUNT_HOLD_REFRESH
+        oy = pad.y + uy * self.COUNT_HOLD_REFRESH
+        try:
+            out = type(pad)(ox, oy, pad.z)
+        except Exception:
+            from types import SimpleNamespace
+            out = SimpleNamespace(x=ox, y=oy, z=pad.z)
+        try:
+            await client.teleport(out)
+            await asyncio.sleep(self.COUNT_HOLD_REFRESH_WAIT)
+            await client.teleport(pad)
+        except Exception:
+            return False
+        seat.tel.note_questing(
+            "countdown-hold",
+            f"this wizard's prompt would not render ON the pad a "
+            f"helper's prompt shows from — stepped it "
+            f"{self.COUNT_HOLD_REFRESH:.0f} off the sigil and back to "
+            f"make the client re-trigger the range window, the thing a "
+            f"plain re-plant provably does not (rev 1b1f499c: five "
+            f"re-plants, zero prompts)")
+        if await self._press_on_prompt(seat, self.COUNT_HOLD_LEADER_POLLS):
+            return True
+        seat.tel.note_questing(
+            "countdown-hold",
+            "this wizard's press-X prompt never rendered — not "
+            "re-planted, not walked off and back. It cannot join, so "
+            "no partner is pressed in without it")
+        return False
 
     async def _sweep_after_hold(self, seat):
         """Chain an expired countdown hold into the walk-through sweep.
@@ -4839,6 +5016,48 @@ class LiveWorker(QThread):
                         f"the spot's business was a turn-in that "
                         f"completed, not a sigil. Script released at once")
                     self._say(seat, "the goal advanced — script released")
+                    return
+                if self._count_hold_sigil:
+                    # A gathered mate whose zone changed while the
+                    # holder's did not: the countdown fired WITHOUT
+                    # this wizard. Rev 1b1f499c burned the rest of a
+                    # 45s hold plus two replays on that state, five
+                    # times, while the booster bounced in and out of
+                    # the tower alone. Release at once -- the follow
+                    # drags the mate back within seconds, and clearing
+                    # the visit stamp lets a fresh gather retry the
+                    # moment it returns. (If the holder's own zone
+                    # read is merely a beat behind, this release is
+                    # the one the zone change was about to do anyway.)
+                    for other in self.seats:
+                        if other.index not in self._count_hold_party:
+                            continue
+                        if (other.zone_seen and self._count_hold_zone
+                                and other.zone_seen
+                                != self._count_hold_zone):
+                            self._count_hold_until = 0.0
+                            seat.count_hold_replays += 1
+                            fresh = (seat.count_hold_replays
+                                     < self.COUNT_HOLD_REPLAYS)
+                            if fresh:
+                                seat.count_hold_spot = None
+                                self._count_hold_last = NEVER
+                            seat.tel.note_questing(
+                                "countdown-hold-over",
+                                f"{other.name} crossed into another zone "
+                                f"mid-hold while this wizard's did not — "
+                                f"the countdown fired without it. "
+                                + (f"Released at once so the party can "
+                                   f"regroup for a fresh count"
+                                   if fresh else
+                                   f"This sigil has burned its retries; "
+                                   f"the script's own machinery gets "
+                                   f"the spot"))
+                            self._say(seat,
+                                      f"{other.name} rode the countdown "
+                                      f"in without {seat.name} — "
+                                      f"released to regroup")
+                            return
                 return
             self._count_hold_until = 0.0
             if holder:
@@ -4998,6 +5217,7 @@ class LiveWorker(QThread):
         self._count_hold_seat = seat.index
         self._count_hold_sigil = bool(sensed)
         self._count_hold_began = now
+        self._count_hold_party = tuple(s.index for s in mates)
         if sensed:
             spotted = ", ".join(o.name for o in sensed)
             saw = (f"{spotted} is standing at a press-X prompt beside "
@@ -5020,12 +5240,17 @@ class LiveWorker(QThread):
         # counter fires -- and standing on it is not joining it, the
         # operator's screenshots say so: the booster stood at "Press X
         # to Enter" through the whole countdown, twice, and entered
-        # nothing. So the gather does both halves: onto the spot, then
-        # X on every helper whose prompt shows -- POLLED, because the
-        # prompt takes a beat to render after a landing and one fixed
-        # sleep missed it live (rev 7e1980b5's T5 hold gathered Oz and
-        # pressed nothing).
+        # nothing. So the gather brings the party onto the spot and
+        # finds the pad (the exact position a prompt provably shows
+        # from) -- but presses NOTHING until the holder itself is
+        # aboard. Rev 1b1f499c ran the other order into the ground for
+        # nineteen minutes: the booster's X went first, the leader's
+        # prompt never rendered, and the counter fired the booster in
+        # ALONE five times while the wizard whose quest it was stood
+        # outside. A booster inside a dungeon without its quester
+        # helps nobody.
         pad = None
+        joiners = []
         for other in self.seats:
             if other is seat or other.client is None:
                 continue
@@ -5050,17 +5275,38 @@ class LiveWorker(QThread):
                                   f"{other.name} steps onto "
                                   f"{seat.name}'s sigil")
                 shows = False
-                for _ in range(6):
+                for _ in range(self.COUNT_HOLD_MATE_POLLS):
                     if await questing.near_interactable(other.client):
                         shows = True
                         break
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(self.COUNT_HOLD_POLL_GAP)
                 if not shows:
                     continue
                 try:
                     pad = await other.client.body.position() or pad
                 except Exception:
                     pass
+                joiners.append(other)
+            except Exception:
+                continue
+
+        # The holder boards first -- prompt seen, X pressed, nothing
+        # weaker -- and only then do the helpers get theirs, so their
+        # presses are the LAST joins and the whole party rides the
+        # final count down together.
+        aboard = await self._join_leader(seat, here, pad)
+        if pad is not None or aboard:
+            # A prompt was SEEN at this spot -- sigil evidence, whether
+            # a helper's or the holder's own. Evidenced spots re-arm on
+            # expiry and are never swept.
+            self._count_hold_sigil = True
+        if joiners and not aboard:
+            self._say(seat,
+                      f"{seat.name} could not join its own sigil — "
+                      f"nobody else is pressed in without it")
+            return
+        for other in joiners:
+            try:
                 ok, _why = await questing.press_x(other.client)
                 if ok:
                     other.tel.note_questing(
@@ -5073,45 +5319,6 @@ class LiveWorker(QThread):
                               f"sigil")
             except Exception:
                 continue
-
-        # The missing half, from rev 7e1980b5's first tower: the sensor
-        # read the leader's hidden prompt as "joined", the booster got
-        # its X, the counter fired -- and OZ ENTERED ALONE, because a
-        # hidden prompt can also mean MISPLACED: near the marker, off
-        # the pad, out of the prompt's range. A helper whose prompt was
-        # just seen marks the pad exactly, so a promptless leader is
-        # re-planted on it and pressed too. If it genuinely was joined,
-        # this un-joins and re-joins it -- the counter restarts once,
-        # the longer hold covers that, and both wizards ride it down
-        # together, which is the whole point of a booster party.
-        if pad is None:
-            return
-        try:
-            if await questing.near_interactable(seat.client):
-                return
-            await seat.client.teleport(pad)
-            self._count_hold_sigil = True
-            seat.tel.note_questing(
-                "countdown-hold",
-                f"re-planted this wizard on the sigil pad its helper's "
-                f"prompt was seen from — its own prompt was hidden, "
-                f"which can mean joined or merely misplaced, and the "
-                f"first tower at rev 7e1980b5 fired with only the "
-                f"booster aboard")
-            for _ in range(6):
-                if await questing.near_interactable(seat.client):
-                    ok, _why = await questing.press_x(seat.client)
-                    if ok:
-                        seat.tel.note_questing(
-                            "countdown-hold",
-                            f"pressed X to join the sigil as the leader")
-                        self._say(seat,
-                                  f"{seat.name} presses X to join its "
-                                  f"own sigil")
-                    break
-                await asyncio.sleep(0.5)
-        except Exception:
-            pass
 
     #: how long the quest position must be continuously unreadable --
     #: goal line reading fine the whole time -- before the hook counts
