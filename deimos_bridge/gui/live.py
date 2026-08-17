@@ -290,6 +290,10 @@ class _Seat:
         self.count_hold_seen = None
         self.count_hold_spot = None
         self.count_hold_replays = 0
+        #: the once-per-visit stamp for pulling the party onto this
+        #: wizard's quest marker the moment it arrives there. See
+        #: `LiveWorker._maybe_count_hold`.
+        self.party_pulled_spot = None
         #: since when this follower's follow has been continuously
         #: failing, how many attempts that is, and when the stranding
         #: alarm last fired. See `LiveWorker.STRANDED_ALARM_EVERY`.
@@ -5113,6 +5117,9 @@ class LiveWorker(QThread):
             # of the gate below, because "left" is usually noticed on a
             # tick when the marker reads far, which the gate ends.
             seat.count_hold_spot = None
+        if (seat.party_pulled_spot
+                and seat.progress != seat.party_pulled_spot):
+            seat.party_pulled_spot = None
         away = seat.marker_away
         goal = (seat.goal or "").strip().lower()
         fight = any(goal.startswith(w) for w in self.FIGHT_GOALS)
@@ -5140,6 +5147,52 @@ class LiveWorker(QThread):
         mates = [s for s in self.seats
                  if s is not seat and s.client is not None
                  and self._follows(s) and s.zone_seen == seat.zone_seen]
+        # The operator's ask, rev 1b1f499c post-mortem: "why wouldn't
+        # we move all of the accounts to the sigil at the same time so
+        # there's no chance of them missing out on entering". So the
+        # moment the leader reaches a non-collect quest marker -- the
+        # only places sigils live -- every follower in the zone is
+        # pulled onto it AT ONCE, concurrently, before any prompt,
+        # press or countdown exists to be late for. Ahead of every
+        # gate below on purpose: this must fire even when the prompt
+        # is up (the sigil that works first try) and even inside the
+        # hold's cooldown. The gather still re-checks positions later;
+        # in the common case this makes its teleports no-ops, and it
+        # makes "the booster was still up the street when the counter
+        # fired" impossible.
+        if (marker_case and mates and seat.progress is not None
+                and seat.party_pulled_spot != seat.progress):
+            seat.party_pulled_spot = seat.progress
+            spot = None
+            try:
+                if not await questing.in_battle(seat.client):
+                    spot = await seat.client.body.position()
+            except Exception:
+                spot = None
+            if spot is not None:
+                async def pull(other):
+                    try:
+                        if await questing.in_battle(other.client):
+                            return
+                        at = await other.client.body.position()
+                        gap = ((at.x - spot.x) ** 2
+                               + (at.y - spot.y) ** 2) ** 0.5
+                        if gap <= self.COUNT_HOLD_GATHER:
+                            return
+                        await other.client.teleport(spot)
+                        other.tel.note_questing(
+                            "party-pulled",
+                            f"pulled onto {seat.name}'s quest marker the "
+                            f"moment it arrived — a sigil admits exactly "
+                            f"the wizards standing on it when its counter "
+                            f"fires, so the party moves as one, before "
+                            f"any countdown exists to be late for")
+                        self._say(other,
+                                  f"{other.name} moves with {seat.name} "
+                                  f"to the marker")
+                    except Exception:
+                        pass
+                await asyncio.gather(*[pull(o) for o in mates])
         if seat.progress is None or (not marker_case and not mates):
             seat.count_hold_seen = None
             return
