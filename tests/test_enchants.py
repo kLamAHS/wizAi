@@ -268,3 +268,40 @@ def test_enchant_keeps_the_original_pip_cost():
     for name, ench in (("Fire Dragon", "Colossal"),
                        ("Fireblade", "Sharpen Blade")):
         assert enchant_card(CARDS[name], ench).pips == CARDS[name].pips
+
+
+def test_a_per_pip_spell_takes_the_bonus_once_not_per_pip():
+    """+300 on Tempest is +300 once, whatever the rack. Folding it into
+    the per-pip amount multiplied it by the rack -- Epic Tempest at
+    seven pips read 2,660 instead of 860 -- so the bonus rides as its
+    own flat companion op in the same group, which the engine lands
+    exactly once (`_resolve_ops` scales only `per_pip` ops)."""
+    base = CARDS["Tempest"]
+    e = enchant_card(base, "Epic")
+    per_pip = [o for o in e.ops if o.get("per_pip")]
+    flat = [o for o in e.ops if o["op"] == "hit" and not o.get("per_pip")]
+    assert per_pip and per_pip[0]["amount"] == base.ops[0]["amount"], \
+        "the per-pip amount was inflated by the flat bonus"
+    assert len(flat) == 1 and flat[0]["amount"] == 300.0
+    assert flat[0]["group"] == per_pip[0]["group"], \
+        "the bonus must share the original's charm/ward snapshot"
+    # The headline stays PER PIP; a flat bonus does not belong in it.
+    assert e.damage == base.damage
+
+
+def test_the_per_pip_bonus_lands_once_in_the_engine():
+    """Seven pips of Epic Tempest: 7 x 80 + 300 = 860, not 7 x 380."""
+    import random
+
+    cards = dict(CARDS)
+    e = enchant_card(cards["Tempest"], "Epic")
+    cards[e.name] = e
+    sim = _sim([e.name], cards)
+    sim.rng = random.Random(7)
+    s = sim.new_state()
+    s.player.norm_pips, s.player.pow_pips = 7, 0
+    s.player.hand = [e]
+    before = s.enemies[0].hp
+    sim.cast(s, e, 0)
+    dealt = before - s.enemies[0].hp
+    assert abs(dealt - 860.0) < 1.0, f"Epic Tempest at 7 pips dealt {dealt}"

@@ -715,10 +715,14 @@ def test_the_pre_pass_refuses_what_the_game_refuses():
     assert be.resolver.enchanted_as == {}
 
 
-def test_one_enchant_per_round_strongest_first():
-    """Every cast reshuffles the hand's windows, so the pass applies
-    exactly one enchant a round -- and with Epic and Strong both in
-    hand, the +300 goes out first."""
+def test_every_useful_enchant_goes_out_strongest_first():
+    """One-per-round was the first cut, and the operator caught its
+    cost the same day: Epic went onto Tempest, the round's own cast
+    was Stormblade, and the Sharpened Blade in hand never touched it
+    -- 10% lost for nothing, unrecoverable once the blade left the
+    hand. Every application re-reads the hand (a cast stales the
+    window pointers), and the strongest damage enchant still goes
+    first."""
     be = _backend()
     epic, strong = MockCard("Epic"), MockCard("Strong")
     combat = MockCombat(
@@ -726,9 +730,31 @@ def test_one_enchant_per_round_strongest_first():
          MockMember("Lost Soul", 900, monster=True, team_id=1)],
         [epic, strong, MockCard("Sunbird"), MockCard("Meteor Strike")])
     h = _Handler(combat, be)
-    assert run(h._maybe_enchant()) == 1
-    assert epic.cast_log and not strong.cast_log
-    assert be.resolver.enchanted_as == {"Meteor Strike": "Epic"}
+    assert run(h._maybe_enchant()) == 2
+    assert epic.cast_log and strong.cast_log, \
+        "an enchantment stayed in hand with a legal target open"
+    assert be.resolver.enchanted_as == {"Meteor Strike": "Epic",
+                                        "Sunbird": "Strong"}
+
+
+def test_the_tempest_stormblade_round_enchants_both():
+    """The reported round, exactly: Epic + Sharpened Blade in hand
+    beside Tempest and Stormblade. Epic onto the AoE, Sharpened Blade
+    onto the blade, both BEFORE the round is planned -- so the blade
+    the policy casts this round already carries its 45%."""
+    be = _backend()
+    epic, sharp = MockCard("Epic"), MockCard("Sharpened Blade")
+    tempest, blade = MockCard("Tempest"), MockCard("Stormblade")
+    combat = MockCombat(
+        [MockMember("Wizard", 2000, client=True, normal_pips=4, team_id=0),
+         MockMember("Lost Soul", 900, monster=True, team_id=1)],
+        [epic, sharp, tempest, blade])
+    h = _Handler(combat, be)
+    assert run(h._maybe_enchant()) == 2
+    assert epic.cast_log == [tempest]
+    assert sharp.cast_log == [blade]
+    assert be.resolver.enchanted_as == {"Tempest": "Epic",
+                                        "Stormblade": "Sharpen Blade"}
 
 
 def test_read_state_reconstitutes_what_the_pre_pass_enchanted():
