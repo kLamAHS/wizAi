@@ -4683,11 +4683,32 @@ class LiveWorker(QThread):
         if now - seat.door_walked_at < self.DOOR_WALK_EVERY:
             return False, ""
         door = self._doors.get((here, there))
+        into = there
         if door is None:
-            # Never seen anyone make this crossing. The leader's own
-            # last spot in THIS zone is the same fact one poll earlier,
-            # and it is what a leader that crossed before the map
-            # existed leaves behind.
+            # The leader is several rooms ahead, which is the ordinary
+            # case rather than the exception: rev e6201303's Konstantin
+            # crossed FIVE doors while Oz stood in the first room, so
+            # the map holds (6Room -> 6Room_2) and nothing at all keyed
+            # on the room he ended up in. The way forward is still the
+            # door he took out of THIS room. Walking it lands the
+            # follower one room closer and the next tick answers the
+            # next room, which is what following someone's route means.
+            #
+            # Prefer a door whose far side the leader has actually been
+            # through -- a room has more than one exit, and the one
+            # that matters is the one on the leader's own path.
+            route = {z for z, _t in (boss.zone_left or ())} | {there}
+            outs = [(to, v) for (frm, to), v in self._doors.items()
+                    if frm == here]
+            walked = [kv for kv in outs if kv[0] in route]
+            best = max(walked or outs, key=lambda kv: kv[1][1], default=None)
+            if best is not None:
+                into, door = best
+        if door is None:
+            # Never seen anyone leave this zone at all. The leader's own
+            # last spot in it is the same fact one poll earlier, and it
+            # is what a leader that crossed before the map existed
+            # leaves behind.
             if boss.last_spot is not None and boss.last_spot_zone == here:
                 door = (boss.last_spot, now, boss.name)
         if door is None:
@@ -4705,13 +4726,13 @@ class LiveWorker(QThread):
         seat.tel.note_questing(
             "door-walk",
             f"no teleport reaches {boss.name} in {there} ({why}) — walking "
-            f"the door {taught_by} was standing on when it made this same "
-            f"crossing out of {here}. A dungeon that refuses friends-list "
-            f"teleports still has doors, and the party watched this one "
-            f"being used")
+            f"the door {taught_by} was standing on when it crossed out of "
+            f"{here}" + ("" if into == there else f" into {into}, one room "
+            f"closer") + ". A dungeon that refuses friends-list teleports "
+            f"still has doors, and the party watched this one being used")
         self._say(seat,
                   f"{seat.name} cannot port to {boss.name} — walking the "
-                  f"door into {there.rsplit('/', 1)[-1]}")
+                  f"door into {into.rsplit('/', 1)[-1]}")
 
         client = seat.client
         self._hop_pause_until = now + self.DOOR_WALK_CEILING
@@ -4755,14 +4776,20 @@ class LiveWorker(QThread):
                 self.HOP_SETTLE if crossed else self.WALK_THROUGH_SETTLE)
         if crossed:
             seat.cross_zone_fails = 0
+            # A crossing that WORKED is the route working, and a
+            # follower five rooms behind has four more to walk. The
+            # cooldown exists to stop a walk that goes nowhere being
+            # retried twice a second, not to pace a chase that is
+            # succeeding.
+            seat.door_walked_at = NEVER
             seat.tel.note_questing(
                 "door-walk",
-                f"walked into the leader's zone on foot ({legs} leg(s)) — "
-                f"the teleport the game refused, done the way a player "
-                f"would do it")
-            return True, f"walked through the door into {there}"
+                f"walked out of {here} on foot ({legs} leg(s)) — the "
+                f"teleport the game refused, done the way a player would "
+                f"do it")
+            return True, f"walked through the door out of {here}"
         return False, (f"{seat.name} could not walk the door from {here} "
-                       f"into {there} either — teleported onto the spot "
+                       f"into {into} either — teleported onto the spot "
                        f"{taught_by} crossed from and swept {legs} leg(s) "
                        f"past it without the zone changing")
 

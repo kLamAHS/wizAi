@@ -15024,6 +15024,65 @@ def test_the_door_map_is_learned_by_watching_the_leader_cross(monkeypatch):
     assert ("6Room", "6Room_2") in worker._doors and len(worker._doors) == 1
 
 
+def test_a_leader_several_rooms_ahead_is_chased_one_door_at_a_time(
+        monkeypatch):
+    """The shape of the actual stranding, with the run's own zone names.
+    Konstantin crossed FIVE doors while Oz stood in the first room, so
+    the map holds (6Room -> 6Room_2) and nothing keyed on the room he
+    ended up in. Walking the door he took out of THIS room lands the
+    booster one room closer, and the next tick answers the next room --
+    which is what following someone's route means. A crossing that
+    worked also clears the retry cooldown, so a five-room chase is not
+    paced at one room per cooldown."""
+    import asyncio
+    import time
+    from types import SimpleNamespace
+
+    from deimos_bridge import party
+    from deimos_bridge.gui.live import NEVER
+
+    rooms = ["6Room", "6Room_2", "6Room_3", "6Room_4", "6Room_5", "6Room_6"]
+    worker, _read = _zoned_party([rooms[-1], rooms[0]])
+    boss, seat = worker.seats
+    worker.leader, worker.booster_party = boss.index, True
+    boss.client = _DoorWalkClient(pos=(9.0, 9.0, 0.0), zone=rooms[-1])
+    boss.zone_seen, seat.zone_seen = rooms[-1], rooms[0]
+    boss.wizard_name = "Konstantin V"
+    # The route he walked, and the doors the party watched him use.
+    t0 = time.monotonic() - 500.0
+    boss.zone_left = [(z, t0 + i * 20) for i, z in enumerate(rooms[:-1])]
+    for i in range(len(rooms) - 1):
+        worker._doors[(rooms[i], rooms[i + 1])] = (
+            SimpleNamespace(x=100.0 * (i + 1), y=0.0, z=0.0),
+            t0 + i * 20, boss.name)
+    # A second exit out of the first room that the leader never used --
+    # taught LAST, so "most recent" alone would take the wrong door.
+    worker._doors[(rooms[0], "SomeOtherStreet")] = (
+        SimpleNamespace(x=-999.0, y=0.0, z=0.0), time.monotonic(), seat.name)
+
+    async def refused(*a, **kw):
+        return False, "your friend is busy"
+
+    async def not_fighting(_c):
+        return False
+
+    monkeypatch.setattr(party, "follow", refused)
+    monkeypatch.setattr(party, "in_battle", not_fighting)
+
+    for i in range(len(rooms) - 1):
+        seat.client = _DoorWalkClient(pos=(1.0, 1.0, 0.0), zone=rooms[i],
+                                      crosses_into=rooms[i + 1],
+                                      crosses_on_leg=1)
+        seat.zone_seen = rooms[i]
+        seat.followed_at = NEVER
+        asyncio.run(worker._follow_step(seat.client, seat))
+        assert seat.client.tped == [(100.0 * (i + 1), 0.0, 0.0)], \
+            f"room {rooms[i]}: took the wrong door ({seat.client.tped})"
+        assert seat.client.zone == rooms[i + 1]
+        assert seat.door_walked_at == NEVER, \
+            "a working chase was left waiting out the retry cooldown"
+
+
 def test_the_leaders_own_last_spot_is_the_door_nobody_watched(monkeypatch):
     """A leader that crossed before the map existed still left the
     answer behind: the last place it was seen in the follower's zone."""
