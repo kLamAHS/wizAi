@@ -588,6 +588,14 @@ class LiveWorker(QThread):
         #: without the holder -- releases it at once instead of burning
         #: out the clock. See `_maybe_count_hold`.
         self._count_hold_party = ()
+        #: the running hold's boarding state: whether the holder is
+        #: provably aboard, the spot to board from, which mates are
+        #: waiting for their X, and when to try again. Boarding is
+        #: flaky rather than impossible -- see `_retry_boarding`.
+        self._count_hold_aboard = False
+        self._count_hold_pad = None
+        self._count_hold_joiners = ()
+        self._count_hold_retry = 0.0
         #: when the running hold engaged, so a goal that advances AFTER
         #: it releases it -- the turn-in-not-a-sigil case.
         self._count_hold_began = 0.0
@@ -4585,6 +4593,16 @@ class LiveWorker(QThread):
 
         away = seat.marker_away
         now = time.monotonic()
+        if self._countdown_held():
+            # A hold is guarding a sigil RIGHT NOW, and this rung walks
+            # wizards off spots. Rev e6201303: the leader's own hold ran
+            # 142.8-187.8 and this swept it four legs off the sigil at
+            # 179.6, in the middle of it -- the "walking out of the
+            # sigil for no reason" class, still alive through the other
+            # rung because the hold only ever gated the SCRIPT's
+            # teleports and never wizAi's own walk.
+            seat.through_since = None
+            return
         if away is None or away > self.WALK_THROUGH_NEAR:
             seat.through_since = None
             return
@@ -4983,6 +5001,12 @@ class LiveWorker(QThread):
     #: how long the refreshed holder stands off the sigil before coming
     #: back -- one beat, enough for the client to register the exit.
     COUNT_HOLD_REFRESH_WAIT = 1.0
+    #: how long between boarding attempts INSIDE a running hold. The
+    #: whole attempt -- refresh out, back, poll, press -- took 2.6s the
+    #: time it worked at rev e6201303, so this leaves room for the poll
+    #: to run out and still gives a 45s hold about five tries instead
+    #: of the one it used to get.
+    COUNT_HOLD_RETRY = 8.0
 
     def _countdown_held(self):
         """Is the script waiting out a possible sigil countdown?"""
@@ -5015,6 +5039,49 @@ class LiveWorker(QThread):
                 return False
             await asyncio.sleep(self.COUNT_HOLD_POLL_GAP)
         return False
+
+    async def _retry_boarding(self, seat):
+        """Try again to get the holder aboard, inside its own hold.
+
+        The boarding is FLAKY, not impossible, and rev e6201303 is the
+        proof: at t=142.8 the sensor fired, the refresh ran, the
+        prompt did not render, and the guard said "it cannot join, so
+        no partner is pressed in without it" -- then stood there doing
+        NOTHING for the remaining 39 seconds of its own hold. The hold
+        expired, re-armed, and at t=189.3 ran the IDENTICAL procedure,
+        which worked in 2.6 seconds and put the party in the dungeon.
+
+        One door, 160 seconds, and the only difference between the
+        attempt that failed and the attempt that worked was that the
+        second one happened. So the hold retries instead of waiting
+        itself out, and the moment the holder is aboard the mates get
+        the X that was being withheld from them.
+        """
+        import time
+
+        now = time.monotonic()
+        if self._count_hold_aboard or now < self._count_hold_retry:
+            return
+        self._count_hold_retry = now + self.COUNT_HOLD_RETRY
+        pad = self._count_hold_pad
+        try:
+            here = await seat.client.body.position()
+        except Exception:
+            here = None
+        if not await self._join_leader(seat, here, pad if pad is not None
+                                       else here):
+            return
+        self._count_hold_aboard = True
+        self._count_hold_sigil = True
+        seat.tel.note_questing(
+            "countdown-hold",
+            "boarded on a later try inside the same hold — the first "
+            "attempt at this sigil failed and the guard used to stand "
+            "still for the rest of its own hold rather than try again")
+        waiting = [o for o in self.seats
+                   if o.index in self._count_hold_joiners
+                   and o.client is not None]
+        await self._press_the_joiners(seat, waiting)
 
     async def _join_leader(self, seat, here, pad):
         """Put the holder aboard its own sigil: prompt seen, X pressed.
@@ -5063,6 +5130,16 @@ class LiveWorker(QThread):
                     return True
         except Exception:
             pass
+        if pad is None:
+            # No helper prompt was seen, so nothing marks the pad --
+            # but the wizard is standing at its own quest marker, which
+            # is the best evidence of where the sigil is that this case
+            # offers, and the refresh below is exactly what eventually
+            # worked at rev e6201303. Without this the marker-case hold
+            # had NOTHING to try: rev e6201303's first hold stood still
+            # for its full 45 seconds, with a partner on the spot, and
+            # neither wizard pressed anything.
+            pad = here
         if pad is None:
             return False
         gap = None
@@ -5296,6 +5373,10 @@ class LiveWorker(QThread):
                                       f"in without {seat.name} — "
                                       f"released to regroup")
                             return
+                # Still holding, still guarding a sigil, and the holder
+                # may not be on it yet. Try again rather than waiting
+                # the clock out -- see `_retry_boarding`.
+                await self._retry_boarding(seat)
                 return
             self._count_hold_until = 0.0
             if holder:
@@ -5587,11 +5668,25 @@ class LiveWorker(QThread):
             # a helper's or the holder's own. Evidenced spots re-arm on
             # expiry and are never swept.
             self._count_hold_sigil = True
+        # Kept for the retries: the boarding is FLAKY, not impossible,
+        # and giving up for the rest of the hold is what made rev
+        # e6201303 take 160 seconds to walk through one door. See
+        # `_retry_boarding`.
+        self._count_hold_aboard = bool(aboard)
+        self._count_hold_pad = pad if pad is not None else here
+        self._count_hold_joiners = tuple(o.index for o in joiners)
+        self._count_hold_retry = time.monotonic() + self.COUNT_HOLD_RETRY
         if joiners and not aboard:
             self._say(seat,
                       f"{seat.name} could not join its own sigil — "
                       f"nobody else is pressed in without it")
             return
+        await self._press_the_joiners(seat, joiners)
+
+    async def _press_the_joiners(self, seat, joiners):
+        """The helpers' X, once the holder is provably aboard."""
+        from .. import questing
+
         for other in joiners:
             try:
                 ok, _why = await questing.press_x(other.client)

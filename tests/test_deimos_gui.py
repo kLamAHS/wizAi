@@ -15003,6 +15003,27 @@ def test_a_press_x_prompt_owns_the_spot_not_the_walk(monkeypatch):
         "the stall clock should restart while the prompt shows"
 
 
+def test_a_sweep_never_walks_a_wizard_off_a_guarded_sigil(monkeypatch):
+    """The "walking out of the sigil for no reason" class, still alive
+    through the OTHER rung: the hold only ever gated the SCRIPT's
+    teleports, never wizAi's own walk. Rev e6201303's leader was inside
+    its own countdown hold (142.8-187.8) when this swept it four legs
+    off the sigil at 179.6."""
+    import asyncio
+    import time
+
+    worker, seat, client = _parked_at_the_door(monkeypatch)
+    worker._count_hold_until = time.monotonic() + 30.0
+    asyncio.run(worker._maybe_walk_through(seat))
+    assert client.legs == [], "swept a wizard whose sigil was being guarded"
+    # ...and the stall clock restarts, so the door still gets its walk
+    # once the hold is over and has proved there was no countdown.
+    worker._count_hold_until = 0.0
+    seat.through_since = time.monotonic() - worker.WALK_THROUGH_AFTER - 1.0
+    asyncio.run(worker._maybe_walk_through(seat))
+    assert client.legs, "the door never got its walk after the hold ended"
+
+
 def test_an_open_dialogue_owns_the_spot_not_the_walk(monkeypatch):
     import asyncio
 
@@ -15738,6 +15759,105 @@ def test_the_leader_is_replanted_onto_the_sensed_sigil(monkeypatch):
         "the leader was not re-planted on the pad"
     assert pressed == [seat.client, other.client], \
         "both wizards must join — the leader FIRST, then the helper"
+
+
+def test_the_hold_tries_again_instead_of_standing_still(monkeypatch):
+    """Rev e6201303, one door, 160 seconds. At t=142.8 the sensor
+    fired, the refresh ran, the prompt did not render, and the guard
+    said "it cannot join, so no partner is pressed in without it" --
+    then stood still for the remaining 39 seconds of its own hold. The
+    hold expired, re-armed, and ran the IDENTICAL procedure at
+    t=189.3, which worked in 2.6 seconds. The only difference between
+    the attempt that failed and the one that worked was that the
+    second one happened."""
+    import asyncio
+    import time
+
+    from deimos_bridge import questing
+
+    worker, seat, other = _at_the_sigil(
+        monkeypatch, goal="Talk To Hoi Mang in Crimson Fields")
+    worker.booster_party = True
+    worker.leader = seat.index
+    seat.marker_away = None
+    other.client = _SigilClient(pos=(400.0, 200.0, 0.0))
+    leader_prompt = []
+
+    async def near(c):
+        if c is other.client:
+            return True
+        return bool(leader_prompt)          # the leader's is dead, at first
+
+    pressed = []
+
+    async def press(c):
+        pressed.append(c)
+        return True, ""
+
+    monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "press_x", press)
+
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held()
+    assert pressed == [], "a helper was pressed in without the leader"
+    assert not worker._count_hold_aboard
+
+    # A tick inside the hold, before the retry is due: nothing happens.
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert pressed == []
+
+    # The retry comes due and the prompt renders this time — exactly
+    # the second attempt that worked live.
+    leader_prompt.append(True)
+    worker._count_hold_retry = time.monotonic() - 1.0
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._count_hold_aboard, "the retry never boarded the leader"
+    assert pressed == [seat.client, other.client], \
+        "the leader boarded but the waiting helper never got its X"
+    said = " ".join(e["detail"] for e in seat.tel.questing
+                    if e["kind"] == "countdown-hold")
+    assert "later try inside the same hold" in said
+
+    # ...and once aboard, further ticks stop retrying.
+    worker._count_hold_retry = time.monotonic() - 1.0
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert pressed == [seat.client, other.client]
+
+
+def test_a_marker_case_hold_has_something_to_try(monkeypatch):
+    """Rev e6201303's first hold stood still for its full 45 seconds
+    with a partner standing on the spot, and neither wizard pressed
+    anything: no helper prompt showed, so nothing marked the pad and
+    the boarding had nowhere to stand. The wizard's own quest marker is
+    the best evidence this case offers, and the off-and-back refresh
+    from it is what eventually worked."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+    tries = []
+
+    async def near(c):
+        # Nobody's prompt shows until the leader has been walked off
+        # the sigil and back (3 teleports).
+        tries.append(c)
+        return c is seat.client and len(seat.client.tped) >= 2
+
+    pressed = []
+
+    async def press(c):
+        pressed.append(c)
+        return True, ""
+
+    monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "press_x", press)
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held()
+    assert len(seat.client.tped) == 2, \
+        ("the marker-case hold had nothing to try and stood still "
+         "(or re-planted the wizard on the spot it was already on)")
+    assert pressed == [seat.client], "the leader never joined its own sigil"
 
 
 def test_an_evidenced_sigil_hold_rearms_instead_of_sweeping(monkeypatch):
