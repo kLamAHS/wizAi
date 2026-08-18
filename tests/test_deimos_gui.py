@@ -1459,6 +1459,105 @@ def _party_worker(goals=("a", "b"), ahead_at=(10.0, 5.0)):
     return worker
 
 
+def _lose_a_fight(worker, seat, opening, rounds=20, seats_in_plan=1):
+    """Play a losing duel into this seat's telemetry, then end it."""
+    from deimos_bridge.telemetry import RoundRecord
+
+    seat.tel.start_fight()
+    index = seat.tel.fights[-1].index
+    for i in range(rounds):
+        seat.tel.rounds.append(RoundRecord(
+            fight=index, round=i + 1, passing=False,
+            seats_in_plan=seats_in_plan))
+    seat.tel.fights[-1].opening = opening
+    seat.tel.fights[-1].rounds = rounds
+    seat.tel.end_fight(False)
+    worker._note_the_loss(seat, False)
+
+
+def test_a_lost_fight_is_written_down_at_all(qapp):
+    """It was not. `FightRecord.won` is read by the export's win count
+    and a red label in the panel, and by nothing else -- so rev
+    8ebfcf70's Konstantin lost three duels to the same boss across
+    thirty minutes and neither export contains one line saying a fight
+    had been lost."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.zone_seen = "DS_Necropolis_Gauntlet_5Room2_Sub/5Room2_5"
+    _lose_a_fight(worker, seat, "Drusilla Morningbane@2400+War Wyrm@685")
+    lost = [e for e in seat.tel.questing if e["kind"] == "lost"]
+    assert lost, [e["kind"] for e in seat.tel.questing]
+    assert "Drusilla Morningbane@2400" in lost[0]["detail"]
+    assert "planned alone" in lost[0]["detail"], \
+        "a duel nobody else was in did not say so"
+
+
+def test_losing_the_same_fight_twice_is_called_a_wall(qapp):
+    """Once is bad luck. Twice is the same ten minutes spent to learn
+    the same thing, and the third attempt -- which rev 8ebfcf70 made --
+    costs another ten and learns nothing again. Said to EVERY seat: a
+    quester dying alone is the booster's problem too."""
+    worker = _party_worker()
+    seat, other = worker.seats
+    seat.zone_seen = "5Room2_5"
+    opening = "Drusilla Morningbane@2400+War Wyrm@685"
+    _lose_a_fight(worker, seat, opening)
+    assert not [e for e in seat.tel.questing if e["kind"] == "boss-wall"], \
+        "one loss is not a wall"
+    _lose_a_fight(worker, seat, opening)
+    wall = [e for e in seat.tel.questing if e["kind"] == "boss-wall"]
+    assert len(wall) == 1, f"the wall was named {len(wall)} time(s)"
+    assert "2 times" in wall[0]["detail"]
+    assert "alone" in wall[0]["detail"]
+    assert [e for e in other.tel.questing if e["kind"] == "boss-wall"], \
+        "the other wizard's export says nothing about it"
+
+
+def test_the_wall_is_named_once_not_on_every_further_loss(qapp):
+    """A third and fourth loss are the same fact. Repeating the line
+    turns the run's headline back into noise."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    for _ in range(4):
+        _lose_a_fight(worker, seat, "Big Boss@9000")
+    assert len([e for e in seat.tel.questing
+                if e["kind"] == "boss-wall"]) == 1
+
+
+def test_two_different_bosses_are_not_one_wall(qapp):
+    """Keyed on the opening board, which is already the join key
+    between two wizards' exports. Losing once to each of two fights is
+    a hard zone, not a wall."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    _lose_a_fight(worker, seat, "Boss A@2400")
+    _lose_a_fight(worker, seat, "Boss B@2400")
+    assert not [e for e in seat.tel.questing if e["kind"] == "boss-wall"]
+
+
+def test_a_won_fight_records_nothing(qapp):
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.tel.start_fight()
+    seat.tel.fights[-1].opening, seat.tel.fights[-1].rounds = "Mob@100", 2
+    seat.tel.end_fight(True)
+    worker._note_the_loss(seat, True)
+    assert not [e for e in seat.tel.questing
+                if e["kind"] in ("lost", "boss-wall")]
+
+
+def test_an_unknown_outcome_is_not_a_loss(qapp):
+    """`_fight_outcome` answers None for a fight that recorded no rounds
+    -- a spurious boundary. Counting that as a defeat would invent walls
+    out of nothing."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.tel.start_fight()
+    seat.tel.end_fight(None)
+    worker._note_the_loss(seat, None)
+    assert not [e for e in seat.tel.questing if e["kind"] == "lost"]
+
+
 def test_the_wizard_that_got_ahead_goes_back_for_the_other(qapp):
     """The reported failure: "sometimes one will get ahead of the other
     and it'll keep going despite being on a different quest".
@@ -8873,6 +8972,103 @@ def test_the_friends_list_teleport_is_bounded(qapp, monkeypatch):
     assert "Online Friends" in why, why
 
 
+def _tp_reason(monkeypatch, raises, friends_name=None):
+    """Run the cross-zone follow against a teleport that fails one
+    particular way, and hand back the reason it reports."""
+    import asyncio
+    import sys
+    import types
+
+    from deimos_bridge import party
+
+    tried = []
+
+    async def _fails(_client, name=None):
+        tried.append(name)
+        raise raises
+
+    class _Mouse:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_a):
+            return False
+
+    class _Follower:
+        mouse_handler = _Mouse()
+
+    async def _no_list(*_a, **_kw):
+        return friends_name or ""
+
+    for name in ("wizwalker", "wizwalker.extensions"):
+        stub = types.ModuleType(name)
+        stub.__path__ = []
+        sys.modules[name] = stub
+    mod = types.ModuleType("wizwalker.extensions.scripting")
+    mod.teleport_to_friend_from_list = _fails
+    sys.modules["wizwalker.extensions.scripting"] = mod
+    monkeypatch.setattr(party, "friends_list_name", _no_list)
+    monkeypatch.setattr(party, "_hardened_friend_tp", lambda: _fails)
+    try:
+        ok, why = asyncio.run(
+            party.teleport_to_leader_across_zones(_Follower(), "Jeffrey"))
+    finally:
+        for name in ("wizwalker.extensions.scripting",
+                     "wizwalker.extensions", "wizwalker"):
+            sys.modules.pop(name, None)
+        party._FULL_NAMES.clear()
+    return ok, why, tried
+
+
+def test_a_teleport_the_game_never_saw_does_not_report_a_refusal(qapp,
+                                                                monkeypatch):
+    """Rev 8ebfcf70's whole export. Seventeen cross-zone follows failed
+    with `No child window named wndCharacter`, and every one of the 47
+    door walks that followed printed "a dungeon that refuses
+    friends-list teleports". No dungeon refused anything: `btnGoToFriend`
+    lives on the character panel that never opened, so the game was
+    never asked. One of those is a game rule to route around and the
+    other is a bug the operator can fix, and the export called the
+    second one the first."""
+    from deimos_bridge import party
+
+    ok, why, _tried = _tp_reason(
+        monkeypatch, ValueError("No child window named wndCharacter"))
+    assert ok is False
+    assert "never attempted" in why, why
+    assert party.never_asked(why), \
+        "the door walk cannot tell this from the game refusing"
+    assert "not on the list" not in why and "friends list — they have" \
+        not in why, "a UI failure was diagnosed as a broken friendship"
+
+
+def test_a_ui_failure_is_not_fatal_for_every_spelling(qapp, monkeypatch):
+    """A duel reports "Konstantin" and the friends list holds
+    "Konstantin V", so the call tries more than one spelling. A window
+    that would not open says nothing at all about which spelling is
+    right -- treating it as fatal threw away the other attempts on the
+    one failure that had nothing to do with the name."""
+    ok, _why, tried = _tp_reason(
+        monkeypatch, ValueError("No child window named wndCharacter"),
+        friends_name="Jeffrey IslandBringer")
+    assert ok is False
+    assert "Jeffrey IslandBringer" in tried, \
+        f"the list's own spelling was never tried: {tried}"
+
+
+def test_the_game_actually_refusing_still_reads_as_a_refusal(qapp,
+                                                            monkeypatch):
+    """The other half. "Your friend is busy" arrives as a modal AFTER
+    the teleport is requested, and door-walking IS the right answer to
+    it -- so it must not be reclassified along with the UI failures."""
+    from deimos_bridge import party
+
+    ok, why, _tried = _tp_reason(
+        monkeypatch, ValueError("No child window named MessageBoxModalWindow"))
+    assert ok is False
+    assert not party.never_asked(why), why
+
+
 def test_a_cut_off_teleport_still_puts_the_friends_list_away(qapp,
                                                             monkeypatch):
     """The one failure wizwalker's own cleanup cannot cover.
@@ -11195,6 +11391,58 @@ def test_moving_zone_restarts_the_clock(monkeypatch):
 
 def test_a_solo_wizard_is_never_left_behind(monkeypatch):
     worker, read_zone = _zoned_party(["Olde Town"])
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+
+
+def test_a_party_of_two_still_has_a_wizard_left_behind(monkeypatch):
+    """A majority of two needs three wizards, so `n < 2` used to return
+    "no evidence" for every two-wizard party -- and with it the whole
+    mechanism: the stranding clock never started, `stranded_where` was
+    never set, and not one `stranded`, `rejoined`, `rejoin-failed` or
+    `rejoin-skipped` line could ever be written.
+
+    Rev 8ebfcf70 is forty-seven minutes of exactly that. Oz sat in
+    `DS_Necropolis_Gauntlet_5Room2` while Konstantin quested four rooms
+    deeper, and both exports contain zero entries from this rung.
+
+    Two wizards in two zones still has an answer, and the rest of the
+    file already uses it: the leader's zone is the party's zone."""
+    worker, read_zone = _zoned_party(["Olde Town", "Unicorn Way"])
+    worker.leader = 0
+    assert _look(worker, read_zone, monkeypatch) == (None, None), \
+        "the first look only starts the clock"
+    worker.seats[1].stranded_since -= worker.STRANDED_AFTER + 1
+    seat, target = _look(worker, read_zone, monkeypatch)
+    assert seat is worker.seats[1], "the follower was not spotted adrift"
+    assert target is worker.seats[0], "the leader is the party's zone"
+    assert worker.seats[1].stranded_where == "Unicorn Way"
+
+
+def test_a_party_of_two_measures_adrift_from_the_leader_not_the_seat_order(
+        monkeypatch):
+    """Which of the two is adrift is decided by which one is the leader,
+    not by index. A booster run points the leader at the quester -- the
+    wizard whose questline the run levels -- and the booster is the one
+    that has to come back."""
+    worker, read_zone = _zoned_party(["Olde Town", "Unicorn Way"])
+    worker.leader = 1                     # the quester is seat 2
+    _look(worker, read_zone, monkeypatch)
+    worker.seats[0].stranded_since -= worker.STRANDED_AFTER + 1
+    seat, target = _look(worker, read_zone, monkeypatch)
+    assert seat is worker.seats[0] and target is worker.seats[1]
+
+
+def test_a_party_of_two_that_is_together_is_left_alone(monkeypatch):
+    worker, read_zone = _zoned_party(["Olde Town", "Olde Town"])
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+
+
+def test_a_party_of_two_decides_nothing_on_an_unreadable_leader(monkeypatch):
+    """No reference, no verdict. Guessing which of two wizards is the
+    stray when the one they are measured against would not read is how
+    a wizard standing exactly where it belongs gets teleported away."""
+    worker, read_zone = _zoned_party(["Olde Town", None])
+    worker.leader = 1
     assert _look(worker, read_zone, monkeypatch) == (None, None)
 
 
@@ -15123,6 +15371,18 @@ class _DoorWalkClient:
             self.zone = self.crosses_into
 
 
+def _spot(x, y, z=0.0):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(x=x, y=y, z=z)
+
+
+def _door_how(door):
+    from deimos_bridge.gui.live import _door_how as how
+
+    return how(door)
+
+
 def _stranded_in_a_dungeon(monkeypatch, door=True, crosses_on_leg=1):
     """A booster one room behind its quester, with no teleport that works."""
     import time
@@ -15207,7 +15467,7 @@ def test_the_door_map_is_learned_by_watching_the_leader_cross(monkeypatch):
     asyncio.run(worker._check_together())
     door = worker._doors.get(("6Room", "6Room_2"))
     assert door is not None, f"no door learned: {sorted(worker._doors)}"
-    spot, _at, taught_by = door
+    spot, _at, taught_by = door[0], door[1], door[2]
     assert (spot.x, spot.y, spot.z) == (300.0, 0.0, 0.0), \
         "the door is not where the leader was standing when it left"
     assert taught_by == boss.name, "the crossing was credited to nobody"
@@ -15286,6 +15546,136 @@ def test_the_leaders_own_last_spot_is_the_door_nobody_watched(monkeypatch):
     asyncio.run(worker._follow_step(seat.client, seat))
     assert seat.client.tped == [(250.0, 25.0, 0.0)]
     assert seat.client.zone == "6Room_2"
+
+
+def test_a_door_is_learned_from_a_fresh_sample_not_a_six_second_old_one():
+    """The aim, and the reason 47 walks crossed nothing.
+
+    A door is inferred from the last place a wizard stood before its
+    zone changed, so the AGE of that sample is the door's position
+    error. Learned off the six-second party poll it is up to ~3,500
+    units at a walking pace, against a `DOOR_WALK_PAST` of 250 -- the
+    booster was teleporting most of a room from the door it was aiming
+    at. `_note_spot` samples on the seat's own second-by-second tick,
+    and records how old the sample was so an export can tell a bad aim
+    from a door that will not open."""
+    import asyncio
+
+    from deimos_bridge.gui.live import NEVER
+
+    worker, _read = _zoned_party(["6Room", "6Room"])
+    boss, _seat = worker.seats
+    boss.client = _DoorWalkClient(pos=(300.0, 0.0, 0.0), zone="6Room")
+
+    asyncio.run(worker._note_spot(boss))
+    assert boss.spot_zone == "6Room"
+    assert worker._doors == {}, "a door was invented without a crossing"
+
+    # A second later it is through, and the door is where it stood.
+    boss.spot_at = NEVER                  # the poll is due again
+    boss.client.zone = "6Room_2"
+    asyncio.run(worker._note_spot(boss))
+    door = worker._doors.get(("6Room", "6Room_2"))
+    assert door is not None, f"no door learned: {sorted(worker._doors)}"
+    assert (door[0].x, door[0].y) == (300.0, 0.0)
+    assert door[3] is not None and door[3] < worker.TOGETHER_POLL, \
+        f"the door is as stale as the party poll it replaced: {door[3]}"
+
+
+def test_a_fresher_sighting_of_a_door_beats_a_staler_one():
+    """The map is overwritten on every crossing, so a wizard that
+    strolls the same door six seconds after entering the room would
+    otherwise replace a sample taken beside it."""
+    import time
+    from types import SimpleNamespace
+
+    worker, _read = _zoned_party(["6Room", "6Room"])
+    boss, seat = worker.seats
+    now = time.monotonic()
+    worker._doors[("6Room", "6Room_2")] = (
+        SimpleNamespace(x=300.0, y=0.0, z=0.0), now, boss.name, 0.4, "walked")
+
+    seat.spot_zone, seat.spot_seen = "6Room", SimpleNamespace(
+        x=-999.0, y=0.0, z=0.0)
+    worker._learn_door(seat, "6Room_2", now, spot=seat.spot_seen,
+                       sampled=now - 6.0)
+    kept = worker._doors[("6Room", "6Room_2")]
+    assert kept[0].x == 300.0, \
+        "a six-second-old sighting replaced a fresh one"
+
+
+def test_a_sigil_is_not_a_door_and_is_never_swept_at(monkeypatch):
+    """The run's own A/B, and the thing no aim can fix. At rev 8ebfcf70
+    Konstantin stood 127 units from the marker, "walked 4 leg(s) through
+    and past it and the zone did not change", then pressed X twelve
+    seconds later and was inside. A sigil admits the wizards standing on
+    it when its counter fires; walking through the pad crosses nothing.
+
+    So a transition the party watched being ridden in on a press-X
+    countdown must not be answered with the four-leg sweep -- which held
+    the whole party's script for up to 45s a time, 47 times, and called
+    every one of them a door."""
+    import asyncio
+    import time
+
+    worker, seat, boss = _stranded_in_a_dungeon(monkeypatch, door=False)
+    # The leader crossed by pressing X, which is what makes it a sigil.
+    boss.spot_zone = "6Room"
+    boss.spot_seen = _spot(500.0, 0.0)
+    boss.pressed_x_at = time.monotonic()
+    worker._learn_door(boss, "6Room_2", time.monotonic(),
+                       spot=boss.spot_seen, sampled=time.monotonic() - 0.5)
+    assert _door_how(worker._doors[("6Room", "6Room_2")]) == "sigil"
+
+    asyncio.run(worker._follow_step(seat.client, seat))
+    assert seat.client.tped == [], "the follower was teleported onto a sigil"
+    assert seat.client.legs == [], "the follower swept at a sigil"
+    said = [e for e in seat.tel.questing if e["kind"] == "route-is-a-sigil"]
+    assert said, [e["kind"] for e in seat.tel.questing]
+    assert "board it together" in said[0]["detail"]
+
+
+def test_a_door_walked_on_foot_is_still_walked(monkeypatch):
+    """The other half of the same rule: an X press long ago does not
+    turn every later crossing into a sigil."""
+    import asyncio
+    import time
+
+    worker, seat, boss = _stranded_in_a_dungeon(monkeypatch, door=False)
+    boss.spot_zone, boss.spot_seen = "6Room", _spot(300.0, 0.0)
+    boss.pressed_x_at = time.monotonic() - worker.SIGIL_CROSS_WINDOW - 1
+    worker._learn_door(boss, "6Room_2", time.monotonic(),
+                       spot=boss.spot_seen, sampled=time.monotonic() - 0.5)
+    assert _door_how(worker._doors[("6Room", "6Room_2")]) == "walked"
+    asyncio.run(worker._follow_step(seat.client, seat))
+    assert seat.client.tped == [(300.0, 0.0, 0.0)], "the door was not walked"
+
+
+def test_a_route_that_keeps_failing_is_named_once_loudly(monkeypatch):
+    """`cross_zone_fails` was written in three places and read in none,
+    so the door walk's only pacing was its 20-second cooldown and it
+    retried the same failing route 47 times without the run ever
+    escalating. Counted per (from, to) now -- a seat-wide counter cannot
+    say WHICH route is the wall -- and said once to every seat, because
+    a booster that cannot reach its quester is the run's headline and
+    not a follow-tick detail."""
+    import asyncio
+
+    from deimos_bridge.gui.live import NEVER
+
+    worker, seat, boss = _stranded_in_a_dungeon(monkeypatch,
+                                                crosses_on_leg=None)
+    for _ in range(worker.DOOR_WALK_GIVE_UP):
+        seat.followed_at = seat.door_walked_at = NEVER
+        seat.client.zone = "6Room"
+        asyncio.run(worker._follow_step(seat.client, seat))
+    assert seat.door_fails[("6Room", "6Room_2")] == worker.DOOR_WALK_GIVE_UP
+    said = [e for e in seat.tel.questing if e["kind"] == "route-impassable"]
+    assert len(said) == 1, \
+        f"the wall was named {len(said)} time(s), not once"
+    assert "5 times running" in said[0]["detail"]
+    assert [e for e in boss.tel.questing if e["kind"] == "route-impassable"], \
+        "only the stranded seat's export carries the run's headline"
 
 
 def test_a_way_in_nobody_knows_is_said_rather_than_retried(monkeypatch):

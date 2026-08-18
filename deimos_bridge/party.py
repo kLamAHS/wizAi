@@ -346,6 +346,39 @@ async def _put_the_friends_list_away(client):
     return True
 
 
+#: the windows the friends-list teleport walks through before the game
+#: is asked for anything. A failure naming one of these happened on
+#: wizAi's side of the glass: the list, or the character panel the row
+#: click is supposed to open. `btnGoToFriend` -- the click that
+#: actually requests a teleport -- lives on that panel, so none of
+#: these can be the game refusing.
+_UI_WINDOWS = ("wndCharacter", "NewFriendsListWindow", "btnFriends",
+               "listFriends", "the friends list would not come up")
+
+#: what the operator can do about it, said in the reason rather than
+#: left to be inferred. The wedge this names is `_hide_window`'s: a
+#: flags word overwritten with `disabled`, which survives until the
+#: client is relaunched or wizAi clears it on the way in.
+UI_HINT = ("This is wizAi's side of the glass, not the game's: check "
+           "no friends window is already open on another tab, and if it "
+           "persists relaunch this client")
+
+
+def never_asked(exc):
+    """Did this failure happen before the game was ever asked to port?
+
+    The distinction the export could not make. "Your friend is busy"
+    and "this instance is closed" arrive as a `MessageBoxModalWindow`
+    AFTER `btnGoToFriend` is clicked; a missing `wndCharacter` is the
+    panel that button lives on failing to open, two steps earlier. One
+    of those is a game rule to route around and the other is a bug to
+    fix, and rev 8ebfcf70 spent 47 minutes calling the second one the
+    first.
+    """
+    said = str(exc)
+    return any(w in said for w in _UI_WINDOWS)
+
+
 async def teleport_to_leader_across_zones(follower, leader_name):
     """(ok, reason). The friends-list teleport, for a different zone.
 
@@ -379,6 +412,13 @@ async def teleport_to_leader_across_zones(follower, leader_name):
                        f"extension ({type(exc).__name__}: {exc})")
 
     import asyncio
+
+    #: set by `attempt` when the failure was the friends-list UI rather
+    #: than anything about the name or the game's answer. Kept out here
+    #: because it must survive every spelling: the reason the whole call
+    #: failed is the same one each time, and reporting "not on the list"
+    #: for it sends the operator to check a friendship that is fine.
+    never_opened = ""
 
     async def attempt(name):
         """(landed, fatal reason). A name that is simply not on the list
@@ -415,6 +455,21 @@ async def teleport_to_leader_across_zones(follower, leader_name):
         except ValueError as exc:
             if "Could not find friend" in str(exc):
                 return False, ""
+            if never_asked(exc):
+                # The game never saw a teleport request. `btnGoToFriend`
+                # is clicked from the character panel, and this failed
+                # before the panel existed -- so whatever else is true,
+                # "the dungeon refused it" is not, and neither is "this
+                # spelling is wrong". Recorded and NOT fatal, so the
+                # other spellings still get their turn; a UI that would
+                # not open says nothing at all about the name.
+                nonlocal never_opened
+                never_opened = (
+                    f"the friends-list UI never came up on this client, "
+                    f"so the teleport to {name} was never attempted — "
+                    f"nothing was clicked and the game was never asked "
+                    f"({exc}; {copy}). {UI_HINT}")
+                return False, ""
             return False, (f"could not teleport to {name} through the "
                            f"friends list (ValueError: {exc}; {copy})")
         except Exception as exc:
@@ -448,6 +503,12 @@ async def teleport_to_leader_across_zones(follower, leader_name):
                 return True, ""
             if fatal:
                 return False, fatal
+
+    if never_opened:
+        # Every spelling failed the same way and none of them got as
+        # far as the name. Saying "not on the friends list" here would
+        # be a diagnosis of a friendship that is fine.
+        return False, never_opened
 
     return False, (f"could not find {leader_name} on this wizard's friends "
                    f"list — they have to be friends and online. A duel "
