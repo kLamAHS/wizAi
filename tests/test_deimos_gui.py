@@ -147,6 +147,147 @@ def test_actual_damage_is_settled_from_the_next_round():
     assert r1.clean
 
 
+def _two_mob_read(a_hp, b_hp, round_number, hand=("Meteor Strike",)):
+    from w101_sim import Actor, State
+    player = Actor(name="Wizard", school="fire", hp=3000, max_hp=3000, team=0)
+    a = Actor(name="Orin Grimcaster", school="death", hp=a_hp, max_hp=3040,
+              team=1)
+    b = Actor(name="Firerock Stomper", school="fire", hp=b_hp, max_hp=845,
+              team=1)
+    return _Read(State(player, [a, b]), round_number, hand)
+
+
+def test_an_aoe_settles_against_the_whole_board(monkeypatch):
+    """Rev e6201303, fight 3. `_settle` looked the target up by NAME and
+    an AoE's target_name is the literal string "all enemies", which no
+    mob is ever called -- so `before` came back None and the round
+    returned having recorded NOTHING: no actual damage, no confound,
+    and `clean` left at its default True. Four Meteor Strikes went that
+    way and the fight exported `damage_dealt: 0.0` for eight rounds in
+    which the wizard alone removed 1,373 health."""
+    tel = Telemetry()
+    tel.start_fight()
+    d = _Decision("Meteor Strike", target_index=None)
+    d.target_kind = "enemies"
+    r = tel.observe(d, _two_mob_read(3040, 845, 1))
+    assert r.aoe, "the record does not know this cast went at the board"
+    r.predicted_damage = 700.0
+    # The board Konstantin actually left behind: 3040->2773 and 845->465.
+    tel.observe(_Decision(passing=True), _two_mob_read(2773, 465, 2))
+    assert r.actual_damage == pytest.approx(647.0), \
+        "the AoE was settled against one mob, or not at all"
+    assert r.clean and not r.confounds
+    assert tel.fights[-1].damage_dealt == pytest.approx(647.0), \
+        "the fight ledger still reports zero damage for a cast that landed"
+
+
+def test_an_aoe_is_predicted_against_the_whole_board_too():
+    """Both halves have to mean the same thing. Measuring a Meteor
+    Strike against `enemies[0]` alone predicted one mob's slice of a
+    cast that removes the board, so a model that was right read as a
+    59% under-prediction."""
+    from deimos_bridge.telemetry import predict_damage
+
+    sim, state, cards = _sim_and_state(hand=("Meteor Strike",),
+                                       enemy_hp=2000)
+    from w101_sim import Actor
+    state.enemies.append(Actor(name="Mob2", school="ice", hp=2000,
+                               max_hp=2000, team=1))
+    one = predict_damage(sim, state, cards["Meteor Strike"], 0)
+    whole = predict_damage(sim, state, cards["Meteor Strike"], 0,
+                           whole_board=True)
+    assert one and whole
+    assert whole > one, "an AoE over two mobs predicted one mob's damage"
+    assert whole == pytest.approx(one * 2, rel=0.05)
+
+
+def test_a_dead_mob_makes_an_aoe_a_lower_bound():
+    tel = Telemetry()
+    tel.start_fight()
+    d = _Decision("Meteor Strike", target_index=None)
+    d.target_kind = "enemies"
+    r = tel.observe(d, _two_mob_read(3040, 61, 1))
+    r.predicted_damage = 700.0
+    from w101_sim import Actor, State
+    player = Actor(name="Wizard", school="fire", hp=3000, max_hp=3000, team=0)
+    left = Actor(name="Orin Grimcaster", school="death", hp=2544,
+                 max_hp=3040, team=1)
+    tel.observe(_Decision(passing=True), _Read(State(player, [left]), 2))
+    assert r.actual_damage == pytest.approx(496.0 + 61.0)
+    assert not r.clean and "lower bound" in " ".join(r.confounds)
+
+
+def test_an_enchanted_cast_is_still_predicted(monkeypatch):
+    """The first live run with enchantments produced ZERO evidence about
+    whether the enchant math matches the game: telemetry looked the
+    chosen card up in the static catalog, which holds no "+tag" names,
+    so Oz's only attack of the run recorded predicted_damage null --
+    and a null prediction also short-circuits the settle, so the fight
+    exported damage_dealt 0.0 for a fight it won."""
+    from w101_sim import enchant_card
+
+    sim, state, cards = _sim_and_state(hand=("Sunbird",))
+    epic = enchant_card(cards["Sunbird"], "Epic")
+    state.player.hand = [epic]
+    assert epic.name not in cards, "the catalog gained the enchanted card"
+
+    tel = Telemetry()
+    tel.start_fight()
+    read = _Read(state, 1, hand=(epic.name,))
+    d = _Decision(epic.name, target_index=0)
+    d.target_kind = "enemy"
+    r = tel.observe(d, read, sim=sim, cards=cards)
+    assert r.predicted_damage, \
+        "the enchanted cast got no prediction, so nothing was measured"
+    plain = predict_damage(sim, state, epic, 0)
+    assert r.predicted_damage == pytest.approx(plain)
+
+
+def test_a_card_nobody_can_find_says_so_instead_of_exporting_clean():
+    """A missing prediction silently disables the settle too, so the
+    round carries no actual damage either -- and still exported
+    `clean: true`, which reads as "measured and fine"."""
+    sim, state, cards = _sim_and_state(hand=("Sunbird",))
+    tel = Telemetry()
+    tel.start_fight()
+    d = _Decision("Not A Real Card", target_index=0)
+    d.target_kind = "enemy"
+    r = tel.observe(d, _Read(state, 1), sim=sim, cards=cards)
+    assert r.predicted_damage is None
+    assert not r.clean and "no prediction" in " ".join(r.confounds)
+
+
+def test_a_dot_is_not_filed_as_a_card_that_moves_no_health():
+    """Heck Hound's 362 health was dropped under a rule written for
+    traps and shields: `predict_damage` measures the cast round, a DoT
+    schedules its damage, so it honestly reads zero. Still dropped --
+    attributing ticks to the round that scheduled them is a different
+    problem -- but no longer indistinguishable from a Fire Trap."""
+    sim, state, cards = _sim_and_state(hand=("Heck Hound",))
+    tel = Telemetry()
+    tel.start_fight()
+    d = _Decision("Heck Hound", target_index=0)
+    d.target_kind = "enemy"
+    r = tel.observe(d, _Read(state, 1), sim=sim, cards=cards)
+    assert r.scheduled_damage, "a DoT was not recognised as one"
+    r.predicted_damage = 0.0
+    tel.observe(_Decision(passing=True), _read(1800, 2))
+    assert r.actual_damage is None, "a DoT's ticks were attributed"
+    assert not r.clean and "scheduled" in " ".join(r.confounds)
+
+    # ...and a real debuff still says nothing at all.
+    sim2, state2, cards2 = _sim_and_state(hand=("Fire Trap",))
+    tel2 = Telemetry()
+    tel2.start_fight()
+    d2 = _Decision("Fire Trap", target_index=0)
+    d2.target_kind = "enemy"
+    t = tel2.observe(d2, _Read(state2, 1), sim=sim2, cards=cards2)
+    assert not t.scheduled_damage
+    t.predicted_damage = 0.0
+    tel2.observe(_Decision(passing=True), _read(1800, 2))
+    assert t.clean and not t.confounds
+
+
 def test_blade_rounds_are_not_damage_observations():
     """A blade predicts 0 and delivers 0. Counting it as a perfect
     prediction would make a buff-heavy deck look more accurate purely for
@@ -17475,6 +17616,29 @@ def test_the_rebuild_path_marks_the_seat_and_reports(monkeypatch):
     assert "self._fresh_source(seat, source)" in src
     assert "seat.script_built = True" in src
     assert "skipped_setup" in src, "a trimmed rebuild has to say so"
+
+
+def test_a_booster_party_rebuild_is_reported_like_any_other():
+    """A rebuild starts the program again from instruction 0. The
+    whole-party branch writes that into every export; the solo-pilot /
+    booster branch returned before it did, so rev e6201303's step
+    counter fell from 13,846 to 1,213 between two heartbeats with
+    nothing anywhere to say why — the most consequential event in a
+    supervised run, invisible in exactly the mode the run was in."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._setup_script)
+    solo = src.split("if self._solo_pilot():", 1)
+    assert len(solo) == 2, "the solo-pilot branch moved"
+    branch = solo[1].split("source, skipped_setup = self._fresh_source", 1)
+    assert len(branch) == 2, \
+        "the solo-pilot branch still throws its skipped-setup list away"
+    # ...and reports the rebuild before it returns out of the branch.
+    body = branch[1].split("return", 1)[0]
+    assert "_note_reload" in body, \
+        "a booster-party rebuild is still silent in the export"
 
 
 # ------------------------------------------- re-arming a dead quest arrow

@@ -69,12 +69,18 @@ class _NoFizzle(random.Random):
         return seq[len(seq) // 2]
 
 
-def predict_damage(sim, state, card, target_index=0):
+def predict_damage(sim, state, card, target_index=0, whole_board=False):
     """What wizAi expects this cast to do to that target, if it lands.
 
     Runs the real cast path on a deep copy, so every rule the engine has
     -- charms, wards, prisms, absorbs, link groups -- is applied exactly
     as it would be in a duel, and nothing touches the caller's state.
+
+    `whole_board` sums the damage over EVERY enemy instead of one, which
+    is the only honest reading of an AoE: a Meteor Strike measured
+    against `enemies[0]` predicts one mob's slice (380) of a cast that
+    removes the board's total (647), so the residual it produces is a
+    70% under-prediction of a model that was right.
 
     Returns None if the cast cannot be predicted (not castable, no such
     target), rather than a misleading zero.
@@ -87,6 +93,11 @@ def predict_damage(sim, state, card, target_index=0):
         target_index = max(0, min(target_index, len(s.enemies) - 1))
         for c in s.hand:
             if c.name == card.name and probe.can_cast(s, c, target_index):
+                if whole_board:
+                    was = [max(e.hp, 0.0) for e in s.enemies]
+                    probe.cast(s, c, target_index)
+                    now = [max(e.hp, 0.0) for e in s.enemies]
+                    return sum(max(b - a, 0.0) for b, a in zip(was, now))
                 before = s.enemies[target_index].hp
                 probe.cast(s, c, target_index)
                 after = s.enemies[target_index].hp
@@ -529,6 +540,15 @@ class RoundRecord:
     hand_visibility: float = 1.0
     predicted_damage: float = None
     actual_damage: float = None
+    #: did this cast schedule its damage instead of dealing it now? A
+    #: DoT predicts zero on the cast round and is dropped by the
+    #: zero-prediction bail, which is right -- but it is a DAMAGE card,
+    #: not a debuff, and the export has to say which. See `_settle`.
+    scheduled_damage: bool = False
+    #: did this cast go at the whole board? An AoE has no single target,
+    #: so it is predicted and settled against every mob at once -- see
+    #: `predict_damage` and `Telemetry._settle_aoe`.
+    aoe: bool = False
     clean: bool = True
     #: why an observation was marked unclean, if it was
     confounds: list = field(default_factory=list)
@@ -758,6 +778,10 @@ class Telemetry:
             chosen=decision.card_name,
             target_index=decision.target_index,
             target_name=target_name,
+            # A fact about the DECISION, not about the prediction: a
+            # round recorded without a sim still has to settle against
+            # the board rather than against a mob called "all enemies".
+            aoe=bool(kind in ("enemies", "global")),
             passing=decision.passing,
             reason=decision.reason,
             policy=getattr(decision, "policy", "") or self.policy_name,
@@ -803,12 +827,48 @@ class Telemetry:
             rec.confounds.append(
                 "could not read " + "; ".join(unreadable))
 
-        if sim is not None and not decision.passing and cards:
-            card = cards.get(decision.chosen if hasattr(decision, "chosen")
-                             else decision.card_name)
+        if sim is not None and not decision.passing:
+            name = (decision.chosen if hasattr(decision, "chosen")
+                    else decision.card_name)
+            # The HAND first, and the catalog only as a fallback. An
+            # enchanted card exists nowhere else: `live_state` builds
+            # "Tempest+epic" per read with `enchant_card` and nothing
+            # registers it into the catalog, so a plain `cards.get` read
+            # None and the biggest hit in the deck -- the enchanted nuke
+            # -- was the one cast that got no prediction at all. Rev
+            # e6201303: Oz's single attack of the run, and with it the
+            # only evidence the first enchanted run could have produced
+            # about whether the enchant math matches the game.
+            #
+            # The catalog's base card is NOT a substitute: `predict_damage`
+            # matches by `c.name` against the hand, and "Tempest" does
+            # not match "Tempest+epic".
+            card = None
+            try:
+                card = next((c for c in s.hand if c.name == name), None)
+            except Exception:
+                card = None
+            if card is None and cards:
+                card = cards.get(name)
             if card is not None:
+                rec.aoe = rec.aoe or bool(getattr(card, "aoe", False))
+                rec.scheduled_damage = bool(
+                    getattr(card, "kind", "") in ("damage", "drain")
+                    and any(o.get("op") == "dot"
+                            for o in (getattr(card, "ops", None) or ())))
                 rec.predicted_damage = predict_damage(
-                    sim, s, card, decision.target_index or 0)
+                    sim, s, card, decision.target_index or 0,
+                    whole_board=rec.aoe)
+            else:
+                # Silence here is how a measurement pipeline quietly
+                # stops measuring: no prediction means `_settle` returns
+                # at once, so the round carries no actual damage either
+                # and still exports `clean: true`.
+                rec.clean = False
+                rec.confounds.append(
+                    f"no prediction: {name!r} was not in this wizard's "
+                    f"hand or in the card table, so nothing about this "
+                    f"cast was measured")
 
         self.rounds.append(rec)
         f = self.fights[-1]
@@ -1077,6 +1137,50 @@ class Telemetry:
             self.fights[-1].passes -= 1
         return rec
 
+    def _settle_aoe(self, prev, pairs, joined):
+        """Settle a board-wide cast against the whole board.
+
+        The measurement an AoE actually supports: every mob's health
+        delta, summed. `predict_damage` predicts the same sum for these
+        rounds (`whole_board`), so the two sides finally mean the same
+        thing -- measuring a Meteor Strike against `enemies[0]` alone
+        compared one mob's 267 against a cast that removed 647 and
+        called the model 59% wrong.
+        """
+        total = 0.0
+        died = []
+        for j, e in enumerate(prev.enemies):
+            after = pairs.get(j)
+            if after is None:
+                total += max(e.hp, 0.0)
+                died.append(e.name)
+            else:
+                total += max(e.hp - after.hp, 0.0)
+        prev.actual_damage = total
+        if died:
+            prev.clean = False
+            prev.confounds.append(
+                f"{', '.join(died)} died: actual damage is a lower bound")
+        if joined > 0:
+            prev.clean = False
+            prev.confounds.append(
+                f"{joined} mob(s) joined the duel this round, so the board "
+                f"delta is measured against a different board")
+        sharing = sorted({who for who in (prev.party_hits or {}).values()
+                          if who})
+        if sharing:
+            prev.clean = False
+            prev.confounds.append(
+                f"{', '.join(sharing)} also hit this board — the delta is "
+                f"the party's damage, not this cast's")
+        if total <= 0.0 and prev.predicted_damage > 0.0:
+            prev.clean = False
+            prev.confounds.append(
+                "nothing landed anywhere on a board that survived — a "
+                "fizzle, or a ward the read missed. The prediction assumes "
+                "the cast lands, so this is not a measurement of the "
+                "damage model")
+
     def _settle(self, read):
         """Fill in the previous round's actual damage from the new board."""
         prev = self._pending
@@ -1092,10 +1196,40 @@ class Telemetry:
             # fight's `damage_dealt` counted those 56 twice. Nothing
             # about the damage model is learnable from a card that was
             # never going to move health.
+            #
+            # ...unless it was. A DoT is a DAMAGE card whose damage is
+            # scheduled rather than immediate, so `predict_damage`
+            # measures the cast round and honestly reads zero -- and the
+            # bail above then files Heck Hound's 362 health under "never
+            # going to move health". Still dropped, because attributing
+            # ticks to the round that scheduled them is a different
+            # problem, but no longer SILENTLY: a reader can tell the
+            # deferred damage from the debuff.
+            if prev.scheduled_damage:
+                prev.clean = False
+                prev.confounds.append(
+                    "this card's damage is scheduled, not immediate — it "
+                    "lands over later rounds, so nothing about it is "
+                    "measurable from this round's board")
             self._pending = None
             return
         board = list(read.state.enemies)
         pairs = match_enemies(prev.enemies, board)
+        if prev.aoe:
+            # An AoE has no single target to settle against, and the
+            # lookup below proves it: `target_name` is the literal
+            # string "all enemies", no mob is ever called that, so
+            # `before` came back None and the round returned having
+            # recorded NOTHING -- no actual damage, no confound, and
+            # `clean` left at its default True. Rev e6201303 lost four
+            # Meteor Strikes that way, and fight 3 exported
+            # `damage_dealt: 0.0` for eight rounds in which Konstantin
+            # alone removed 1,373 health.
+            self._settle_aoe(prev, pairs, len(board) - len(prev.enemies))
+            if prev.actual_damage is not None:
+                self.fights[-1].damage_dealt += prev.actual_damage
+            self._pending = None
+            return
         target = prev.target_name
         i = prev.target_index
         if i is None or not (0 <= i < len(prev.enemies)):

@@ -2665,10 +2665,24 @@ class LiveWorker(QThread):
                 # they step into its duels.
                 pilot = self.seats[self.leader]
                 source, reset = scripts.solo_source(source)
-                source, _skipped = self._fresh_source(seat, source)
+                source, skipped_setup = self._fresh_source(seat, source)
                 seat.runner = scripts.make_runner(
                     [pilot.client or client], source, solo=True)
                 seat.script_built = True
+                # A rebuild starts the program again from instruction 0,
+                # and the whole-party branch below writes that into
+                # every export. This one did not -- so rev e6201303's
+                # step counter fell from 13,846 to 1,213 between two
+                # heartbeats with nothing anywhere to say why, and a
+                # reader can only blame the watchdog reload four
+                # minutes earlier. The most consequential event in a
+                # supervised script run was invisible in exactly the
+                # mode the run was in.
+                seat.runner.skipped_setup = list(skipped_setup)
+                if skipped_setup:
+                    self._note_reload(
+                        seat, "the script was rebuilt (its text changed)",
+                        seat.runner)
                 what = ("boosters — they keep to it and join its fights, "
                         "their own journals ignored"
                         if self.booster_party else "others follow and fight")
