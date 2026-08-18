@@ -1475,6 +1475,47 @@ def _lose_a_fight(worker, seat, opening, rounds=20, seats_in_plan=1):
     worker._note_the_loss(seat, False)
 
 
+def test_the_export_says_how_the_run_was_wired(qapp):
+    """Rev 8ebfcf70 shipped two exports and neither could answer the
+    first question anybody asks of them: which wizard was supposed to
+    be leading, and what the other one was for. It has to be
+    reverse-engineered from which rungs fired, and it changes what
+    every other line means -- a booster's quest goal differing from the
+    quester's is the DESIGN, and the same two lines in a plain follow
+    are a party that has walked apart."""
+    worker = _party_worker()
+    worker.leader, worker.booster_party = 1, True
+    boss, booster = worker.seats[1], worker.seats[0]
+    boss.wizard_name = "Konstantin V"
+    assert worker._party_shape(booster) == {
+        "mode": "booster party",
+        "seats": 2,
+        "leader_seat": 2,
+        "leader": "Konstantin V",
+        "role": "booster",
+        "scripted": False,
+        "script_drives": "nobody",
+    }
+    assert worker._party_shape(boss)["role"] == "leader"
+
+
+def test_a_solo_run_says_it_is_one(qapp):
+    from deimos_bridge.gui.live import LiveWorker
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    shape = worker._party_shape(worker.seats[0])
+    assert shape["mode"] == "solo" and shape["seats"] == 1
+
+
+def test_the_wiring_reaches_the_exported_summary(qapp):
+    """On the Telemetry, so it lands in the file rather than only in
+    the window nobody is watching at 3am."""
+    tel = Telemetry()
+    assert tel.summary()["party"] == {}, "an offline probe has no party"
+    tel.party = {"mode": "booster party", "role": "booster"}
+    assert tel.summary()["party"]["role"] == "booster"
+
+
 def test_a_lost_fight_is_written_down_at_all(qapp):
     """It was not. `FightRecord.won` is read by the export's win count
     and a red label in the panel, and by nothing else -- so rev
@@ -15602,6 +15643,15 @@ def test_a_fresher_sighting_of_a_door_beats_a_staler_one():
     kept = worker._doors[("6Room", "6Room_2")]
     assert kept[0].x == 300.0, \
         "a six-second-old sighting replaced a fresh one"
+
+    # ...and so does the party poll, which cannot say how old its
+    # sample is at all. It runs LAST in the tick, so without this the
+    # good sample is overwritten within the same second it was taken.
+    seat.last_spot_zone = "6Room"
+    seat.last_spot = SimpleNamespace(x=-42.0, y=0.0, z=0.0)
+    worker._learn_door(seat, "6Room_2", now)
+    assert worker._doors[("6Room", "6Room_2")][0].x == 300.0, \
+        "an undated sighting replaced a dated, fresher one"
 
 
 def test_a_sigil_is_not_a_door_and_is_never_swept_at(monkeypatch):

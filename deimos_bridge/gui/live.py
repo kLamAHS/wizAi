@@ -2428,6 +2428,40 @@ class LiveWorker(QThread):
         except Exception:
             return None
 
+    def _party_shape(self, seat):
+        """What this wizard is FOR, and who it is following.
+
+        Named rather than inferred, because the modes are not visible
+        in the telemetry they change the meaning of. A booster's quest
+        goal differing from the leader's is the design; the same two
+        lines in a plain follow are a party that has walked apart. An
+        export that cannot tell them apart cannot be read at all.
+        """
+        if len(self.seats) < 2:
+            mode = "solo"
+        elif self.booster_party:
+            mode = "booster party"
+        elif self._solo_pilot():
+            mode = "solo pilot"
+        elif self.follow_leader:
+            mode = "follow the leader"
+        else:
+            mode = "independent"
+        boss = self.seats[self.leader] if self.seats else None
+        return {
+            "mode": mode,
+            "seats": len(self.seats),
+            "leader_seat": self.leader + 1,
+            "leader": (boss.wizard_name or boss.name) if boss else "",
+            "role": ("leader" if seat.index == self.leader else
+                     "booster" if self._is_booster(seat) else "follower"),
+            "scripted": bool(self.script),
+            "script_drives": ("nobody" if not self.script else
+                              "the leader only"
+                              if self._solo_pilot() or self.booster_party
+                              else "every seat"),
+        }
+
     #: how many times one opening may be lost before the party is told
     #: it is a wall rather than bad luck. Two, because the second loss
     #: is the first evidence that the first was not variance -- and the
@@ -3330,6 +3364,15 @@ class LiveWorker(QThread):
                 seat.tel.school = seat.school
                 seat.tel.deck = seat.deck
                 seat.tel.seat = seat.index
+                # How this run was WIRED, in the file. Every other line
+                # in an export means something different depending on
+                # it -- "the follower charged ahead and the leader
+                # chased" is the design in a booster party and a bug in
+                # a plain follow -- and rev 8ebfcf70's two files cannot
+                # answer which mode produced them at all. It cost an
+                # afternoon of reading rungs backwards to work out
+                # which wizard was even supposed to be leading.
+                seat.tel.party = self._party_shape(seat)
                 # Before a single fight: the seat number is knowable now,
                 # the wizard's name is not until a duel names it. Half an
                 # answer on the title bar beats none while the operator
@@ -4885,10 +4928,18 @@ class LiveWorker(QThread):
         # follower must not be sent to sweep at it.
         how = ("sigil" if now - seat.pressed_x_at <= self.SIGIL_CROSS_WINDOW
                else "walked")
+        # Never trade a better-aimed door for a worse-aimed one. Both
+        # `_note_spot` (fresh, on the seat's own second) and the party
+        # poll (up to six seconds stale, and no age at all to declare)
+        # learn doors, and the poll runs last -- so without this the
+        # good sample is overwritten by the bad one within the tick.
+        # An unknown age loses to a known one for the same reason: the
+        # only thing that can be said about it is that it is at least
+        # as stale as the poll that produced it.
         old = self._doors.get((out, into))
-        if old is not None and age is not None:
+        if old is not None and _door_how(old) == how:
             was = old[3] if len(old) > 3 else None
-            if was is not None and was < age and _door_how(old) == how:
+            if was is not None and (age is None or was < age):
                 return               # we already know this door better
         self._doors[(out, into)] = (spot, now, seat.name, age, how)
         if len(self._doors) > self.DOORS_REMEMBERED:
