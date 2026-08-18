@@ -288,6 +288,35 @@ def test_a_dot_is_not_filed_as_a_card_that_moves_no_health():
     assert t.clean and not t.confounds
 
 
+def test_the_export_says_how_many_rounds_were_actually_a_party():
+    """`policy_mix` reported "ttk-lookahead · party" on 100% of rev
+    e6201303's rounds, and not one of them was a party: the
+    coordinator's barrier waits 2.5s for the other seats and the
+    booster took 7.1-7.5s just to click a card, so every shared round
+    was planned alone. A policy's NAME is not evidence that it had
+    anybody to coordinate with."""
+    from types import SimpleNamespace
+
+    tel = Telemetry()
+    tel.start_fight()
+    def move(seat):
+        return SimpleNamespace(seat=seat, target_name=None, wizard="",
+                               card="Sunbird", expected=0.0, passing=False)
+
+    solo = SimpleNamespace(moves=[move(0)])
+    both = SimpleNamespace(moves=[move(0), move(1)])
+    a = tel.observe(_Decision("Sunbird", 0), _read(2000, 1), party=solo)
+    b = tel.observe(_Decision("Sunbird", 0), _read(2000, 2), party=both)
+    assert (a.seats_in_plan, b.seats_in_plan) == (1, 2)
+    assert tel.summary()["planned_alone"] == {"alone": 1, "rounds": 2}
+
+    # No coordinator at all is one seat, not a crash.
+    tel2 = Telemetry()
+    tel2.start_fight()
+    tel2.observe(_Decision("Sunbird", 0), _read(2000, 1))
+    assert tel2.summary()["planned_alone"] == {"alone": 1, "rounds": 1}
+
+
 def test_blade_rounds_are_not_damage_observations():
     """A blade predicts 0 and delivers 0. Counting it as a perfect
     prediction would make a buff-heavy deck look more accurate purely for

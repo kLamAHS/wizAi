@@ -561,6 +561,12 @@ class RoundRecord:
     #: board, so a mob another wizard also hit hands this wizard's cast a
     #: residual that is the party's total -- which is not a measurement
     #: of anything. See `Telemetry._settle`.
+    #: how many seats the coordinator actually fused into this round's
+    #: plan. 1 means this wizard planned ALONE -- which is what happens
+    #: whenever a seat misses the barrier, and rev e6201303 shows it
+    #: happening on every round the two wizards shared while
+    #: `policy_mix` reported 100% "party". A label is not a measurement.
+    seats_in_plan: int = 1
     party_hits: dict = field(default_factory=dict)
     #: what the WHOLE party expected to take off this round's target,
     #: this wizard's own share included. The measurement that survives a
@@ -815,6 +821,12 @@ class Telemetry:
 
         rec.at = round(self.clock(), 1)
         rec.party_hits = _party_hits(party, seat)
+        try:
+            moves = getattr(party, "moves", None) or ()
+            rec.seats_in_plan = max(1, len({getattr(m, "seat", i)
+                                            for i, m in enumerate(moves)}))
+        except Exception:
+            rec.seats_in_plan = 1
         rec.party_predicted = _party_expected(party, rec.target_name)
 
         unreadable = list(getattr(read, "unreadable", ()) or ())
@@ -1682,6 +1694,18 @@ class Telemetry:
     def clear_curve(self):
         self._curve, self._ttk = [], []
 
+    def planned_alone(self):
+        """Rounds whose plan held exactly one seat, out of all rounds.
+
+        The difference between "the party policy ran" and "there was a
+        party". A seat that misses the coordinator's barrier plans on
+        its own and still records `ttk-lookahead · party`, so the mix
+        alone cannot tell a coordinated run from a pair of solo ones.
+        """
+        rounds = [r for r in self.rounds if not r.passing]
+        alone = sum(1 for r in rounds if (r.seats_in_plan or 1) <= 1)
+        return {"alone": alone, "rounds": len(rounds)}
+
     def policy_mix(self):
         """Rounds played, per policy and per path within it.
 
@@ -1756,6 +1780,14 @@ class Telemetry:
             # cannot use. In a real party those are most of them.
             "party_damage_model": self.party_error_stats(),
             "policy_mix": self.policy_mix(),
+            # ...and how many of those "party" rounds were a party. The
+            # coordinator's barrier waits `Coordinator.TIMEOUT` (2.5s)
+            # for the other seats, and rev e6201303's booster took 7.1
+            # to 7.5s just to click a card -- so every round the two
+            # wizards shared was planned ALONE while `policy_mix` read
+            # 100% party. A policy's NAME is not evidence that it had
+            # anybody to coordinate with.
+            "planned_alone": self.planned_alone(),
             "unresolved": self.unresolved_names(),
             "hand_visibility": self.hand_visibility(),
             "hidden_cards": self.hidden_cards(),
