@@ -366,6 +366,15 @@ class _Seat:
         #: wizard has just walked out of is not somewhere it was left
         #: behind. See `LiveWorker._check_together`.
         self.zone_left = []
+        #: the last position this seat was seen at, and the zone it was
+        #: in at the time -- the raw material of the door map. See
+        #: `LiveWorker._doors` and `_walk_the_leaders_door`.
+        self.last_spot = None
+        self.last_spot_zone = None
+        #: when this seat last walked a door route, and how many
+        #: consecutive cross-zone follows have failed for it.
+        self.door_walked_at = NEVER
+        self.cross_zone_fails = 0
         #: stage name -> how many times it has failed, so a broken stage
         #: is reported rather than retried silently twice a second
         self.stage_errors = {}
@@ -582,6 +591,13 @@ class LiveWorker(QThread):
         #: when the running hold engaged, so a goal that advances AFTER
         #: it releases it -- the turn-in-not-a-sigil case.
         self._count_hold_began = 0.0
+        #: (from zone, to zone) -> the position a wizard was standing on
+        #: the last time it made that crossing. The party's shared map
+        #: of doors, learned by watching, and the answer to a dungeon
+        #: that refuses friends-list teleports: a follower cannot port
+        #: to its leader, but it CAN walk the door its leader just
+        #: walked. See `_learn_door` and `_walk_the_leaders_door`.
+        self._doors = {}
         #: when the party last changed realm, and which realms this run
         #: has already tried. See `_realm_hop_party`.
         self._realm_hopped_at = NEVER
@@ -2649,10 +2665,24 @@ class LiveWorker(QThread):
                 # they step into its duels.
                 pilot = self.seats[self.leader]
                 source, reset = scripts.solo_source(source)
-                source, _skipped = self._fresh_source(seat, source)
+                source, skipped_setup = self._fresh_source(seat, source)
                 seat.runner = scripts.make_runner(
                     [pilot.client or client], source, solo=True)
                 seat.script_built = True
+                # A rebuild starts the program again from instruction 0,
+                # and the whole-party branch below writes that into
+                # every export. This one did not -- so rev e6201303's
+                # step counter fell from 13,846 to 1,213 between two
+                # heartbeats with nothing anywhere to say why, and a
+                # reader can only blame the watchdog reload four
+                # minutes earlier. The most consequential event in a
+                # supervised script run was invisible in exactly the
+                # mode the run was in.
+                seat.runner.skipped_setup = list(skipped_setup)
+                if skipped_setup:
+                    self._note_reload(
+                        seat, "the script was rebuilt (its text changed)",
+                        seat.runner)
                 what = ("boosters — they keep to it and join its fights, "
                         "their own journals ignored"
                         if self.booster_party else "others follow and fight")
@@ -2809,11 +2839,26 @@ class LiveWorker(QThread):
 
         moved, why = await party.follow(client, boss.client,
                                         leader_name=boss.wizard_name)
+        # A teleport the GAME refuses is not a wizAi failure to retry
+        # harder: most dungeon instances allow friends-list ports and
+        # some do not, and inside one that does not, every retry is
+        # another "your friend is busy". The way in is the way the
+        # leader itself went -- see `_walk_the_leaders_door`.
+        if (not moved and why and seat.zone_seen and boss.zone_seen
+                and seat.zone_seen != boss.zone_seen):
+            seat.cross_zone_fails += 1
+            walked, door_why = await self._walk_the_leaders_door(
+                seat, boss, why)
+            if walked:
+                moved, why = True, door_why
+            elif door_why:
+                why = f"{why} — and {door_why}"
         if moved and why:
             self._say(seat, why)
         if moved or not why:
             seat.follow_failing_since = None
             seat.follow_fails = 0
+            seat.cross_zone_fails = 0
             return
         # A follower that cannot reach its leader is the failure that
         # makes the whole party pointless, so it is said -- but
@@ -4572,6 +4617,195 @@ class LiveWorker(QThread):
             pass
         mins = (now - since) / 60.0
         await self._sweep_through(seat, away, f"parked {mins:.0f} min")
+
+    #: how many doors the map remembers. A dungeon is a handful of
+    #: rooms and a world is a handful of streets; anything past this is
+    #: history, not a route.
+    DOORS_REMEMBERED = 64
+    #: how long between door walks for one wizard. A walk holds the
+    #: script and takes several seconds; retrying it every follow tick
+    #: would be the friends-list spam with extra steps.
+    DOOR_WALK_EVERY = 20.0
+    #: how far past the door position each leg aims. The trigger volume
+    #: sits at the door, so stopping ON it is exactly the landing that
+    #: does not cross -- the walk-in-door lesson, reused.
+    DOOR_WALK_PAST = 250.0
+    #: how long one leg of the door walk may run.
+    DOOR_WALK_LEG = 12.0
+    #: how long the script is held while a door walk is in flight.
+    DOOR_WALK_CEILING = 45.0
+
+    def _learn_door(self, seat, into, now):
+        """Record where this wizard was standing when it left a zone.
+
+        The position sampled on the poll BEFORE the change is, by
+        construction, the last place the wizard stood in the old zone --
+        which is the door, give or take one poll of walking. Every
+        wizard teaches the whole party: the leader crossing first is
+        precisely the case a stranded follower needs, and it is the
+        common one.
+        """
+        out = seat.last_spot_zone
+        if not out or not into or out == into or seat.last_spot is None:
+            return
+        self._doors[(out, into)] = (seat.last_spot, now, seat.name)
+        if len(self._doors) > self.DOORS_REMEMBERED:
+            for key in sorted(self._doors,
+                              key=lambda k: self._doors[k][1])[:8]:
+                self._doors.pop(key, None)
+
+    async def _walk_the_leaders_door(self, seat, boss, why):
+        """Walk into the leader's zone, when no teleport can get there.
+
+        The operator's report, and the fix they asked for: "the booster
+        and boostee got into a dungeon but the booster is trying to
+        teleport via friends to the boostee, but some instances (most
+        allow tp's) don't allow teleports, so it says your friend is
+        busy on repeat. instead we can follow the tp steps of the
+        leader to enter combats in this case or follow to different
+        locations".
+
+        Rev e6201303 is what that costs. Oz reached
+        `DS_Arena_Gauntlet_6Room` with Konstantin and then stood in it
+        for ten minutes while Konstantin walked on through
+        `6Room_Sub/6Room_2` ... `6Room_6` -- the gauntlet's rooms are
+        separate ZONES, an XYZ teleport cannot cross one, and the
+        friends-list teleport is refused inside the instance. So the
+        booster contributed two combat rounds to a 27-minute run while
+        the wizard it exists to protect fought Orin Grimcaster alone,
+        twice, and lost both.
+
+        A wizard cannot port there. It can WALK there, and it does not
+        need to know the way: the leader just walked it, and
+        `_learn_door` wrote down where it was standing when it went.
+        Teleporting to that spot is legal (same zone), and walking
+        through it is the same four-leg sweep that answers a walk-in
+        door -- the trigger volume sits at the door, so a landing ON it
+        crosses nothing and the legs aim PAST it.
+
+        Returns (walked, reason).
+        """
+        import math
+        import time
+
+        from .. import party
+
+        here, there = seat.zone_seen, boss.zone_seen
+        if not here or not there or here == there:
+            return False, ""
+        now = time.monotonic()
+        if now - seat.door_walked_at < self.DOOR_WALK_EVERY:
+            return False, ""
+        door = self._doors.get((here, there))
+        into = there
+        if door is None:
+            # The leader is several rooms ahead, which is the ordinary
+            # case rather than the exception: rev e6201303's Konstantin
+            # crossed FIVE doors while Oz stood in the first room, so
+            # the map holds (6Room -> 6Room_2) and nothing at all keyed
+            # on the room he ended up in. The way forward is still the
+            # door he took out of THIS room. Walking it lands the
+            # follower one room closer and the next tick answers the
+            # next room, which is what following someone's route means.
+            #
+            # Prefer a door whose far side the leader has actually been
+            # through -- a room has more than one exit, and the one
+            # that matters is the one on the leader's own path.
+            route = {z for z, _t in (boss.zone_left or ())} | {there}
+            outs = [(to, v) for (frm, to), v in self._doors.items()
+                    if frm == here]
+            walked = [kv for kv in outs if kv[0] in route]
+            best = max(walked or outs, key=lambda kv: kv[1][1], default=None)
+            if best is not None:
+                into, door = best
+        if door is None:
+            # Never seen anyone leave this zone at all. The leader's own
+            # last spot in it is the same fact one poll earlier, and it
+            # is what a leader that crossed before the map existed
+            # leaves behind.
+            if boss.last_spot is not None and boss.last_spot_zone == here:
+                door = (boss.last_spot, now, boss.name)
+        if door is None:
+            return False, (f"{seat.name} cannot teleport to {boss.name} in "
+                           f"{there} and has no record of the way in — "
+                           f"nobody has been watched crossing from {here} "
+                           f"to {there} yet")
+        spot, _at, taught_by = door
+        try:
+            if await party.in_battle(seat.client):
+                return False, ""
+        except Exception:
+            pass
+        seat.door_walked_at = now
+        seat.tel.note_questing(
+            "door-walk",
+            f"no teleport reaches {boss.name} in {there} ({why}) — walking "
+            f"the door {taught_by} was standing on when it crossed out of "
+            f"{here}" + ("" if into == there else f" into {into}, one room "
+            f"closer") + ". A dungeon that refuses friends-list teleports "
+            f"still has doors, and the party watched this one being used")
+        self._say(seat,
+                  f"{seat.name} cannot port to {boss.name} — walking the "
+                  f"door into {into.rsplit('/', 1)[-1]}")
+
+        client = seat.client
+        self._hop_pause_until = now + self.DOOR_WALK_CEILING
+        crossed = False
+        legs = 0
+        try:
+            try:
+                await client.teleport(spot)
+            except Exception as exc:
+                return False, (f"could not step to the door into {there} "
+                               f"({type(exc).__name__}: {exc})")
+            if await self._zone_crossed(client, here):
+                crossed = True
+            else:
+                # Which way is through? The wizard has just landed ON
+                # the door, so the leader's heading is unknown and the
+                # approach line is gone. Sweep: forward along the yaw
+                # it landed with, then the three other quarters. One of
+                # them is into the room.
+                try:
+                    yaw = await client.body.yaw()
+                    ux, uy = -math.sin(yaw), -math.cos(yaw)
+                except Exception:
+                    ux, uy = 1.0, 0.0
+                for vx, vy in ((ux, uy), (-uy, ux), (uy, -ux), (-ux, -uy)):
+                    legs += 1
+                    try:
+                        await asyncio.wait_for(
+                            client.goto(spot.x + vx * self.DOOR_WALK_PAST,
+                                        spot.y + vy * self.DOOR_WALK_PAST),
+                            timeout=self.DOOR_WALK_LEG)
+                    except Exception:
+                        pass          # a wall; the next quarter answers
+                    if await self._zone_crossed(client, here):
+                        crossed = True
+                        break
+                    if await party.in_battle(client):
+                        break
+        finally:
+            self._hop_pause_until = time.monotonic() + (
+                self.HOP_SETTLE if crossed else self.WALK_THROUGH_SETTLE)
+        if crossed:
+            seat.cross_zone_fails = 0
+            # A crossing that WORKED is the route working, and a
+            # follower five rooms behind has four more to walk. The
+            # cooldown exists to stop a walk that goes nowhere being
+            # retried twice a second, not to pace a chase that is
+            # succeeding.
+            seat.door_walked_at = NEVER
+            seat.tel.note_questing(
+                "door-walk",
+                f"walked out of {here} on foot ({legs} leg(s)) — the "
+                f"teleport the game refused, done the way a player would "
+                f"do it")
+            return True, f"walked through the door out of {here}"
+        return False, (f"{seat.name} could not walk the door from {here} "
+                       f"into {into} either — teleported onto the spot "
+                       f"{taught_by} crossed from and swept {legs} leg(s) "
+                       f"past it without the zone changing")
 
     async def _sweep_through(self, seat, away, label):
         """The walk itself: through the marker, then sweep. Shared by
@@ -7141,12 +7375,22 @@ class LiveWorker(QThread):
         zones = {}
         for seat in live:
             zones[seat] = await party.zone(seat.client)
+            # Where this wizard is standing, kept from poll to poll.
+            # Worthless on its own; the poll AFTER a zone change turns
+            # the previous sample into the door that was walked
+            # through -- see `_learn_door`.
+            spot = None
+            try:
+                spot = await seat.client.body.position()
+            except Exception:
+                pass
             if zones[seat]:
                 if seat.zone_seen and zones[seat] != seat.zone_seen:
                     # Where it has just come FROM, and when. See the
                     # "left there on purpose" test below.
                     seat.zone_left.append((seat.zone_seen, now))
                     del seat.zone_left[:-8]
+                    self._learn_door(seat, zones[seat], now)
                     # Free: this poll already runs every TOGETHER_POLL
                     # seconds for the stranded check. Recording it turns
                     # the log into a route -- where each wizard went and
@@ -7161,6 +7405,9 @@ class LiveWorker(QThread):
                 if zones[seat] != seat.zone_seen:
                     seat.zone_since = now
                 seat.zone_seen = zones[seat]
+            if spot is not None and zones[seat]:
+                seat.last_spot = spot
+                seat.last_spot_zone = zones[seat]
         known = [z for z in zones.values() if z]
         if len(known) < len(live):
             return None, None            # a read failed; no evidence

@@ -147,6 +147,176 @@ def test_actual_damage_is_settled_from_the_next_round():
     assert r1.clean
 
 
+def _two_mob_read(a_hp, b_hp, round_number, hand=("Meteor Strike",)):
+    from w101_sim import Actor, State
+    player = Actor(name="Wizard", school="fire", hp=3000, max_hp=3000, team=0)
+    a = Actor(name="Orin Grimcaster", school="death", hp=a_hp, max_hp=3040,
+              team=1)
+    b = Actor(name="Firerock Stomper", school="fire", hp=b_hp, max_hp=845,
+              team=1)
+    return _Read(State(player, [a, b]), round_number, hand)
+
+
+def test_an_aoe_settles_against_the_whole_board(monkeypatch):
+    """Rev e6201303, fight 3. `_settle` looked the target up by NAME and
+    an AoE's target_name is the literal string "all enemies", which no
+    mob is ever called -- so `before` came back None and the round
+    returned having recorded NOTHING: no actual damage, no confound,
+    and `clean` left at its default True. Four Meteor Strikes went that
+    way and the fight exported `damage_dealt: 0.0` for eight rounds in
+    which the wizard alone removed 1,373 health."""
+    tel = Telemetry()
+    tel.start_fight()
+    d = _Decision("Meteor Strike", target_index=None)
+    d.target_kind = "enemies"
+    r = tel.observe(d, _two_mob_read(3040, 845, 1))
+    assert r.aoe, "the record does not know this cast went at the board"
+    r.predicted_damage = 700.0
+    # The board Konstantin actually left behind: 3040->2773 and 845->465.
+    tel.observe(_Decision(passing=True), _two_mob_read(2773, 465, 2))
+    assert r.actual_damage == pytest.approx(647.0), \
+        "the AoE was settled against one mob, or not at all"
+    assert r.clean and not r.confounds
+    assert tel.fights[-1].damage_dealt == pytest.approx(647.0), \
+        "the fight ledger still reports zero damage for a cast that landed"
+
+
+def test_an_aoe_is_predicted_against_the_whole_board_too():
+    """Both halves have to mean the same thing. Measuring a Meteor
+    Strike against `enemies[0]` alone predicted one mob's slice of a
+    cast that removes the board, so a model that was right read as a
+    59% under-prediction."""
+    from deimos_bridge.telemetry import predict_damage
+
+    sim, state, cards = _sim_and_state(hand=("Meteor Strike",),
+                                       enemy_hp=2000)
+    from w101_sim import Actor
+    state.enemies.append(Actor(name="Mob2", school="ice", hp=2000,
+                               max_hp=2000, team=1))
+    one = predict_damage(sim, state, cards["Meteor Strike"], 0)
+    whole = predict_damage(sim, state, cards["Meteor Strike"], 0,
+                           whole_board=True)
+    assert one and whole
+    assert whole > one, "an AoE over two mobs predicted one mob's damage"
+    assert whole == pytest.approx(one * 2, rel=0.05)
+
+
+def test_a_dead_mob_makes_an_aoe_a_lower_bound():
+    tel = Telemetry()
+    tel.start_fight()
+    d = _Decision("Meteor Strike", target_index=None)
+    d.target_kind = "enemies"
+    r = tel.observe(d, _two_mob_read(3040, 61, 1))
+    r.predicted_damage = 700.0
+    from w101_sim import Actor, State
+    player = Actor(name="Wizard", school="fire", hp=3000, max_hp=3000, team=0)
+    left = Actor(name="Orin Grimcaster", school="death", hp=2544,
+                 max_hp=3040, team=1)
+    tel.observe(_Decision(passing=True), _Read(State(player, [left]), 2))
+    assert r.actual_damage == pytest.approx(496.0 + 61.0)
+    assert not r.clean and "lower bound" in " ".join(r.confounds)
+
+
+def test_an_enchanted_cast_is_still_predicted(monkeypatch):
+    """The first live run with enchantments produced ZERO evidence about
+    whether the enchant math matches the game: telemetry looked the
+    chosen card up in the static catalog, which holds no "+tag" names,
+    so Oz's only attack of the run recorded predicted_damage null --
+    and a null prediction also short-circuits the settle, so the fight
+    exported damage_dealt 0.0 for a fight it won."""
+    from w101_sim import enchant_card
+
+    sim, state, cards = _sim_and_state(hand=("Sunbird",))
+    epic = enchant_card(cards["Sunbird"], "Epic")
+    state.player.hand = [epic]
+    assert epic.name not in cards, "the catalog gained the enchanted card"
+
+    tel = Telemetry()
+    tel.start_fight()
+    read = _Read(state, 1, hand=(epic.name,))
+    d = _Decision(epic.name, target_index=0)
+    d.target_kind = "enemy"
+    r = tel.observe(d, read, sim=sim, cards=cards)
+    assert r.predicted_damage, \
+        "the enchanted cast got no prediction, so nothing was measured"
+    plain = predict_damage(sim, state, epic, 0)
+    assert r.predicted_damage == pytest.approx(plain)
+
+
+def test_a_card_nobody_can_find_says_so_instead_of_exporting_clean():
+    """A missing prediction silently disables the settle too, so the
+    round carries no actual damage either -- and still exported
+    `clean: true`, which reads as "measured and fine"."""
+    sim, state, cards = _sim_and_state(hand=("Sunbird",))
+    tel = Telemetry()
+    tel.start_fight()
+    d = _Decision("Not A Real Card", target_index=0)
+    d.target_kind = "enemy"
+    r = tel.observe(d, _Read(state, 1), sim=sim, cards=cards)
+    assert r.predicted_damage is None
+    assert not r.clean and "no prediction" in " ".join(r.confounds)
+
+
+def test_a_dot_is_not_filed_as_a_card_that_moves_no_health():
+    """Heck Hound's 362 health was dropped under a rule written for
+    traps and shields: `predict_damage` measures the cast round, a DoT
+    schedules its damage, so it honestly reads zero. Still dropped --
+    attributing ticks to the round that scheduled them is a different
+    problem -- but no longer indistinguishable from a Fire Trap."""
+    sim, state, cards = _sim_and_state(hand=("Heck Hound",))
+    tel = Telemetry()
+    tel.start_fight()
+    d = _Decision("Heck Hound", target_index=0)
+    d.target_kind = "enemy"
+    r = tel.observe(d, _Read(state, 1), sim=sim, cards=cards)
+    assert r.scheduled_damage, "a DoT was not recognised as one"
+    r.predicted_damage = 0.0
+    tel.observe(_Decision(passing=True), _read(1800, 2))
+    assert r.actual_damage is None, "a DoT's ticks were attributed"
+    assert not r.clean and "scheduled" in " ".join(r.confounds)
+
+    # ...and a real debuff still says nothing at all.
+    sim2, state2, cards2 = _sim_and_state(hand=("Fire Trap",))
+    tel2 = Telemetry()
+    tel2.start_fight()
+    d2 = _Decision("Fire Trap", target_index=0)
+    d2.target_kind = "enemy"
+    t = tel2.observe(d2, _Read(state2, 1), sim=sim2, cards=cards2)
+    assert not t.scheduled_damage
+    t.predicted_damage = 0.0
+    tel2.observe(_Decision(passing=True), _read(1800, 2))
+    assert t.clean and not t.confounds
+
+
+def test_the_export_says_how_many_rounds_were_actually_a_party():
+    """`policy_mix` reported "ttk-lookahead · party" on 100% of rev
+    e6201303's rounds, and not one of them was a party: the
+    coordinator's barrier waits 2.5s for the other seats and the
+    booster took 7.1-7.5s just to click a card, so every shared round
+    was planned alone. A policy's NAME is not evidence that it had
+    anybody to coordinate with."""
+    from types import SimpleNamespace
+
+    tel = Telemetry()
+    tel.start_fight()
+    def move(seat):
+        return SimpleNamespace(seat=seat, target_name=None, wizard="",
+                               card="Sunbird", expected=0.0, passing=False)
+
+    solo = SimpleNamespace(moves=[move(0)])
+    both = SimpleNamespace(moves=[move(0), move(1)])
+    a = tel.observe(_Decision("Sunbird", 0), _read(2000, 1), party=solo)
+    b = tel.observe(_Decision("Sunbird", 0), _read(2000, 2), party=both)
+    assert (a.seats_in_plan, b.seats_in_plan) == (1, 2)
+    assert tel.summary()["planned_alone"] == {"alone": 1, "rounds": 2}
+
+    # No coordinator at all is one seat, not a crash.
+    tel2 = Telemetry()
+    tel2.start_fight()
+    tel2.observe(_Decision("Sunbird", 0), _read(2000, 1))
+    assert tel2.summary()["planned_alone"] == {"alone": 1, "rounds": 1}
+
+
 def test_blade_rounds_are_not_damage_observations():
     """A blade predicts 0 and delivers 0. Counting it as a perfect
     prediction would make a buff-heavy deck look more accurate purely for
@@ -14883,6 +15053,275 @@ def test_the_walk_through_is_on_the_service_ladder(monkeypatch):
         "a booster parked at the quester's marker must not wander off"
 
 
+# ---------------------- the dungeon that refuses friends-list teleports
+#
+# The operator, rev e6201303: "the booster and boostee got into a dungeon
+# but the booster is trying to teleport via friends to the boostee, but
+# some instances (most allow tp's) don't allow teleports, so it says your
+# friend is busy on repeat. instead we can follow the tp steps of the
+# leader to enter combats in this case or follow to different locations".
+#
+# What it cost: Oz stood in `DS_Arena_Gauntlet_6Room` for ten minutes
+# while Konstantin walked on through `6Room_Sub/6Room_2` ... `6Room_6`.
+# The gauntlet's rooms are separate ZONES, so no XYZ teleport crosses
+# one, and the instance refuses the friends list. Konstantin fought Orin
+# Grimcaster alone, twice, and lost both.
+
+class _DoorWalkClient:
+    def __init__(self, pos=(0.0, 0.0, 0.0), zone="6Room", crosses_into=None,
+                 crosses_on_leg=None):
+        self.tped = []
+        self.legs = []
+        self.zone = zone
+        self.crosses_into = crosses_into
+        self.crosses_on_leg = crosses_on_leg
+        x, y, z = pos
+
+        class _Body:
+            async def position(_s):
+                from types import SimpleNamespace
+                return SimpleNamespace(x=x, y=y, z=z)
+
+            async def yaw(_s):
+                return 0.0
+
+        self.body = _Body()
+
+    async def is_loading(self):
+        return False
+
+    async def zone_name(self):
+        return self.zone
+
+    async def teleport(self, xyz):
+        self.tped.append((xyz.x, xyz.y, xyz.z))
+
+    async def goto(self, x, y):
+        self.legs.append((round(x, 1), round(y, 1)))
+        if self.crosses_on_leg and len(self.legs) >= self.crosses_on_leg:
+            self.zone = self.crosses_into
+
+
+def _stranded_in_a_dungeon(monkeypatch, door=True, crosses_on_leg=1):
+    """A booster one room behind its quester, with no teleport that works."""
+    import time
+    from types import SimpleNamespace
+
+    from deimos_bridge import party
+
+    worker, _read = _zoned_party(["6Room_2", "6Room"])
+    boss, seat = worker.seats           # seat 0 leads; seat 1 is the booster
+    worker.leader = boss.index
+    worker.booster_party = True
+    boss.client = _DoorWalkClient(pos=(500.0, 500.0, 0.0), zone="6Room_2")
+    seat.client = _DoorWalkClient(pos=(10.0, 10.0, 0.0), zone="6Room",
+                                  crosses_into="6Room_2",
+                                  crosses_on_leg=crosses_on_leg)
+    boss.zone_seen, seat.zone_seen = "6Room_2", "6Room"
+    boss.wizard_name = "Konstantin V"
+    seat.followed_at = time.monotonic() - 999.0
+    if door:
+        # The leader was watched crossing: it stood here in 6Room.
+        worker._doors[("6Room", "6Room_2")] = (
+            SimpleNamespace(x=300.0, y=0.0, z=0.0), time.monotonic(),
+            boss.name)
+
+    async def refused(*a, **kw):
+        return False, ("could not teleport to Konstantin V through the "
+                       "friends list — your friend is busy")
+
+    async def not_fighting(_c):
+        return False
+
+    monkeypatch.setattr(party, "follow", refused)
+    monkeypatch.setattr(party, "in_battle", not_fighting)
+    return worker, seat, boss
+
+
+def test_a_dungeon_that_refuses_teleports_is_walked_into(monkeypatch):
+    """The headline. The friends-list teleport is refused, so the
+    booster teleports to the spot its quester was standing on when it
+    made this same crossing and walks through it. A dungeon that
+    refuses teleports still has doors."""
+    import asyncio
+
+    worker, seat, boss = _stranded_in_a_dungeon(monkeypatch)
+    asyncio.run(worker._follow_step(seat.client, seat))
+    assert seat.client.tped == [(300.0, 0.0, 0.0)], \
+        "the booster never stepped to the door"
+    assert seat.client.zone == "6Room_2", "it did not end up in the room"
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert kinds.count("door-walk") == 2, \
+        f"the walk was not reported as one attempt and one outcome: {kinds}"
+    said = " ".join(e["detail"] for e in seat.tel.questing
+                    if e["kind"] == "door-walk")
+    assert "refuses friends-list teleports" in said and "on foot" in said
+
+
+def test_the_door_map_is_learned_by_watching_the_leader_cross(monkeypatch):
+    """Nobody tells wizAi where the doors are. It watches: the position
+    a wizard was standing on the poll BEFORE its zone changed is, by
+    construction, the door it just used -- and one wizard's crossing
+    teaches the whole party."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    worker, read_zone = _zoned_party(["6Room", "6Room"])
+    boss, seat = worker.seats
+    boss.client = _DoorWalkClient(pos=(300.0, 0.0, 0.0), zone="6Room")
+    seat.client = _DoorWalkClient(pos=(10.0, 10.0, 0.0), zone="6Room")
+    monkeypatch.setattr(party, "zone", read_zone)
+
+    # First poll: both in 6Room. Positions recorded, no door yet -- a
+    # door is a CROSSING, and nobody has crossed.
+    asyncio.run(worker._check_together())
+    assert worker._doors == {}, "a door was invented without a crossing"
+    assert boss.last_spot_zone == "6Room"
+    assert (boss.last_spot.x, boss.last_spot.y) == (300.0, 0.0)
+
+    # Second poll: the leader is now in 6Room_2, and where it stood on
+    # the poll before is the way in.
+    boss._zone = boss.client.zone = "6Room_2"
+    asyncio.run(worker._check_together())
+    door = worker._doors.get(("6Room", "6Room_2"))
+    assert door is not None, f"no door learned: {sorted(worker._doors)}"
+    spot, _at, taught_by = door
+    assert (spot.x, spot.y, spot.z) == (300.0, 0.0, 0.0), \
+        "the door is not where the leader was standing when it left"
+    assert taught_by == boss.name, "the crossing was credited to nobody"
+    # The follower's own zone never changed, so it taught nothing.
+    assert ("6Room", "6Room_2") in worker._doors and len(worker._doors) == 1
+
+
+def test_a_leader_several_rooms_ahead_is_chased_one_door_at_a_time(
+        monkeypatch):
+    """The shape of the actual stranding, with the run's own zone names.
+    Konstantin crossed FIVE doors while Oz stood in the first room, so
+    the map holds (6Room -> 6Room_2) and nothing keyed on the room he
+    ended up in. Walking the door he took out of THIS room lands the
+    booster one room closer, and the next tick answers the next room --
+    which is what following someone's route means. A crossing that
+    worked also clears the retry cooldown, so a five-room chase is not
+    paced at one room per cooldown."""
+    import asyncio
+    import time
+    from types import SimpleNamespace
+
+    from deimos_bridge import party
+    from deimos_bridge.gui.live import NEVER
+
+    rooms = ["6Room", "6Room_2", "6Room_3", "6Room_4", "6Room_5", "6Room_6"]
+    worker, _read = _zoned_party([rooms[-1], rooms[0]])
+    boss, seat = worker.seats
+    worker.leader, worker.booster_party = boss.index, True
+    boss.client = _DoorWalkClient(pos=(9.0, 9.0, 0.0), zone=rooms[-1])
+    boss.zone_seen, seat.zone_seen = rooms[-1], rooms[0]
+    boss.wizard_name = "Konstantin V"
+    # The route he walked, and the doors the party watched him use.
+    t0 = time.monotonic() - 500.0
+    boss.zone_left = [(z, t0 + i * 20) for i, z in enumerate(rooms[:-1])]
+    for i in range(len(rooms) - 1):
+        worker._doors[(rooms[i], rooms[i + 1])] = (
+            SimpleNamespace(x=100.0 * (i + 1), y=0.0, z=0.0),
+            t0 + i * 20, boss.name)
+    # A second exit out of the first room that the leader never used --
+    # taught LAST, so "most recent" alone would take the wrong door.
+    worker._doors[(rooms[0], "SomeOtherStreet")] = (
+        SimpleNamespace(x=-999.0, y=0.0, z=0.0), time.monotonic(), seat.name)
+
+    async def refused(*a, **kw):
+        return False, "your friend is busy"
+
+    async def not_fighting(_c):
+        return False
+
+    monkeypatch.setattr(party, "follow", refused)
+    monkeypatch.setattr(party, "in_battle", not_fighting)
+
+    for i in range(len(rooms) - 1):
+        seat.client = _DoorWalkClient(pos=(1.0, 1.0, 0.0), zone=rooms[i],
+                                      crosses_into=rooms[i + 1],
+                                      crosses_on_leg=1)
+        seat.zone_seen = rooms[i]
+        seat.followed_at = NEVER
+        asyncio.run(worker._follow_step(seat.client, seat))
+        assert seat.client.tped == [(100.0 * (i + 1), 0.0, 0.0)], \
+            f"room {rooms[i]}: took the wrong door ({seat.client.tped})"
+        assert seat.client.zone == rooms[i + 1]
+        assert seat.door_walked_at == NEVER, \
+            "a working chase was left waiting out the retry cooldown"
+
+
+def test_the_leaders_own_last_spot_is_the_door_nobody_watched(monkeypatch):
+    """A leader that crossed before the map existed still left the
+    answer behind: the last place it was seen in the follower's zone."""
+    import asyncio
+    from types import SimpleNamespace
+
+    worker, seat, boss = _stranded_in_a_dungeon(monkeypatch, door=False)
+    boss.last_spot = SimpleNamespace(x=250.0, y=25.0, z=0.0)
+    boss.last_spot_zone = "6Room"
+    asyncio.run(worker._follow_step(seat.client, seat))
+    assert seat.client.tped == [(250.0, 25.0, 0.0)]
+    assert seat.client.zone == "6Room_2"
+
+
+def test_a_way_in_nobody_knows_is_said_rather_than_retried(monkeypatch):
+    """No map entry and no remembered leader spot: the follower cannot
+    invent a route, and the one thing it must not do is fail silently.
+    Rev e6201303's ten-minute stranding exported ONE line."""
+    import asyncio
+
+    worker, seat, boss = _stranded_in_a_dungeon(monkeypatch, door=False)
+    boss.last_spot = None
+    asyncio.run(worker._follow_step(seat.client, seat))
+    assert seat.client.tped == [] and seat.client.legs == []
+    failed = [e for e in seat.tel.questing if e["kind"] == "follow-failed"]
+    assert failed, "a follower that cannot reach its leader said nothing"
+    assert "no record of the way in" in failed[0]["detail"]
+
+
+def test_the_door_walk_is_not_retried_every_follow_tick(monkeypatch):
+    """A walk holds the script and takes seconds; retrying it twice a
+    second would be the friends-list spam with extra steps."""
+    import asyncio
+    import time
+
+    worker, seat, boss = _stranded_in_a_dungeon(monkeypatch,
+                                                crosses_on_leg=None)
+    asyncio.run(worker._follow_step(seat.client, seat))
+    assert len(seat.client.tped) == 1, "the first walk did not happen"
+    seat.followed_at = time.monotonic() - 999.0
+    asyncio.run(worker._follow_step(seat.client, seat))
+    assert len(seat.client.tped) == 1, \
+        "the door walk retried inside its own cooldown"
+
+
+def test_an_unreadable_zone_never_reads_as_already_together():
+    """The silent half of the ten-minute stranding. Wizard101 reuses
+    coordinate space between the rooms of an instance, so two wizards
+    two rooms apart can read a gap of nothing -- and `follow` answered
+    "already together, nothing to do" with an EMPTY reason, which resets
+    the caller's stranding clock. One export line for ten minutes."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    follower = _party_client(pos=(100, 0, 0), zone_name=None)
+    leader = _party_client(pos=(120, 0, 0), zone_name="6Room_2")
+    moved, why = asyncio.run(party.follow(follower, leader,
+                                          leader_name="Konstantin V"))
+    assert not moved
+    assert why, "an unproven 'together' was reported as nothing to say"
+    assert "zone would not read" in why
+
+    # ...and when both zones DO read and match, silence is still right.
+    a = _party_client(pos=(100, 0, 0), zone_name="6Room")
+    b = _party_client(pos=(120, 0, 0), zone_name="6Room")
+    assert asyncio.run(party.follow(a, b, leader_name="K")) == (False, "")
+
+
 # ------------------------------ the sigil countdown the script cannot see
 #
 # The operator's correction, rev e786b716: "konstantin literally had the
@@ -17206,6 +17645,29 @@ def test_the_rebuild_path_marks_the_seat_and_reports(monkeypatch):
     assert "self._fresh_source(seat, source)" in src
     assert "seat.script_built = True" in src
     assert "skipped_setup" in src, "a trimmed rebuild has to say so"
+
+
+def test_a_booster_party_rebuild_is_reported_like_any_other():
+    """A rebuild starts the program again from instruction 0. The
+    whole-party branch writes that into every export; the solo-pilot /
+    booster branch returned before it did, so rev e6201303's step
+    counter fell from 13,846 to 1,213 between two heartbeats with
+    nothing anywhere to say why — the most consequential event in a
+    supervised run, invisible in exactly the mode the run was in."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._setup_script)
+    solo = src.split("if self._solo_pilot():", 1)
+    assert len(solo) == 2, "the solo-pilot branch moved"
+    branch = solo[1].split("source, skipped_setup = self._fresh_source", 1)
+    assert len(branch) == 2, \
+        "the solo-pilot branch still throws its skipped-setup list away"
+    # ...and reports the rebuild before it returns out of the branch.
+    body = branch[1].split("return", 1)[0]
+    assert "_note_reload" in body, \
+        "a booster-party rebuild is still silent in the export"
 
 
 # ------------------------------------------- re-arming a dead quest arrow
