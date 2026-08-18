@@ -352,14 +352,25 @@ async def _window_came_up(window, timeout: float = FRIENDS_WINDOW_WAIT):
     nothing.
     """
     waited = 0.0
+    read = False
     while True:
-        with suppress(Exception):
+        try:
             flags = await window.flags()
+        except Exception:
+            pass
+        else:
+            read = True
             if (flags & WindowFlags.visible) and not (
                     flags & WindowFlags.disabled):
                 return True
         if waited >= timeout:
-            return False
+            # A flags word that would not read even once is no evidence
+            # against this window. Refusing on it would block a client
+            # that was about to work, for a reason nobody could act on
+            # -- so an unreadable window is let through and judged by
+            # what happens next, the way it was before this check
+            # existed. Only a window that READS as unusable is refused.
+            return not read
         await asyncio.sleep(0.2)
         waited += 0.2
 

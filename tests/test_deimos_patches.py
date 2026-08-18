@@ -748,6 +748,23 @@ def test_a_list_that_will_not_come_up_says_so_instead_of_wndCharacter():
         "party.py cannot tell this apart from the game refusing"
 
 
+def test_a_flags_word_that_will_not_read_does_not_block_the_teleport():
+    """No evidence is not evidence. The precondition refuses a window
+    that READS as unusable; a window whose flags will not read at all
+    is let through and judged by what happens next, because blocking
+    on it would stop a client that was about to work for a reason
+    nobody could act on."""
+    mod = _load_ww_utils()
+    client = _FriendsClient(friends=["Konstantin Ice"])
+
+    async def _no_read():
+        raise RuntimeError("the flags word would not read")
+
+    client.friends_window.flags = _no_read
+    _run_tp(mod, client, name="Konstantin Ice")
+    assert client.teleported, "an unreadable window blocked a good teleport"
+
+
 def test_the_row_is_never_clicked_at_a_window_that_cannot_take_it():
     """The precondition, stated. A click aimed at a wedged window is a
     click into empty HUD, and every second spent waiting for the panel
