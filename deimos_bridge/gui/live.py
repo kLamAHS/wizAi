@@ -410,6 +410,11 @@ class _Seat:
         #: twice is a wall; the outcome used to be recorded and read by
         #: nothing but the win count. See `_note_the_loss`.
         self.lost_to = {}
+        #: consecutive rounds where every line the rollout tried ended
+        #: with this wizard dead, and the fight that was last reported
+        #: for. See `_watch_for_a_fight_that_cannot_be_won`.
+        self.no_line_survives = 0
+        self.unwinnable_said_for = None
         #: stage name -> how many times it has failed, so a broken stage
         #: is reported rather than retried silently twice a second
         self.stage_errors = {}
@@ -3573,6 +3578,9 @@ class LiveWorker(QThread):
             # keeps ticking while this loop is parked in
             # wait_for_combat below.
             seat.tel.start_fight()
+            # A new board is a new verdict. The run of no-surviving-line
+            # rounds belongs to the duel that produced it.
+            seat.no_line_survives = 0
             try:
                 # blocks until a duel starts, then plays it out -- but
                 # looks up while it waits, so Stop is answered between
@@ -9046,9 +9054,97 @@ class LiveWorker(QThread):
             getattr(backend, "_measured_incoming", 0.0) or 0.0)
         if seat.tel.fights:
             seat.tel.fights[-1].damage_taken += rec.incoming
+        self._watch_for_a_fight_that_cannot_be_won(seat, rec)
         self.seat_round_done.emit(seat.index, rec)
         if seat.index == 0:
             self.round_done.emit(rec)
+
+    #: how many rounds in a row where NO line survives before the run is
+    #: told. Five, because one such round is a bad hand and five is the
+    #: board. Rev 8ebfcf70's fight 2 opened with seven of them at full
+    #: health, so this fires deep inside the FIRST attempt rather than
+    #: after the second corpse -- which is the difference between losing
+    #: ten minutes and losing thirty.
+    UNWINNABLE_ROUNDS = 5
+
+    def _watch_for_a_fight_that_cannot_be_won(self, seat, rec):
+        """Say so when every line the rollout tries ends in this wizard's
+        death, round after round.
+
+        The verdict already exists and already goes in the export. A
+        rollout that dies returns `_lost_score`'s sentinel rather than a
+        turn count, `policies.is_sentinel` is the ready-made classifier
+        for it -- and its only caller in the repo is a pip-thrift
+        tie-break inside the ranking. So the one component that actually
+        knows the fight is unwinnable tells nobody.
+
+        Rev 8ebfcf70 is what that costs. Konstantin's fight 2 opens with
+        rounds 1-7 where every candidate INCLUDING `pass` is the
+        sentinel, at 1998 of 1998 health -- the policy knew on round one,
+        at full health, that it had no line -- and 19 of the fight's 26
+        rounds read that way. The same board was then walked back into
+        twice more. Nothing said a word until the wizard was dead, three
+        times over.
+
+        Reported, not acted on. What to DO about it depends on why the
+        line is missing -- a party that never arrived, a deck with no
+        answer, a wizard ten levels light -- and only the operator can
+        tell those apart. What wizAi can do is stop the verdict dying
+        inside the ranking function.
+        """
+        from .. import policies
+
+        cands = list(rec.candidates or ())
+        if not cands:
+            # No candidates is not "no line survives": a round with
+            # nothing castable has nothing to roll out. It says nothing
+            # either way, so it neither counts nor clears.
+            return
+
+        def died(cand):
+            turns = getattr(cand, "turns", None)
+            horizon = getattr(cand, "horizon", None)
+            if turns is None and isinstance(cand, dict):
+                turns, horizon = cand.get("turns"), cand.get("horizon")
+            if turns is None or horizon is None:
+                return False
+            try:
+                return policies.is_sentinel(turns, horizon)
+            except Exception:
+                return False
+
+        if not all(died(c) for c in cands):
+            seat.no_line_survives = 0
+            return
+        seat.no_line_survives += 1
+        fight = seat.tel.fights[-1] if seat.tel.fights else None
+        index = getattr(fight, "index", None)
+        if (seat.no_line_survives < self.UNWINNABLE_ROUNDS
+                or seat.unwinnable_said_for == index):
+            return
+        seat.unwinnable_said_for = index
+        opening = getattr(fight, "opening", "") or "this board"
+        with_me = rec.seats_in_plan or 1
+        live = [s for s in self.seats if s.client is not None]
+        alone = (f", and {seat.name} is planning them alone while "
+                 f"{len(live)} wizard(s) are in the run"
+                 if with_me <= 1 and len(live) > 1 else "")
+        for other in self.seats:
+            try:
+                other.tel.note_questing(
+                    "unwinnable",
+                    f"{seat.no_line_survives} rounds in a row against "
+                    f"{opening} where every line the rollout tried — "
+                    f"including passing — ended with {seat.name} dead"
+                    f"{alone}. At {rec.player_hp:.0f} of "
+                    f"{rec.player_max_hp:.0f} health. This is the policy's "
+                    f"own verdict, and it has been available since the "
+                    f"round it first appeared")
+            except Exception:
+                pass
+        self._say(seat,
+                  f"{seat.name} has no surviving line against {opening} — "
+                  f"{seat.no_line_survives} rounds running")
 
     def _learn_name(self, seat, read):
         """Take the wizard's own name off the duel it is standing in.

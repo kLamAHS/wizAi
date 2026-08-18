@@ -1475,6 +1475,112 @@ def _lose_a_fight(worker, seat, opening, rounds=20, seats_in_plan=1):
     worker._note_the_loss(seat, False)
 
 
+def _no_line_round(worker, seat, hp=1998.0, died=True, n=4, seats_in_plan=1):
+    """One round whose candidate set either all died or did not, pushed
+    through the same path `_on_decision` uses."""
+    from deimos_bridge.telemetry import RoundRecord
+
+    fight = seat.tel.fights[-1].index if seat.tel.fights else 1
+    # 14 turns at a horizon of 12 is `died()`; 6 turns is a real count.
+    cands = [{"card": f"c{i}", "turns": 14 if died else 6, "horizon": 12}
+             for i in range(n)]
+    rec = RoundRecord(fight=fight, round=len(seat.tel.rounds) + 1,
+                      candidates=cands, player_hp=hp, player_max_hp=1998.0,
+                      seats_in_plan=seats_in_plan)
+    seat.tel.rounds.append(rec)
+    worker._watch_for_a_fight_that_cannot_be_won(seat, rec)
+    return rec
+
+
+def test_a_fight_with_no_surviving_line_is_said_out_loud(qapp):
+    """The verdict already existed and already went in the export. A
+    rollout that dies returns `_lost_score`'s sentinel instead of a turn
+    count, `policies.is_sentinel` classifies it, and its only caller in
+    the repo is a pip-thrift tie-break inside the ranking — so the one
+    component that knew the fight was unwinnable told nobody.
+
+    Rev 8ebfcf70's fight 2 opened with SEVEN rounds in a row where every
+    candidate, `pass` included, was that sentinel, at 1998 of 1998
+    health. 19 of its 26 rounds read that way, the board was walked back
+    into twice more, and nothing said a word until the wizard was dead
+    three times over."""
+    worker = _party_worker()
+    seat, other = worker.seats
+    seat.tel.start_fight()
+    seat.tel.fights[-1].opening = "Drusilla Morningbane@2400+War Wyrm@685"
+    for _ in range(worker.UNWINNABLE_ROUNDS - 1):
+        _no_line_round(worker, seat)
+    assert not [e for e in seat.tel.questing if e["kind"] == "unwinnable"], \
+        "a handful of bad hands is not a verdict"
+    _no_line_round(worker, seat)
+    said = [e for e in seat.tel.questing if e["kind"] == "unwinnable"]
+    assert len(said) == 1, [e["kind"] for e in seat.tel.questing]
+    assert "Drusilla Morningbane@2400" in said[0]["detail"]
+    assert "planning them alone" in said[0]["detail"]
+    assert "1998 of 1998 health" in said[0]["detail"], \
+        "the verdict arrived at full health and the line did not say so"
+    assert [e for e in other.tel.questing if e["kind"] == "unwinnable"]
+
+
+def test_one_line_that_survives_clears_the_count(qapp):
+    """Consecutive, not cumulative. A fight that has an answer on some
+    rounds and not others is a hard fight, not a wall."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.tel.start_fight()
+    for _ in range(worker.UNWINNABLE_ROUNDS - 1):
+        _no_line_round(worker, seat)
+    _no_line_round(worker, seat, died=False)
+    assert seat.no_line_survives == 0
+    for _ in range(worker.UNWINNABLE_ROUNDS - 1):
+        _no_line_round(worker, seat)
+    assert not [e for e in seat.tel.questing if e["kind"] == "unwinnable"]
+
+
+def test_a_round_with_nothing_to_roll_out_neither_counts_nor_clears(qapp):
+    """An empty candidate set is a round with nothing castable, not a
+    round where no line survives. Counting it would invent verdicts out
+    of a dry hand; clearing on it would hide a real one."""
+    from deimos_bridge.telemetry import RoundRecord
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.tel.start_fight()
+    for _ in range(worker.UNWINNABLE_ROUNDS - 1):
+        _no_line_round(worker, seat)
+    was = seat.no_line_survives
+    empty = RoundRecord(fight=1, round=99, candidates=[],
+                        player_hp=100.0, player_max_hp=1998.0)
+    worker._watch_for_a_fight_that_cannot_be_won(seat, empty)
+    assert seat.no_line_survives == was
+
+
+def test_the_verdict_is_said_once_per_fight(qapp):
+    """Nineteen of that fight's rounds read the same way. Nineteen
+    identical lines is the headline turned back into noise."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.tel.start_fight()
+    for _ in range(worker.UNWINNABLE_ROUNDS + 14):
+        _no_line_round(worker, seat)
+    assert len([e for e in seat.tel.questing
+                if e["kind"] == "unwinnable"]) == 1
+
+
+def test_the_next_fight_gets_its_own_verdict(qapp):
+    """A new board is a new question. Konstantin walked back into the
+    same one twice more, and each attempt deserved saying."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    for _ in range(2):
+        seat.tel.start_fight()
+        seat.no_line_survives = 0
+        for _ in range(worker.UNWINNABLE_ROUNDS):
+            _no_line_round(worker, seat)
+    assert len([e for e in seat.tel.questing
+                if e["kind"] == "unwinnable"]) == 2
+
+
 def test_the_export_says_how_the_run_was_wired(qapp):
     """Rev 8ebfcf70 shipped two exports and neither could answer the
     first question anybody asks of them: which wizard was supposed to
