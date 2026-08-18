@@ -14883,6 +14883,216 @@ def test_the_walk_through_is_on_the_service_ladder(monkeypatch):
         "a booster parked at the quester's marker must not wander off"
 
 
+# ---------------------- the dungeon that refuses friends-list teleports
+#
+# The operator, rev e6201303: "the booster and boostee got into a dungeon
+# but the booster is trying to teleport via friends to the boostee, but
+# some instances (most allow tp's) don't allow teleports, so it says your
+# friend is busy on repeat. instead we can follow the tp steps of the
+# leader to enter combats in this case or follow to different locations".
+#
+# What it cost: Oz stood in `DS_Arena_Gauntlet_6Room` for ten minutes
+# while Konstantin walked on through `6Room_Sub/6Room_2` ... `6Room_6`.
+# The gauntlet's rooms are separate ZONES, so no XYZ teleport crosses
+# one, and the instance refuses the friends list. Konstantin fought Orin
+# Grimcaster alone, twice, and lost both.
+
+class _DoorWalkClient:
+    def __init__(self, pos=(0.0, 0.0, 0.0), zone="6Room", crosses_into=None,
+                 crosses_on_leg=None):
+        self.tped = []
+        self.legs = []
+        self.zone = zone
+        self.crosses_into = crosses_into
+        self.crosses_on_leg = crosses_on_leg
+        x, y, z = pos
+
+        class _Body:
+            async def position(_s):
+                from types import SimpleNamespace
+                return SimpleNamespace(x=x, y=y, z=z)
+
+            async def yaw(_s):
+                return 0.0
+
+        self.body = _Body()
+
+    async def is_loading(self):
+        return False
+
+    async def zone_name(self):
+        return self.zone
+
+    async def teleport(self, xyz):
+        self.tped.append((xyz.x, xyz.y, xyz.z))
+
+    async def goto(self, x, y):
+        self.legs.append((round(x, 1), round(y, 1)))
+        if self.crosses_on_leg and len(self.legs) >= self.crosses_on_leg:
+            self.zone = self.crosses_into
+
+
+def _stranded_in_a_dungeon(monkeypatch, door=True, crosses_on_leg=1):
+    """A booster one room behind its quester, with no teleport that works."""
+    import time
+    from types import SimpleNamespace
+
+    from deimos_bridge import party
+
+    worker, _read = _zoned_party(["6Room_2", "6Room"])
+    boss, seat = worker.seats           # seat 0 leads; seat 1 is the booster
+    worker.leader = boss.index
+    worker.booster_party = True
+    boss.client = _DoorWalkClient(pos=(500.0, 500.0, 0.0), zone="6Room_2")
+    seat.client = _DoorWalkClient(pos=(10.0, 10.0, 0.0), zone="6Room",
+                                  crosses_into="6Room_2",
+                                  crosses_on_leg=crosses_on_leg)
+    boss.zone_seen, seat.zone_seen = "6Room_2", "6Room"
+    boss.wizard_name = "Konstantin V"
+    seat.followed_at = time.monotonic() - 999.0
+    if door:
+        # The leader was watched crossing: it stood here in 6Room.
+        worker._doors[("6Room", "6Room_2")] = (
+            SimpleNamespace(x=300.0, y=0.0, z=0.0), time.monotonic(),
+            boss.name)
+
+    async def refused(*a, **kw):
+        return False, ("could not teleport to Konstantin V through the "
+                       "friends list — your friend is busy")
+
+    async def not_fighting(_c):
+        return False
+
+    monkeypatch.setattr(party, "follow", refused)
+    monkeypatch.setattr(party, "in_battle", not_fighting)
+    return worker, seat, boss
+
+
+def test_a_dungeon_that_refuses_teleports_is_walked_into(monkeypatch):
+    """The headline. The friends-list teleport is refused, so the
+    booster teleports to the spot its quester was standing on when it
+    made this same crossing and walks through it. A dungeon that
+    refuses teleports still has doors."""
+    import asyncio
+
+    worker, seat, boss = _stranded_in_a_dungeon(monkeypatch)
+    asyncio.run(worker._follow_step(seat.client, seat))
+    assert seat.client.tped == [(300.0, 0.0, 0.0)], \
+        "the booster never stepped to the door"
+    assert seat.client.zone == "6Room_2", "it did not end up in the room"
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert kinds.count("door-walk") == 2, \
+        f"the walk was not reported as one attempt and one outcome: {kinds}"
+    said = " ".join(e["detail"] for e in seat.tel.questing
+                    if e["kind"] == "door-walk")
+    assert "refuses friends-list teleports" in said and "on foot" in said
+
+
+def test_the_door_map_is_learned_by_watching_the_leader_cross(monkeypatch):
+    """Nobody tells wizAi where the doors are. It watches: the position
+    a wizard was standing on the poll BEFORE its zone changed is, by
+    construction, the door it just used -- and one wizard's crossing
+    teaches the whole party."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    worker, read_zone = _zoned_party(["6Room", "6Room"])
+    boss, seat = worker.seats
+    boss.client = _DoorWalkClient(pos=(300.0, 0.0, 0.0), zone="6Room")
+    seat.client = _DoorWalkClient(pos=(10.0, 10.0, 0.0), zone="6Room")
+    monkeypatch.setattr(party, "zone", read_zone)
+
+    # First poll: both in 6Room. Positions recorded, no door yet -- a
+    # door is a CROSSING, and nobody has crossed.
+    asyncio.run(worker._check_together())
+    assert worker._doors == {}, "a door was invented without a crossing"
+    assert boss.last_spot_zone == "6Room"
+    assert (boss.last_spot.x, boss.last_spot.y) == (300.0, 0.0)
+
+    # Second poll: the leader is now in 6Room_2, and where it stood on
+    # the poll before is the way in.
+    boss._zone = boss.client.zone = "6Room_2"
+    asyncio.run(worker._check_together())
+    door = worker._doors.get(("6Room", "6Room_2"))
+    assert door is not None, f"no door learned: {sorted(worker._doors)}"
+    spot, _at, taught_by = door
+    assert (spot.x, spot.y, spot.z) == (300.0, 0.0, 0.0), \
+        "the door is not where the leader was standing when it left"
+    assert taught_by == boss.name, "the crossing was credited to nobody"
+    # The follower's own zone never changed, so it taught nothing.
+    assert ("6Room", "6Room_2") in worker._doors and len(worker._doors) == 1
+
+
+def test_the_leaders_own_last_spot_is_the_door_nobody_watched(monkeypatch):
+    """A leader that crossed before the map existed still left the
+    answer behind: the last place it was seen in the follower's zone."""
+    import asyncio
+    from types import SimpleNamespace
+
+    worker, seat, boss = _stranded_in_a_dungeon(monkeypatch, door=False)
+    boss.last_spot = SimpleNamespace(x=250.0, y=25.0, z=0.0)
+    boss.last_spot_zone = "6Room"
+    asyncio.run(worker._follow_step(seat.client, seat))
+    assert seat.client.tped == [(250.0, 25.0, 0.0)]
+    assert seat.client.zone == "6Room_2"
+
+
+def test_a_way_in_nobody_knows_is_said_rather_than_retried(monkeypatch):
+    """No map entry and no remembered leader spot: the follower cannot
+    invent a route, and the one thing it must not do is fail silently.
+    Rev e6201303's ten-minute stranding exported ONE line."""
+    import asyncio
+
+    worker, seat, boss = _stranded_in_a_dungeon(monkeypatch, door=False)
+    boss.last_spot = None
+    asyncio.run(worker._follow_step(seat.client, seat))
+    assert seat.client.tped == [] and seat.client.legs == []
+    failed = [e for e in seat.tel.questing if e["kind"] == "follow-failed"]
+    assert failed, "a follower that cannot reach its leader said nothing"
+    assert "no record of the way in" in failed[0]["detail"]
+
+
+def test_the_door_walk_is_not_retried_every_follow_tick(monkeypatch):
+    """A walk holds the script and takes seconds; retrying it twice a
+    second would be the friends-list spam with extra steps."""
+    import asyncio
+    import time
+
+    worker, seat, boss = _stranded_in_a_dungeon(monkeypatch,
+                                                crosses_on_leg=None)
+    asyncio.run(worker._follow_step(seat.client, seat))
+    assert len(seat.client.tped) == 1, "the first walk did not happen"
+    seat.followed_at = time.monotonic() - 999.0
+    asyncio.run(worker._follow_step(seat.client, seat))
+    assert len(seat.client.tped) == 1, \
+        "the door walk retried inside its own cooldown"
+
+
+def test_an_unreadable_zone_never_reads_as_already_together():
+    """The silent half of the ten-minute stranding. Wizard101 reuses
+    coordinate space between the rooms of an instance, so two wizards
+    two rooms apart can read a gap of nothing -- and `follow` answered
+    "already together, nothing to do" with an EMPTY reason, which resets
+    the caller's stranding clock. One export line for ten minutes."""
+    import asyncio
+
+    from deimos_bridge import party
+
+    follower = _party_client(pos=(100, 0, 0), zone_name=None)
+    leader = _party_client(pos=(120, 0, 0), zone_name="6Room_2")
+    moved, why = asyncio.run(party.follow(follower, leader,
+                                          leader_name="Konstantin V"))
+    assert not moved
+    assert why, "an unproven 'together' was reported as nothing to say"
+    assert "zone would not read" in why
+
+    # ...and when both zones DO read and match, silence is still right.
+    a = _party_client(pos=(100, 0, 0), zone_name="6Room")
+    b = _party_client(pos=(120, 0, 0), zone_name="6Room")
+    assert asyncio.run(party.follow(a, b, leader_name="K")) == (False, "")
+
+
 # ------------------------------ the sigil countdown the script cannot see
 #
 # The operator's correction, rev e786b716: "konstantin literally had the

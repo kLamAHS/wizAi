@@ -498,7 +498,8 @@ async def follow(follower, leader, leader_name=None,
         return False, ""
 
     here, there = await zone(follower), await zone(leader)
-    if here is not None and there is not None and here != there:
+    known = here is not None and there is not None
+    if known and here != there:
         ok, why = await teleport_to_leader_across_zones(follower, leader_name)
         if not ok:
             return False, why
@@ -525,6 +526,22 @@ async def follow(follower, leader, leader_name=None,
             return True, ("stepped onto the leader's spot — its press-X "
                           "prompt is up, and a sigil admits only the "
                           "wizards standing on it")
+        if not known:
+            # "Close enough" is a claim about ONE zone, and this tick
+            # could not read both. Wizard101 reuses coordinate space
+            # between the rooms of an instance, so two wizards in
+            # different rooms of the same dungeon can read a gap of
+            # nothing at all -- and answering "already together" to
+            # that is not merely wrong, it is SILENT: the caller resets
+            # its stranding clock on an empty reason. Rev e6201303's
+            # booster stood in `DS_Arena_Gauntlet_6Room` for ten
+            # minutes while its quester fought two rooms away, and the
+            # whole export carries one line about it.
+            return False, (f"cannot tell whether this wizard is with the "
+                           f"leader: the zone would not read "
+                           f"({'follower' if here is None else 'leader'} "
+                           f"side), and positions from two rooms of one "
+                           f"dungeon can read as the same spot")
         return False, ""              # already together, nothing to do
 
     # Onto the leader whenever they are fighting, however close this
