@@ -1291,7 +1291,7 @@ class WizAiCombatHandler:
     ENCHANT_CAST_TIME = 1.0
 
     async def _maybe_enchant(self):
-        """Play one enchantment onto the best card in hand, before planning.
+        """Play the hand's enchantments onto its best cards, before planning.
 
         Wizard101's sun enchantments (Epic, Gargantuan, Sharpened
         Blade, Potent Trap...) are FREE actions: played during the
@@ -1303,28 +1303,50 @@ class WizAiCombatHandler:
         nuke went out at its printed size.
 
         It runs BEFORE `decide()`'s board read on purpose. The decision
-        is then made from a hand whose enchanted card carries its real
-        numbers -- `read_state` reconstitutes it via the resolver's
+        is then made from a hand whose enchanted cards carry their real
+        numbers -- `read_state` reconstitutes them via the resolver's
         `enchanted_as` record -- so the TTK rollouts price the enchant
         with no policy machinery at all: the lookahead simply sees a
         645 Sunbird where a 345 one used to be, in this round's
         candidates and every rollout line that draws it.
 
-        ONE enchant per round, deliberately: a cast reshuffles the hand
-        windows and every pointer this pass collected goes stale the
-        moment one goes out. The next round enchants the next card; a
-        fight long enough to want three enchants has the rounds.
+        EVERY useful enchantment goes out, one application at a time
+        with a fresh hand read between them, because each cast
+        reshuffles the hand's windows and stales every pointer the
+        previous read collected. One-per-round was the first cut and
+        the operator caught its cost the same day: Epic went onto
+        Tempest, the round's own cast was Stormblade, and the Sharpened
+        Blade sitting in hand never touched it -- 10% lost for nothing,
+        unrecoverable once the blade left the hand. The cap is a
+        safety bound, not a policy: a seven-card hand cannot pair more
+        than three enchants with targets.
+
+        Returns how many enchantments were applied.
+        """
+        applied = 0
+        for _ in range(3):
+            if not await self._enchant_once():
+                break
+            applied += 1
+        return applied
+
+    async def _enchant_once(self):
+        """One enchantment onto the best target in hand, freshly read.
 
         Target choice is the human rule: a damage enchant onto the
         biggest nuke, an AoE counted once per living enemy; Sharpened
         Blade onto the biggest blade, Potent Trap onto the biggest
-        trap. Treasure cards, item cards and already-enchanted cards
-        are refused by the game and skipped here; a base name already
-        recorded under a DIFFERENT enchant is skipped too, because the
-        client's read says only THAT a card is enchanted, and two
-        enchantments on copies of one name could not be told apart.
+        trap. With several enchantments in hand the strongest damage
+        one goes first, so Epic's +300 lands on this round's best card
+        before Strong's +100 takes the runner-up. Treasure cards, item
+        cards and already-enchanted cards are refused by the game and
+        skipped here; a base name already recorded under a DIFFERENT
+        enchant is skipped too, because the client's read says only
+        THAT a card is enchanted, and two enchantments on copies of
+        one name could not be told apart.
 
-        Returns how many enchants were applied (0 or 1).
+        Returns 1 when an enchantment was applied, 0 when nothing
+        useful was left to do.
         """
         from w101_sim import (DMG_ENCHANTS, ENCHANT_CARDS,
                               enchant_target_kinds)

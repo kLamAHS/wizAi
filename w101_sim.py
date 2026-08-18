@@ -314,9 +314,13 @@ def enchant_card(card, enchant):
     # An earlier cut put the whole bonus on the largest op, which
     # over-credited every hybrid nuke.
     fields = []
+    per_pip_hits = []
     for i, o in enumerate(card.ops):
         if o["op"] in ("hit", "drain") and o.get("amount") is not None:
-            fields.append((i, "amount", o["amount"]))
+            if o.get("per_pip"):
+                per_pip_hits.append(i)
+            else:
+                fields.append((i, "amount", o["amount"]))
         elif o["op"] == "dot" and o.get("total") is not None:
             if o.get("per_pip"):
                 raise ValueError(
@@ -324,6 +328,25 @@ def enchant_card(card, enchant):
                     f"modeled: the flat bonus is not per-pip, but this "
                     f"op's total is scaled by pips at cast time")
             fields.append((i, "total", o["total"]))
+    if per_pip_hits:
+        # An X-pip spell's damage op is PER PIP and the enchant's bonus
+        # is not: +300 on Tempest is +300 once, whatever the rack.
+        # Folding it into the per-pip amount multiplied it by the rack
+        # -- Epic Tempest at seven pips read 2,660 instead of 860 --
+        # so the bonus rides as its own flat companion op in the SAME
+        # op group, where it shares the original's charm/ward snapshot
+        # and blades multiply it exactly as the game does. The engine
+        # scales only `per_pip` ops by the rack (`_resolve_ops`), so a
+        # flat op beside them lands once. The headline `damage` stays
+        # untouched: on an X-pip card it prints PER PIP, and a flat
+        # bonus does not belong in a per-pip number.
+        like = card.ops[per_pip_hits[0]]
+        companion = {k: (dict(v) if isinstance(v, dict) else v)
+                     for k, v in like.items() if k != "per_pip"}
+        companion["amount"] = float(bonus)
+        ops = [dict(o) for o in card.ops] + [companion]
+        return replace(card, name=f"{card.name}+{tag}", ops=ops,
+                       source=f"enchant-{tag}")
     if not fields:
         raise ValueError(f"{enchant} found no damage op on {card.name}")
     base_total = sum(v for _, _, v in fields)
