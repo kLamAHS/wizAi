@@ -16638,6 +16638,136 @@ def test_one_countdown_hold_per_visit_and_a_return_rearms(monkeypatch):
     assert worker._countdown_held(), "the return visit was not guarded"
 
 
+def _only_the_helper_has_a_prompt(worker, seat, other, monkeypatch):
+    """The run's own shape: the partner is at a press-X prompt beside
+    this wizard, and this wizard's own prompt never renders however it
+    is re-planted. In rev bf3b32e7 that partner's prompt was for its
+    OWN quest -- the two wizards were never on the same one -- and the
+    sensor has no way to tell that from a shared sigil."""
+    from deimos_bridge import questing
+
+    async def near(c):
+        return c is other.client
+
+    async def press(c):
+        return True, ""
+
+    monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "press_x", press)
+
+
+def _hold_and_let_it_expire(worker, seat, monkeypatch, spot=None):
+    """One VISIT: the script walks the wizard off the spot and back,
+    then the guard arms, holds, and the 45s pass with nothing firing.
+
+    The yank is the point. Rev bf3b32e7's script looped out to CL_Hub
+    and back between every attempt, and each return is a new visit that
+    the per-visit bound cannot see.
+    """
+    import asyncio
+    import time
+
+    from deimos_bridge.gui.live import NEVER
+
+    here = spot or seat.progress
+    away_spot = (here[0], (900, 900, 0), here[2])
+    seat.progress, seat.marker_away = away_spot, 5000.0
+    asyncio.run(worker._maybe_count_hold(seat))          # off the spot
+    seat.progress, seat.marker_away = here, 8.0
+    seat.progress_at = time.monotonic()
+    worker._count_hold_last = NEVER
+    seat.count_hold_seen = time.monotonic() - 1.0
+    asyncio.run(worker._maybe_count_hold(seat))          # arm + hold
+    if worker._countdown_held():
+        worker._count_hold_until = time.monotonic() - 1.0
+        asyncio.run(worker._maybe_count_hold(seat))      # expire
+        return True
+    return False
+
+
+def test_a_spot_that_never_fires_stops_being_treated_as_a_sigil(monkeypatch):
+    """The 88 minutes at rev bf3b32e7.
+
+    Konstantin's goal was `Talk To Karolak Nightspinner in Stormriven`
+    with the marker 270 away — an NPC, not a dungeon. The evidence for
+    a sigil was Oz standing at a press-X prompt beside it, which was
+    Oz's OWN prompt for its own quest, because the two wizards were
+    never on the same one. The sensor cannot tell those apart.
+
+    The per-VISIT bound did not save it: the script's retry loop walked
+    the wizard out to CL_Hub and back, and that is a NEW visit, so the
+    guard re-armed from scratch every time. 448 holds, 47 expiries, the
+    script held for most of two hours, and the goal never moved.
+
+    So the spot itself is remembered. Three visits that held the full
+    45s and never fired, and the fourth is refused."""
+    worker, seat, other = _at_the_sigil(monkeypatch)
+    _only_the_helper_has_a_prompt(worker, seat, other, monkeypatch)
+    # Held often enough to have proved it, over however many visits.
+    for _ in range(worker.COUNT_HOLD_DUDS * worker.COUNT_HOLD_REPLAYS):
+        assert _hold_and_let_it_expire(worker, seat, monkeypatch), \
+            "the guard stopped arming before the spot was proved a dud"
+    assert worker._sigil_dud(seat) >= worker.COUNT_HOLD_DUDS
+
+    assert not _hold_and_let_it_expire(worker, seat, monkeypatch), \
+        "the script was held again at a spot that has never once fired"
+    said = [e for e in seat.tel.questing
+            if e["kind"] == "countdown-hold-refused"]
+    assert said, [e["kind"] for e in seat.tel.questing][-6:]
+    assert "none of them fired" in said[0]["detail"]
+
+
+def test_a_spot_that_does_fire_is_forgiven_its_earlier_failures(monkeypatch):
+    """A door that opens on the fourth try is still a door. A sigil
+    whose countdown was restarted twice by late joins must not be
+    written off for it."""
+    import asyncio
+    import time
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+    _only_the_helper_has_a_prompt(worker, seat, other, monkeypatch)
+    for _ in range(worker.COUNT_HOLD_REPLAYS):
+        _hold_and_let_it_expire(worker, seat, monkeypatch)
+    assert worker._sigil_dud(seat) == 1
+
+    # This time it fires: a fresh visit, and the zone changes while the
+    # script is held.
+    from deimos_bridge.gui.live import NEVER
+
+    here = seat.progress
+    seat.progress = (here[0], (900, 900, 0), here[2])
+    seat.marker_away = 5000.0
+    asyncio.run(worker._maybe_count_hold(seat))
+    seat.progress, seat.marker_away = here, 8.0
+    seat.progress_at = time.monotonic()
+    worker._count_hold_last = NEVER
+    seat.count_hold_seen = time.monotonic() - 1.0
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held()
+    seat.zone_seen = "MB_Interiors/AmyBrooksPlace"
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert not worker._countdown_held()
+    seat.zone_seen = "MB_KnightsCourt"
+    assert worker._sigil_dud(seat) == 0, \
+        "a spot that fired is still counted against"
+
+
+def test_a_dud_spot_is_remembered_per_spot_not_per_run(monkeypatch):
+    """Writing off one doorway must not write off the next one."""
+    worker, seat, other = _at_the_sigil(monkeypatch)
+    _only_the_helper_has_a_prompt(worker, seat, other, monkeypatch)
+    for _ in range(worker.COUNT_HOLD_DUDS * worker.COUNT_HOLD_REPLAYS):
+        _hold_and_let_it_expire(worker, seat, monkeypatch)
+    assert not _hold_and_let_it_expire(worker, seat, monkeypatch)
+
+    # A different spot in the same zone is a different question.
+    elsewhere = ("MB_KnightsCourt", (40, 60, 0), seat.goal)
+    seat.progress = elsewhere
+    seat.count_hold_spot = None
+    assert _hold_and_let_it_expire(worker, seat, monkeypatch, elsewhere), \
+        "a fresh doorway was refused for another one's record"
+
+
 def test_the_first_look_only_arms_the_countdown_guard(monkeypatch):
     """The press-X prompt takes a beat to render after a landing;
     holding on the first look would classify every fresh arrival at a

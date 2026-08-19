@@ -720,6 +720,50 @@ def test_a_cross_zone_follow_uses_the_friends_list_when_it_has_a_name(
     assert asked["name"] == "Wolf Deathblade"
 
 
+def test_a_teleport_that_landed_is_not_reported_as_a_failure(monkeypatch):
+    """`_teleport_to_friend` clicks "Go to Friend", polls ~8s for
+    `MessageBoxModalWindow`, and raises when none comes up — but a box
+    that never appears is not the same as a teleport that did not
+    happen, because the game does not always ask.
+
+    Rev bf3b32e7: `No child window named MessageBoxModalWindow; hardened
+    copy — 60 times in a row`, on a party that spent much of that run
+    standing together. Every one of those sent the follow down the
+    door-walk ladder for a teleport that had already landed. The
+    wizard's own zone settles it."""
+    from deimos_bridge import party
+
+    follower = _FakeClient(zone="Unicorn Way")
+
+    async def _lands_but_complains(f, leader_name):
+        f._zone = "Triton Avenue"           # it worked
+        return False, ("could not teleport through the friends list "
+                       "(ValueError: No child window named "
+                       "MessageBoxModalWindow; hardened copy)")
+
+    monkeypatch.setattr(party, "teleport_to_leader_across_zones",
+                        _lands_but_complains)
+    moved, why = asyncio.run(party.follow(
+        follower, _FakeClient(zone="Triton Avenue"), leader_name="Wolf"))
+    assert moved is True, why
+    assert "Triton Avenue" in why and "reported otherwise" in why
+
+
+def test_a_teleport_that_did_not_land_is_still_a_failure(monkeypatch):
+    """The other half. A follower that is still in the zone it started
+    in did not go anywhere, whatever the reason said."""
+    from deimos_bridge import party
+
+    async def _fails(f, leader_name):
+        return False, "your friend is busy"
+
+    monkeypatch.setattr(party, "teleport_to_leader_across_zones", _fails)
+    moved, why = asyncio.run(party.follow(
+        _FakeClient(zone="Unicorn Way"),
+        _FakeClient(zone="Triton Avenue"), leader_name="Wolf"))
+    assert moved is False and why == "your friend is busy"
+
+
 def test_arriving_beside_a_fighting_leader_is_not_joining_it(monkeypatch):
     """Wizard101 puts you in the circle only when you touch a sigil or a
     mob. A follower standing next to the circle looks exactly like a

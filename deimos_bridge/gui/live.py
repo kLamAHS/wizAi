@@ -5645,6 +5645,56 @@ class LiveWorker(QThread):
             seat, away,
             f"held {self.COUNT_HOLD:.0f}s with no countdown")
 
+    #: how many visits to one spot may hold for a countdown and never
+    #: fire before the spot is written off as not being a sigil at all.
+    #:
+    #: The per-VISIT bound (`COUNT_HOLD_REPLAYS`) is not enough on its
+    #: own, and rev bf3b32e7 is 88 minutes of why: the script's own
+    #: retry loop walks the wizard out of the cell and back, which is a
+    #: NEW visit, so the guard re-armed from scratch every time. 448
+    #: holds, 47 expiries, the script held for most of two hours, and
+    #: the wizard never moved off `Talk To Karolak Nightspinner`.
+    #:
+    #: Three, because a real sigil that swallowed three full holds
+    #: without once firing is not one this rung can help with either.
+    COUNT_HOLD_DUDS = 3
+
+    def _sigil_dud(self, seat, add=0):
+        """How many visits to this spot have held and never fired.
+
+        Keyed on (zone, the rounded cell `progress` already uses) so it
+        survives the wizard being walked out and back -- which is the
+        whole point, that being exactly what the script does between
+        attempts.
+        """
+        where = (seat.zone_seen or "", seat.count_hold_spot or seat.progress)
+        if not where[1]:
+            return 0
+        duds = getattr(self, "_sigil_duds", None)
+        if duds is None:
+            duds = self._sigil_duds = {}
+        if add:
+            duds[where] = duds.get(where, 0) + add
+            if len(duds) > 64:
+                for key in list(duds)[:16]:
+                    duds.pop(key, None)
+        return duds.get(where, 0)
+
+    def _sigil_fired(self, seat):
+        """This spot IS a sigil after all: forget its failures.
+
+        Keyed on the zone the hold BEGAN in, not the one the wizard is
+        standing in now -- firing is a zone change, so by the time this
+        runs `zone_seen` is the far side of the door and would look up
+        a spot that has never been held at.
+        """
+        duds = getattr(self, "_sigil_duds", None)
+        if not duds:
+            return
+        where = (self._count_hold_zone or seat.zone_seen or "",
+                 seat.count_hold_spot or seat.progress)
+        duds.pop(where, None)
+
     async def _maybe_count_hold(self, seat):
         """Hold the script while a dungeon sigil may be counting down.
 
@@ -5696,6 +5746,10 @@ class LiveWorker(QThread):
                         and seat.zone_seen != self._count_hold_zone):
                     self._count_hold_until = 0.0
                     seat.count_hold_replays = 0
+                    # It fired, so this spot IS a sigil: forget any
+                    # earlier visits that did not. A door that opens on
+                    # the fourth try is still a door.
+                    self._sigil_fired(seat)
                     seat.tel.note_questing(
                         "countdown-hold-over",
                         f"the zone changed while the script was held — a "
@@ -5792,12 +5846,16 @@ class LiveWorker(QThread):
                             f"live sigil")
                     else:
                         seat.count_hold_replays = 0
+                        duds = self._sigil_dud(seat, +1)
                         seat.tel.note_questing(
                             "countdown-hold-over",
                             f"held at this sigil "
                             f"{self.COUNT_HOLD_REPLAYS} times and it never "
                             f"fired — leaving the entry to the script's "
-                            f"own machinery")
+                            f"own machinery"
+                            + (f". That is {duds} visit(s) to this spot "
+                               f"that have held and never fired"
+                               if duds > 1 else ""))
                     return
                 seat.tel.note_questing(
                     "countdown-hold-over",
@@ -5968,6 +6026,35 @@ class LiveWorker(QThread):
             return
 
         seat.count_hold_spot = seat.progress
+        duds = self._sigil_dud(seat)
+        if duds >= self.COUNT_HOLD_DUDS:
+            # This spot has taken three full holds and never fired. It
+            # is not a sigil, and holding the script here again buys
+            # nothing but another 45 seconds of a wizard standing still.
+            #
+            # Rev bf3b32e7: `Talk To Karolak Nightspinner in Stormriven`
+            # with the marker 270 away, and the evidence for a sigil was
+            # Oz standing at a press-X prompt beside it -- Oz's OWN
+            # prompt, for its own quest, which it was on because the two
+            # wizards were never on the same one. The sensor cannot tell
+            # that prompt from a shared sigil's, and this is the backstop
+            # that does not have to.
+            seat.count_hold_seen = None
+            self._count_hold_last = now
+            self._say_once(
+                seat, f"sigil-dud:{seat.zone_seen}:{seat.progress}",
+                f"{seat.name} is not holding here again — this spot has "
+                f"held for a countdown {duds} times and never fired",
+                kind="countdown-hold-refused",
+                detail=(f"declined to hold the script at this spot: "
+                        f"{duds} visits have held the full "
+                        f"{self.COUNT_HOLD:.0f}s for a countdown and none "
+                        f"of them fired. Whatever a helper's press-X "
+                        f"prompt beside this wizard is for, it is not a "
+                        f"sigil this wizard can enter — and every hold "
+                        f"here is {self.COUNT_HOLD:.0f}s of the script "
+                        f"not running"))
+            return
         seat.count_hold_seen = None
         self._count_hold_last = now
         self._count_hold_until = now + self.COUNT_HOLD

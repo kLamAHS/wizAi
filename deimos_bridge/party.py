@@ -563,6 +563,30 @@ async def follow(follower, leader, leader_name=None,
     if known and here != there:
         ok, why = await teleport_to_leader_across_zones(follower, leader_name)
         if not ok:
+            # ...but ask the wizard where it is before believing that.
+            # The teleport reports failure for anything it did not see
+            # go the way it expects, and the commonest of those is the
+            # confirmation box: `_teleport_to_friend` clicks "Go to
+            # Friend", polls ~8s for `MessageBoxModalWindow`, and
+            # raises when none comes up. A box that never appears is
+            # not the same as a teleport that did not happen — the game
+            # does not always ask — and the wizard's own zone settles it
+            # outright.
+            #
+            # Rev bf3b32e7: `No child window named MessageBoxModalWindow;
+            # hardened copy — 60 times in a row`, on a party that spent
+            # much of that run standing together. Reporting those as
+            # failures sends the follow down the door-walk ladder for a
+            # teleport that had already landed.
+            landed = None
+            try:
+                landed = await zone(follower)
+            except Exception:
+                landed = None
+            if landed is not None and landed == there:
+                return True, (f"followed the leader into {there} — the "
+                              f"teleport landed even though it reported "
+                              f"otherwise ({why})")
             return False, why
         return True, f"followed the leader into {there}"
 
