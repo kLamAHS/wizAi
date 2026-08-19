@@ -660,6 +660,11 @@ class Telemetry:
         #: learned from the first duel; the seat is always known.
         self.wizard = wizard
         self.seat = int(seat or 0)
+        #: how the run was wired: the mode, the leader, and what this
+        #: wizard's job in it was. Filled by the live worker before the
+        #: first fight. Empty for a bare Telemetry -- an offline probe
+        #: has no party.
+        self.party = {}
         self.school = school
         self.deck = list(deck or [])
         #: the run's NameResolver, if there is one. Only used so the GUI
@@ -1766,6 +1771,12 @@ class Telemetry:
             "revision": revision(),
             "policy": self.policy_name,
             "school": self.school,
+            # What this wizard was FOR. Every line below means something
+            # different depending on it, and no export before this one
+            # could say -- so "the follower charged ahead and the leader
+            # chased it" had to be reverse-engineered out of which rungs
+            # had fired.
+            "party": dict(self.party or {}),
             # Fights that actually happened. The live worker claims a
             # record at the top of its loop and then waits for a duel,
             # so stopping the run leaves a 0-round record behind -- and

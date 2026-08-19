@@ -283,7 +283,96 @@ async def _close_friend_windows(client, friends_window=None):
             friends_window = await _maybe_get_named_window(
                 client.root_window, "NewFriendsListWindow", retries=0
             )
-        await friends_window.write_flags(WindowFlags.disabled)
+        await _hide_window(friends_window)
+
+
+async def _hide_window(window):
+    """Take a window off screen without breaking it for next time.
+
+    `write_flags` is a whole-word write -- 32 bits at offset 156 -- and
+    this used to hand it `WindowFlags.disabled` on its own. That value
+    is `0x80000000`: it does not merely hide the window, it clears
+    `visible`, `noclip` and every dock/parent-size/centring bit the
+    game's layout depends on, and it SETS the bit that makes a window
+    ignore the mouse. Nothing anywhere put any of it back.
+
+    So the first teleport of a run -- or the first friends-list name
+    read, which goes through the same tidy-up -- left the list wedged,
+    and every teleport after it failed in exactly the same place: the
+    row still reads (text does not need an enabled window), the click
+    lands on a window that ignores it, and `wndCharacter` never opens.
+    That is the whole of wizAi's run at rev 8ebfcf70: seventeen
+    attempts, one error, 0 for 17, in a public hub as readily as inside
+    a dungeon -- and it was exported as "this instance refuses
+    friends-list teleports", which is not what happened. The teleport
+    was never asked for; `btnGoToFriend` is two steps further on.
+
+    Read, clear one bit, write. The window comes back the way the game
+    left it.
+    """
+    flags = await window.flags()
+    await window.write_flags(flags & ~WindowFlags.visible
+                             & ~WindowFlags.disabled)
+
+
+async def _unwedge_window(window):
+    """Undo a `disabled` bit somebody else left on, if there is one.
+
+    The destructive close above is not the only one: `Deimos/src/
+    utils.py` has its own copy, spelled `write_flags(WindowFlags(
+    2147483648))`, and a client that has been driven by Deimos itself
+    at any point this session arrives here already wedged. Clearing the
+    bit on the way IN costs one read and makes the repair retroactive
+    -- the wizard that has been failing this teleport all run starts
+    working again on the next attempt, rather than on the next launch.
+
+    Returns True when a wedge was actually cleared, so the caller can
+    say so: a client that needed this is evidence, not noise.
+    """
+    flags = await window.flags()
+    if not (flags & WindowFlags.disabled):
+        return False
+    await window.write_flags(flags & ~WindowFlags.disabled)
+    return True
+
+
+#: how long the friends list is given to come up after `btnFriends` is
+#: clicked. The click is a mouse move plus a press; the window is the
+#: game's answer to it, and it is not instant.
+FRIENDS_WINDOW_WAIT = 3.0
+
+
+async def _window_came_up(window, timeout: float = FRIENDS_WINDOW_WAIT):
+    """Is this window on screen and able to take a click?
+
+    Visible AND not disabled. Both halves are load-bearing: a window
+    can be visible and still ignore the mouse, which is the state
+    `_hide_window` used to leave behind, and it is the one that reads
+    as a working friends list right up until the row click does
+    nothing.
+    """
+    waited = 0.0
+    read = False
+    while True:
+        try:
+            flags = await window.flags()
+        except Exception:
+            pass
+        else:
+            read = True
+            if (flags & WindowFlags.visible) and not (
+                    flags & WindowFlags.disabled):
+                return True
+        if waited >= timeout:
+            # A flags word that would not read even once is no evidence
+            # against this window. Refusing on it would block a client
+            # that was about to work, for a reason nobody could act on
+            # -- so an unreadable window is let through and judged by
+            # what happens next, the way it was before this check
+            # existed. Only a window that READS as unusable is refused.
+            return not read
+        await asyncio.sleep(0.2)
+        waited += 0.2
 
 
 async def _cycle_friends_list(
@@ -447,10 +536,33 @@ async def teleport_to_friend_from_list(
             client.root_window, "NewFriendsListWindow"
         )
     else:
+        # A wedge FIRST, because the check below cannot see one. A
+        # window carrying the `disabled` bit reads its rows perfectly
+        # and ignores every click, so "open it if it is not visible"
+        # opens something that cannot be used, and the failure lands
+        # eight seconds later on a `wndCharacter` that never came up.
+        # See `_hide_window` for who set the bit.
+        with suppress(Exception):
+            await _unwedge_window(friends_window)
         if not await friends_window.is_visible():
             # friend's list isn't open so open it
             friend_button = await _maybe_get_named_window(client.root_window, "btnFriends")
             await client.mouse_handler.click_window(friend_button)
+
+    # ...and it has to actually be on screen before a row is clicked at
+    # it. Upstream clicked `btnFriends` and carried straight on, so a
+    # list that did not come up was indistinguishable from one that
+    # did until the click had already been aimed into empty HUD. The
+    # distinction matters to the caller: "the friends list would not
+    # open" is a wizAi problem the operator can act on, and "no child
+    # window named wndCharacter" reads like the game refusing a
+    # teleport it was never asked for.
+    if not await _window_came_up(friends_window):
+        raise ValueError(
+            "the friends list would not come up on this client, so the "
+            "teleport was never attempted — nothing was clicked and the "
+            "game was never asked"
+        )
 
     # Everything from here on can fail, and every one of those failures
     # used to leave this window up -- the close was the last line of the

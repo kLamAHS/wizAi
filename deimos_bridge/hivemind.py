@@ -540,6 +540,10 @@ class Hivemind:
         self._fighting = set()
         self._gather = None
         self.last_plan = None
+        #: why the most recent plan held one seat, when it should not
+        #: have. None whenever the round was a party, or the party is
+        #: genuinely one wizard. See `_why_alone`.
+        self.last_alone = None
         #: seat -> its share of the most recent plan. Per seat rather
         #: than read off `last_plan`, because a fast client can open the
         #: next round's gather before a slow one has read the last one.
@@ -705,6 +709,24 @@ class Hivemind:
             gather.closing = True
         self._plan_gather(gather)
 
+    def _why_alone(self, gather):
+        """One line naming who was missing from this round's plan.
+
+        Called under the lock, from `_plan_gather`.
+        """
+        missing = sorted(gather.expected - set(gather.subs))
+        others = sorted(set(self._seats) - set(gather.subs))
+        if missing:
+            who = ", ".join(f"wizard {s + 1}" for s in missing)
+            return (f"waited {self.timeout:.1f}s for {who} and it did not "
+                    f"submit a board — expected it because it was in a duel")
+        if others:
+            who = ", ".join(f"wizard {s + 1}" for s in others)
+            return (f"{who} was not in a duel when this round's plan was "
+                    f"opened, so nothing waited for it — if it IS in this "
+                    f"fight, it announced itself too late to be counted")
+        return "this wizard is the only one in the party"
+
     def _close(self, gather):
         with self._lock:
             if gather.done or gather.closing:
@@ -733,6 +755,17 @@ class Hivemind:
         gather.party = party
         with self._lock:
             gather.done = True
+            # WHY this round was not a party, in the round it happened.
+            # `planned_alone` counts these and cannot say what went
+            # wrong, and the two causes want opposite fixes: a seat that
+            # was never expected is a coordination bug, and a seat that
+            # was expected and did not arrive is a slow client. Rev
+            # 8ebfcf70's party shared a duel in 33 of 46 fights and
+            # fused a plan in 11 rounds of 161, and the export could not
+            # say which of those it was even once.
+            self.last_alone = (
+                self._why_alone(gather) if party is not None
+                and len(party.moves) <= 1 and len(self._seats) > 1 else None)
             waiters = list(gather.waiters.values())
             gather.waiters.clear()
             if self._gather is gather:

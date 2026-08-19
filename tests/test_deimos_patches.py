@@ -189,15 +189,38 @@ def _load_ww_utils():
     return types.SimpleNamespace(**namespace)
 
 
-class _Win:
-    """A game window with a name, text, children and visibility."""
+#: the flags a window the game has put on screen actually carries: not
+#: `visible` alone but the layout bits beside it. Modelled because the
+#: bug this file exists to pin down is a whole-word WRITE over them --
+#: see `test_hiding_the_friends_list_keeps_the_bits_the_game_set`.
+_LAID_OUT = 1 | 2 | 128 | 512          # visible | noclip | dock_left | dock_top
 
-    def __init__(self, name, children=(), text="", visible=True):
+
+class _Win:
+    """A game window with a name, text, children and visibility.
+
+    Visibility is the flag word, not a separate bool. It used to be a
+    separate bool and `write_flags` used to be a recorder that changed
+    nothing, so the one thing the real window does on a flags write --
+    stop being visible, and stop taking clicks -- was unmodellable, and
+    the wedge that cost rev 8ebfcf70 its whole run could not be written
+    as a test.
+    """
+
+    def __init__(self, name, children=(), text="", visible=True, flags=None):
         self._name = name
         self._children = children if callable(children) else list(children)
         self._text = text
         self._visible = visible
-        self.flags = None
+        self._flags = _LAID_OUT if flags is None else int(flags)
+        if not callable(visible) and not visible:
+            self._flags &= ~1
+        #: when set, the `disabled` bit comes straight back after any
+        #: write -- a window nothing wizAi does can repair.
+        self.unwedgeable = False
+        #: every value ever written, for tests that care how it was done
+        #: rather than what it left behind.
+        self.flags_written = []
 
     async def name(self):
         return self._name
@@ -208,14 +231,29 @@ class _Win:
 
     async def is_visible(self):
         v = self._visible
-        return bool(v() if callable(v) else v)
+        if callable(v):
+            return bool(v())
+        return bool(self._flags & 1)
+
+    async def takes_clicks(self):
+        """On screen AND not disabled. The pair is the point: a window
+        can be visible and still ignore the mouse, and that state reads
+        as a working friends list right up until the row click does
+        nothing."""
+        return bool(await self.is_visible()) and not (self._flags & 2147483648)
 
     async def maybe_text(self):
         t = self._text
         return t() if callable(t) else t
 
+    async def flags(self):
+        return self._flags
+
     async def write_flags(self, flags):
-        self.flags = flags
+        self.flags_written.append(int(flags))
+        self._flags = int(flags)
+        if self.unwedgeable:
+            self._flags |= 2147483648
 
     async def get_windows_with_name(self, name):
         found = []
@@ -327,7 +365,13 @@ class _FriendsClient:
             async def click_window(self, win):
                 name = await win.name()
                 me.clicks.append(name)
-                if name == "btnArrowDown":
+                if name == "btnFriends":
+                    # The game's own toggle. It re-shows the list; it
+                    # does not un-disable a window somebody wrote a
+                    # `disabled` bit onto, which is exactly why a wedged
+                    # client cannot click its own way out.
+                    me.friends_window._flags |= 1
+                elif name == "btnArrowDown":
                     me.page = me.page % max(me.pages, 1) + 1
                 elif name == "btnGoToFriend":
                     me.confirm_open = bool(me.confirms)
@@ -339,6 +383,13 @@ class _FriendsClient:
 
             async def click(self, x, y):
                 me.clicks.append(f"row@{y}")
+                # A raw coordinate click only opens anything if the
+                # window under it is on screen and taking input. This
+                # used to be unconditional, which made the whole class
+                # of failure -- a list that reads and does not click --
+                # invisible to every test in this file.
+                if not await me.friends_window.takes_clicks():
+                    return
                 me.panel_open = bool(me.opens_panel)
 
         self.mouse_handler = _Mouse()
@@ -359,6 +410,14 @@ def _run_tp(mod, client, **kw):
     import asyncio
 
     return asyncio.run(mod.teleport_to_friend_from_list(client, **kw))
+
+
+def _await(coro):
+    """One coroutine, run to completion. For assertions about a window's
+    state after the teleport has already finished."""
+    import asyncio
+
+    return asyncio.run(coro)
 
 
 def test_a_tab_that_never_reads_online_friends_fails_fast_not_forever():
@@ -459,7 +518,8 @@ def test_a_friend_teleport_that_works_closes_everything_it_opened():
     _run_tp(mod, client, name="Konstantin Ice")
     assert client.teleported
     assert not client.panel_open, "the character panel was left open"
-    assert client.friends_window.flags == mod.WindowFlags.disabled
+    assert not _await(client.friends_window.is_visible()), \
+        "the friends list was left up"
 
 
 def test_a_failed_teleport_does_not_leave_the_wizard_behind_two_modals():
@@ -475,7 +535,7 @@ def test_a_failed_teleport_does_not_leave_the_wizard_behind_two_modals():
     with pytest.raises(ValueError):
         _run_tp(mod, client, name="Konstantin Ice")
     assert not client.panel_open
-    assert client.friends_window.flags == mod.WindowFlags.disabled, \
+    assert not _await(client.friends_window.is_visible()), \
         "the friends list was left up after a failed teleport"
 
 
@@ -488,7 +548,7 @@ def test_a_confirmation_that_never_comes_still_closes_the_panel():
         _run_tp(mod, client, name="Konstantin Ice")
     assert not client.teleported
     assert not client.panel_open
-    assert client.friends_window.flags == mod.WindowFlags.disabled
+    assert not _await(client.friends_window.is_visible())
 
 
 def test_a_row_click_that_opened_nothing_is_tried_again():
@@ -591,6 +651,134 @@ def test_a_friend_who_is_not_on_the_list_still_says_so_exactly():
     with pytest.raises(ValueError) as caught:
         _run_tp(mod, client, name="Nobody Here")
     assert "Could not find friend" in str(caught.value)
+
+
+# ------------------------------------- the friends list wizAi wedged itself
+# Rev 8ebfcf70 is the whole reason this block exists. A two-wizard run:
+# seventeen cross-zone follows, seventeen failures, one error every time
+# -- `No child window named wndCharacter; hardened copy` -- in a public
+# hub as readily as inside a dungeon. The booster never once reached the
+# quester, the quester fought a 2400hp boss alone three times and lost
+# all three, and the export blamed the instance for refusing teleports
+# it was never asked for.
+#
+# It was wizAi's own tidy-up. `_close_friend_windows` put the list away
+# with `write_flags(WindowFlags.disabled)`, a WHOLE-WORD write of
+# 0x80000000 over a field that also holds `visible`, `noclip` and every
+# dock bit -- and it set the bit that makes a window ignore the mouse.
+# Nothing restored any of it. So the list still READ (text does not need
+# an enabled window, which is why the friend was always found) and no
+# longer CLICKED, forever, from the first teleport of the run onward.
+
+
+def test_hiding_the_friends_list_keeps_the_bits_the_game_set():
+    """The fix, stated as the invariant: closing the list may clear
+    `visible` and nothing else. Every other bit is the game's layout,
+    and a window that comes back without it is a window the game cannot
+    put on screen properly."""
+    mod = _load_ww_utils()
+    client = _FriendsClient(friends=["Konstantin Ice"])
+    laid_out = client.friends_window._flags
+    assert laid_out & mod.WindowFlags.visible, "fixture is not on screen"
+    _run_tp(mod, client, name="Konstantin Ice")
+    assert client.teleported
+    left = client.friends_window._flags
+    assert not (left & mod.WindowFlags.visible), "the list was left up"
+    assert not (left & mod.WindowFlags.disabled), \
+        "the close set the bit that makes the window ignore the mouse"
+    assert left == laid_out & ~mod.WindowFlags.visible, \
+        (f"the close overwrote the flags word instead of clearing one "
+         f"bit: {laid_out:#x} -> {left:#x}")
+
+
+def test_a_second_teleport_still_works_after_the_first_closed_the_list():
+    """The regression in one sentence. Two teleports in a row on one
+    client -- which is every run -- and the second must work. Under the
+    old whole-word close it could not: the first one wedged the window
+    and the second died on `wndCharacter` without the game ever being
+    asked."""
+    mod = _load_ww_utils()
+    client = _FriendsClient(friends=["Konstantin Ice"])
+    _run_tp(mod, client, name="Konstantin Ice")
+    assert client.teleported
+    client.teleported = False
+    _run_tp(mod, client, name="Konstantin Ice")
+    assert client.teleported, \
+        "the first teleport left the friends list unable to take a click"
+
+
+def test_a_wedged_friends_list_is_cleared_on_the_way_in():
+    """...and a client wedged by something else is repaired rather than
+    written off. `Deimos/src/utils.py` has its own copy of the
+    destructive close, so a client Deimos has driven this session
+    arrives already wedged -- and a wizard that has been failing this
+    teleport all run has to start working again on the next attempt,
+    not on the next launch."""
+    mod = _load_ww_utils()
+    client = _FriendsClient(friends=["Konstantin Ice"])
+    # Exactly what the old close left behind.
+    client.friends_window._flags = int(mod.WindowFlags.disabled)
+    _run_tp(mod, client, name="Konstantin Ice")
+    assert client.teleported, "a wedged client was never un-wedged"
+
+
+def test_a_list_that_will_not_come_up_says_so_instead_of_wndCharacter():
+    """The message is the deliverable. `No child window named
+    wndCharacter` reads like the game refusing a teleport; it is the
+    character panel that the row click never opened, two steps before
+    the game is asked for anything. `party.never_asked` keys on this
+    wording to stop the export blaming the dungeon."""
+    import pytest
+
+    from deimos_bridge import party
+
+    mod = _load_ww_utils()
+    client = _FriendsClient(friends=["Konstantin Ice"])
+    # Wedged, and the toggle cannot fix it: `btnFriends` re-shows a
+    # window, it does not re-enable one.
+    client.friends_window._flags = int(mod.WindowFlags.disabled)
+    client.friends_window.unwedgeable = True
+    with pytest.raises(ValueError) as caught:
+        _run_tp(mod, client, name="Konstantin Ice")
+    said = str(caught.value)
+    assert "wndCharacter" not in said, \
+        f"still reporting the symptom rather than the cause: {said}"
+    assert "never attempted" in said or "would not come up" in said
+    assert party.never_asked(caught.value), \
+        "party.py cannot tell this apart from the game refusing"
+
+
+def test_a_flags_word_that_will_not_read_does_not_block_the_teleport():
+    """No evidence is not evidence. The precondition refuses a window
+    that READS as unusable; a window whose flags will not read at all
+    is let through and judged by what happens next, because blocking
+    on it would stop a client that was about to work for a reason
+    nobody could act on."""
+    mod = _load_ww_utils()
+    client = _FriendsClient(friends=["Konstantin Ice"])
+
+    async def _no_read():
+        raise RuntimeError("the flags word would not read")
+
+    client.friends_window.flags = _no_read
+    _run_tp(mod, client, name="Konstantin Ice")
+    assert client.teleported, "an unreadable window blocked a good teleport"
+
+
+def test_the_row_is_never_clicked_at_a_window_that_cannot_take_it():
+    """The precondition, stated. A click aimed at a wedged window is a
+    click into empty HUD, and every second spent waiting for the panel
+    it cannot open is a second the booster is not with its quester."""
+    import pytest
+
+    mod = _load_ww_utils()
+    client = _FriendsClient(friends=["Konstantin Ice"])
+    client.friends_window._flags = int(mod.WindowFlags.disabled)
+    client.friends_window.unwedgeable = True
+    with pytest.raises(ValueError):
+        _run_tp(mod, client, name="Konstantin Ice")
+    assert not [c for c in client.clicks if c.startswith("row@")], \
+        "a row was clicked at a window that ignores clicks"
 
 
 # ------------------------------------------------------------ navmap_tp result

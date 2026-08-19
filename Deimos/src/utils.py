@@ -1052,8 +1052,17 @@ async def teleport_to_friend_from_list(
     character_window = await _maybe_get_named_window(client.root_window, "wndCharacter")
     await _teleport_to_friend(client, character_window)
 
-    # close friends window
-    await friends_window.write_flags(WindowFlags(2147483648))
+    # close friends window -- by clearing the visible bit, not by
+    # overwriting the whole flags word. `WindowFlags(2147483648)` is
+    # `disabled` alone: it wipes visible, noclip and every layout bit
+    # and leaves behind a window that reads its rows and ignores the
+    # mouse. Nothing puts those bits back, so the wizard's next
+    # teleport -- and every one after it -- dies at the character
+    # panel that never opens. See `_hide_window` in wizwalker's
+    # scripting utils for the run that cost.
+    flags = await friends_window.flags()
+    await friends_window.write_flags(flags & ~WindowFlags.visible
+                                     & ~WindowFlags.disabled)
 
 
 # returns True if all provided friends are in the list, and False if any single friend is not

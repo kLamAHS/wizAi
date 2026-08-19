@@ -1263,12 +1263,26 @@ class WizAiCombatHandler:
         the very list the policy was shown, because this class built it.
     """
 
+    #: Class-level defaults. A handler can be built without `__init__`
+    #: -- the suite does exactly that to exercise one method in
+    #: isolation -- and a counter that only exists on the instance turns
+    #: those into AttributeErrors far from the thing being tested.
+    _blind_rounds = 0
+    _gave_up_blind = False
+
     def __init__(self, client, backend):
         self.client = client
         self.backend = backend
         self._last_read = None
         #: rounds lost to a failed board read, surfaced at the end of a run
         self._read_failures = 0
+        #: ...and how many of those came in a row. The total is a
+        #: statistic; the RUN is a state -- a wizard playing rounds
+        #: against a board it cannot see. See `handle_combat`.
+        self._blind_rounds = 0
+        #: said once per duel, so a blind board is reported and not
+        #: repeated every time the loop asks whether it is still going.
+        self._gave_up_blind = False
         #: when the previous round's handling finished, so the next one
         #: can say how long the GAME took between them. See `handle_round`.
         self._left_round_at = None
@@ -1421,6 +1435,95 @@ class WizAiCombatHandler:
             return 1
         return 0
 
+    #: how many rounds in a row may fail to read the board before the
+    #: duel is abandoned. Three, because one is a hiccup and the state
+    #: this catches does not recover: rev 8ebfcf70's Oz cast twice, lost
+    #: its board read, and then passed 108 rounds over 23 minutes
+    #: against `Fire Elf Hunter@150` with `player_hp` reading 0.0 and no
+    #: enemies at all, while Konstantin left and fought three more
+    #: duels. `won` came out null and the fight had 110 rounds in it.
+    BLIND_ROUNDS = 3
+
+    async def handle_combat(self):
+        """The duel, with two things wizwalker's own loop cannot do.
+
+        FIRST, it announces the seat to the party BEFORE the first
+        round is planned. The coordinator waits only for seats it knows
+        are in a duel (`Hivemind.enter_combat`), and that used to be
+        called at the top of each seat's own `_handle_round` -- after
+        `wait_for_planning_phase`, and therefore possibly after another
+        seat had already read its board, submitted, found itself the
+        only expected seat, and planned alone. Round one of every fight
+        was exposed to that race by construction. Announced from here it
+        lands before the planning wait, which is seconds wide.
+
+        SECOND, it gives up on a board it cannot read. `handle_combat`
+        loops `while await self.in_combat()`, and a client whose memory
+        reads have gone bad answers that question as badly as any other
+        -- so a duel that has actually ended reads as still running, and
+        every round inside it fails, passes, and comes round again. That
+        is not a slow fight, it is a wizard playing a duel that is not
+        there, and nothing bounded it.
+        """
+        from contextlib import suppress
+
+        hive = getattr(self.backend, "coordinator", None)
+        seat = getattr(self.backend, "seat", None)
+        if hive is not None and seat is not None:
+            with suppress(Exception):
+                hive.enter_combat(seat)
+        self._blind_rounds = 0
+        self._gave_up_blind = False
+        try:
+            return await super().handle_combat()
+        finally:
+            self._blind_rounds = 0
+            self._gave_up_blind = False
+
+    async def in_combat(self):
+        """The loop's own exit condition, plus the blind-board escape.
+
+        `handle_combat` asks this every iteration, and so do the two
+        phase waits inside it, so answering False here unwinds the duel
+        the way the duel ending does -- no exception, no crashed fight
+        loop, and the seat's own loop goes back to waiting for the next
+        real duel.
+        """
+        if self._blind_rounds >= self.BLIND_ROUNDS:
+            if not self._gave_up_blind:
+                self._gave_up_blind = True
+                await self._give_up_on_a_blind_board()
+            return False
+        return await super().in_combat()
+
+    async def _give_up_on_a_blind_board(self):
+        """True when this duel should be abandoned. Says so once.
+
+        Deliberately not a raise: the caller is wizwalker's loop and the
+        seat's fight loop treats an exception as a crash. Leaving the
+        circle and reporting is what the rest of the party needs -- they
+        stop paying the barrier's timeout for a seat that cannot answer.
+        """
+        hive = getattr(self.backend, "coordinator", None)
+        seat = getattr(self.backend, "seat", None)
+        if hive is not None and seat is not None:
+            try:
+                hive.leave_combat(seat)
+            except Exception:
+                pass
+        try:
+            self.backend.report_lost_round(
+                0,
+                f"{self._blind_rounds} rounds in a row could not read the "
+                f"board, so this duel is being left rather than played "
+                f"blind. Every round since the reads went bad has been a "
+                f"pass against a board with no player and no enemies in "
+                f"it — if the duel really is still running, this client's "
+                f"hooks need re-attaching")
+        except Exception:
+            pass
+        return True
+
     async def handle_round(self):
         """Time the round, then play it. See `_handle_round`.
 
@@ -1482,6 +1585,11 @@ class WizAiCombatHandler:
         # the circle never stalls the ones already swinging -- and one
         # that has just walked in has to be counted before the others
         # plan without it.
+        #
+        # Kept as a backstop. `handle_combat` announces the seat before
+        # the planning wait, which is where it has to happen to beat the
+        # other seat's `decide()`; this covers a round reached by any
+        # path that did not come through there.
         hive = getattr(self.backend, "coordinator", None)
         if hive is not None:
             hive.enter_combat(self.backend.seat)
@@ -1519,6 +1627,7 @@ class WizAiCombatHandler:
                 # scored against the damage model. A round the run could
                 # not read has to appear as exactly that.
                 self._read_failures += 1
+                self._blind_rounds += 1
                 self._planned = time.monotonic() - began
                 await self._report_lost_round(exc)
                 await self.pass_button()
@@ -1526,6 +1635,9 @@ class WizAiCombatHandler:
             self._planned = time.monotonic() - began
             read = self.backend.last_read
             self._last_read = read
+            # A board that read is the end of a blind run, whatever the
+            # policy then decided to do with it.
+            self._blind_rounds = 0
 
             if decision.passing or read is None:
                 await self.pass_button()

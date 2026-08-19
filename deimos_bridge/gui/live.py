@@ -55,6 +55,17 @@ from PyQt6.QtCore import QThread, pyqtSignal
 NEVER = float("-inf")
 
 
+def _door_how(door):
+    """How a learned door was crossed: "walked", "sigil", or unknown.
+
+    A door entry has grown twice -- `(spot, at, taught_by)`, then a
+    sample age, then this -- and the older shapes still turn up in a
+    map that outlives a reload. Reading the field positionally with a
+    default keeps every one of them legible instead of raising.
+    """
+    return door[4] if len(door) > 4 else ""
+
+
 class SeatConfig:
     """One wizard's half of a run: what it plays and what it plays with.
 
@@ -288,6 +299,11 @@ class _Seat:
         #: how many times an evidenced sigil's hold has re-armed here.
         #: See `LiveWorker._maybe_count_hold`.
         self.count_hold_seen = None
+        #: when this wizard last pressed X at a press-X prompt. A zone
+        #: change shortly after one is a SIGIL crossing, not a door, and
+        #: the difference decides whether a stranded follower can walk
+        #: in behind it. See `_learn_door`.
+        self.pressed_x_at = NEVER
         self.count_hold_spot = None
         self.count_hold_replays = 0
         #: the once-per-visit stamp for pulling the party onto this
@@ -371,10 +387,37 @@ class _Seat:
         #: `LiveWorker._doors` and `_walk_the_leaders_door`.
         self.last_spot = None
         self.last_spot_zone = None
+        #: the same pair, sampled on this seat's OWN tick instead of on
+        #: the six-second party poll, and when. A door is learned from
+        #: the last place a wizard stood before its zone changed, so the
+        #: age of that sample IS the error in the door's position -- and
+        #: at six seconds it is thousands of units, which no 250-unit
+        #: sweep can absorb. See `_note_spot` and `_learn_door`.
+        self.spot_at = NEVER
+        self.spot_at_prev = NEVER
+        self.spot_seen = None
+        self.spot_zone = None
         #: when this seat last walked a door route, and how many
         #: consecutive cross-zone follows have failed for it.
         self.door_walked_at = NEVER
         self.cross_zone_fails = 0
+        #: consecutive door-walk failures, per (from zone, to zone). The
+        #: per-seat counter above says a follow is failing; this says
+        #: THIS ROUTE is not working, which is the one an escalation can
+        #: act on. See `_walk_the_leaders_door`.
+        self.door_fails = {}
+        #: opening board -> when this seat lost to it. A fight lost
+        #: twice is a wall; the outcome used to be recorded and read by
+        #: nothing but the win count. See `_note_the_loss`.
+        self.lost_to = {}
+        #: consecutive rounds where every line the rollout tried ended
+        #: with this wizard dead, and the fight that was last reported
+        #: for. See `_watch_for_a_fight_that_cannot_be_won`.
+        self.no_line_survives = 0
+        self.unwinnable_said_for = None
+        #: the fight this seat has already explained a lone plan for.
+        #: See `_say_why_it_planned_alone`.
+        self.alone_said_for = None
         #: stage name -> how many times it has failed, so a broken stage
         #: is reported rather than retried silently twice a second
         self.stage_errors = {}
@@ -933,6 +976,12 @@ class LiveWorker(QThread):
                 # back to the top to write one.
                 await self._stage(seat, "reading the quest",
                                   self._read_goal(seat))
+                # Two reads on this seat's own client, once a second, and
+                # they are what the door map is made of. On the party
+                # poll's six-second clock the doors it learns are most of
+                # a room wide of the doors they name. See `_note_spot`.
+                await self._stage(seat, "noting where this wizard stands",
+                                  self._note_spot(seat))
                 # Ends any catch-up BEFORE deciding whether to start
                 # one. The other order meant a catch-up started this
                 # tick was judged finished on the same tick, by state
@@ -2387,6 +2436,109 @@ class LiveWorker(QThread):
         except Exception:
             return None
 
+    def _party_shape(self, seat):
+        """What this wizard is FOR, and who it is following.
+
+        Named rather than inferred, because the modes are not visible
+        in the telemetry they change the meaning of. A booster's quest
+        goal differing from the leader's is the design; the same two
+        lines in a plain follow are a party that has walked apart. An
+        export that cannot tell them apart cannot be read at all.
+        """
+        if len(self.seats) < 2:
+            mode = "solo"
+        elif self.booster_party:
+            mode = "booster party"
+        elif self._solo_pilot():
+            mode = "solo pilot"
+        elif self.follow_leader:
+            mode = "follow the leader"
+        else:
+            mode = "independent"
+        boss = self.seats[self.leader] if self.seats else None
+        return {
+            "mode": mode,
+            "seats": len(self.seats),
+            "leader_seat": self.leader + 1,
+            "leader": (boss.wizard_name or boss.name) if boss else "",
+            "role": ("leader" if seat.index == self.leader else
+                     "booster" if self._is_booster(seat) else "follower"),
+            "scripted": bool(self.script),
+            "script_drives": ("nobody" if not self.script else
+                              "the leader only"
+                              if self._solo_pilot() or self.booster_party
+                              else "every seat"),
+        }
+
+    #: how many times one opening may be lost before the party is told
+    #: it is a wall rather than bad luck. Two, because the second loss
+    #: is the first evidence that the first was not variance -- and the
+    #: third costs another ten minutes to learn nothing.
+    BOSS_WALL_LOSSES = 2
+
+    def _note_the_loss(self, seat, won):
+        """Record a defeat, and say when one keeps happening.
+
+        A lost duel used to be written into `FightRecord.won` and read
+        by nothing but the export's win count and a red label in the
+        panel. So rev 8ebfcf70's Konstantin walked into `Drusilla
+        Morningbane@2400+War Wyrm@685` alone three times, lost all
+        three, and spent thirty of the run's forty-seven minutes doing
+        it -- with no line anywhere in the log saying a fight had been
+        lost at all, let alone the same one three times.
+
+        The two facts that make it actionable are the opening (which
+        is already the join key between two wizards' exports) and how
+        many seats were actually in the plan. One wizard against a
+        2400hp boss in a party of two is not a hard fight, it is a
+        party that did not arrive.
+        """
+        import time
+
+        if won is not False or not seat.tel.fights:
+            return
+        fight = seat.tel.fights[-1]
+        opening = fight.opening or "an unnamed board"
+        now = time.monotonic()
+        where = seat.zone_seen or "an unknown zone"
+        # How many wizards were actually in the circle for THIS fight --
+        # not for the run. `planned_alone` answers the run-wide version
+        # and is an export statistic; the question here is whether the
+        # duel that was just lost had a party in it.
+        played = [r for r in seat.tel.rounds
+                  if r.fight == fight.index and not r.passing]
+        alone = bool(played) and all((r.seats_in_plan or 1) <= 1
+                                     for r in played)
+        seat.tel.note_questing(
+            "lost",
+            f"{seat.name} lost to {opening} after {fight.rounds} round(s) "
+            f"in {where}"
+            + (" — every round of it planned alone" if alone else "")
+            + ". This is the only place a defeat is written down: the "
+            "fight record's outcome is read by the win count and nothing "
+            "else")
+        seen = seat.lost_to.setdefault(opening, [])
+        seen.append(now)
+        if len(seen) != self.BOSS_WALL_LOSSES:
+            return
+        live = [s for s in self.seats if s.client is not None]
+        short = (f" — fighting it alone while {len(live)} wizard(s) were "
+                 f"in the run" if alone and len(live) > 1 else "")
+        for other in self.seats:
+            try:
+                other.tel.note_questing(
+                    "boss-wall",
+                    f"{seat.name} has now lost to {opening} "
+                    f"{len(seen)} times in {where}{short}. Walking back in "
+                    f"a third time costs the same minutes and learns "
+                    f"nothing: either the party has to arrive together or "
+                    f"this fight needs a different deck")
+            except Exception:
+                pass
+        self._say(seat,
+                  f"{seat.name} has lost to {opening} {len(seen)} times — "
+                  f"this fight is a wall, not bad luck")
+
     #: how far a wizard's max health may move between runs and still be
     #: the same wizard. A level-up is a few percent; the two wizards that
     #: got merged into one record were 1,053 and 713, which is 32%.
@@ -3220,6 +3372,15 @@ class LiveWorker(QThread):
                 seat.tel.school = seat.school
                 seat.tel.deck = seat.deck
                 seat.tel.seat = seat.index
+                # How this run was WIRED, in the file. Every other line
+                # in an export means something different depending on
+                # it -- "the follower charged ahead and the leader
+                # chased" is the design in a booster party and a bug in
+                # a plain follow -- and rev 8ebfcf70's two files cannot
+                # answer which mode produced them at all. It cost an
+                # afternoon of reading rungs backwards to work out
+                # which wizard was even supposed to be leading.
+                seat.tel.party = self._party_shape(seat)
                 # Before a single fight: the seat number is knowable now,
                 # the wizard's name is not until a duel names it. Half an
                 # answer on the title bar beats none while the operator
@@ -3420,6 +3581,9 @@ class LiveWorker(QThread):
             # keeps ticking while this loop is parked in
             # wait_for_combat below.
             seat.tel.start_fight()
+            # A new board is a new verdict. The run of no-surviving-line
+            # rounds belongs to the duel that produced it.
+            seat.no_line_survives = 0
             try:
                 # blocks until a duel starts, then plays it out -- but
                 # looks up while it waits, so Stop is answered between
@@ -3454,7 +3618,9 @@ class LiveWorker(QThread):
                     "nothing to search the friends list for. The hooks "
                     "are usually the cause — close this client "
                     "completely and relaunch it.")
-            seat.tel.end_fight(await self._fight_outcome(seat.client, seat))
+            won = await self._fight_outcome(seat.client, seat)
+            seat.tel.end_fight(won)
+            self._note_the_loss(seat, won)
             self.seat_fight_done.emit(seat.index, seat.fought)
             if seat.index == 0:
                 self.fight_done.emit(seat.fought)
@@ -4652,8 +4818,94 @@ class LiveWorker(QThread):
     DOOR_WALK_LEG = 12.0
     #: how long the script is held while a door walk is in flight.
     DOOR_WALK_CEILING = 45.0
+    #: how many times one (from, to) route may fail before the party is
+    #: told, once, that it is impassable. Small, because the information
+    #: is worth having early and the line is said once per route: rev
+    #: 8ebfcf70 needed it at minute two and got 47 identical lines and
+    #: no verdict instead.
+    DOOR_WALK_GIVE_UP = 5
 
-    def _learn_door(self, seat, into, now):
+    #: how often a seat samples where it is standing, for the door map.
+    #: One position read and one zone read on its OWN client, on its own
+    #: tick -- not the party-wide sweep `TOGETHER_POLL` paces.
+    #:
+    #: The number is the whole point. A door is inferred from the last
+    #: sample taken before the zone changed, so the sample's age is the
+    #: door's position error, and a wizard runs ~580 units a second.
+    #: Learned off the six-second party poll the error is up to ~3,500
+    #: units and the sweep that has to absorb it is `DOOR_WALK_PAST`,
+    #: 250. That is rev 8ebfcf70's booster: 47 door walks, 0 crossings,
+    #: every one of them teleporting to a spot most of a room away from
+    #: the door it was aiming at.
+    SPOT_POLL = 1.0
+    #: how soon after a wizard's own X press a zone change still counts
+    #: as that sigil firing rather than as a door it walked. Generous:
+    #: the countdown is ~10s and RESTARTS on every late join, and the
+    #: instance load takes seconds more -- `COUNT_HOLD` budgets 45s for
+    #: the same span and for the same reasons.
+    SIGIL_CROSS_WINDOW = 60.0
+    #: a door learned from a sample older than this is not a door, it is
+    #: a place the wizard happened to be. Recorded anyway -- it is still
+    #: the best guess available, and one room closer beats standing
+    #: still -- but said out loud, so an export can tell a bad aim from
+    #: a door that will not open.
+    DOOR_SAMPLE_FRESH = 2.0
+
+    async def _note_spot(self, seat):
+        """Sample where this wizard is, and learn the door if it moved.
+
+        The zone read is what makes it worth doing: a position on its
+        own cannot tell which side of a door it was taken on, and a
+        sample taken just AFTER a crossing is in the new room's
+        coordinate space -- the one place a follower must not be sent.
+        Reading both together means every sample is stamped with the
+        room it belongs to, and the door is the newest sample still
+        stamped with the old one.
+        """
+        import time
+
+        if len(self.seats) < 2:
+            # The door map exists so one wizard can walk in behind
+            # another. A solo run has nobody to teach and nobody to
+            # follow, so it should not pay two memory reads a second
+            # for it -- `TOGETHER_POLL`'s own docstring is about
+            # exactly this traffic.
+            return
+        now = time.monotonic()
+        if now - seat.spot_at < self.SPOT_POLL:
+            return
+        seat.spot_at = now
+        try:
+            if await seat.client.is_loading():
+                # Mid-load a position reads in the OLD zone's space
+                # while `zone_name` may already answer the new one.
+                # Pairing those two is how a door gets recorded on the
+                # wrong side of itself.
+                return
+        except Exception:
+            pass
+        try:
+            zone = await seat.client.zone_name()
+        except Exception:
+            return
+        if not zone:
+            return
+        try:
+            spot = await seat.client.body.position()
+        except Exception:
+            return
+        was, before = seat.spot_zone, seat.spot_seen
+        if was and was != zone and before is not None:
+            self._learn_door(seat, zone, now, spot=before,
+                             sampled=seat.spot_at_prev)
+        seat.spot_at_prev = now
+        seat.spot_seen, seat.spot_zone = spot, zone
+        # Keep the party poll's own view fed too: it is what
+        # `_walk_the_leaders_door`'s last-resort branch reads, and a
+        # fresher value there is strictly better than a staler one.
+        seat.last_spot, seat.last_spot_zone = spot, zone
+
+    def _learn_door(self, seat, into, now, spot=None, sampled=None):
         """Record where this wizard was standing when it left a zone.
 
         The position sampled on the poll BEFORE the change is, by
@@ -4662,11 +4914,45 @@ class LiveWorker(QThread):
         wizard teaches the whole party: the leader crossing first is
         precisely the case a stranded follower needs, and it is the
         common one.
+
+        "Give or take one poll of walking" is the load-bearing phrase,
+        and it used to be one SIX-SECOND poll. The door is recorded with
+        the age of the sample it came from now, and a fresher sighting
+        never loses to a staler one -- see `SPOT_POLL`.
         """
-        out = seat.last_spot_zone
-        if not out or not into or out == into or seat.last_spot is None:
+        out = seat.last_spot_zone if spot is None else seat.spot_zone
+        if spot is None:
+            spot = seat.last_spot
+        if not out or not into or out == into or spot is None:
             return
-        self._doors[(out, into)] = (seat.last_spot, now, seat.name)
+        age = None if sampled is None else max(0.0, now - sampled)
+        # HOW it crossed, not just where from. A zone change that
+        # follows this wizard's own X press is a sigil firing, and a
+        # sigil is not a door: it admits the wizards standing on it when
+        # its counter runs out, and no amount of walking through the pad
+        # crosses it. The run proves that on its own, without any of the
+        # door map involved -- rev 8ebfcf70 t=1922.8, Konstantin 127
+        # units from the marker, four legs swept "through and past it"
+        # and the zone did not change; t=1935.3 it pressed X, and at
+        # t=1950.3 it was inside. Same wizard, same spot, twelve seconds
+        # apart. Walking is not the way through one of these, so a
+        # follower must not be sent to sweep at it.
+        how = ("sigil" if now - seat.pressed_x_at <= self.SIGIL_CROSS_WINDOW
+               else "walked")
+        # Never trade a better-aimed door for a worse-aimed one. Both
+        # `_note_spot` (fresh, on the seat's own second) and the party
+        # poll (up to six seconds stale, and no age at all to declare)
+        # learn doors, and the poll runs last -- so without this the
+        # good sample is overwritten by the bad one within the tick.
+        # An unknown age loses to a known one for the same reason: the
+        # only thing that can be said about it is that it is at least
+        # as stale as the poll that produced it.
+        old = self._doors.get((out, into))
+        if old is not None and _door_how(old) == how:
+            was = old[3] if len(old) > 3 else None
+            if was is not None and (age is None or was < age):
+                return               # we already know this door better
+        self._doors[(out, into)] = (spot, now, seat.name, age, how)
         if len(self._doors) > self.DOORS_REMEMBERED:
             for key in sorted(self._doors,
                               key=lambda k: self._doors[k][1])[:8]:
@@ -4742,26 +5028,92 @@ class LiveWorker(QThread):
             # is what a leader that crossed before the map existed
             # leaves behind.
             if boss.last_spot is not None and boss.last_spot_zone == here:
-                door = (boss.last_spot, now, boss.name)
+                door = (boss.last_spot, now, boss.name,
+                        max(0.0, now - boss.spot_at))
         if door is None:
             return False, (f"{seat.name} cannot teleport to {boss.name} in "
                            f"{there} and has no record of the way in — "
                            f"nobody has been watched crossing from {here} "
                            f"to {there} yet")
-        spot, _at, taught_by = door
+        # Four fields now; three is the shape a door learned before the
+        # sample age existed still has, and it reads as "age unknown"
+        # rather than as an error.
+        spot, _at, taught_by = door[0], door[1], door[2]
+        aim = door[3] if len(door) > 3 else None
+        if _door_how(door) == "sigil":
+            # Not a door. `taught_by` did not walk out of this room, it
+            # stood on a sigil and pressed X, and a sigil admits the
+            # wizards standing on it when its counter fires -- so the
+            # four-leg sweep below cannot cross it however good the aim
+            # is. Rev 8ebfcf70 swept at one for 47 attempts, holding
+            # the whole party's script up to 45s each time, and the
+            # export called every one of them a door.
+            #
+            # Nor is the answer to press X here: the counter this
+            # wizard would start is its own, and a follower that enters
+            # a fresh copy of the dungeon alone is the solo boss again
+            # with a loading screen in front of it. What is needed is
+            # for the party to be on the pad together, which is
+            # `_maybe_count_hold`'s job at the moment of entry and
+            # nothing this rung can retrofit once the leader is
+            # already through. So: say so, exactly, and do not sweep.
+            self._say_once(
+                seat, f"sigil-route:{here}->{into}",
+                f"{seat.name} cannot follow {boss.name} into {into}: the "
+                f"way in is a sigil, not a door, and {taught_by} rode it "
+                f"in on a press-X countdown",
+                kind="route-is-a-sigil",
+                detail=(f"{here} -> {into} was crossed by {taught_by} "
+                        f"pressing X at a sigil, not by walking a door. A "
+                        f"sigil admits the wizards standing on it when "
+                        f"its counter fires, so no sweep crosses one and "
+                        f"{seat.name} cannot enter behind {boss.name} — "
+                        f"the party has to board it together. Latest "
+                        f"teleport reason: {why}"))
+            return False, (f"{here} -> {into} is a sigil entry, not a "
+                           f"door — {seat.name} cannot walk in behind "
+                           f"{boss.name}, the party has to board it "
+                           f"together")
         try:
             if await party.in_battle(seat.client):
                 return False, ""
         except Exception:
             pass
         seat.door_walked_at = now
+        # ...and say WHY no teleport reached, in the terms the operator
+        # can act on. This line used to assert the dungeon had refused,
+        # every time, and rev 8ebfcf70 printed that 47 times for a
+        # teleport the game was never asked for -- the friends list
+        # would not open, which is wizAi's bug and not a game rule.
+        # See `party.never_asked`.
+        blamed = ("The teleport was never attempted, so this is not the "
+                  "dungeon refusing one — but the door is still the way "
+                  "in, and the party watched this one being used"
+                  if party.never_asked(why) else
+                  "A dungeon that refuses friends-list teleports still "
+                  "has doors, and the party watched this one being used")
+        # How good the aim is, said in the same line as the attempt. A
+        # door sampled a second before the crossing is a door; one
+        # sampled six seconds before it is wherever the wizard happened
+        # to be, and the difference is the difference between this
+        # working and rev 8ebfcf70's 0-for-47. Without it an export
+        # cannot tell "we walked to the wrong place" from "this door
+        # cannot be walked".
+        aimed = ("" if aim is None else
+                 f" The door was sampled {aim:.1f}s before the crossing"
+                 + ("" if aim <= self.DOOR_SAMPLE_FRESH else
+                    f", which is stale — at a walking pace that is "
+                    f"~{aim * 580:.0f} units of error against a "
+                    f"{self.DOOR_WALK_PAST:.0f}-unit sweep") + ".")
+        tried = seat.door_fails.get((here, into), 0)
         seat.tel.note_questing(
             "door-walk",
             f"no teleport reaches {boss.name} in {there} ({why}) — walking "
             f"the door {taught_by} was standing on when it crossed out of "
             f"{here}" + ("" if into == there else f" into {into}, one room "
-            f"closer") + ". A dungeon that refuses friends-list teleports "
-            f"still has doors, and the party watched this one being used")
+            f"closer") + f". {blamed}."
+            + (f" This route has failed {tried} time(s) already." if tried
+               else "") + aimed)
         self._say(seat,
                   f"{seat.name} cannot port to {boss.name} — walking the "
                   f"door into {into.rsplit('/', 1)[-1]}")
@@ -4808,6 +5160,7 @@ class LiveWorker(QThread):
                 self.HOP_SETTLE if crossed else self.WALK_THROUGH_SETTLE)
         if crossed:
             seat.cross_zone_fails = 0
+            seat.door_fails.pop((here, into), None)
             # A crossing that WORKED is the route working, and a
             # follower five rooms behind has four more to walk. The
             # cooldown exists to stop a walk that goes nowhere being
@@ -4820,10 +5173,42 @@ class LiveWorker(QThread):
                 f"teleport the game refused, done the way a player would "
                 f"do it")
             return True, f"walked through the door out of {here}"
+
+        # It did not cross, and that is a fact about THIS ROUTE. Counted
+        # per (from, to) rather than per seat, because the seat-wide
+        # counter next door -- `cross_zone_fails` -- is written in three
+        # places and read in none, which is why rev 8ebfcf70 ran the
+        # same failing walk 47 times without the run ever escalating.
+        fails = seat.door_fails.get((here, into), 0) + 1
+        seat.door_fails[(here, into)] = fails
+        if fails == self.DOOR_WALK_GIVE_UP:
+            # Said once, loudly, at the point where repeating it stops
+            # being a retry and becomes the run's headline. The route
+            # keeps being attempted afterwards -- there is nothing else
+            # to attempt, and a door that opens on the fiftieth try is
+            # still a door -- but the export now names the wall instead
+            # of burying it under identical lines.
+            for other in self.seats:
+                try:
+                    other.tel.note_questing(
+                        "route-impassable",
+                        f"{seat.name} has failed to walk {here} -> {into} "
+                        f"{fails} times running, and no teleport reaches "
+                        f"{boss.name} either. {boss.name} is questing on "
+                        f"the far side of a transition this wizard cannot "
+                        f"cross, so every fight through it is one wizard "
+                        f"short. Latest teleport reason: {why}")
+                except Exception:
+                    pass
+            self._say(seat,
+                      f"{seat.name} cannot reach {boss.name}: {here} -> "
+                      f"{into} has failed {fails} times and no teleport "
+                      f"works either")
         return False, (f"{seat.name} could not walk the door from {here} "
                        f"into {into} either — teleported onto the spot "
                        f"{taught_by} crossed from and swept {legs} leg(s) "
-                       f"past it without the zone changing")
+                       f"past it without the zone changing "
+                       f"({fails} failure(s) on this route)")
 
     async def _sweep_through(self, seat, away, label):
         """The walk itself: through the marker, then sweep. Shared by
@@ -5020,6 +5405,8 @@ class LiveWorker(QThread):
         True only when the prompt was SEEN and the press went -- the
         proof `_join_leader` deals in.
         """
+        import time
+
         from .. import questing
 
         for _ in range(polls):
@@ -5027,6 +5414,7 @@ class LiveWorker(QThread):
                 if await questing.near_interactable(seat.client):
                     ok, _why = await questing.press_x(seat.client)
                     if ok:
+                        seat.pressed_x_at = time.monotonic()
                         seat.tel.note_questing(
                             "countdown-hold",
                             "pressed X to join the sigil as the leader")
@@ -5111,6 +5499,7 @@ class LiveWorker(QThread):
            mates' presses were about to cause anyway.
         """
         import math
+        import time
 
         from .. import questing
 
@@ -5119,6 +5508,7 @@ class LiveWorker(QThread):
             if await questing.near_interactable(client):
                 ok, _why = await questing.press_x(client)
                 if ok:
+                    seat.pressed_x_at = time.monotonic()
                     seat.tel.note_questing(
                         "countdown-hold",
                         "this wizard's own press-X prompt rendered once "
@@ -5685,12 +6075,15 @@ class LiveWorker(QThread):
 
     async def _press_the_joiners(self, seat, joiners):
         """The helpers' X, once the holder is provably aboard."""
+        import time
+
         from .. import questing
 
         for other in joiners:
             try:
                 ok, _why = await questing.press_x(other.client)
                 if ok:
+                    other.pressed_x_at = time.monotonic()
                     other.tel.note_questing(
                         "countdown-hold",
                         f"pressed X to join {seat.name}'s sigil — "
@@ -7511,7 +7904,30 @@ class LiveWorker(QThread):
         for z in known:
             counts[z] = counts.get(z, 0) + 1
         best, n = max(counts.items(), key=lambda kv: kv[1])
-        if n < 2 or n == len(live):
+        if len(live) == 2 and n == 1:
+            # A party of two has no majority to be in. `n < 2` below
+            # reads that as "no evidence" and returns, which means this
+            # whole mechanism -- the stranding clock, `stranded_where`,
+            # the rejoin, and every line of telemetry any of them write
+            # -- has never once fired for a two-wizard party. Rev
+            # 8ebfcf70 is forty-seven minutes of it: Oz in
+            # `DS_Necropolis_Gauntlet_5Room2` and Konstantin four rooms
+            # deeper for most of the run, and not one `stranded`,
+            # `rejoined`, `rejoin-failed` or `rejoin-skipped` entry in
+            # either export. The only thing that noticed was the
+            # follow's own alarm, which cannot act.
+            #
+            # Two wizards in two zones still has an answer, and it is
+            # the one the rest of the file already uses: the leader's
+            # zone is the party's zone. `_follow_step` follows it,
+            # `_walk_the_leaders_door` walks toward it, and in solo-pilot
+            # and booster runs the leader IS the route. So the straggler
+            # is simply whichever seat is not the leader.
+            boss = self.seats[self.leader]
+            if boss not in live or zones.get(boss) is None:
+                return None, None        # no reference; decide nothing
+            best = zones[boss]
+        elif n < 2 or n == len(live):
             return None, None            # no majority, or nobody adrift
 
         odd = [s for s in live if zones[s] != best]
@@ -8641,9 +9057,133 @@ class LiveWorker(QThread):
             getattr(backend, "_measured_incoming", 0.0) or 0.0)
         if seat.tel.fights:
             seat.tel.fights[-1].damage_taken += rec.incoming
+        self._watch_for_a_fight_that_cannot_be_won(seat, rec)
+        self._say_why_it_planned_alone(seat, rec)
         self.seat_round_done.emit(seat.index, rec)
         if seat.index == 0:
             self.round_done.emit(rec)
+
+    #: how many rounds in a row where NO line survives before the run is
+    #: told. Five, because one such round is a bad hand and five is the
+    #: board. Rev 8ebfcf70's fight 2 opened with seven of them at full
+    #: health, so this fires deep inside the FIRST attempt rather than
+    #: after the second corpse -- which is the difference between losing
+    #: ten minutes and losing thirty.
+    UNWINNABLE_ROUNDS = 5
+
+    def _say_why_it_planned_alone(self, seat, rec):
+        """Once per fight: why this round's plan held one wizard.
+
+        `planned_alone` was built to stop a policy's NAME being taken as
+        evidence it had anybody to coordinate with, and it does that --
+        but it is a count, and a count cannot be acted on. Rev 8ebfcf70:
+        the two wizards shared a duel in 33 of 46 fights and fused a
+        plan in 11 rounds of 161, and nothing in either export said
+        whether the missing seat was waited for and late, or never
+        expected at all. Those want opposite fixes.
+
+        Once per fight, because it is a property of the fight rather
+        than of the round -- the run has 151 alone rounds in it and 151
+        identical lines would bury the thing they explain.
+        """
+        if (rec.seats_in_plan or 1) > 1 or self.hive is None:
+            return
+        if len([s for s in self.seats if s.client is not None]) < 2:
+            return
+        why = getattr(self.hive, "last_alone", None)
+        if not why:
+            return
+        index = getattr(seat.tel.fights[-1], "index", None) \
+            if seat.tel.fights else None
+        if seat.alone_said_for == index:
+            return
+        seat.alone_said_for = index
+        try:
+            seat.tel.note_questing(
+                "planned-alone",
+                f"round {rec.round} planned without the rest of the party: "
+                f"{why}")
+        except Exception:
+            pass
+
+    def _watch_for_a_fight_that_cannot_be_won(self, seat, rec):
+        """Say so when every line the rollout tries ends in this wizard's
+        death, round after round.
+
+        The verdict already exists and already goes in the export. A
+        rollout that dies returns `_lost_score`'s sentinel rather than a
+        turn count, `policies.is_sentinel` is the ready-made classifier
+        for it -- and its only caller in the repo is a pip-thrift
+        tie-break inside the ranking. So the one component that actually
+        knows the fight is unwinnable tells nobody.
+
+        Rev 8ebfcf70 is what that costs. Konstantin's fight 2 opens with
+        rounds 1-7 where every candidate INCLUDING `pass` is the
+        sentinel, at 1998 of 1998 health -- the policy knew on round one,
+        at full health, that it had no line -- and 19 of the fight's 26
+        rounds read that way. The same board was then walked back into
+        twice more. Nothing said a word until the wizard was dead, three
+        times over.
+
+        Reported, not acted on. What to DO about it depends on why the
+        line is missing -- a party that never arrived, a deck with no
+        answer, a wizard ten levels light -- and only the operator can
+        tell those apart. What wizAi can do is stop the verdict dying
+        inside the ranking function.
+        """
+        from .. import policies
+
+        cands = list(rec.candidates or ())
+        if not cands:
+            # No candidates is not "no line survives": a round with
+            # nothing castable has nothing to roll out. It says nothing
+            # either way, so it neither counts nor clears.
+            return
+
+        def died(cand):
+            turns = getattr(cand, "turns", None)
+            horizon = getattr(cand, "horizon", None)
+            if turns is None and isinstance(cand, dict):
+                turns, horizon = cand.get("turns"), cand.get("horizon")
+            if turns is None or horizon is None:
+                return False
+            try:
+                return policies.is_sentinel(turns, horizon)
+            except Exception:
+                return False
+
+        if not all(died(c) for c in cands):
+            seat.no_line_survives = 0
+            return
+        seat.no_line_survives += 1
+        fight = seat.tel.fights[-1] if seat.tel.fights else None
+        index = getattr(fight, "index", None)
+        if (seat.no_line_survives < self.UNWINNABLE_ROUNDS
+                or seat.unwinnable_said_for == index):
+            return
+        seat.unwinnable_said_for = index
+        opening = getattr(fight, "opening", "") or "this board"
+        with_me = rec.seats_in_plan or 1
+        live = [s for s in self.seats if s.client is not None]
+        alone = (f", and {seat.name} is planning them alone while "
+                 f"{len(live)} wizard(s) are in the run"
+                 if with_me <= 1 and len(live) > 1 else "")
+        for other in self.seats:
+            try:
+                other.tel.note_questing(
+                    "unwinnable",
+                    f"{seat.no_line_survives} rounds in a row against "
+                    f"{opening} where every line the rollout tried — "
+                    f"including passing — ended with {seat.name} dead"
+                    f"{alone}. At {rec.player_hp:.0f} of "
+                    f"{rec.player_max_hp:.0f} health. This is the policy's "
+                    f"own verdict, and it has been available since the "
+                    f"round it first appeared")
+            except Exception:
+                pass
+        self._say(seat,
+                  f"{seat.name} has no surviving line against {opening} — "
+                  f"{seat.no_line_survives} rounds running")
 
     def _learn_name(self, seat, read):
         """Take the wizard's own name off the duel it is standing in.
