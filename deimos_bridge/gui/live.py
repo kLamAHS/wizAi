@@ -415,6 +415,9 @@ class _Seat:
         #: for. See `_watch_for_a_fight_that_cannot_be_won`.
         self.no_line_survives = 0
         self.unwinnable_said_for = None
+        #: the fight this seat has already explained a lone plan for.
+        #: See `_say_why_it_planned_alone`.
+        self.alone_said_for = None
         #: stage name -> how many times it has failed, so a broken stage
         #: is reported rather than retried silently twice a second
         self.stage_errors = {}
@@ -9055,6 +9058,7 @@ class LiveWorker(QThread):
         if seat.tel.fights:
             seat.tel.fights[-1].damage_taken += rec.incoming
         self._watch_for_a_fight_that_cannot_be_won(seat, rec)
+        self._say_why_it_planned_alone(seat, rec)
         self.seat_round_done.emit(seat.index, rec)
         if seat.index == 0:
             self.round_done.emit(rec)
@@ -9066,6 +9070,41 @@ class LiveWorker(QThread):
     #: after the second corpse -- which is the difference between losing
     #: ten minutes and losing thirty.
     UNWINNABLE_ROUNDS = 5
+
+    def _say_why_it_planned_alone(self, seat, rec):
+        """Once per fight: why this round's plan held one wizard.
+
+        `planned_alone` was built to stop a policy's NAME being taken as
+        evidence it had anybody to coordinate with, and it does that --
+        but it is a count, and a count cannot be acted on. Rev 8ebfcf70:
+        the two wizards shared a duel in 33 of 46 fights and fused a
+        plan in 11 rounds of 161, and nothing in either export said
+        whether the missing seat was waited for and late, or never
+        expected at all. Those want opposite fixes.
+
+        Once per fight, because it is a property of the fight rather
+        than of the round -- the run has 151 alone rounds in it and 151
+        identical lines would bury the thing they explain.
+        """
+        if (rec.seats_in_plan or 1) > 1 or self.hive is None:
+            return
+        if len([s for s in self.seats if s.client is not None]) < 2:
+            return
+        why = getattr(self.hive, "last_alone", None)
+        if not why:
+            return
+        index = getattr(seat.tel.fights[-1], "index", None) \
+            if seat.tel.fights else None
+        if seat.alone_said_for == index:
+            return
+        seat.alone_said_for = index
+        try:
+            seat.tel.note_questing(
+                "planned-alone",
+                f"round {rec.round} planned without the rest of the party: "
+                f"{why}")
+        except Exception:
+            pass
 
     def _watch_for_a_fight_that_cannot_be_won(self, seat, rec):
         """Say so when every line the rollout tries ends in this wizard's

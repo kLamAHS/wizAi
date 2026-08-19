@@ -4872,6 +4872,119 @@ def test_a_round_lost_to_a_failed_read_goes_through_the_record():
     assert passes
 
 
+def test_a_run_of_unreadable_rounds_ends_the_duel_instead_of_playing_it():
+    """The 23 minutes rev 8ebfcf70 lost in one duel. Oz opened against
+    `Fire Elf Hunter@150`, cast Tempest twice, and then passed 108
+    rounds with `player_hp` reading 0.0 and no enemies at all — while
+    Konstantin left and fought three more duels. `won` came out null and
+    the fight recorded 110 rounds.
+
+    `handle_combat` loops `while await self.in_combat()`, and a client
+    whose memory reads have gone bad answers that as badly as any other
+    question, so a duel that has ended reads as still running. Every
+    round inside it fails, passes, and comes round again. Bounded now:
+    answering the loop's own question is what unwinds it, so there is no
+    exception for the seat's fight loop to treat as a crash."""
+    import asyncio
+
+    async def _decide():
+        raise RuntimeError("MemoryReadError")
+
+    handler, passes = _stub_handler(_decide, read=None)
+    handler._blind_rounds = 0
+    handler._gave_up_blind = False
+    for _ in range(handler.BLIND_ROUNDS):
+        asyncio.run(handler.handle_round())
+    assert handler._blind_rounds == handler.BLIND_ROUNDS
+    assert len(passes) == handler.BLIND_ROUNDS, "it stopped passing early"
+
+    # The loop asks; the answer is what ends the duel.
+    class _Base:
+        async def in_combat(self):
+            return True
+
+    handler.__class__ = type("_Bounded", (handler.__class__, _Base), {})
+    assert asyncio.run(handler.in_combat()) is False, \
+        "a wizard with no readable board was kept in the duel"
+    said = [r for _n, r in handler.backend.lost
+            if "rounds in a row" in r]
+    assert len(said) == 1, [r for _n, r in handler.backend.lost]
+    assert "hooks need re-attaching" in said[0]
+    # ...and said once, not every time the loop asks again.
+    assert asyncio.run(handler.in_combat()) is False
+    assert len([r for _n, r in handler.backend.lost
+                if "rounds in a row" in r]) == 1
+
+
+def test_a_seat_announces_its_duel_before_the_first_round_is_planned():
+    """The race that made round one of every fight a solo plan.
+
+    The coordinator waits only for seats it knows are in a duel, and
+    that used to be announced at the top of each seat's own
+    `_handle_round` — AFTER `wait_for_planning_phase`. So a seat that
+    got from its own announcement to `decide()` before the other seat
+    reached its announcement found itself the only expected wizard, and
+    the gather closed as 'full' with one board in it, instantly, with no
+    waiting at all however long the timeout was.
+
+    Announced from `handle_combat` it lands before the planning wait,
+    which is seconds wide."""
+    import asyncio
+
+    entered = []
+
+    class _Hive:
+        def enter_combat(self, seat):
+            entered.append(("enter", seat, len(order)))
+
+        def leave_combat(self, seat):
+            pass
+
+    order = []
+
+    class _Base:
+        async def handle_combat(self):
+            order.append("planning wait")
+            order.append("round")
+
+    from deimos_bridge.live_backend import WizAiCombatHandler
+
+    class _Handler(WizAiCombatHandler, _Base):
+        def __init__(self):
+            pass
+
+    handler = _Handler()
+    handler.backend = type("_B", (), {"coordinator": _Hive(), "seat": 1})()
+    asyncio.run(handler.handle_combat())
+    assert entered == [("enter", 1, 0)], \
+        f"the seat was announced after the duel had started running: {entered}"
+    assert order == ["planning wait", "round"]
+
+
+def test_a_board_that_reads_again_clears_the_blind_run():
+    """Consecutive, not cumulative. A client that hiccups once and
+    recovers is not a client playing blind, and treating it as one would
+    abandon duels over a single bad read."""
+    import asyncio
+
+    from deimos_bridge.live_backend import PolicyDecision
+
+    state = {"fail": True}
+
+    async def _decide():
+        if state["fail"]:
+            raise RuntimeError("MemoryReadError")
+        return PolicyDecision(passing=True, reason="pass")
+
+    handler, _passes = _stub_handler(_decide, read=object())
+    asyncio.run(handler.handle_round())
+    asyncio.run(handler.handle_round())
+    assert handler._blind_rounds == 2
+    state["fail"] = False
+    asyncio.run(handler.handle_round())
+    assert handler._blind_rounds == 0, "a good read did not clear the run"
+
+
 def test_a_board_with_unreadable_wards_is_not_a_clean_observation():
     """An empty ward list is the same value for "no shields" and "the
     read failed". The second hands the policy a bare mob, it prices its

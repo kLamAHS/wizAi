@@ -388,6 +388,82 @@ def test_leaving_the_circle_releases_the_others_immediately():
     assert asyncio.run(drive()) is not None
 
 
+def test_a_lone_plan_says_which_wizard_was_missing_and_why():
+    """`planned_alone` counts these and cannot say what went wrong, and
+    the two causes want opposite fixes. Rev 8ebfcf70's party shared a
+    duel in 33 of 46 fights and fused a plan in 11 rounds of 161, and
+    neither export could say, even once, whether the other seat was
+    waited for and late or never expected at all.
+
+    Expected and absent: a slow client."""
+    hive = Hivemind(passes=1, timeout=0.2)
+    subs = party(2)
+    for sub in subs:
+        hive.join(sub.seat, sub.name)
+        hive.enter_combat(sub.seat)
+
+    async def drive():
+        s = subs[0]
+        return await hive.decide(s.seat, s.sim, s.state, s.policy)
+
+    asyncio.run(drive())
+    assert len(hive.last_plan.moves) == 1
+    assert hive.last_alone is not None
+    assert "wizard 2" in hive.last_alone and "did not submit" in hive.last_alone
+
+
+def test_a_lone_plan_says_when_the_other_seat_was_never_expected():
+    """The other cause, and the one that reads as working. Nothing
+    waited at all: the seat had not announced its duel when this round's
+    plan was opened, so the gather was 'full' with one wizard in it and
+    closed at once. That is a coordination bug, not a slow client, and
+    the count alone cannot tell them apart."""
+    hive = Hivemind(passes=1, timeout=30.0)
+    subs = party(2)
+    for sub in subs:
+        hive.join(sub.seat, sub.name)
+    hive.enter_combat(subs[0].seat)          # only one is in a duel
+
+    async def drive():
+        s = subs[0]
+        return await asyncio.wait_for(
+            hive.decide(s.seat, s.sim, s.state, s.policy), 5)
+
+    asyncio.run(drive())
+    assert len(hive.last_plan.moves) == 1
+    assert hive.last_alone is not None
+    assert "wizard 2" in hive.last_alone
+    assert "not in a duel" in hive.last_alone
+    assert "too late to be counted" in hive.last_alone
+
+
+def test_a_round_that_was_a_party_explains_nothing():
+    hive = Hivemind(passes=2, timeout=5.0)
+    subs = party(2)
+    for sub in subs:
+        hive.join(sub.seat, sub.name)
+        hive.enter_combat(sub.seat)
+
+    async def drive():
+        return await asyncio.gather(*[
+            hive.decide(s.seat, s.sim, s.state, s.policy) for s in subs])
+
+    asyncio.run(drive())
+    assert len(hive.last_plan.moves) == 2
+    assert hive.last_alone is None
+
+
+def test_a_party_of_one_has_nothing_to_explain():
+    """A solo run plans alone every round by definition. Explaining it
+    would be 200 lines of noise per run."""
+    hive = Hivemind(passes=1, timeout=5.0)
+    sub = party(1)[0]
+    hive.join(sub.seat, sub.name)
+    hive.enter_combat(sub.seat)
+    asyncio.run(hive.decide(sub.seat, sub.sim, sub.state, sub.policy))
+    assert hive.last_alone is None
+
+
 def test_a_seat_deciding_alone_is_not_left_waiting_for_a_party():
     """Nobody has entered combat, so there is nobody to wait for."""
     hive = Hivemind(passes=2, timeout=30.0)
