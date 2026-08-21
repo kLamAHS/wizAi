@@ -619,6 +619,11 @@ class LiveWorker(QThread):
         #: and keeps cancelling with its next teleport. Deadline, like
         #: the hop's. See `_maybe_count_hold` and `_countdown_held`.
         self._count_hold_until = 0.0
+        #: has this hold already stepped the wizard off its pad and
+        #: back? That move un-joins a counting sigil, so it is worth
+        #: exactly one counter restart per hold and no more. See
+        #: `_join_leader`'s third rung.
+        self._count_hold_stepped_off = False
         self._count_hold_zone = None
         self._count_hold_seat = -1
         self._count_hold_last = NEVER
@@ -5389,9 +5394,17 @@ class LiveWorker(QThread):
     #: how long between boarding attempts INSIDE a running hold. The
     #: whole attempt -- refresh out, back, poll, press -- took 2.6s the
     #: time it worked at rev e6201303, so this leaves room for the poll
-    #: to run out and still gives a 45s hold about five tries instead
-    #: of the one it used to get.
-    COUNT_HOLD_RETRY = 8.0
+    #: to run out and still gives a 45s hold several tries instead of
+    #: the one it used to get.
+    #:
+    #: It must also EXCEED the countdown it is guarding. `COUNT_HOLD`
+    #: documents that counter as ~10s, and a retry that steps the
+    #: wizard off its pad restarts it -- so at the 8.0 this used to be,
+    #: a real sigil could never finish counting. Rev 09a0af80: every
+    #: hold ran its full 45s at six cycles apiece and not one fired.
+    #: The step-off is now once per hold anyway (`_join_leader`), and
+    #: this is the second guard on the same mistake.
+    COUNT_HOLD_RETRY = 12.0
 
     def _countdown_held(self):
         """Is the script waiting out a possible sigil countdown?"""
@@ -5556,6 +5569,22 @@ class LiveWorker(QThread):
         # On the pad -- planted there or standing there all along --
         # and the prompt still will not render: dead. Leave the range
         # window entirely and come back in.
+        #
+        # ONCE per hold. The docstring above budgets for "one counter
+        # restart", and that is the right price -- but `_retry_boarding`
+        # calls this every `COUNT_HOLD_RETRY` seconds, so the price was
+        # being paid over and over against a countdown the constant at
+        # `COUNT_HOLD` documents as ~10s. Stepping off UN-JOINS the
+        # wizard, so an 8-second retry cadence reset a 10-second counter
+        # forever: the guard prevented the entry it exists to protect.
+        # Rev 09a0af80's holds ran their full 45s at six cycles apiece
+        # and not one of them fired.
+        #
+        # The cheap rungs above (press a prompt that IS up, re-plant off
+        # the pad) may still repeat -- neither of them un-joins anything.
+        if self._count_hold_stepped_off:
+            return False
+        self._count_hold_stepped_off = True
         try:
             marker, _why = await questing.read_quest_position(client)
         except Exception:
@@ -5659,6 +5688,24 @@ class LiveWorker(QThread):
     #: without once firing is not one this rung can help with either.
     COUNT_HOLD_DUDS = 3
 
+    def _sigil_cell(self, seat, zone=None):
+        """(zone, cell) for the spot memory -- WITHOUT the quest goal.
+
+        `seat.progress` is `(zone, position, goal)`, and keying on it
+        whole meant a flapping goal silently re-keyed the memory: the
+        same doorway looked like a new spot every time the quest
+        tracker changed its mind, so the dud count never accumulated
+        and the guard never wrote anything off. Rev 09a0af80's quester
+        alternated between a Zafaria quest and a Wysteria one at the
+        same marker, which is exactly that.
+
+        The physical spot is what a sigil is. The goal is not part of
+        it.
+        """
+        spot = seat.count_hold_spot or seat.progress
+        cell = spot[1] if isinstance(spot, tuple) and len(spot) > 1 else spot
+        return (zone or seat.zone_seen or "", cell)
+
     def _sigil_dud(self, seat, add=0):
         """How many visits to this spot have held and never fired.
 
@@ -5667,7 +5714,7 @@ class LiveWorker(QThread):
         whole point, that being exactly what the script does between
         attempts.
         """
-        where = (seat.zone_seen or "", seat.count_hold_spot or seat.progress)
+        where = self._sigil_cell(seat)
         if not where[1]:
             return 0
         duds = getattr(self, "_sigil_duds", None)
@@ -5691,8 +5738,7 @@ class LiveWorker(QThread):
         duds = getattr(self, "_sigil_duds", None)
         if not duds:
             return
-        where = (self._count_hold_zone or seat.zone_seen or "",
-                 seat.count_hold_spot or seat.progress)
+        where = self._sigil_cell(seat, zone=self._count_hold_zone)
         duds.pop(where, None)
 
     async def _maybe_count_hold(self, seat):
@@ -5987,6 +6033,7 @@ class LiveWorker(QThread):
         except Exception:
             here = None
         sensed = []
+        shopfront = []
         if here is not None:
             for other in mates:
                 try:
@@ -5995,12 +6042,44 @@ class LiveWorker(QThread):
                     at = await other.client.body.position()
                     gap = ((at.x - here.x) ** 2
                            + (at.y - here.y) ** 2) ** 0.5
-                    if (gap <= self.COUNT_HOLD_SENSE
-                            and await questing.near_interactable(
-                                other.client)):
+                    if gap > self.COUNT_HOLD_SENSE:
+                        continue
+                    if await questing.at_a_sigil(other.client):
                         sensed.append(other)
+                    elif await questing.near_interactable(other.client):
+                        # A prompt with no Team Up button: a vendor, a
+                        # bank, a Talk NPC. Recorded but NOT counted as
+                        # sigil evidence -- the old sensor read exactly
+                        # this as "the party is at a sigil mid-entry"
+                        # and spent 36% of rev 09a0af80 holding at
+                        # conversations.
+                        shopfront.append(other)
                 except Exception:
                     continue
+        if shopfront and not sensed:
+            # Graded, not gated. The Team Up window path cannot be
+            # checked without a live client, so a spot that shows a
+            # prompt WITHOUT one is not refused outright -- it falls
+            # back to the plain marker case, which is what this rung
+            # did before any of this existed. What it does lose is the
+            # evidenced-sigil privileges: no re-arming on expiry, and
+            # the spot starts collecting duds immediately, so a Talk
+            # NPC stops being revisited instead of costing 45s a time.
+            self._sigil_dud(seat, +1)
+            self._say_once(
+                seat, f"shopfront:{seat.zone_seen}:{seat.progress}",
+                f"{', '.join(o.name for o in shopfront)} is at a press-X "
+                f"prompt beside {seat.name}, but it has no Team Up "
+                f"button — not a sigil",
+                kind="countdown-hold-refused",
+                detail=(f"a partner's prompt here has no Team Up button, "
+                        f"so this is a vendor, a bank or a Talk NPC and "
+                        f"not a dungeon sigil the party is entering. "
+                        f"Holding on the plain marker case only, with no "
+                        f"re-arm — rev 09a0af80 read this exact state as "
+                        f"a sigil mid-entry and spent 36% of the run "
+                        f"frozen at conversations"))
+
         if not marker_case and not sensed:
             return
 
@@ -6061,6 +6140,7 @@ class LiveWorker(QThread):
         self._count_hold_zone = seat.zone_seen
         self._count_hold_seat = seat.index
         self._count_hold_sigil = bool(sensed)
+        self._count_hold_stepped_off = False
         self._count_hold_began = now
         self._count_hold_party = tuple(s.index for s in mates)
         if sensed:
@@ -6119,9 +6199,15 @@ class LiveWorker(QThread):
                         self._say(other,
                                   f"{other.name} steps onto "
                                   f"{seat.name}'s sigil")
+                # The narrow read, for the same reason as the arming
+                # sensor: this decides both that the spot IS a sigil
+                # (`_count_hold_sigil` below, which buys it re-arms and
+                # exempts it from sweeps) and that this wizard should be
+                # sent to press X. At a Talk NPC the press opens a
+                # conversation nobody asked for.
                 shows = False
                 for _ in range(self.COUNT_HOLD_MATE_POLLS):
-                    if await questing.near_interactable(other.client):
+                    if await questing.at_a_sigil(other.client):
                         shows = True
                         break
                     await asyncio.sleep(self.COUNT_HOLD_POLL_GAP)

@@ -892,8 +892,45 @@ async def near_interactable(client) -> bool:
 
     `NPCRangeWin` is the window that appears when a sigil, dungeon door
     or quest NPC is in range (`src/paths.py:45`).
+
+    Deliberately broad -- see `at_a_sigil` for the narrow question. Two
+    callers want breadth: auto-dialogue, which talks to whatever is in
+    range, and the walk-through, which is asking "is there anything
+    here at all". A caller that is going to FREEZE THE SCRIPT wants the
+    other one.
     """
     window = await window_from_path(client.root_window, NPC_RANGE_PATH)
+    return window is not None and await _visible(window)
+
+
+#: `src/paths.py:41`. The Team Up button lives INSIDE `NPCRangeWin`, and
+#: only a dungeon sigil puts it there -- a quest NPC, a vendor, the bank
+#: and another player's housing object all raise the same range window
+#: with no way to team up through it.
+SIGIL_PATH = ["WorldView", "NPCRangeWin", "imgBackground", "TeamUpButton"]
+
+
+async def at_a_sigil(client) -> bool:
+    """Is the press-X prompt a DUNGEON SIGIL's, rather than anything's?
+
+    `near_interactable` cannot tell those apart -- `at_quest_marker`'s
+    own docstring says so: the range window "appears for *every*
+    interactable in range: vendors, bank, the dye shop, other players'
+    housing objects". That is fine for clicking dialogue and wrong for
+    deciding to freeze the script for 45 seconds.
+
+    Rev 09a0af80 is the cost of not distinguishing them. Five of that
+    run's ten quest steps were `Talk To` steps; every one of them put a
+    wizard within `AT_THE_MARKER` of an NPC that raised the range
+    window, the guard read a partner's prompt as a sigil mid-entry, and
+    36% of a 25-minute run went into countdown holds at conversations.
+
+    The discriminator was already in the tree and never used: Deimos
+    reads `TeamUpButton` out of the same window (`src/paths.py:41`), and
+    the preset quester's own dungeon test is `NPCRangeWin` +
+    `TeamUpButton` visible -- the pair, not the first alone.
+    """
+    window = await window_from_path(client.root_window, SIGIL_PATH)
     return window is not None and await _visible(window)
 
 

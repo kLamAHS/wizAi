@@ -16085,6 +16085,12 @@ def _at_the_sigil(monkeypatch, goal="Go To Amy Brooks' Place in Knight's Court",
 
     monkeypatch.setattr(questing, "in_dialogue", in_dialogue)
     monkeypatch.setattr(questing, "near_interactable", near)
+    # These fixtures model a DUNGEON sigil, so its press-X prompt is a
+    # sigil's. `at_a_sigil` is the narrow read the hold's sensor uses;
+    # `near_interactable` stays broad for dialogue and the walk-through.
+    # A test that wants an NPC prompt instead patches `at_a_sigil` back
+    # to False -- see the Talk-NPC tests below.
+    monkeypatch.setattr(questing, "at_a_sigil", near)
     monkeypatch.setattr(questing, "in_battle", in_battle)
     monkeypatch.setattr(questing, "read_quest_position", marker_pos)
     return worker, seat, other
@@ -16217,6 +16223,7 @@ def test_a_boosters_prompt_beside_the_leader_is_a_sigil_sensor(monkeypatch):
         return True, ""
 
     monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "at_a_sigil", near)
     monkeypatch.setattr(questing, "press_x", press)
     asyncio.run(worker._maybe_count_hold(seat))
     assert worker._countdown_held(), "the sensor did not trigger the hold"
@@ -16253,6 +16260,7 @@ def test_no_helper_x_while_the_leader_cannot_board(monkeypatch):
         return True, ""
 
     monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "at_a_sigil", near)
     monkeypatch.setattr(questing, "press_x", press)
     asyncio.run(worker._maybe_count_hold(seat))
     assert worker._countdown_held()
@@ -16295,6 +16303,7 @@ def test_a_dead_prompt_is_walked_off_the_sigil_and_back(monkeypatch):
         return True, ""
 
     monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "at_a_sigil", near)
     monkeypatch.setattr(questing, "press_x", press)
     asyncio.run(worker._maybe_count_hold(seat))
     assert len(seat.client.tped) == 3, "no out-and-back refresh"
@@ -16331,6 +16340,7 @@ def test_a_mate_that_crossed_alone_releases_the_hold(monkeypatch):
         return True, ""
 
     monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "at_a_sigil", near)
     monkeypatch.setattr(questing, "press_x", press)
     asyncio.run(worker._maybe_count_hold(seat))
     assert worker._countdown_held()
@@ -16374,6 +16384,7 @@ def test_a_prompt_that_renders_after_the_hold_gets_the_leaders_x(
         return True, ""
 
     monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "at_a_sigil", near)
     monkeypatch.setattr(questing, "press_x", press)
     asyncio.run(worker._maybe_count_hold(seat))
     assert worker._countdown_held()
@@ -16412,6 +16423,7 @@ def test_the_leader_is_replanted_onto_the_sensed_sigil(monkeypatch):
         return True, ""
 
     monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "at_a_sigil", near)
     monkeypatch.setattr(questing, "press_x", press)
     asyncio.run(worker._maybe_count_hold(seat))
     assert seat.client.tped == [(400.0, 200.0, 0.0)], \
@@ -16454,6 +16466,7 @@ def test_the_hold_tries_again_instead_of_standing_still(monkeypatch):
         return True, ""
 
     monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "at_a_sigil", near)
     monkeypatch.setattr(questing, "press_x", press)
 
     asyncio.run(worker._maybe_count_hold(seat))
@@ -16483,6 +16496,67 @@ def test_the_hold_tries_again_instead_of_standing_still(monkeypatch):
     assert pressed == [seat.client, other.client]
 
 
+def test_the_step_off_happens_once_per_hold_not_once_per_retry(monkeypatch):
+    """The guard was preventing the entry it exists to protect.
+
+    `_join_leader`'s third rung steps the wizard 800 units off its pad
+    and back to re-trigger the range window, and its own docstring
+    accepts that this costs "one counter restart" — because stepping off
+    UN-JOINS a wizard that was counting. But `_retry_boarding` ran it
+    again every `COUNT_HOLD_RETRY` seconds, and at the 8.0s that used to
+    be, that is a reset every 8s against a countdown `COUNT_HOLD`
+    documents as ~10s. A real sigil could never finish.
+
+    Rev 09a0af80: every hold ran its full 45 seconds at roughly six
+    cycles apiece, and not one of them fired."""
+    import asyncio
+    import time
+
+    from deimos_bridge import questing
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+
+    async def only_the_helper(c):
+        return c is other.client       # the holder's own never renders
+
+    async def press(_c):
+        return True, ""
+
+    monkeypatch.setattr(questing, "near_interactable", only_the_helper)
+    monkeypatch.setattr(questing, "at_a_sigil", only_the_helper)
+    monkeypatch.setattr(questing, "press_x", press)
+
+    def step_offs():
+        return len([e for e in seat.tel.questing
+                    if e["kind"] == "countdown-hold"
+                    and "off the sigil and back" in e["detail"]])
+
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held()
+    assert step_offs() == 1, "the holder never stepped off at all"
+
+    # Four retries come due inside the same hold. The cheap rungs may
+    # run again -- polling for a prompt and re-planting onto the pad
+    # un-join nothing. The 800-unit step-off may not.
+    for _ in range(4):
+        worker._count_hold_retry = time.monotonic() - 1.0
+        asyncio.run(worker._maybe_count_hold(seat))
+    assert step_offs() == 1, \
+        (f"the hold un-joined the wizard {step_offs()} times in one hold, "
+         f"restarting the countdown it was guarding")
+
+
+def test_the_retry_cadence_outlasts_the_countdown_it_guards(monkeypatch):
+    """A second guard on the same mistake, stated as arithmetic: a retry
+    that could restart the counter must not come round faster than the
+    counter runs."""
+    from deimos_bridge.gui.live import LiveWorker
+
+    assert LiveWorker.COUNT_HOLD_RETRY > 10.0, \
+        ("the boarding retry is faster than the ~10s countdown "
+         "COUNT_HOLD documents, so a sigil can never finish counting")
+
+
 def test_a_marker_case_hold_has_something_to_try(monkeypatch):
     """Rev e6201303's first hold stood still for its full 45 seconds
     with a partner standing on the spot, and neither wizard pressed
@@ -16510,6 +16584,7 @@ def test_a_marker_case_hold_has_something_to_try(monkeypatch):
         return True, ""
 
     monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "at_a_sigil", near)
     monkeypatch.setattr(questing, "press_x", press)
     asyncio.run(worker._maybe_count_hold(seat))
     assert worker._countdown_held()
@@ -16545,6 +16620,7 @@ def test_an_evidenced_sigil_hold_rearms_instead_of_sweeping(monkeypatch):
         return True, ""
 
     monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "at_a_sigil", near)
     monkeypatch.setattr(questing, "press_x", press)
     asyncio.run(worker._maybe_count_hold(seat))
     assert worker._countdown_held()
@@ -16638,6 +16714,58 @@ def test_one_countdown_hold_per_visit_and_a_return_rearms(monkeypatch):
     assert worker._countdown_held(), "the return visit was not guarded"
 
 
+def test_a_talk_npc_prompt_is_not_a_sigil_and_holds_nothing(monkeypatch):
+    """Rev 09a0af80 spent 36% of a 25-minute run holding the script at
+    conversations. Five of its ten quest steps were `Talk To` steps, and
+    a Talk NPC raises the same `NPCRangeWin` a dungeon sigil does — so
+    the sensor, which asked only "is a partner at a press-X prompt",
+    read every one of them as a sigil mid-entry.
+
+    `at_quest_marker`'s own docstring already said the range window
+    "appears for *every* interactable in range: vendors, bank, the dye
+    shop, other players' housing objects". The discriminator was in the
+    tree and unused: only a sigil puts a Team Up button inside that
+    window."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+
+    async def prompt(c):
+        return c is other.client       # the partner is at SOMETHING
+
+    async def no_sigil(_c):
+        return False                   # ...but it has no Team Up button
+
+    monkeypatch.setattr(questing, "near_interactable", prompt)
+    monkeypatch.setattr(questing, "at_a_sigil", no_sigil)
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert not worker._count_hold_sigil, \
+        "a conversation was recorded as an evidenced sigil"
+    said = " ".join(e["detail"] for e in seat.tel.questing
+                    if e["kind"] == "countdown-hold")
+    assert "mid-entry" not in said, \
+        "the export claims the party is entering a sigil at a Talk NPC"
+
+
+def test_a_partner_that_walked_here_itself_is_still_evidence(monkeypatch):
+    """The other half — the case the sensor exists for must keep
+    working."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+
+    async def at_sigil(c):
+        return c is other.client
+
+    monkeypatch.setattr(questing, "at_a_sigil", at_sigil)
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._count_hold_sigil, "a real sigil sensor stopped working"
+
+
 def _only_the_helper_has_a_prompt(worker, seat, other, monkeypatch):
     """The run's own shape: the partner is at a press-X prompt beside
     this wizard, and this wizard's own prompt never renders however it
@@ -16653,6 +16781,7 @@ def _only_the_helper_has_a_prompt(worker, seat, other, monkeypatch):
         return True, ""
 
     monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "at_a_sigil", near)
     monkeypatch.setattr(questing, "press_x", press)
 
 
