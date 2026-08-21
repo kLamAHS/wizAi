@@ -9263,7 +9263,15 @@ class LiveWorker(QThread):
             return
         if len([s for s in self.seats if s.client is not None]) < 2:
             return
-        why = getattr(self.hive, "last_alone", None)
+        # This seat's reason, not the party's most recent one. They are
+        # different sentences pointing at different wizards: "waited and
+        # it did not submit" is a slow client, "reached the round after
+        # the party had planned it" is this client being the slow one.
+        # One shared field meant a seat could be filed under the exact
+        # opposite of what happened to it.
+        reason = getattr(self.hive, "alone_reason", None)
+        why = (reason(seat.index) if callable(reason)
+               else getattr(self.hive, "last_alone", None))
         if not why:
             return
         index = getattr(seat.tel.fights[-1], "index", None) \

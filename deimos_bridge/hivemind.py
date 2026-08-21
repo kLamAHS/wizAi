@@ -113,6 +113,7 @@ testable headless and a party of one behaves exactly like no party at
 all.
 """
 import asyncio
+import collections
 import copy
 import threading
 import time
@@ -472,16 +473,32 @@ class _Submission:
 
 
 class _Gather:
-    """One round's barrier: who is expected, who has arrived, the plan."""
+    """One round's barrier: who is expected, who has arrived, the plan.
 
-    def __init__(self, expected):
+    `round` is the game's own round number, taken from the submitting
+    seat's read. It is what makes "this seat is late for a round the
+    party already planned" distinguishable from "this seat has come
+    around to the next round" -- two states that used to look
+    identical, because the only evidence was whether the seat was
+    already in `subs`. None when the caller had no read to take it
+    from, which is the pre-round-key behaviour and is still what the
+    coordinator does for a seat deciding without one.
+    """
+
+    def __init__(self, expected, round_number=None):
         self.expected = set(expected)
+        self.round = round_number
         self.subs = {}
         self.waiters = {}          # seat -> (loop, asyncio.Event)
         self.plan = {}             # seat -> action
         self.party = None          # PartyPlan
         self.closing = False
         self.done = False
+        #: set when this gather exists only to give ONE late seat its
+        #: move for a round the party has already planned. Never
+        #: recorded as that round's gather, and reported as lateness
+        #: rather than as somebody else's failure to turn up.
+        self.late = False
 
     def full(self):
         return self.expected and set(self.subs) >= self.expected
@@ -495,13 +512,19 @@ class Hivemind:
     waited for, so a wizard still walking to the circle never stalls the
     three that are already swinging.
 
-    Thread-safe on purpose: each `LiveWorker` owns a client on its own
-    thread with its own event loop, so the barrier cannot be an
-    `asyncio` primitive — those bind to one loop. The state is guarded by
-    a plain lock held only for bookkeeping (never across the planning
-    itself, which would block another seat's whole event loop), and a
-    waiting seat is woken through `call_soon_threadsafe` onto its own
-    loop.
+    The lock is not decoration, but it is not what this docstring used
+    to claim either. It said each `LiveWorker` owns a client on its own
+    thread with its own event loop; that has not been true since the
+    workers were folded into one — `LiveWorker` runs every seat on a
+    single thread and a single loop (`gui/live.py`), so two seats never
+    touch this state at the same instant. What the lock and the
+    `call_soon_threadsafe` wake-up buy is that they are still correct if
+    a seat is ever driven from another loop, and that cost is a few
+    microseconds. What they do NOT buy is protection from the real
+    hazard, which is ordering: one seat's `_plan_gather` runs to
+    completion on the shared loop while the other seat's timeout clock
+    is stopped. `decide` extends its deadline for exactly that reason —
+    see the `closing` branch there.
     """
 
     #: how long a seat waits for the rest of the party before planning
@@ -510,14 +533,48 @@ class Hivemind:
     #: clients reaching the same round.
     TIMEOUT = 2.5
 
+    #: how long a seat will wait for a partner that has SAID it is
+    #: working on this round -- see `arriving`.
+    #:
+    #: `TIMEOUT` is jitter money: it assumes every seat reaches the
+    #: barrier at about the same moment and buys a couple of seconds of
+    #: slack. That assumption was wrong in the field. A seat's round
+    #: does real work before it submits -- the enchant pre-pass alone is
+    #: three clicks per enchantment and up to three enchantments -- so
+    #: rev 09a0af80's booster spent 12.57s, 10.52s and 7.12s getting to
+    #: the barrier while its partner waited 2.5s and planned alone. The
+    #: party fused a plan on exactly the rounds where the pre-pass had
+    #: nothing to do.
+    #:
+    #: Waiting longer for EVERY absence would be the wrong fix: a seat
+    #: that has left the duel, crashed, or is walking to the circle must
+    #: not cost the seat that is ready. So the extra patience is spent
+    #: only on a seat that has announced this exact round and not yet
+    #: arrived -- evidence, not optimism. A seat that announces nothing
+    #: gets precisely the old `TIMEOUT`, which is why every test written
+    #: before this existed still measures what it measured.
+    PATIENCE = 12.0
+
+    #: how many planned rounds are remembered, for spotting a seat that
+    #: arrives after its round is over. Small on purpose: the only
+    #: question ever asked of it is about the round a seat is holding
+    #: right now, and an unbounded map in a process that runs for hours
+    #: is a leak.
+    SERVED_MEMORY = 8
+
     def __init__(self, timeout=None, passes=2, overkill_guard=True,
                  margin=1.0, budget=6.0, on_status=None, on_plan=None,
-                 kill_confidence=KILL_CONFIDENCE, boosters=()):
+                 kill_confidence=KILL_CONFIDENCE, boosters=(),
+                 patience=None):
         #: coordination passes after the solo baseline. 0 reproduces
         #: uncoordinated play exactly, which is what the A/B measures
         #: against; 2 settles the two-wizards-one-mob case.
         self.passes = max(0, int(passes))
         self.timeout = self.TIMEOUT if timeout is None else float(timeout)
+        #: see `PATIENCE`. Settable so a test can scale it down beside
+        #: `timeout` and measure the same ratio in a hundredth of the
+        #: wall clock.
+        self.patience = self.PATIENCE if patience is None else float(patience)
         self.overkill_guard = bool(overkill_guard)
         #: scales committed damage before it is believed. Below 1 the
         #: party under-commits (more overlap, fewer survivors); above 1
@@ -539,11 +596,23 @@ class Hivemind:
         self._seats = {}           # seat -> name
         self._fighting = set()
         self._gather = None
+        #: round number -> (gather that planned it, when). Most recent
+        #: last, bounded by `SERVED_MEMORY` and aged out by
+        #: `_served_ttl`. Only rounds a read supplied a number for are
+        #: in here; a coordinator deciding without reads leaves it
+        #: empty and behaves exactly as it did before there was a round
+        #: key at all.
+        self._served = collections.OrderedDict()
+        #: seat -> (round number or None, when it said so). Written by
+        #: `arriving`, read by `_still_coming`.
+        self._announced = {}
         self.last_plan = None
-        #: why the most recent plan held one seat, when it should not
-        #: have. None whenever the round was a party, or the party is
-        #: genuinely one wizard. See `_why_alone`.
-        self.last_alone = None
+        #: seat -> why ITS most recent plan held one seat, when it
+        #: should not have. Per seat because it is read per seat
+        #: (`gui/live.py`'s `_say_why_alone`) and one shared field let a
+        #: fast seat report the slow seat's reason as its own. See
+        #: `_why_alone` and the `last_alone` property.
+        self._alone = {}
         #: seat -> its share of the most recent plan. Per seat rather
         #: than read off `last_plan`, because a fast client can open the
         #: next round's gather before a slow one has read the last one.
@@ -579,6 +648,12 @@ class Hivemind:
     def leave_combat(self, seat):
         with self._lock:
             self._fighting.discard(seat)
+            # A seat that has left the duel is not on its way to the
+            # barrier, whatever it said on the way in. `_still_coming`
+            # already filters on `_fighting`; dropping the announcement
+            # too means a seat that re-enters later cannot inherit
+            # patience it did not ask for.
+            self._announced.pop(seat, None)
             gather = self._gather
         if gather is not None and not gather.done:
             self._maybe_close(gather)
@@ -596,6 +671,71 @@ class Hivemind:
         """This seat's share of the most recent plan, or None."""
         with self._lock:
             return self._moves.get(seat)
+
+    @property
+    def last_alone(self):
+        """Why the most recent plan held one seat -- any seat's.
+
+        Kept because it reads well and a single-seat caller wants
+        exactly this. Ask `alone_reason(seat)` when the answer has to be
+        about a PARTICULAR wizard: with two seats a round can leave two
+        different reasons, and this returns whichever landed last.
+        """
+        with self._lock:
+            for reason in reversed(list(self._alone.values())):
+                if reason:
+                    return reason
+            return None
+
+    def alone_reason(self, seat):
+        """Why THIS seat's most recent plan was a solo one, or None."""
+        with self._lock:
+            return self._alone.get(seat)
+
+    def arriving(self, seat, round_number=None):
+        """This seat is working on this round and will submit a board.
+
+        Said at the top of the round, before the work that delays the
+        submission -- so a partner that reaches the barrier first has
+        evidence that waiting is worth something. See `PATIENCE`.
+
+        Cheap and idempotent; a seat that never calls it is waited for
+        exactly as long as it always was.
+        """
+        with self._lock:
+            self._announced[seat] = (
+                None if round_number is None else int(round_number),
+                time.monotonic())
+
+    def _still_coming(self, gather):
+        """Seconds left worth waiting for a partner that announced this round.
+
+        Zero unless some expected-and-missing seat has called
+        `arriving` for this gather's round recently enough that its
+        `PATIENCE` has not run out. The clock starts at the
+        announcement, not at the wait, so the total a ready seat can
+        lose is `patience` -- however many times round the loop it
+        goes.
+        """
+        now = time.monotonic()
+        best = 0.0
+        with self._lock:
+            missing = ((gather.expected & set(self._fighting))
+                       - set(gather.subs))
+            for s in missing:
+                announced = self._announced.get(s)
+                if announced is None:
+                    continue
+                rnd, at = announced
+                if (gather.round is not None and rnd is not None
+                        and rnd != gather.round):
+                    # It announced a DIFFERENT round: either it is
+                    # behind and this board is not the one it is
+                    # holding, or it has moved on without us. Neither
+                    # is a reason to keep this seat waiting.
+                    continue
+                best = max(best, self.patience - (now - at))
+        return max(0.0, best)
 
     def _say(self, message):
         if self.on_status:
@@ -644,6 +784,15 @@ class Hivemind:
                     deadline = time.monotonic() + self.budget + 1.0
                     continue
                 if not gather.closing:
+                    # Nobody is planning yet, so somebody is simply not
+                    # here. Worth more time ONLY if it has said it is
+                    # coming and its patience has not run out --
+                    # evidence, not optimism. See `PATIENCE`.
+                    grace = self._still_coming(gather)
+                    if grace > 0:
+                        deadline = time.monotonic() + min(grace, self.timeout)
+                        continue
+                if not gather.closing:
                     self._close(gather)
                 break
         if not gather.done:
@@ -660,24 +809,55 @@ class Hivemind:
     def _submit(self, seat, sim, state, policy, read, rate=0.0):
         """Put this seat in the open gather. Returns (gather, wait-or-None)."""
         stale = None
+        late = None
+        number = getattr(read, "round_number", None)
+        number = None if number is None else int(number)
         with self._lock:
-            gather = self._gather
-            if gather is None or gather.done or gather.closing \
-                    or seat in gather.subs:
-                # A seat coming round again means the previous round is
-                # over for it — plan what is sitting there rather than
-                # merging two rounds into one board.
-                if gather is not None and not gather.done \
-                        and not gather.closing:
-                    stale = gather
-                    gather.closing = True
-                expected = set(self._fighting) or {seat}
-                gather = self._gather = _Gather(expected)
-            gather.expected.add(seat)
-            gather.subs[seat] = _Submission(
-                seat, self._seats.get(seat, f"wizard {seat + 1}"),
-                sim, state, policy, read, rate=max(0.0, float(rate or 0.0)))
-            if gather.full():
+            def _sub(g):
+                g.expected.add(seat)
+                g.subs[seat] = _Submission(
+                    seat, self._seats.get(seat, f"wizard {seat + 1}"),
+                    sim, state, policy, read,
+                    rate=max(0.0, float(rate or 0.0)))
+
+            served = self._served_for(number)
+            if served is not None and seat not in served.subs:
+                # This round is over: the party planned it while this
+                # seat was still getting here. Opening a gather for it
+                # would re-expect a seat that has already been served,
+                # wait the full timeout for a board that will never
+                # come, and end with BOTH seats reporting that they
+                # waited for the other -- one late round, blamed twice.
+                # Give it a move now instead, and call the lateness by
+                # its name.
+                late = _Gather({seat}, number)
+                late.late = True
+                late.closing = True
+                _sub(late)
+            else:
+                gather = self._gather
+                if gather is None or gather.done or gather.closing \
+                        or seat in gather.subs \
+                        or (number is not None and gather.round is not None
+                            and gather.round != number):
+                    # A seat coming round again means the previous round is
+                    # over for it — plan what is sitting there rather than
+                    # merging two rounds into one board.
+                    if gather is not None and not gather.done \
+                            and not gather.closing:
+                        stale = gather
+                        gather.closing = True
+                    expected = set(self._fighting) or {seat}
+                    gather = self._gather = _Gather(expected, number)
+                elif gather.round is None:
+                    # The gather was opened by a seat with no read; the
+                    # first number to turn up names the round.
+                    gather.round = number
+                _sub(gather)
+            if late is not None:
+                close_now = False
+                wait = None
+            elif gather.full():
                 gather.closing = True
                 close_now = True
                 wait = None
@@ -693,9 +873,43 @@ class Hivemind:
 
         if stale is not None:
             self._plan_gather(stale)
+        if late is not None:
+            self._plan_gather(late)
+            return late, None
         if close_now:
             self._plan_gather(gather)
         return gather, (None if gather.done else wait)
+
+    def _served_ttl(self):
+        """How long a planned round stays interesting.
+
+        A round number is not unique: every duel starts again at 1, so
+        `_served` would eventually match round 1 of THIS fight against
+        round 1 of the last one and hand a seat a solo plan on the
+        strength of it. Detecting the duel boundary here would need the
+        read to identify the fight, which it does not; ageing the
+        memory out needs nothing. The only question ever asked of a
+        served round is "did a partner arrive moments too late for it",
+        and the longest a partner can legitimately be behind is its
+        patience plus the planning budget.
+        """
+        return self.patience + self.budget
+
+    def _served_for(self, number):
+        """The gather that planned this round recently, or None.
+
+        Called under the lock.
+        """
+        if number is None:
+            return None
+        entry = self._served.get(number)
+        if entry is None:
+            return None
+        gather, at = entry
+        if time.monotonic() - at > self._served_ttl():
+            del self._served[number]
+            return None
+        return gather
 
     def _maybe_close(self, gather):
         """Close a gather whose remaining seats have left the fight."""
@@ -714,6 +928,10 @@ class Hivemind:
 
         Called under the lock, from `_plan_gather`.
         """
+        if gather.late:
+            return (f"reached round {gather.round} after the party had "
+                    f"already planned it — played this round alone rather "
+                    f"than holding the board waiting to be re-planned")
         missing = sorted(gather.expected - set(gather.subs))
         others = sorted(set(self._seats) - set(gather.subs))
         if missing:
@@ -763,9 +981,16 @@ class Hivemind:
             # 8ebfcf70's party shared a duel in 33 of 46 fights and
             # fused a plan in 11 rounds of 161, and the export could not
             # say which of those it was even once.
-            self.last_alone = (
-                self._why_alone(gather) if party is not None
-                and len(party.moves) <= 1 and len(self._seats) > 1 else None)
+            alone = (self._why_alone(gather) if party is not None
+                     and len(party.moves) <= 1 and len(self._seats) > 1
+                     else None)
+            for s in gather.subs:
+                self._alone[s] = alone
+            if gather.round is not None and not gather.late:
+                self._served.pop(gather.round, None)   # re-insert as newest
+                self._served[gather.round] = (gather, time.monotonic())
+                while len(self._served) > self.SERVED_MEMORY:
+                    self._served.popitem(last=False)
             waiters = list(gather.waiters.values())
             gather.waiters.clear()
             if self._gather is gather:

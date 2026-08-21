@@ -437,6 +437,250 @@ def test_a_lone_plan_says_when_the_other_seat_was_never_expected():
     assert "too late to be counted" in hive.last_alone
 
 
+class _Read:
+    """Just the part of a board read the barrier looks at."""
+
+    def __init__(self, round_number):
+        self.round_number = round_number
+
+
+def test_a_skewed_seat_that_says_it_is_coming_is_still_waited_for():
+    """The measured failure, at a hundredth of the wall clock.
+
+    Rev 09a0af80's booster took 12.57s, 10.52s and 7.12s to reach the
+    barrier -- the enchant pre-pass is three clicks per enchantment and
+    it runs before `decide()` -- while its partner waited `TIMEOUT`
+    (2.5s), planned alone, and the party fused a plan on exactly the
+    rounds where the pre-pass had nothing to do. 86% of that run's
+    rounds were planned alone.
+
+    The ratios here are the field's: a skew 3.6x the timeout, and a
+    patience 4.8x it. Scaled by 100 so the test costs a tenth of a
+    second rather than half a minute.
+    """
+    hive = Hivemind(passes=1, timeout=0.025, patience=0.12)
+    subs = party(2)
+    for sub in subs:
+        hive.join(sub.seat, sub.name)
+        hive.enter_combat(sub.seat)
+
+    async def drive():
+        slow = subs[1]
+        hive.arriving(slow.seat, 4)              # said before the work
+        fast = asyncio.ensure_future(
+            hive.decide(subs[0].seat, subs[0].sim, subs[0].state,
+                        subs[0].policy, _Read(4)))
+        await asyncio.sleep(0.09)                # the pre-pass
+        late = asyncio.ensure_future(
+            hive.decide(slow.seat, slow.sim, slow.state, slow.policy,
+                        _Read(4)))
+        return await asyncio.wait_for(asyncio.gather(fast, late), 5)
+
+    got = asyncio.run(drive())
+    assert all(g is not None for g in got)
+    assert len(hive.last_plan.moves) == 2, \
+        "the party never fused, so the skew still costs coordination"
+    assert hive.rounds == 1, "one round, planned once"
+
+
+def test_patience_is_spent_on_evidence_not_on_hope():
+    """A seat that says nothing gets exactly the old timeout. The
+    patience is for a partner that has ANNOUNCED this round and not yet
+    arrived -- a hung client, a client walking to the circle, a client
+    whose duel ended must never cost the seat that is ready."""
+    hive = Hivemind(passes=1, timeout=0.05, patience=30.0)
+    subs = party(2)
+    for sub in subs:
+        hive.join(sub.seat, sub.name)
+        hive.enter_combat(sub.seat)
+
+    async def drive():
+        s = subs[0]
+        return await asyncio.wait_for(
+            hive.decide(s.seat, s.sim, s.state, s.policy, _Read(4)), 5)
+
+    assert asyncio.run(drive()) is not None
+    assert len(hive.last_plan.moves) == 1
+
+
+def test_patience_for_a_partner_announcing_a_different_round_is_not_spent():
+    """It is behind, or it has moved on. Either way this board is not
+    the one it is holding, and waiting for it buys nothing."""
+    hive = Hivemind(passes=1, timeout=0.05, patience=30.0)
+    subs = party(2)
+    for sub in subs:
+        hive.join(sub.seat, sub.name)
+        hive.enter_combat(sub.seat)
+    hive.arriving(subs[1].seat, 3)               # a round ago
+
+    async def drive():
+        s = subs[0]
+        return await asyncio.wait_for(
+            hive.decide(s.seat, s.sim, s.state, s.policy, _Read(4)), 5)
+
+    assert asyncio.run(drive()) is not None
+    assert len(hive.last_plan.moves) == 1
+
+
+def test_one_late_round_is_not_blamed_twice():
+    """The mutual-blame shape, exactly as run 4's export shows it.
+
+    The fast seat submits, opens a gather expecting both, times out,
+    plans alone, and `_plan_gather` clears the slot. The slow seat then
+    arrives, finds no gather, and opens a SECOND one for the same round
+    -- re-snapshotting `expected` from `_fighting`, so it expects a seat
+    that has already been served, waits its own timeout, and blames the
+    first. Both seats emit "waited ...s for <the other>" for one late
+    round.
+
+    With a round key the late seat is recognised as late: it gets its
+    move at once and its reason names its own lateness.
+    """
+    said = []
+    hive = Hivemind(passes=1, timeout=0.02, patience=0.0,
+                    on_status=said.append)
+    subs = party(2)
+    for sub in subs:
+        hive.join(sub.seat, sub.name)
+        hive.enter_combat(sub.seat)
+
+    async def drive():
+        fast, slow = subs
+        first = await hive.decide(fast.seat, fast.sim, fast.state,
+                                  fast.policy, _Read(7))
+        why_fast = hive.alone_reason(fast.seat)
+        second = await asyncio.wait_for(
+            hive.decide(slow.seat, slow.sim, slow.state, slow.policy,
+                        _Read(7)), 5)
+        return first, second, why_fast, hive.alone_reason(slow.seat)
+
+    first, second, why_fast, why_slow = asyncio.run(drive())
+    assert first is not None and second is not None, \
+        "both seats still have to get a move"
+    assert why_fast and "did not submit" in why_fast
+    assert why_slow and "did not submit" not in why_slow, \
+        "the late seat blamed the seat that was already there"
+    assert "after the party had already planned it" in why_slow
+    assert "round 7" in why_slow
+
+
+def test_the_late_seat_does_not_wait_out_a_second_timeout():
+    """The cost of the second gather was not only the wrong reason: the
+    late seat sat through a whole timeout waiting for a board that had
+    already been planned. It has a move to make and the game has a
+    clock."""
+    import time as _time
+
+    hive = Hivemind(passes=1, timeout=1.0, patience=0.0)
+    subs = party(2)
+    for sub in subs:
+        hive.join(sub.seat, sub.name)
+        hive.enter_combat(sub.seat)
+
+    async def drive():
+        fast, slow = subs
+        await hive.decide(fast.seat, fast.sim, fast.state, fast.policy,
+                          _Read(7))
+        began = _time.monotonic()
+        await hive.decide(slow.seat, slow.sim, slow.state, slow.policy,
+                          _Read(7))
+        return _time.monotonic() - began
+
+    took = asyncio.run(drive())
+    assert took < 0.5, \
+        f"the late seat waited {took:.2f}s for a round already planned"
+
+
+def test_a_seat_reports_its_own_reason_and_not_its_partners():
+    """`last_alone` was one shared field, written by whichever seat
+    planned last and read per seat by the export. So a seat that was
+    late for a planned round could be filed under "waited for the
+    other and it did not submit" -- the opposite diagnosis, pointing at
+    the wrong wizard."""
+    hive = Hivemind(passes=1, timeout=0.02, patience=0.0)
+    subs = party(2)
+    for sub in subs:
+        hive.join(sub.seat, sub.name)
+        hive.enter_combat(sub.seat)
+
+    async def drive():
+        fast, slow = subs
+        await hive.decide(fast.seat, fast.sim, fast.state, fast.policy,
+                          _Read(2))
+        await hive.decide(slow.seat, slow.sim, slow.state, slow.policy,
+                          _Read(2))
+
+    asyncio.run(drive())
+    assert "did not submit" in (hive.alone_reason(0) or ""), \
+        "the seat that waited had its reason overwritten by the seat "\
+        "that was late"
+    assert "already planned it" in (hive.alone_reason(1) or "")
+
+
+def test_a_round_number_that_comes_round_again_is_a_new_duel():
+    """Round numbers restart at 1 with every fight, so the memory of
+    planned rounds has to age out -- or round 1 of this duel is
+    answered with round 1 of the last one, and a seat is handed a solo
+    plan on the strength of a fight that is over."""
+    hive = Hivemind(passes=1, timeout=0.02, patience=0.0, budget=0.0)
+    hive.patience = 0.0
+    subs = party(2)
+    for sub in subs:
+        hive.join(sub.seat, sub.name)
+        hive.enter_combat(sub.seat)
+
+    async def drive():
+        fast, slow = subs
+        await hive.decide(fast.seat, fast.sim, fast.state, fast.policy,
+                          _Read(1))
+        await asyncio.sleep(0.05)               # longer than the ttl (0.0)
+        # a new duel: both seats submit round 1 again, together
+        return await asyncio.gather(
+            hive.decide(fast.seat, fast.sim, fast.state, fast.policy,
+                        _Read(1)),
+            hive.decide(slow.seat, slow.sim, slow.state, slow.policy,
+                        _Read(1)))
+
+    asyncio.run(drive())
+    assert len(hive.last_plan.moves) == 2, \
+        "the new duel's round 1 was answered with the old duel's"
+
+
+def test_the_memory_of_planned_rounds_is_bounded():
+    """A process that runs for hours cannot grow a dict per round."""
+    hive = Hivemind(passes=1, timeout=0.02, patience=0.0)
+    sub = party(1)[0]
+    hive.join(sub.seat, sub.name)
+    hive.enter_combat(sub.seat)
+
+    async def drive():
+        for n in range(1, 40):
+            await hive.decide(sub.seat, sub.sim, sub.state, sub.policy,
+                              _Read(n))
+
+    asyncio.run(drive())
+    assert len(hive._served) <= Hivemind.SERVED_MEMORY
+
+
+def test_a_barrier_without_reads_behaves_exactly_as_it_always_did():
+    """Every caller that has no board read -- and every test written
+    before there was a round key -- must be unaffected: no round
+    number, no served memory, one gather at a time."""
+    hive = Hivemind(passes=2, timeout=5.0)
+    subs = party(2)
+    for sub in subs:
+        hive.join(sub.seat, sub.name)
+        hive.enter_combat(sub.seat)
+
+    async def drive():
+        return await asyncio.gather(*[
+            hive.decide(s.seat, s.sim, s.state, s.policy) for s in subs])
+
+    asyncio.run(drive())
+    assert len(hive.last_plan.moves) == 2
+    assert hive._served == {}
+
+
 def test_a_round_that_was_a_party_explains_nothing():
     hive = Hivemind(passes=2, timeout=5.0)
     subs = party(2)

@@ -1110,6 +1110,27 @@ class WizAiBackend:
                 f"again with a longer pause between selecting the card and "
                 f"clicking the target")
 
+    def report_enchant_refused(self, card_name, enchant):
+        """The enchantment would not go onto the card, twice.
+
+        Status only, on the same channel as `report_slow_cast`, because
+        nothing about the ROUND has failed: the pre-pass runs before the
+        round is planned, and the card is still there to be cast plain.
+
+        What matters is the half that is silent -- the enchantment is
+        NOT recorded in `enchanted_as`. That record is what `read_state`
+        reconstitutes the board from, so an enchantment written down
+        without landing turns a 345 Sunbird into a 645 one for every
+        rollout after it, and the damage model files the difference as
+        its own miss. Reporting nothing and recording nothing would be
+        safe but mute; this says which card is being priced plain.
+        """
+        if self.on_slow_cast:
+            self.on_slow_cast(
+                f"{enchant} would not go onto {card_name} — leaving the "
+                f"card unenchanted rather than recording an enchantment "
+                f"that is not on it")
+
     def report_redraw_retry(self, card_name, exc):
         """The cast died reading the board's UI; casting again after it
         settles.
@@ -1298,11 +1319,42 @@ class WizAiCombatHandler:
     # pass_button/in_combat; `read_state` only needs those, so `self` is a
     # valid `combat` for the backend.
 
-    #: `sleep_time` for the enchant's two clicks -- wizwalker's own
-    #: default rather than the shaved `cast_time`, because the second
-    #: click must land on a card window and an enchant happens at most
-    #: once a round; this is not where the fast timing was needed.
-    ENCHANT_CAST_TIME = 1.0
+    #: `sleep_time` for the enchant's clicks.
+    #:
+    #: This was 1.0 -- wizwalker's own unhurried default -- on the
+    #: reasoning that an enchant happens at most once a round and the
+    #: fast timing was not needed here. Both halves of that turned out
+    #: to be wrong. `_maybe_enchant` applies up to THREE, and
+    #: `CombatCard.cast`'s card-target branch sleeps this value THREE
+    #: times per enchant (`card.py:46,53,68`), so a full pre-pass is
+    #: nine seconds -- and it runs BEFORE `decide()`, so it is nine
+    #: seconds of a seat not yet at the party barrier, whose timeout is
+    #: 2.5. Rev 09a0af80's storm booster measured 12.57s, 10.52s and
+    #: 7.12s of `acted` on the rounds it enchanted three, three and two
+    #: cards; its fire partner, holding no enchants, measured 0.6s. The
+    #: party fused a plan on exactly the rounds where the pre-pass did
+    #: nothing.
+    #:
+    #: Safe to shave now that `_enchant_once` VERIFIES the enchant
+    #: landed and retries at `RETRY_CAST_TIME` when it did not, which
+    #: is the same ladder the primary cast has always climbed. A click
+    #: that is too fast now costs one retry instead of a silently
+    #: mispriced board.
+    ENCHANT_CAST_TIME = 0.3
+
+    def _report(self, channel, *args):
+        """Say something on one of the backend's status channels.
+
+        Tolerant on purpose. The handler runs against several backends
+        -- the live one, the wizsprinter subclass, and the stubs the
+        tests build -- and a missing channel or a raising listener must
+        never be the reason an enchantment or a cast does not happen.
+        The report is commentary; the duel is the work.
+        """
+        try:
+            getattr(self.backend, channel)(*args)
+        except Exception:
+            pass
 
     async def _maybe_enchant(self):
         """Play the hand's enchantments onto its best cards, before planning.
@@ -1388,7 +1440,7 @@ class WizAiCombatHandler:
                 continue
             key = ENCHANT_CARDS.get(game_name)
             if key is not None:
-                enchants.append((c, key))
+                enchants.append((c, key, game_name))
                 continue
             if treasure or item or flagged:
                 continue
@@ -1411,7 +1463,7 @@ class WizAiCombatHandler:
         if state is not None:
             living = max(1, sum(1 for e in state.enemies if e.alive))
 
-        for c_enchant, key in enchants:
+        for c_enchant, key, enchant_name in enchants:
             kinds = enchant_target_kinds(key)
 
             def worth(entry):
@@ -1429,8 +1481,33 @@ class WizAiCombatHandler:
             c_base, card = max(legal, key=worth)
             if worth((c_base, card)) <= 0:
                 continue
+            # Believed only once it landed. This wrote the record
+            # unconditionally, and a recorded-but-unapplied enchant is
+            # worse than no enchant at all: `read_state` reconstitutes
+            # a 645 Sunbird that is really a 345, the rollouts price
+            # the fight off it, and the damage model files the miss.
+            # The check is the one the real cast already uses two
+            # hundred lines down -- and it becomes load-bearing the
+            # moment the clicks get faster, which is what this commit
+            # does.
+            before = await self._cards_in_hand()
             await c_enchant.cast(c_base,
                                  sleep_time=self.ENCHANT_CAST_TIME)
+            if not await self._card_left_the_hand(before):
+                # One retry at wizwalker's own unhurried timing, the
+                # same ladder the primary cast climbs.
+                self._report("report_slow_cast", enchant_name)
+                await c_enchant.cast(c_base,
+                                     sleep_time=self.RETRY_CAST_TIME)
+                if not await self._card_left_the_hand(before):
+                    self._report("report_enchant_refused", card.name,
+                                 enchant_name)
+                    # Stop the pre-pass rather than spending the same
+                    # four clicks on the next enchantment in hand: an
+                    # enchant that will not go on is a board that is
+                    # not accepting card-target clicks, and the round
+                    # itself still has to be cast.
+                    return 0
             resolver.enchanted_as[card.name] = key
             return 1
         return 0
@@ -1593,6 +1670,18 @@ class WizAiCombatHandler:
         hive = getattr(self.backend, "coordinator", None)
         if hive is not None:
             hive.enter_combat(self.backend.seat)
+            # And announced as working on THIS round, before the work
+            # that delays the submission. A round does real things
+            # before it reaches the barrier -- the enchant pre-pass is
+            # three clicks per enchantment -- and a partner that gets
+            # there first has no other way to tell "still coming" from
+            # "not coming". Without this it waits `TIMEOUT` and plans
+            # alone; with it, it waits up to `PATIENCE` for a seat that
+            # is demonstrably in this round. See `Hivemind.arriving`.
+            try:
+                hive.arriving(self.backend.seat, self._last_round_number)
+            except Exception:
+                pass
         # Every action here is a mouse click -- wizwalker has no memory
         # API for casting -- and `MouseHandler.__aenter__` is what
         # activates the mouseless cursor hook that makes those clicks land
