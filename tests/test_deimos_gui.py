@@ -18332,9 +18332,14 @@ def test_a_collect_step_with_no_marker_at_all_still_hops(monkeypatch):
     # the crowding question is the live one.
     seat.collect_moved_for = "collect gemstones in hall of champions"
     seat.collect_moved_at = time.monotonic() - 600.0
+    # ...HERE, and recently. The latch used to be a run-lifetime fact
+    # with no zone on it, so one tick of progress at minute three
+    # authorised hops for the rest of the session in any zone.
+    seat.zone_seen = seat.zone_seen or "Krokotopia/KT_ChampHall"
+    seat.collect_moved_in = seat.zone_seen
     asyncio.run(worker._maybe_realm_hop(seat))
     assert fired, "the crowded-realm rung refused a markerless Collect"
-    assert "count HAS moved before" in fired[0]
+    assert "count went up in this zone" in fired[0]
     assert "crowded realm" in fired[0]
 
 
@@ -18411,7 +18416,264 @@ def test_everyone_failing_is_not_reported_as_a_split(monkeypatch):
     assert failed and "still together" in failed[0]["detail"]
 
 
-def test_a_landed_hop_restarts_the_crowded_judgement_clock(monkeypatch):
+def _collect_seat(worker, goal, zone="WizardCity/WC_Hub"):
+    """A seat parked on a Collect goal, watched long enough to judge."""
+    import time
+
+    seat = worker.seats[0]
+    seat.goal = goal
+    seat.zone_seen = zone
+    seat.marker_away = None              # a Collect step publishes none
+    # Working, as far as the position clock can tell: the script
+    # teleports it around every few seconds, so `progress_at` is fresh.
+    seat.progress_at = time.monotonic() - 5.0
+    seat.goal_at = time.monotonic() - worker.REALM_HOP_AFTER - 1
+    return seat
+
+
+def test_a_collect_goal_with_no_counter_is_no_evidence_at_all(monkeypatch):
+    """Rev ebc4aff8's 145-minute wedge, in one call.
+
+    `is_collect_goal` and `collect_count` are two different reads of the
+    same string: the first matches the VERB, the second needs a literal
+    `(n of m)`. "Collect Dirt Mound in Cyclops Lane" satisfies the first
+    and not the second — so `here` came back None, the `and` in the
+    never-started guard short-circuited, and the one check standing
+    between this rung and an unbounded loop did not run at all.
+
+    The party then hopped 25 times over 145 minutes, standing in
+    `WizardCity/WC_Hub` on a step whose collectibles are in Cyclops
+    Lane, while the export said every single time: "its count HAS moved
+    before, so this wizard does reach the spawns". It never had —
+    `collect_moved_at` was 0.0 for the entire run."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    goal = "Collect Dirt Mound in Cyclops Lane"
+    assert questing.is_collect_goal(goal), "the rung must enable itself"
+    assert questing.collect_count(goal) is None, "and have nothing to read"
+
+    worker, _read = _zoned_party(["WC_Hub"] * 2)
+    worker.script = "###deimos_expertmode"
+    fired = []
+
+    async def record(seat, why):
+        fired.append(why)
+
+    worker._realm_hop_party = record
+    seat = _collect_seat(worker, goal)
+    asyncio.run(worker._maybe_realm_hop(seat))
+
+    assert fired == [], "it hopped on a step that publishes no evidence"
+    note = [e for e in seat.tel.questing if e["kind"] == "realm-hop-refused"]
+    assert note and "no '(n of m)' counter" in note[0]["detail"]
+
+
+def test_no_message_ever_claims_a_count_moved_when_it_did_not(monkeypatch):
+    """The reason string picked its wording from `away is None` rather
+    than from the evidence, so a branch printed a fact the code had not
+    established. A log line that reads like a diagnosis has to be one."""
+    import asyncio
+    import time
+
+    worker, _read = _zoned_party(["KT_ChampHall"] * 2)
+    worker.script = "###deimos_expertmode"
+    fired = []
+
+    async def record(seat, why):
+        fired.append(why)
+
+    worker._realm_hop_party = record
+    seat = _collect_seat(worker, "Collect Gemstones in Hall of Champions (0 of 4)",
+                         zone="Krokotopia/KT_ChampHall")
+    seat.collect_moved_for = "collect gemstones in hall of champions"
+    seat.collect_moved_at = time.monotonic() - 120.0
+    seat.collect_moved_in = seat.zone_seen
+    asyncio.run(worker._maybe_realm_hop(seat))
+
+    assert fired, "a wizard proven to be at the spawns was refused"
+    assert "count went up in this zone 2 min ago" in fired[0], \
+        "the reason has to name the evidence it is standing on"
+
+
+def test_a_count_that_moved_in_another_zone_is_not_evidence_here(monkeypatch):
+    """The latch was a run-lifetime fact with no reset anywhere — one
+    init, one write, one read — so a tick of progress at minute three
+    authorised realm hops for the rest of the session, in whatever zone
+    the wizard later wandered into."""
+    import asyncio
+    import time
+
+    worker, _read = _zoned_party(["WC_Hub"] * 2)
+    worker.script = "###deimos_expertmode"
+    fired = []
+
+    async def record(seat, why):
+        fired.append(why)
+
+    worker._realm_hop_party = record
+    seat = _collect_seat(worker, "Collect Dirt Mound in Cyclops Lane (0 of 3)")
+    seat.collect_moved_for = "collect dirt mound in cyclops lane"
+    seat.collect_moved_at = time.monotonic() - 120.0
+    seat.collect_moved_in = "WizardCity/WC_Streets/WC_CyclopsLane"  # elsewhere
+    asyncio.run(worker._maybe_realm_hop(seat))
+    assert fired == [], "a count that moved in another zone licensed a hop"
+
+    # ...and stale, in the right zone, is refused for the other reason.
+    seat.collect_moved_in = seat.zone_seen
+    seat.collect_moved_at = time.monotonic() - worker.COLLECT_MOVE_FRESH - 1
+    asyncio.run(worker._maybe_realm_hop(seat))
+    assert fired == [], "an hour-old count still licensed a hop"
+
+
+def test_one_goal_cannot_buy_an_unbounded_number_of_realms(monkeypatch):
+    """Three limiters existed and none was a budget: the cooldown is a
+    rate limit, `_realms_tried` explicitly clears and starts over when
+    exhausted, and `REALM_HOP_AFTER` only delays the first hop. What
+    ended rev ebc4aff8's loop after 26 hops was the game — "the realm
+    list's page number would not read" — not wizAi."""
+    import asyncio
+    import time
+
+    worker, calls = _hoppable_party(monkeypatch)
+    # In the zone its step names, so only the budget can end this.
+    seat = _collect_seat(worker, "Collect Gemstones in Hall of Champions (0 of 4)",
+                         zone="Krokotopia/KT_ChampHall")
+    seat.collect_moved_for = "collect gemstones in hall of champions"
+    seat.collect_moved_in = seat.zone_seen
+
+    hops = 0
+    for _ in range(12):
+        # Everything the rung asks for, every cycle: the count moved
+        # here a moment ago, the goal has not advanced, the cooldown is
+        # clear. Only the budget can end this.
+        seat.collect_moved_at = time.monotonic() - 60.0
+        seat.goal_at = time.monotonic() - worker.REALM_HOP_AFTER - 1
+        worker._realm_hopped_at = -1e9
+        before = len(calls["hops"])
+        asyncio.run(worker._maybe_realm_hop(seat))
+        if len(calls["hops"]) > before:
+            hops += 1
+
+    assert hops == worker.REALM_HOP_BUDGET, \
+        f"one unchanged goal bought {hops} realms"
+    note = [e for e in seat.tel.questing
+            if e["kind"] == "realm-hop-refused"
+            and "the realm is not what is wrong" in e["detail"]
+            or "realm changes with no progress" in (e.get("detail") or "")]
+    assert note, "it stopped and never said why"
+
+
+def test_a_goal_that_advances_gets_a_fresh_realm_budget(monkeypatch):
+    """A changed goal is the outcome a hop is trying to buy. The budget
+    is a backstop against a loop, not a per-run allowance."""
+    import asyncio
+    import time
+
+    worker, calls = _hoppable_party(monkeypatch)
+    # In the zone its step names, so only the budget can end this.
+    seat = _collect_seat(worker, "Collect Gemstones in Hall of Champions (0 of 4)",
+                         zone="Krokotopia/KT_ChampHall")
+    worker._hops_for[id(seat)] = (worker.REALM_HOP_BUDGET, seat.goal)
+    seat.collect_moved_for = "collect gemstones in hall of champions"
+    seat.collect_moved_in = seat.zone_seen
+    seat.collect_moved_at = time.monotonic() - 60.0
+    worker._realm_hopped_at = -1e9
+
+    asyncio.run(worker._maybe_realm_hop(seat))
+    assert calls["hops"] == [], "the budget was not spent"
+
+    # The step advances. `_note_goal` clears the budget with it.
+    worker._note_goal(seat, "Collect Gemstones in Hall of Champions (1 of 4)",
+                      time.monotonic())
+    seat.goal_at = time.monotonic() - worker.REALM_HOP_AFTER - 1
+    seat.collect_moved_at = time.monotonic() - 60.0
+    seat.collect_moved_in = seat.zone_seen
+    worker._realm_hopped_at = -1e9
+    asyncio.run(worker._maybe_realm_hop(seat))
+    assert calls["hops"], "a step that advanced did not get a fresh budget"
+
+
+def test_a_collect_step_in_another_part_of_this_world_is_not_a_crowd(
+        monkeypatch):
+    """The read that was available in plain text for every one of rev
+    ebc4aff8's 152 minutes: the goal said "in Cyclops Lane" while the
+    wizard stood in `WizardCity/WC_Hub`. A realm change keeps the zone
+    and swaps the shard, so it can only ever help a wizard already at
+    the collectibles."""
+    import asyncio
+    import time
+
+    worker, _read = _zoned_party(["WC_Hub"] * 2)
+    worker.script = "###deimos_expertmode"
+    fired = []
+
+    async def record(seat, why):
+        fired.append(why)
+
+    worker._realm_hop_party = record
+    seat = _collect_seat(worker, "Collect Dirt Mound in Cyclops Lane (0 of 3)")
+    seat.collect_moved_for = "collect dirt mound in cyclops lane"
+    seat.collect_moved_at = time.monotonic() - 60.0
+    seat.collect_moved_in = seat.zone_seen
+    seat.progress = (seat.zone_seen, (1, 2, 3), seat.goal)
+    worker.seats[1].progress = (seat.zone_seen, (4, 5, 6), "")
+
+    asyncio.run(worker._maybe_realm_hop(seat))
+    assert fired == [], "it changed shard for a wizard in the wrong street"
+    note = [e for e in seat.tel.questing if e["kind"] == "realm-hop-refused"]
+    assert note and "names a destination that is not" in note[-1]["detail"]
+
+
+def test_the_place_check_never_vetoes_on_a_guess():
+    """It would be a bad trade to swap a 145-minute stall for a subtler
+    always-on wrongness. A zone id ABBREVIATES and REORDERS its area
+    (`KT_ChampHall` is the Hall of Champions), a world hub hides under
+    an internal alias (`ZF_Z00_Hub` IS the Baobab Crossroads), and an
+    interior is not named after the street it opens off. All three have
+    to answer "cannot tell", and only an outright mismatch may veto."""
+    from deimos_bridge import questlist
+
+    # abbreviated and reordered — the wizard IS there
+    assert questlist.area_is_this_zone(
+        "Hall of Champions", "Krokotopia/KT_ChampHall") is None
+    # a hub under its alias
+    assert questlist.area_is_this_zone(
+        "Baobab Crossroads", "Zafaria/ZF_Z00_Hub") is None
+    # inside something
+    assert questlist.area_is_this_zone(
+        "Elephant Graveyard",
+        "Zafaria/Interiors/ZF_Z10_I02_Didos_Mausoleum") is None
+    # nothing to compare
+    assert questlist.area_is_this_zone("", "Zafaria/ZF_Z00_Hub") is None
+    assert questlist.area_is_this_zone("Cyclops Lane", "") is None
+
+    # ...and the answers it IS allowed to give
+    assert questlist.area_is_this_zone(
+        "Drum Jungle", "Zafaria/ZF_Z09_Drum_Jungle") is True
+    assert questlist.area_is_this_zone(
+        "Cyclops Lane", "WizardCity/WC_Hub") is False
+    assert questlist.area_is_this_zone(
+        "Cyclops Lane", "Zafaria/ZF_Z00_Hub") is False
+
+
+def test_a_landed_hop_restarts_only_its_own_clock(monkeypatch):
+    """The new realm earns its own `REALM_HOP_AFTER` — on its own field.
+
+    This used to restamp `progress_at`, on the reasoning that the zone
+    genuinely reloaded. A realm change keeps the zone AND the position,
+    so nothing about the wizard moved, and `progress_at` is the clock
+    TWELVE other rungs read: the heartbeat's "unchanged for N min",
+    `_check_progress` (STUCK_AFTER 300), `_unstick` and `_desperate_hop`
+    (330), the countdown hold's stale bypass, the no-progress alarm.
+    `REALM_HOP_COOLDOWN` is 300, so a party hopping on schedule reset
+    every one of those watchdogs before any could fire.
+
+    Rev ebc4aff8 is the cost: 25 hops over 145 minutes in
+    `WizardCity/WC_Hub`, and across 142 heartbeats the idle clock
+    crossed eight minutes exactly ONCE — in the single 566s window
+    opened because a hop was REFUSED rather than taken."""
     import asyncio
     import time
 
@@ -18422,8 +18684,11 @@ def test_a_landed_hop_restarts_the_crowded_judgement_clock(monkeypatch):
         seat.cells_seen[(1, 2, 3)] = stale
     asyncio.run(worker._realm_hop_party(worker.seats[0], "testing"))
     for seat in worker.seats:
-        assert seat.progress_at > stale + 900, \
-            "the new realm inherited the old realm's stuck clock"
+        assert seat.realm_settled_at > stale + 900, \
+            "the new realm inherited the old realm's crowding clock"
+        assert seat.progress_at == stale, \
+            "the hop reset the stuck ladder's clock and starved every "\
+            "watchdog that reads it"
         assert seat.cells_seen == {}
 
 
@@ -21160,6 +21425,11 @@ def test_a_lone_wizard_on_a_collect_step_is_a_regroup_not_a_realm(monkeypatch):
     seat.goal_at = time.monotonic() - worker.REALM_HOP_AFTER - 1
     seat.collect_moved_for = "collect gemstones in hall of champions"
     seat.collect_moved_at = time.monotonic() - 600.0
+    # ...HERE, and recently. The latch used to be a run-lifetime fact
+    # with no zone on it, so one tick of progress at minute three
+    # authorised hops for the rest of the session in any zone.
+    seat.zone_seen = seat.zone_seen or "Krokotopia/KT_ChampHall"
+    seat.collect_moved_in = seat.zone_seen
     seat.progress = ("Krokotopia/KT_Hub", (1, 2, 3), goal)
     other.progress = ("Krokotopia/KT_Krokosphinx/KT_ChampHall", (4, 5, 6),
                       "Talk To General Khaba in Hall of Champions")
@@ -21436,14 +21706,19 @@ def test_a_collect_count_that_never_moved_blocks_the_realm_hop(monkeypatch):
     asyncio.run(worker._maybe_realm_hop(seat))
     assert fired == [], "it hopped for a wizard that never reached the spawns"
     note = [e for e in seat.tel.questing if e["kind"] == "realm-hop-refused"]
-    assert note and "never advanced once" in note[0]["detail"]
+    assert note and "has not advanced in this zone" in note[0]["detail"]
 
     # ...and once the count HAS moved, the same stall is the crowd.
     seat.collect_moved_for = "collect gemstones in hall of champions"
     seat.collect_moved_at = time.monotonic() - 600.0
+    # ...HERE, and recently. The latch used to be a run-lifetime fact
+    # with no zone on it, so one tick of progress at minute three
+    # authorised hops for the rest of the session in any zone.
+    seat.zone_seen = seat.zone_seen or "Krokotopia/KT_ChampHall"
+    seat.collect_moved_in = seat.zone_seen
     asyncio.run(worker._maybe_realm_hop(seat))
     assert fired, "a proven-reachable wizard was refused"
-    assert "count HAS moved before" in fired[0]
+    assert "count went up in this zone" in fired[0]
 
 
 def test_the_goal_poll_notices_a_collect_count_going_up():

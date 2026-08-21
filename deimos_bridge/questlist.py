@@ -426,6 +426,13 @@ def goal_disowns(quest_name, goal) -> bool:
     return bool(_loose_lookup(index, goal))
 
 
+#: area display names a world hub may legitimately be hiding under.
+#: Taken from the quest data's own area column, which carries six:
+#: Baobab Crossroads, Commons, Plaza of Conquests, Regent's Square,
+#: Shopping District, The Oasis.
+_HUBBISH = re.compile(r"commons|crossroads|hub|plaza|shopping|square|oasis",
+                      re.I)
+
 #: area display names that name a world but no useful area, and areas
 #: whose name is a common word. Nothing is looked up under these -- an
 #: ambiguous area is answered "unknown", and unknown is never evidence.
@@ -535,6 +542,66 @@ def world_of_zone(zone) -> str:
     """
     head = _world_key((zone or "").split("/")[0])
     return head if head in _worlds() else ""
+
+
+def area_is_this_zone(area, zone):
+    """Is this area display name the zone the wizard is standing in?
+
+    True, False or **None for "cannot tell"**, and the three are not
+    interchangeable. The client's zone id squashes to the area's words
+    for a plain street -- `"Drum Jungle"` inside
+    `"Zafaria/ZF_Z09_Drum_Jungle"`, `"Baobab Crown"` inside
+    `"Zafaria/ZF_Z01_Baobab_Crown"` -- and that positive match is
+    reliable.
+
+    The negative is not, and measuring it on rev ebc4aff8's own fifteen
+    zone/goal pairs is what settles the shape of the caller: only two
+    matched, and most of the misses were a wizard legitimately walking
+    TOWARDS its area. Two whole families never match by name at all: an
+    interior (`"Zafaria/Interiors/ZF_Z10_I02_Didos_Mausoleum"` for a
+    goal in the Elephant Graveyard) and a world hub under an internal
+    alias (`"Zafaria/ZF_Z00_Hub"` is the Baobab Crossroads). Both
+    answer None here rather than False, and a caller must treat None as
+    no answer.
+
+    So this may VETO an action and may never authorise one. The one
+    place it is worth a veto is the realm hop, where refusing costs a
+    cooldown and acting wrongly cost rev ebc4aff8 seventy percent of a
+    206-minute run.
+    """
+    area, zone = (area or "").strip(), (zone or "").strip()
+    if not area or not zone:
+        return None
+    if world_of_area(area) and world_of_zone(zone) \
+            and _world_key(world_of_area(area)) != world_of_zone(zone):
+        return False                     # a different world entirely
+    squashed = re.sub(r"[^a-z0-9]", "", zone.lower())
+    if _area_key(area).replace(" ", "") in squashed:
+        return True
+    parts = [p for p in zone.split("/") if p]
+    if len(parts) > 2 or any(p.lower() == "interiors" for p in parts):
+        return None                      # inside something; unnameable
+    # A zone id ABBREVIATES and REORDERS: `KT_ChampHall` is the Hall of
+    # Champions, and a whole-name substring test calls that a mismatch
+    # -- a false veto on a wizard standing exactly where it should be,
+    # which is the "subtler always-on wrongness" this predicate must
+    # not trade a stall for. So one shared word of four letters or more
+    # is enough to withdraw the veto. It is a weak signal used only to
+    # say "cannot tell", which is the direction it is safe to be wrong
+    # in.
+    if any(word in squashed
+           for word in _area_key(area).split() if len(word) >= 4):
+        return None
+    if len(parts) == 2 and re.search(r"hub|commons", parts[1], re.I) \
+            and _HUBBISH.search(area):
+        # A world hub carries an internal alias -- `ZF_Z00_Hub` IS the
+        # Baobab Crossroads -- so a hub zone cannot be called "not the
+        # area" by name alone. But it can only alias a HUB area. A
+        # street name against a hub zone is a real mismatch, and that
+        # is rev ebc4aff8's exact pair: "Collect Dirt Mound in Cyclops
+        # Lane" read for 152 minutes from `WizardCity/WC_Hub`.
+        return None
+    return False
 
 
 def goal_is_elsewhere(goal, zone) -> bool:

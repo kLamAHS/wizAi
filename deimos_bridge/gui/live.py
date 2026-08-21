@@ -242,6 +242,18 @@ class _Seat:
         #: against. See `LiveWorker._maybe_realm_hop`.
         self.collect_moved_at = 0.0
         self.collect_moved_for = ""
+        #: the zone the count went up IN. A count that moved in another
+        #: zone is not evidence this wizard is at the spawns HERE, and
+        #: the latch used to be keyed on the collectible's name alone
+        #: -- so one tick of progress licensed realm hops for the rest
+        #: of the session. See `LiveWorker._maybe_realm_hop`.
+        self.collect_moved_in = ""
+        #: when this seat last landed in a fresh realm. Its own clock,
+        #: deliberately: the realm hop used to restamp `progress_at`
+        #: to give the new shard a clean observation window, and
+        #: `progress_at` is the clock TWELVE other rungs read -- the
+        #: whole stuck ladder among them. See `_realm_hop_party`.
+        self.realm_settled_at = 0.0
         #: when this client's quest hook last DID read a position, and
         #: on which goal. Proof the hook works, which is what separates
         #: "this quest has no marker" from "the arrow is off". See
@@ -670,6 +682,10 @@ class LiveWorker(QThread):
         #: has already tried. See `_realm_hop_party`.
         self._realm_hopped_at = NEVER
         self._realms_tried = set()
+        #: id(seat) -> (hops spent, the goal they were spent on). The
+        #: budget `REALM_HOP_BUDGET` bounds, cleared when the goal
+        #: changes because a changed goal is the outcome a hop buys.
+        self._hops_for = {}
         #: when a looping script was last forcibly restarted. See
         #: `_maybe_restart_script`.
         self._script_restarted_at = NEVER
@@ -4142,6 +4158,22 @@ class LiveWorker(QThread):
             if got and was and got[0] == was[0] and got[1] > was[1]:
                 seat.collect_moved_at = now
                 seat.collect_moved_for = got[0]
+                # ...and WHERE. A count that went up in another zone is
+                # not evidence this wizard is at the spawns here, and
+                # this latch had no reset of any kind: one init, one
+                # write, one read, so a single tick of progress
+                # authorised realm hops for the rest of the session.
+                seat.collect_moved_in = seat.zone_seen or ""
+            elif got is None:
+                # The step is no longer a counted Collect. Whatever the
+                # latch was remembering belongs to a step that is over.
+                seat.collect_moved_at = 0.0
+                seat.collect_moved_for = ""
+                seat.collect_moved_in = ""
+            # A goal that changed is a goal that advanced, which is the
+            # outcome a realm hop is trying to buy. Its budget starts
+            # again. See `REALM_HOP_BUDGET`.
+            self._hops_for.pop(id(seat), None)
             # In order, and bounded. `_who_is_behind` needs to know that
             # a step was HELD and left, which a single current value
             # cannot say.
@@ -6844,6 +6876,19 @@ class LiveWorker(QThread):
     #: its own copy of the "realm" action, the first one hops the whole
     #: party, and the stamp turns the other two into no-ops.
     REALM_HOP_COOLDOWN = 300.0
+    #: how recently a Collect count must have gone up, in THIS zone, for
+    #: the wizard to be treated as working the spawns. Two hop cycles:
+    #: long enough that a genuinely contested realm still qualifies
+    #: between hops, short enough that a tick of progress an hour ago in
+    #: another world does not.
+    COLLECT_MOVE_FRESH = 960.0
+    #: how many realm changes one unchanged goal may buy before the
+    #: realm is accepted as not being the variable. Rev ebc4aff8 spent
+    #: 26 on one goal over 145 minutes; the loop is designed unbounded
+    #: on the assumption that its entry guards are sound, and this is
+    #: the backstop for when they are not. Cleared whenever the goal
+    #: changes, which is the outcome a hop is trying to buy.
+    REALM_HOP_BUDGET = 4
 
     async def _maybe_realm_hop(self, seat):
         """Change realms when a Collect step is contested, not stuck.
@@ -6876,6 +6921,24 @@ class LiveWorker(QThread):
         if not questing.is_collect_goal(seat.goal):
             return
         if not (self.script or self.auto_quest):
+            return
+        spent, spent_for = self._hops_for.get(id(seat), (0, ""))
+        if spent_for == seat.goal and spent >= self.REALM_HOP_BUDGET:
+            # The realm is not the variable. Twenty-six hops on one
+            # unchanged goal is what rev ebc4aff8 spent before the GAME
+            # -- not wizAi -- stopped it, and every one of them looked
+            # reasonable in the log.
+            self._say_once(
+                seat, f"hop-budget:{seat.name}:{seat.goal}",
+                f"{seat.name} has changed realm {spent} times on this one "
+                f"step and it has not advanced — the realm is not what is "
+                f"wrong. Not changing again for this step",
+                kind="realm-hop-refused",
+                detail=(f"{seat.goal!r} has now cost {spent} realm changes "
+                        f"with no progress. A quieter shard answers a "
+                        f"contested spawn; {spent} of them answering "
+                        f"nothing means the wizard is not at the spawns, "
+                        f"and this rung cannot be the one that fixes that"))
             return
         now = time.monotonic()
         if not seat.progress_at:
@@ -6930,8 +6993,55 @@ class LiveWorker(QThread):
                 # long enough to say it is not.
                 return
             here = questing.collect_count(seat.goal)
-            if here and not (seat.collect_moved_for == here[0]
-                             and seat.collect_moved_at):
+            if here is None:
+                # No counter in the goal line, so there is no progress
+                # signal at all -- and this rung's entire case rests on
+                # one. `is_collect_goal` and `collect_count` are two
+                # different reads of the same string (`questing.py`):
+                # the first matches the VERB, the second needs a
+                # literal `(N of M)`, and rev ebc4aff8's `Collect Dirt
+                # Mound in Cyclops Lane` satisfied the first and not the
+                # second.
+                #
+                # What that used to mean: `here` was None, the `and`
+                # below short-circuited, and the never-started guard --
+                # the one thing standing between this rung and an
+                # unbounded loop -- did not run at all. The party then
+                # hopped 25 times over 145 minutes while the export
+                # said, every time, "its count HAS moved before, so
+                # this wizard does reach the spawns". It never had:
+                # `collect_moved_at` was 0.0 for the entire run. The
+                # sentence was not a judgement, it was a hardcoded
+                # string on the `away is None` branch.
+                #
+                # Refusing is the safe direction and always was. A
+                # refused hop costs one cooldown; an unjustified one
+                # cost this run seventy percent of itself.
+                self._say_once(
+                    seat, f"collect-no-count:{seat.name}:{seat.goal}",
+                    f"{seat.name}'s Collect step publishes no count, so "
+                    f"nothing here can say whether it is working the "
+                    f"spawns or standing in the wrong zone. Not changing "
+                    f"realms",
+                    kind="realm-hop-refused",
+                    detail=(f"{seat.goal!r} carries no '(n of m)' counter, "
+                            f"and the counter is the only evidence this "
+                            f"rung has: a realm change keeps the zone and "
+                            f"swaps the shard, which helps a wizard that "
+                            f"is AT the collectibles and nothing else. "
+                            f"With no count there is no way to tell those "
+                            f"apart, so this is left to the stuck ladder"))
+                return
+            # Both sides have to be a real zone. Comparing "" to ""
+            # would let a latch that never recorded a zone agree with a
+            # seat whose zone did not read -- permission granted by two
+            # absences, which is the shape of the bug this replaces.
+            fresh = bool(seat.collect_moved_at
+                         and seat.collect_moved_in
+                         and seat.collect_moved_in == seat.zone_seen
+                         and now - seat.collect_moved_at
+                         <= self.COLLECT_MOVE_FRESH)
+            if not (seat.collect_moved_for == here[0] and fresh):
                 # ...and it has to have moved AT LEAST ONCE. A crowded
                 # realm is a wizard picking up collectibles slowly; a
                 # count that has never left its starting number is a
@@ -6946,18 +7056,26 @@ class LiveWorker(QThread):
                 # the party across realms, which is strictly worse than
                 # the crowding it was answering. Being WITH the party
                 # is not being AT the spawns; only the count knows.
+                # ...and RECENTLY, and HERE. `collect_moved_at` was a
+                # run-lifetime latch with no reset anywhere -- one init,
+                # one write, one read -- so a count that ticked once at
+                # minute three authorised every hop for the rest of the
+                # session, in any zone the wizard later wandered into.
                 self._say_once(
                     seat, f"collect-never-started:{seat.name}",
-                    f"{seat.name}'s Collect count has never moved off "
-                    f"{here[1]} of {here[2]} — it has not reached the "
-                    f"collectibles at all, so a quieter realm is not the "
+                    f"{seat.name}'s Collect count has not moved off "
+                    f"{here[1]} of {here[2]} here — it is not reaching "
+                    f"the collectibles, so a quieter realm is not the "
                     f"answer. Not changing realms",
                     kind="realm-hop-refused",
-                    detail=(f"{seat.goal!r} has never advanced once. A "
+                    detail=(f"{seat.goal!r} has not advanced in this zone "
+                            f"within the last "
+                            f"{self.COLLECT_MOVE_FRESH / 60:.0f} min. A "
                             f"crowded realm shows a count that moves and "
-                            f"then stalls; a count still on its starting "
-                            f"number is a wizard that never got to the "
-                            f"spawns, and a shard swap keeps the zone"))
+                            f"then stalls; a count that has not moved "
+                            f"where the wizard is standing is a wizard "
+                            f"that never got to the spawns, and a shard "
+                            f"swap keeps the zone"))
                 return
         if away is None and not self._with_the_party(seat):
             # ...and without a marker, the party IS the check. A realm
@@ -6986,17 +7104,62 @@ class LiveWorker(QThread):
                         f"zone and only changes the shard, so it cannot "
                         f"help a wizard that is not at the spawns"))
             return
+        if away is None and self._collect_is_elsewhere(seat):
+            # The goal names where to go, and it is not here. A realm
+            # change keeps the zone, so it cannot be the answer to a
+            # wizard standing in the wrong one -- and this is the read
+            # that was available, in plain text, for every one of rev
+            # ebc4aff8's 152 minutes: the goal said "in Cyclops Lane"
+            # while the wizard stood in `WizardCity/WC_Hub`.
+            self._say_once(
+                seat, f"collect-not-here:{seat.name}:{seat.goal}",
+                f"{seat.name}'s Collect step is in another part of this "
+                f"world, not where it is standing — a quieter realm "
+                f"cannot help with that. Not changing realms",
+                kind="realm-hop-refused",
+                detail=(f"{seat.goal!r} names a destination that is not "
+                        f"{seat.zone_seen or 'this zone'}. A realm change "
+                        f"keeps the zone and swaps the shard, so it can "
+                        f"only help a wizard already at the collectibles "
+                        f"— this one has not got there"))
+            return
         idle = ((now - seat.progress_at) if away is not None
                 else (now - seat.goal_at)) / 60.0
-        where = (f"{away:,.0f} from its marker, with nothing moving"
-                 if away is not None else
-                 f"and its count HAS moved before, so this wizard does "
-                 f"reach the spawns — they are just being taken")
+        # From the evidence, not from which branch we are on. This read
+        # `away is None` and printed "its count HAS moved before, so
+        # this wizard does reach the spawns" -- a sentence the code had
+        # not established and, in rev ebc4aff8, one that was false 25
+        # times running while `collect_moved_at` sat at 0.0. A log line
+        # that reads like a diagnosis has to BE one.
+        if away is not None:
+            where = f"{away:,.0f} from its marker, with nothing moving"
+        else:
+            moved = (now - seat.collect_moved_at) / 60.0
+            where = (f"and its count went up in this zone {moved:.0f} min "
+                     f"ago, so this wizard does reach the spawns — they "
+                     f"are just being taken")
         await self._realm_hop_party(
             seat, f"{seat.goal!r} has not advanced in {idle:.0f} min — "
                   f"{where}. Collectibles are shared ground spawns, so a "
                   f"count that will not move is a crowded realm rather "
                   f"than a wedged wizard, and a quieter shard is the move")
+
+    def _collect_is_elsewhere(self, seat):
+        """Does this Collect goal name somewhere the wizard is not?
+
+        True only when `questlist.area_is_this_zone` says so outright.
+        It answers None -- meaning "cannot tell" -- for an interior and
+        for a world hub under an internal alias, and None is not a
+        veto: refusing to act on a guess is what keeps this from
+        replacing a 145-minute stall with an always-on wrongness.
+        """
+        from .. import questlist
+
+        try:
+            return questlist.area_is_this_zone(
+                questlist.goal_area(seat.goal), seat.zone_seen) is False
+        except Exception:
+            return False
 
     def _with_the_party(self, seat):
         """Is this wizard in a zone at least one other wizard is in?
@@ -7159,13 +7322,37 @@ class LiveWorker(QThread):
                 self._say(stranded[0][0], said)
             else:
                 self._say(seat, f"the whole party is on {target['name']}")
+                spent, spent_for = self._hops_for.get(id(seat), (0, ""))
+                self._hops_for[id(seat)] = (
+                    (spent + 1) if spent_for == seat.goal else 1, seat.goal)
+                if len(self._hops_for) > 8:
+                    self._hops_for.pop(next(iter(self._hops_for)), None)
                 for one in live:
                     # The crowded-judgement clock starts over: the new
-                    # realm earns its own REALM_HOP_AFTER before being
-                    # called contested, not the old realm's leftovers --
-                    # and the zone genuinely did reload, so a fresh
-                    # progress stamp is the truth, not a fudge.
-                    one.progress_at = time.monotonic()
+                    # realm earns its own `REALM_HOP_AFTER` before being
+                    # called contested, not the old realm's leftovers.
+                    #
+                    # On ITS OWN field. This restamped `progress_at`,
+                    # on the reasoning that the zone genuinely reloaded
+                    # -- but a realm change keeps the zone AND the
+                    # position, so nothing about the wizard moved, and
+                    # `progress_at` is read by twelve other rungs: the
+                    # heartbeat's "unchanged for N min",
+                    # `_check_progress` (STUCK_AFTER 300), `_unstick`
+                    # and `_desperate_hop` (STUCK_AFTER + UNSTICK_EVERY
+                    # = 330), the countdown hold's stale bypass, the
+                    # no-progress alarm. `REALM_HOP_COOLDOWN` is 300,
+                    # so a party hopping on schedule reset every one of
+                    # those watchdogs before any of them could fire.
+                    #
+                    # Rev ebc4aff8 is the whole cost: 25 hops over 145
+                    # minutes in `WizardCity/WC_Hub`, and across 142
+                    # heartbeats the idle clock crossed eight minutes
+                    # exactly ONCE -- in the one 566s window opened
+                    # because a hop was REFUSED rather than taken.
+                    # `_check_progress` and `_desperate_hop` each fired
+                    # once in 145 minutes, both inside that window.
+                    one.realm_settled_at = time.monotonic()
                     one.cells_seen.clear()
         except asyncio.CancelledError:
             # The stage deadline cut the maneuver mid-party. Without
