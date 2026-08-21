@@ -757,6 +757,93 @@ def test_the_tempest_stormblade_round_enchants_both():
                                         "Stormblade": "Sharpen Blade"}
 
 
+def test_an_enchant_is_verified_before_it_is_believed():
+    """A click that does not take must not be written down as an enchant.
+
+    `CombatCard.cast` clicks and returns; it raises nothing when the
+    game deselects the card instead of applying it. The pre-pass used
+    to record `enchanted_as` on the strength of that return, and a
+    recorded-but-unapplied enchantment is worse than none at all --
+    `read_state` hands the rollouts a 645 Sunbird that is really a 345,
+    and every plan after it is priced off a card that does not exist.
+
+    This became load-bearing the moment `ENCHANT_CAST_TIME` was shaved
+    from 1.0 to 0.3: a click that is now too fast costs one slow retry,
+    not a silently mispriced board.
+    """
+    be = _backend()
+    said = []
+    be.on_slow_cast = said.append
+    epic = MockCard("Epic")
+    epic.misfires = True                 # the game deselects it
+    meteor = MockCard("Meteor Strike")
+    combat = MockCombat(
+        [MockMember("Wizard", 2000, client=True, normal_pips=4, team_id=0),
+         MockMember("Lost Soul", 900, monster=True, team_id=1)],
+        [epic, meteor])
+    h = _Handler(combat, be)
+
+    assert run(h._maybe_enchant()) == 0, "a refused enchant is not an enchant"
+    assert be.resolver.enchanted_as == {}, \
+        "the board was priced off an enchantment that never landed"
+    assert epic in combat._hand, "it was never applied, so it is still in hand"
+    assert len(epic.cast_log) == 2, \
+        f"the slow retry never ran (tried {len(epic.cast_log)}x)"
+    assert any("Meteor Strike" in s for s in said), \
+        "a card being priced plain has to say so"
+
+
+def test_a_refused_enchant_does_not_cost_the_whole_hand_its_clicks():
+    """Two enchantments, the first refusing: stop, do not spend four
+    more clicks on the second. An enchant that will not go on is a
+    board not taking card-target clicks at all, and the round itself
+    still has to be cast -- against a party barrier whose timeout is
+    2.5 seconds."""
+    be = _backend()
+    epic, strong = MockCard("Epic"), MockCard("Strong")
+    epic.misfires = strong.misfires = True
+    combat = MockCombat(
+        [MockMember("Wizard", 2000, client=True, normal_pips=4, team_id=0),
+         MockMember("Lost Soul", 900, monster=True, team_id=1)],
+        [epic, strong, MockCard("Sunbird"), MockCard("Meteor Strike")])
+    h = _Handler(combat, be)
+
+    assert run(h._maybe_enchant()) == 0
+    assert len(epic.cast_log) == 2, "the strongest enchant goes first, twice"
+    assert strong.cast_log == [], \
+        "the pre-pass kept clicking after the board said no"
+
+
+def test_the_enchant_clicks_are_not_slower_than_the_party_barrier():
+    """Three enchants at the old 1.0s were nine seconds of a seat that
+    had not reached `decide()` yet -- `CombatCard.cast`'s card-target
+    branch sleeps this value three times per enchant -- against a
+    `Hivemind.TIMEOUT` of 2.5. Rev 09a0af80's booster measured 12.57s,
+    10.52s and 7.12s of `acted` on its three-, three- and two-enchant
+    rounds, and the party fused a plan on exactly the rounds where the
+    pre-pass did nothing. A full pre-pass has to fit inside the barrier
+    it runs in front of."""
+    from deimos_bridge.hivemind import Hivemind
+    from deimos_bridge.live_backend import WizAiCombatHandler
+
+    worst = 3 * 3 * WizAiCombatHandler.ENCHANT_CAST_TIME
+    assert worst <= Hivemind.PATIENCE, \
+        (f"a three-enchant pre-pass costs {worst:.1f}s in front of a "
+         f"barrier that will wait {Hivemind.PATIENCE}s for an announced "
+         f"partner — the party can never fuse a plan on a round that "
+         f"enchants")
+    # And it is worth saying why the plain timeout is not the bound.
+    # `_handle_round` announces the round (`Hivemind.arriving`) before
+    # the pre-pass, so a partner that gets to the barrier first spends
+    # `PATIENCE` rather than `TIMEOUT` on a seat it can see is coming.
+    # `TIMEOUT` is still what an unannounced absence costs, and the
+    # pre-pass no longer fits inside it by much either way.
+    assert worst > Hivemind.TIMEOUT, \
+        ("the pre-pass now fits inside the plain timeout, so the "
+         "announcement is carrying nothing and this test is measuring "
+         "the wrong thing")
+
+
 def test_read_state_reconstitutes_what_the_pre_pass_enchanted():
     """The client's read says only THAT a card is enchanted; the
     resolver's record of what the pre-pass applied says WHICH. The

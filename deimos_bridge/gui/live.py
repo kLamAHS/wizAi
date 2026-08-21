@@ -167,6 +167,18 @@ class _Seat:
         #: `LiveWorker._check_in_step`.
         self.goal = ""
         self.goal_read = 0.0
+        #: when the goal last read as something, blank reads excluded.
+        #: A blank read keeps the previous value -- a blank is not
+        #: evidence the wizard changed quest -- but only for
+        #: `GOAL_MAX_AGE`, after which a kept value is invention. The
+        #: same rule the quest NAME has always had; the goal did not,
+        #: and cleared itself on every transient blank. See
+        #: `LiveWorker._note_goal`.
+        self.goal_ok_at = 0.0
+        #: a changed goal that has been read ONCE. It drives nothing
+        #: until a second read agrees with it. See
+        #: `LiveWorker._note_goal`.
+        self.goal_pending = ""
         #: every goal this wizard has held, in order. A wizard still on
         #: a step another has already left is the one behind -- see
         #: `LiveWorker._who_is_behind`.
@@ -619,6 +631,11 @@ class LiveWorker(QThread):
         #: and keeps cancelling with its next teleport. Deadline, like
         #: the hop's. See `_maybe_count_hold` and `_countdown_held`.
         self._count_hold_until = 0.0
+        #: has this hold already stepped the wizard off its pad and
+        #: back? That move un-joins a counting sigil, so it is worth
+        #: exactly one counter restart per hold and no more. See
+        #: `_join_leader`'s third rung.
+        self._count_hold_stepped_off = False
         self._count_hold_zone = None
         self._count_hold_seat = -1
         self._count_hold_last = NEVER
@@ -685,6 +702,12 @@ class LiveWorker(QThread):
         #: seat that owns it. Kept only so the handover is said once
         #: rather than every tick. See `_script_seat`.
         self._script_driver = None
+        #: True while some seat's tick is inside the party's one VM.
+        #: `_script_step` is guarded by the DRIVE lock, which is per
+        #: seat -- so when the driver moves and the original owner's
+        #: loop then comes back to life, two tasks hold two different
+        #: locks and step one instruction pointer. See `_script_step`.
+        self._vm_stepping = False
         #: the step count and when it last CHANGED, so a script that has
         #: stopped executing is a fact rather than an inference. See
         #: `_check_script_alive`.
@@ -901,8 +924,15 @@ class LiveWorker(QThread):
                 # exactly as stuck as one wedged outside it, and that
                 # nine-minute hole was the one place the timeline could
                 # not account for.
-                await self._heartbeat(seat, self._script_drives(seat),
-                                      fighting=fighting)
+                # Through `_stage`, not bare. It is the one remaining
+                # unbounded await in this loop despite the comment
+                # above saying every other one is inside a deadline,
+                # and it is a DIAGNOSTIC -- the instrument for finding
+                # a stuck wizard must never be the reason one is stuck.
+                await self._stage(seat, "the heartbeat",
+                                  self._heartbeat(seat,
+                                                  self._script_drives(seat),
+                                                  fighting=fighting))
                 if fighting or seat.in_upkeep:
                     await asyncio.sleep(0.5)
                     continue
@@ -1332,6 +1362,11 @@ class LiveWorker(QThread):
                     "reading the quest": 30.0,
                     "script": 20.0,
                     "script step": 240.0,
+                    # A handful of memory reads and a log line. Bounded
+                    # because it used to be awaited bare: a read that
+                    # never returns took the seat's whole tick with it,
+                    # and this is the stage that exists to REPORT that.
+                    "the heartbeat": 30.0,
                     "following the leader": 60.0,
                     "quest step": 60.0}
     #: the fallback for a stage with no entry above, including the
@@ -1449,9 +1484,20 @@ class LiveWorker(QThread):
         return got
 
     #: how long a seat's service loop may go without coming round before
-    #: another seat takes the script off it. Three ticks' worth of the
-    #: slowest stage, and well under the five minutes `_check_progress`
-    #: needs to notice anything at all.
+    #: another seat takes the script off it.
+    #:
+    #: This used to read "three ticks' worth of the slowest stage",
+    #: which was never true: `STAGE_LIMITS["script step"]` alone is
+    #: 240, and a `waitfor zonechange` is bounded at 150 inside it. A
+    #: seat doing exactly what the script told it to went quiet for
+    #: longer than this and lost the script to its partner -- rev
+    #: 09a0af80's `script-driver-moved` immediately followed by
+    #: `waitfor-gave-up`.
+    #:
+    #: A running stage now keeps the clock going (`_still_ticking`), so
+    #: this measures what it says: a loop that is not going round at
+    #: all. Ninety seconds of that is a wedged client, not a slow
+    #: instruction.
     DRIVER_QUIET = 90.0
 
     def _dialogue_is_ours(self):
@@ -1596,7 +1642,7 @@ class LiveWorker(QThread):
         if wheel:
             coro = self._at_the_wheel(seat, name, coro, started)
         try:
-            await asyncio.wait_for(coro, limit)
+            await self._still_ticking(seat, asyncio.wait_for(coro, limit))
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError:
@@ -1621,6 +1667,46 @@ class LiveWorker(QThread):
                            kind="stage-timeout", detail=detail)
         except Exception as exc:
             self._stage_failed(seat, name, exc)
+
+    #: how often a running stage restamps its seat's liveness clock.
+    #: Small against `DRIVER_QUIET`; large against anything the loop
+    #: does per tick.
+    TICK_STAMP = 5.0
+
+    async def _still_ticking(self, seat, awaitable):
+        """`awaitable`, with this seat's liveness clock kept running.
+
+        `seat.ticked_at` is stamped once at the top of the tick and
+        nowhere else, and one tick's stages sum to about 1,425 seconds
+        against a `DRIVER_QUIET` of 90. `STAGE_LIMITS["script step"]`
+        is 240 on its own, and a `waitfor zonechange` is bounded at 150
+        INSIDE it -- so one ordinary instruction took a seat past the
+        liveness threshold and handed the party's script to the other
+        seat. Rev 09a0af80's export has exactly that: `script-driver-
+        moved` followed by `waitfor-gave-up`, which is one event
+        reported twice, and the second seat picking up a program the
+        first was in the middle of.
+
+        A stage that is RUNNING is not a loop that has stopped coming
+        round. So the clock runs while it runs, and what `DRIVER_QUIET`
+        now measures is what its name says: a seat whose loop is not
+        going round at all -- wedged in `_read_in_battle`, or gone. A
+        stage that genuinely hangs is still caught, by its own deadline
+        in `STAGE_LIMITS`, which is the bound built for it.
+        """
+        import time
+
+        task = asyncio.ensure_future(awaitable)
+        try:
+            while True:
+                done, _pending = await asyncio.wait({task},
+                                                    timeout=self.TICK_STAMP)
+                seat.ticked_at = time.monotonic()
+                if done:
+                    return task.result()
+        finally:
+            if not task.done():
+                task.cancel()
 
     async def _at_the_wheel(self, seat, name, coro, started=None):
         """`coro`, holding this wizard's drive lock.
@@ -1983,6 +2069,26 @@ class LiveWorker(QThread):
         runner = owner.runner
         if runner is None:
             return
+        # One stepper, enforced. The stage above holds this SEAT's drive
+        # lock, and `_script_seat` can hand the script to another seat
+        # and hand it back: seat 1 picks it up while seat 0 is quiet,
+        # seat 0's loop comes round again, and now two tasks holding two
+        # different per-seat locks are inside `run_for` on one
+        # instruction pointer. Skipped rather than queued -- a second
+        # burst of the same program is not wanted late either, and
+        # waiting for it would spend this seat's whole stage deadline.
+        if self._vm_stepping:
+            return
+        self._vm_stepping = True
+        try:
+            await self._step_the_vm(seat, owner, runner)
+        finally:
+            self._vm_stepping = False
+
+    async def _step_the_vm(self, seat, owner, runner):
+        """The body of `_script_step`, under its one-stepper guard."""
+        import time
+
         if not runner.stale:
             done = await runner.run_for(
                 should_stop=lambda: self._stop or seat.in_upkeep)
@@ -2469,6 +2575,32 @@ class LiveWorker(QThread):
                               if self._solo_pilot() or self.booster_party
                               else "every seat"),
         }
+
+    def _restamp_party(self):
+        """Rewrite every seat's party block from what is true NOW.
+
+        `_party_shape` is stamped once at connect time, and every fact
+        in it can change afterwards: `_setup_script` has not run yet,
+        no duel has named a wizard yet, and the GUI writes
+        `auto_quest`, `booster_party`, `solo_script`, `follow_leader`
+        and `leader` straight onto the running worker while it works.
+
+        So a block written once is a claim about a run that had not
+        started. Rev 09a0af80's export said mode "follow the leader",
+        `scripted: false`, `script_drives: "nobody"` and leader
+        "wizard 1" -- for a scripted booster party. Every other line in
+        an export means something different depending on this one, and
+        this one was wrong.
+
+        Never raises: it describes the run, and nothing that merely
+        describes the run may stop it.
+        """
+        for seat in self.seats:
+            try:
+                if seat.tel is not None:
+                    seat.tel.party = self._party_shape(seat)
+            except Exception:
+                pass
 
     #: how many times one opening may be lost before the party is told
     #: it is a wall rather than bad luck. Two, because the second loss
@@ -3380,6 +3512,18 @@ class LiveWorker(QThread):
                 # answer which mode produced them at all. It cost an
                 # afternoon of reading rungs backwards to work out
                 # which wizard was even supposed to be leading.
+                # ...and re-stamped as the run goes on. This is the
+                # connect-time snapshot: it is written BEFORE the
+                # script is loaded, BEFORE the first duel learns
+                # `wizard_name`, and before any GUI push -- and the GUI
+                # then mutates `auto_quest`, `booster_party`,
+                # `solo_script`, `follow_leader` and `leader` on the
+                # RUNNING worker. Rev 09a0af80's export reported mode
+                # "follow the leader", `scripted: false`,
+                # `script_drives: "nobody"` and leader "wizard 1" for a
+                # run that plainly had a script and was a booster
+                # party. The block was added for diagnosis and it
+                # blocked the diagnosis. See `_restamp_party`.
                 seat.tel.party = self._party_shape(seat)
                 # Before a single fight: the seat number is knowable now,
                 # the wizard's name is not until a duel names it. Half an
@@ -3467,6 +3611,11 @@ class LiveWorker(QThread):
                 # must not survive a failed run.
                 await self._hotkeys.stop()
                 self._hotkeys = None
+            # The export is written after this. Whatever the run
+            # ACTUALLY was -- the mode the GUI switched it to, the
+            # script it was given, the names the duels learned -- is
+            # known now and was not when the block was first stamped.
+            self._restamp_party()
             for seat in self.seats:
                 if seat.runner is not None:
                     seat.runner.stop()
@@ -3706,22 +3855,23 @@ class LiveWorker(QThread):
         except Exception:
             goal = ""
         if goal and goal != seat.goal:
-            seat.goal_at = now
-            # Did a Collect COUNT go up? That is the only evidence a
-            # wizard ever found the collectibles, and without it a
-            # stalled count means "never got there" rather than "the
-            # realm is picked clean". See `_maybe_realm_hop`.
-            was = questing.collect_count(seat.goal)
-            got = questing.collect_count(goal)
-            if got and was and got[0] == was[0] and got[1] > was[1]:
-                seat.collect_moved_at = now
-                seat.collect_moved_for = got[0]
-            # In order, and bounded. `_who_is_behind` needs to know that
-            # a step was HELD and left, which a single current value
-            # cannot say.
-            seat.goals_seen.append(goal)
-            del seat.goals_seen[:-12]
-        seat.goal = goal
+            # A CHANGE is confirmed before it is believed. This read
+            # resolves a window path whose fifth element is an UNNAMED
+            # list slot (`questing.py`), and `window_from_path` returns
+            # the FIRST match -- so which quest's line comes back can
+            # change between two reads with nothing having happened in
+            # the game. Rev 09a0af80's quester alternated between a
+            # Zafaria quest and a Wysteria one while standing still in
+            # the Zafaria hub, and 23 rungs consume `seat.goal`,
+            # including the ones that hold the script, teleport the
+            # party and pause the run.
+            #
+            # Deimos has carried a re-read for exactly this since
+            # before wizAi existed (`Deimos/src/questing.py`); it was
+            # never ported. One re-read costs `GOAL_CONFIRM`, and only
+            # on the poll where the goal changed.
+            goal = await self._confirmed_goal(seat, goal)
+        self._note_goal(seat, goal, now)
 
         # The quest NAME, alongside the goal and on the same poll. It is
         # what `questlist` can place in a questline; the goal cannot be
@@ -3756,15 +3906,34 @@ class LiveWorker(QThread):
         # the body's position. Consumed by `_start_catching_up`, which
         # cannot await -- and which must not start a catch-up for a
         # marker no within-zone teleport can reach. See `MARKER_IN_ZONE`.
+        was_away = seat.marker_away
         seat.marker_away = None
         marker = None
+        away = None
         try:
             marker, _why = await questing.read_quest_position(seat.client)
             if marker is not None and at is not None:
                 dx, dy = at.x - marker.x, at.y - marker.y
-                seat.marker_away = (dx * dx + dy * dy) ** 0.5
+                away = (dx * dx + dy * dy) ** 0.5
         except Exception:
             pass
+        if (away is not None and away <= self.AT_THE_MARKER
+                and (was_away is None or was_away > self.AT_THE_MARKER)):
+            # A marker that has just come within arm's reach is the
+            # single most consequential read this poll makes -- it is
+            # what `marker_case` gates the whole sigil rung on -- and
+            # it is the least trustworthy. `read_quest_position`
+            # resolves to a hook installed in the game's quest-ARROW
+            # render loop: one static pointer, last writer wins, with
+            # no quest identity attached to what it wrote. The Wysteria
+            # quest that flapped into rev 09a0af80's Zafaria hub read
+            # 81 units away, then 0.
+            #
+            # So arriving is confirmed and leaving is not: a marker
+            # going far needs no second opinion, because nothing acts
+            # on distance.
+            away = await self._confirmed_marker(seat, at, away)
+        seat.marker_away = away
         # The dead-hook clock. One failed read is noise -- a zone change
         # makes several fail in a row -- but a marker that will not read
         # for minutes WHILE the goal line reads fine is the quest arrow
@@ -3897,6 +4066,128 @@ class LiveWorker(QThread):
             oldest = min(self._quest_zone, key=lambda k: self._quest_zone[k][1])
             del self._quest_zone[oldest]
 
+    #: how long a second opinion on a changed quest read is worth
+    #: waiting for. Long enough that the two reads are not the same
+    #: memory snapshot, short enough to disappear inside a poll that
+    #: already runs every `GOAL_POLL`. Deimos waits three seconds for
+    #: the same purpose; a tick has other seats to serve.
+    GOAL_CONFIRM = 0.35
+    #: how long a goal that will not read is kept before it counts as
+    #: gone. The quest NAME has had this rule since rev 30e83468 and
+    #: the goal did not: a blank read CLEARED it, unconditionally, and
+    #: `maybe_text` returns blank for a zero length, a mid-write
+    #: pointer or a decode failure. Shorter than `NAME_MAX_AGE`
+    #: because the goal is the read every rung consults and a stale one
+    #: is more expensive than an unknown one.
+    GOAL_MAX_AGE = 120.0
+    #: units two reads of the same marker may differ by and still be
+    #: called the same marker. The idle animation and the body's own
+    #: drift account for tens; a different quest's marker is hundreds
+    #: to six figures away.
+    MARKER_AGREE = 150.0
+
+    async def _confirmed_goal(self, seat, first):
+        """A changed goal, read twice, or the previous one.
+
+        Returns `first` only when a second read agrees with it.
+        Otherwise the old goal stands and the disagreement is recorded
+        -- the next poll will read whatever is current and confirm it
+        then, so a real change costs at most one `GOAL_POLL`, and a
+        flap costs nothing at all.
+        """
+        from .. import questing
+
+        await asyncio.sleep(self.GOAL_CONFIRM)
+        try:
+            again = await questing.read_quest_goal(seat.client)
+        except Exception:
+            again = ""
+        if again == first:
+            return first
+        try:
+            seat.tel.note_questing(
+                "goal-flapped",
+                f"the quest tracker read {first!r} and then {again!r} "
+                f"{self.GOAL_CONFIRM:.2f}s later — keeping "
+                f"{seat.goal!r} rather than letting one read of an "
+                f"unnamed window slot move the party")
+        except Exception:
+            pass
+        return seat.goal
+
+    def _note_goal(self, seat, goal, now):
+        """Keep the freshest goal, and stop keeping a dead one.
+
+        The same rule `_note_name` has always had, for the same reason
+        and with the same expiry: a blank read is not evidence the
+        wizard changed quest, but a kept value becomes invention if it
+        is kept forever.
+        """
+        from .. import questing
+
+        if not goal:
+            if (seat.goal and seat.goal_ok_at
+                    and now - seat.goal_ok_at > self.GOAL_MAX_AGE):
+                seat.goal = ""
+            return
+        seat.goal_ok_at = now
+        if goal != seat.goal:
+            seat.goal_at = now
+            # Did a Collect COUNT go up? That is the only evidence a
+            # wizard ever found the collectibles, and without it a
+            # stalled count means "never got there" rather than "the
+            # realm is picked clean". See `_maybe_realm_hop`.
+            was = questing.collect_count(seat.goal)
+            got = questing.collect_count(goal)
+            if got and was and got[0] == was[0] and got[1] > was[1]:
+                seat.collect_moved_at = now
+                seat.collect_moved_for = got[0]
+            # In order, and bounded. `_who_is_behind` needs to know that
+            # a step was HELD and left, which a single current value
+            # cannot say.
+            seat.goals_seen.append(goal)
+            del seat.goals_seen[:-12]
+        seat.goal = goal
+
+    async def _confirmed_marker(self, seat, at, first):
+        """A marker that has just come near, read twice, or nothing.
+
+        None when the two reads disagree: a marker nobody can measure
+        twice is not a marker to teleport a party onto, and `None`
+        already means "no usable marker" to every rung that reads it.
+        """
+        from .. import questing
+
+        await asyncio.sleep(self.GOAL_CONFIRM)
+        try:
+            again, _why = await questing.read_quest_position(seat.client)
+        except Exception:
+            again = None
+        if again is None or at is None:
+            try:
+                seat.tel.note_questing(
+                    "marker-unconfirmed",
+                    f"the quest marker read {first:.0f} units away and "
+                    f"then would not read at all — not treating the "
+                    f"wizard as standing on its objective")
+            except Exception:
+                pass
+            return None
+        dx, dy = at.x - again.x, at.y - again.y
+        second = (dx * dx + dy * dy) ** 0.5
+        if abs(second - first) <= self.MARKER_AGREE:
+            return second
+        try:
+            seat.tel.note_questing(
+                "marker-flapped",
+                f"the quest marker read {first:.0f} units away and then "
+                f"{second:.0f} — the arrow hook is a last-writer-wins "
+                f"pointer with no quest attached to it, so neither read "
+                f"is evidence of where this wizard's objective is")
+        except Exception:
+            pass
+        return None
+
     def _note_name(self, seat, name, now):
         """Keep the freshest quest name, and stop keeping a dead one.
 
@@ -3991,6 +4282,10 @@ class LiveWorker(QThread):
         if now - seat.beat_at < self.HEARTBEAT_EVERY:
             return
         seat.beat_at = now
+        # Once a minute is often enough to catch a mode the operator
+        # switched mid-run, and cheap: `_party_shape` reads fields off
+        # `self` and touches no client.
+        self._restamp_party()
 
         # Nothing a report does may take the run down. This is the whole
         # body, not just the write, and it is not defensiveness for its
@@ -5389,9 +5684,17 @@ class LiveWorker(QThread):
     #: how long between boarding attempts INSIDE a running hold. The
     #: whole attempt -- refresh out, back, poll, press -- took 2.6s the
     #: time it worked at rev e6201303, so this leaves room for the poll
-    #: to run out and still gives a 45s hold about five tries instead
-    #: of the one it used to get.
-    COUNT_HOLD_RETRY = 8.0
+    #: to run out and still gives a 45s hold several tries instead of
+    #: the one it used to get.
+    #:
+    #: It must also EXCEED the countdown it is guarding. `COUNT_HOLD`
+    #: documents that counter as ~10s, and a retry that steps the
+    #: wizard off its pad restarts it -- so at the 8.0 this used to be,
+    #: a real sigil could never finish counting. Rev 09a0af80: every
+    #: hold ran its full 45s at six cycles apiece and not one fired.
+    #: The step-off is now once per hold anyway (`_join_leader`), and
+    #: this is the second guard on the same mistake.
+    COUNT_HOLD_RETRY = 12.0
 
     def _countdown_held(self):
         """Is the script waiting out a possible sigil countdown?"""
@@ -5556,6 +5859,22 @@ class LiveWorker(QThread):
         # On the pad -- planted there or standing there all along --
         # and the prompt still will not render: dead. Leave the range
         # window entirely and come back in.
+        #
+        # ONCE per hold. The docstring above budgets for "one counter
+        # restart", and that is the right price -- but `_retry_boarding`
+        # calls this every `COUNT_HOLD_RETRY` seconds, so the price was
+        # being paid over and over against a countdown the constant at
+        # `COUNT_HOLD` documents as ~10s. Stepping off UN-JOINS the
+        # wizard, so an 8-second retry cadence reset a 10-second counter
+        # forever: the guard prevented the entry it exists to protect.
+        # Rev 09a0af80's holds ran their full 45s at six cycles apiece
+        # and not one of them fired.
+        #
+        # The cheap rungs above (press a prompt that IS up, re-plant off
+        # the pad) may still repeat -- neither of them un-joins anything.
+        if self._count_hold_stepped_off:
+            return False
+        self._count_hold_stepped_off = True
         try:
             marker, _why = await questing.read_quest_position(client)
         except Exception:
@@ -5659,6 +5978,24 @@ class LiveWorker(QThread):
     #: without once firing is not one this rung can help with either.
     COUNT_HOLD_DUDS = 3
 
+    def _sigil_cell(self, seat, zone=None):
+        """(zone, cell) for the spot memory -- WITHOUT the quest goal.
+
+        `seat.progress` is `(zone, position, goal)`, and keying on it
+        whole meant a flapping goal silently re-keyed the memory: the
+        same doorway looked like a new spot every time the quest
+        tracker changed its mind, so the dud count never accumulated
+        and the guard never wrote anything off. Rev 09a0af80's quester
+        alternated between a Zafaria quest and a Wysteria one at the
+        same marker, which is exactly that.
+
+        The physical spot is what a sigil is. The goal is not part of
+        it.
+        """
+        spot = seat.count_hold_spot or seat.progress
+        cell = spot[1] if isinstance(spot, tuple) and len(spot) > 1 else spot
+        return (zone or seat.zone_seen or "", cell)
+
     def _sigil_dud(self, seat, add=0):
         """How many visits to this spot have held and never fired.
 
@@ -5667,7 +6004,7 @@ class LiveWorker(QThread):
         whole point, that being exactly what the script does between
         attempts.
         """
-        where = (seat.zone_seen or "", seat.count_hold_spot or seat.progress)
+        where = self._sigil_cell(seat)
         if not where[1]:
             return 0
         duds = getattr(self, "_sigil_duds", None)
@@ -5680,6 +6017,43 @@ class LiveWorker(QThread):
                     duds.pop(key, None)
         return duds.get(where, 0)
 
+    #: total seconds of held script one spot may ever cost.
+    #:
+    #: `COUNT_HOLD` (45) x `COUNT_HOLD_REPLAYS` (2) x
+    #: `COUNT_HOLD_DUDS` (3) is 270 seconds per spot, and that product
+    #: is only a bound if all three counters hold. Two of them do not
+    #: survive an ordinary run: `count_hold_replays` is a per-seat
+    #: field that any of a dozen paths resets, and the dud count was
+    #: keyed through `seat.progress` -- which carries the quest goal --
+    #: so rev 09a0af80's flapping tracker silently re-keyed the memory
+    #: and the count never reached three at all.
+    #:
+    #: This one cannot be reset by anything except the spot actually
+    #: firing. It is deliberately larger than the nominal 270: it is
+    #: not a tighter policy, it is the backstop that makes the policy
+    #: true.
+    COUNT_HOLD_SPEND = 300.0
+
+    def _sigil_spent(self, seat, add=0.0, zone=None):
+        """Seconds of held script this spot has cost, ever.
+
+        Same key as `_sigil_dud` and cleared by the same event -- a
+        spot that fires is a sigil, and a sigil that took four tries is
+        still a sigil.
+        """
+        where = self._sigil_cell(seat, zone=zone)
+        if not where[1]:
+            return 0.0
+        spent = getattr(self, "_sigil_spends", None)
+        if spent is None:
+            spent = self._sigil_spends = {}
+        if add:
+            spent[where] = spent.get(where, 0.0) + add
+            if len(spent) > 64:
+                for key in list(spent)[:16]:
+                    spent.pop(key, None)
+        return spent.get(where, 0.0)
+
     def _sigil_fired(self, seat):
         """This spot IS a sigil after all: forget its failures.
 
@@ -5688,12 +6062,11 @@ class LiveWorker(QThread):
         runs `zone_seen` is the far side of the door and would look up
         a spot that has never been held at.
         """
-        duds = getattr(self, "_sigil_duds", None)
-        if not duds:
-            return
-        where = (self._count_hold_zone or seat.zone_seen or "",
-                 seat.count_hold_spot or seat.progress)
-        duds.pop(where, None)
+        where = self._sigil_cell(seat, zone=self._count_hold_zone)
+        for ledger in (getattr(self, "_sigil_duds", None),
+                       getattr(self, "_sigil_spends", None)):
+            if ledger:
+                ledger.pop(where, None)
 
     async def _maybe_count_hold(self, seat):
         """Hold the script while a dungeon sigil may be counting down.
@@ -5899,6 +6272,30 @@ class LiveWorker(QThread):
         marker_case = (away is not None and away <= self.AT_THE_MARKER
                        and bool(goal)
                        and not questing.is_collect_goal(seat.goal))
+        if marker_case and self._marker_is_another_world(seat):
+            # A near marker for a goal that names another WORLD is not
+            # this wizard's objective, whatever the arrow says.
+            # `MARKER_IN_ZONE` was the only guard against a marker read
+            # in somebody else's coordinate space, and it assumes
+            # another zone always comes back as six figures -- rev
+            # 1843e387 logged 98,813 and 115,018, which is where the
+            # number came from. Rev 09a0af80's Wysteria marker, read
+            # from the Zafaria hub, came back as 81 and then 0 and went
+            # straight through it.
+            marker_case = False
+            self._say_once(
+                seat, f"marker-elsewhere:{seat.name}:{seat.goal}",
+                f"{seat.name}'s quest marker reads close, but its goal "
+                f"is in another world — not treating this spot as its "
+                f"objective",
+                kind="marker-another-world",
+                detail=(f"{seat.goal!r} names a destination in another "
+                        f"world while the wizard is in "
+                        f"{seat.zone_seen or 'an unread zone'}. The "
+                        f"quest arrow is one pointer with no quest "
+                        f"attached to it, and a marker read in another "
+                        f"world's coordinate space can land anywhere — "
+                        f"including on top of the wizard"))
         # The booster-as-sensor case, and it needs no marker at all:
         # "Talk To Hoi Mang in Crimson Fields" reads its marker from
         # INSIDE the dungeon -- past every distance gate -- while the
@@ -5987,6 +6384,7 @@ class LiveWorker(QThread):
         except Exception:
             here = None
         sensed = []
+        shopfront = []
         if here is not None:
             for other in mates:
                 try:
@@ -5995,12 +6393,44 @@ class LiveWorker(QThread):
                     at = await other.client.body.position()
                     gap = ((at.x - here.x) ** 2
                            + (at.y - here.y) ** 2) ** 0.5
-                    if (gap <= self.COUNT_HOLD_SENSE
-                            and await questing.near_interactable(
-                                other.client)):
+                    if gap > self.COUNT_HOLD_SENSE:
+                        continue
+                    if await questing.at_a_sigil(other.client):
                         sensed.append(other)
+                    elif await questing.near_interactable(other.client):
+                        # A prompt with no Team Up button: a vendor, a
+                        # bank, a Talk NPC. Recorded but NOT counted as
+                        # sigil evidence -- the old sensor read exactly
+                        # this as "the party is at a sigil mid-entry"
+                        # and spent 36% of rev 09a0af80 holding at
+                        # conversations.
+                        shopfront.append(other)
                 except Exception:
                     continue
+        if shopfront and not sensed:
+            # Graded, not gated. The Team Up window path cannot be
+            # checked without a live client, so a spot that shows a
+            # prompt WITHOUT one is not refused outright -- it falls
+            # back to the plain marker case, which is what this rung
+            # did before any of this existed. What it does lose is the
+            # evidenced-sigil privileges: no re-arming on expiry, and
+            # the spot starts collecting duds immediately, so a Talk
+            # NPC stops being revisited instead of costing 45s a time.
+            self._sigil_dud(seat, +1)
+            self._say_once(
+                seat, f"shopfront:{seat.zone_seen}:{seat.progress}",
+                f"{', '.join(o.name for o in shopfront)} is at a press-X "
+                f"prompt beside {seat.name}, but it has no Team Up "
+                f"button — not a sigil",
+                kind="countdown-hold-refused",
+                detail=(f"a partner's prompt here has no Team Up button, "
+                        f"so this is a vendor, a bank or a Talk NPC and "
+                        f"not a dungeon sigil the party is entering. "
+                        f"Holding on the plain marker case only, with no "
+                        f"re-arm — rev 09a0af80 read this exact state as "
+                        f"a sigil mid-entry and spent 36% of the run "
+                        f"frozen at conversations"))
+
         if not marker_case and not sensed:
             return
 
@@ -6026,6 +6456,27 @@ class LiveWorker(QThread):
             return
 
         seat.count_hold_spot = seat.progress
+        spent = self._sigil_spent(seat)
+        if spent >= self.COUNT_HOLD_SPEND:
+            # The total, independent of how the visits were counted.
+            # Everything else that bounds this rung is a counter some
+            # other path can reset; this is a clock that only the spot
+            # firing can stop.
+            seat.count_hold_seen = None
+            self._count_hold_last = now
+            self._say_once(
+                seat, f"sigil-spent:{self._sigil_cell(seat)}",
+                f"{seat.name} is not holding here again — this spot has "
+                f"already cost {spent / 60:.0f} min of held script and "
+                f"never fired",
+                kind="countdown-hold-refused",
+                detail=(f"declined to hold the script at this spot: it "
+                        f"has spent {spent:.0f}s frozen here across "
+                        f"every visit, against a ceiling of "
+                        f"{self.COUNT_HOLD_SPEND:.0f}s. Whatever is "
+                        f"here, four minutes of a stopped script has "
+                        f"not got the party through it"))
+            return
         duds = self._sigil_dud(seat)
         if duds >= self.COUNT_HOLD_DUDS:
             # This spot has taken three full holds and never fired. It
@@ -6057,10 +6508,22 @@ class LiveWorker(QThread):
             return
         seat.count_hold_seen = None
         self._count_hold_last = now
+        # Charged when the hold is COMMITTED, at its full length,
+        # rather than measured at whichever of the half-dozen exits
+        # ends it. Deliberately: the ledger's job is to be the one
+        # bound nothing else can reset, and a charge that depends on
+        # reaching a particular exit is a charge some path can skip. A
+        # spot released early by its goal advancing is over-charged by
+        # the difference -- and a spot where the goal advances is a
+        # conversation, which is what this ceiling is for. A spot that
+        # FIRES has its ledger cleared outright, so a real sigil never
+        # pays for the tries it took.
+        self._sigil_spent(seat, add=self.COUNT_HOLD)
         self._count_hold_until = now + self.COUNT_HOLD
         self._count_hold_zone = seat.zone_seen
         self._count_hold_seat = seat.index
         self._count_hold_sigil = bool(sensed)
+        self._count_hold_stepped_off = False
         self._count_hold_began = now
         self._count_hold_party = tuple(s.index for s in mates)
         if sensed:
@@ -6119,9 +6582,15 @@ class LiveWorker(QThread):
                         self._say(other,
                                   f"{other.name} steps onto "
                                   f"{seat.name}'s sigil")
+                # The narrow read, for the same reason as the arming
+                # sensor: this decides both that the spot IS a sigil
+                # (`_count_hold_sigil` below, which buys it re-arms and
+                # exempts it from sweeps) and that this wizard should be
+                # sent to press X. At a Talk NPC the press opens a
+                # conversation nobody asked for.
                 shows = False
                 for _ in range(self.COUNT_HOLD_MATE_POLLS):
-                    if await questing.near_interactable(other.client):
+                    if await questing.at_a_sigil(other.client):
                         shows = True
                         break
                     await asyncio.sleep(self.COUNT_HOLD_POLL_GAP)
@@ -8653,7 +9122,31 @@ class LiveWorker(QThread):
             away = getattr(seat, "marker_away", None)
             if away is not None and away > self.MARKER_IN_ZONE:
                 return away
+            # ...and the same thing said the other way. A marker for a
+            # goal in another WORLD is out of reach at any distance:
+            # read in that world's coordinate space it can come back as
+            # any number at all, and rev 09a0af80's came back as 81.
+            # Spending the party's one catch-up attempt on it is the
+            # same waste this bound exists to prevent.
+            if away is not None and self._marker_is_another_world(seat):
+                return away
         return None
+
+    def _marker_is_another_world(self, seat):
+        """Does this seat's goal name a destination in another world?
+
+        False whenever either side is unknown -- an area the quest data
+        does not list, an area two worlds share, a goal with no
+        destination in it, a zone that will not read. This gates rungs
+        that hold the script and move the party, and refusing to act on
+        a guess is the whole point.
+        """
+        from .. import questlist
+
+        try:
+            return questlist.goal_is_elsewhere(seat.goal, seat.zone_seen)
+        except Exception:
+            return False
 
     def _written_off(self, group):
         """Has a catch-up already given up on this exact step?
@@ -9177,7 +9670,15 @@ class LiveWorker(QThread):
             return
         if len([s for s in self.seats if s.client is not None]) < 2:
             return
-        why = getattr(self.hive, "last_alone", None)
+        # This seat's reason, not the party's most recent one. They are
+        # different sentences pointing at different wizards: "waited and
+        # it did not submit" is a slow client, "reached the round after
+        # the party had planned it" is this client being the slow one.
+        # One shared field meant a seat could be filed under the exact
+        # opposite of what happened to it.
+        reason = getattr(self.hive, "alone_reason", None)
+        why = (reason(seat.index) if callable(reason)
+               else getattr(self.hive, "last_alone", None))
         if not why:
             return
         index = getattr(seat.tel.fights[-1], "index", None) \

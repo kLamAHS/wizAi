@@ -1622,6 +1622,138 @@ def test_the_wiring_reaches_the_exported_summary(qapp):
     assert tel.summary()["party"]["role"] == "booster"
 
 
+def test_the_wiring_is_re_stamped_from_what_the_run_actually_became(qapp):
+    """The block is written at connect time and every fact in it can
+    change afterwards. `_setup_script` has not run yet, no duel has
+    named a wizard yet, and the GUI writes `auto_quest`,
+    `booster_party`, `solo_script`, `follow_leader` and `leader`
+    straight onto the running worker while it works.
+
+    Rev 09a0af80's export said mode "follow the leader",
+    `scripted: false`, `script_drives: "nobody"` and leader "wizard 1"
+    -- for a scripted booster party. It was added for diagnosis, and it
+    blocked this audit."""
+    worker = _party_worker()
+    for seat in worker.seats:
+        seat.tel.party = worker._party_shape(seat)
+    assert worker.seats[0].tel.party["mode"] != "booster party"
+
+    # ...and now the run becomes what it really is.
+    worker.leader, worker.booster_party = 1, True
+    worker.script = "sub main { }"
+    worker.seats[1].wizard_name = "Konstantin V"
+
+    worker._restamp_party()
+    for seat in worker.seats:
+        assert seat.tel.party["mode"] == "booster party"
+        assert seat.tel.party["scripted"] is True
+        assert seat.tel.party["script_drives"] == "the leader only"
+        assert seat.tel.party["leader"] == "Konstantin V"
+    assert worker.seats[0].tel.party["role"] == "booster"
+    assert worker.seats[1].tel.party["role"] == "leader"
+
+
+def test_re_stamping_the_wiring_can_never_stop_the_run(qapp):
+    """It describes the run. Nothing that merely describes the run may
+    take it down -- the first version of the heartbeat read
+    `runner.steps` unguarded and killed a seat's loop with it."""
+    worker = _party_worker()
+
+    def boom(_seat):
+        raise RuntimeError("the shape could not be read")
+
+    worker._party_shape = boom
+    worker._restamp_party()          # must not raise
+
+
+def test_a_running_stage_keeps_its_seat_on_the_air(qapp):
+    """`seat.ticked_at` was stamped once at the top of the tick and
+    nowhere else, and one tick's stages sum to about 1,425 seconds
+    against a `DRIVER_QUIET` of 90. `STAGE_LIMITS["script step"]` is
+    240 on its own and a `waitfor zonechange` is bounded at 150 inside
+    it -- so one ordinary instruction took a seat past the liveness
+    threshold and handed the party's script to the other seat. Rev
+    09a0af80: `script-driver-moved` immediately followed by
+    `waitfor-gave-up`, which is one event reported twice."""
+    import asyncio
+    import time
+
+    worker = _party_worker()
+    worker.TICK_STAMP = 0.01
+    seat = worker.seats[0]
+    seat.ticked_at = time.monotonic()
+    began = seat.ticked_at
+
+    async def a_long_instruction():
+        await asyncio.sleep(0.12)
+
+    asyncio.run(worker._stage(seat, "script step", a_long_instruction(),
+                              limit=5.0))
+    assert seat.ticked_at > began, \
+        "a seat doing exactly what it was told went quiet and lost the script"
+
+
+def test_a_stage_that_hangs_is_still_cut_off(qapp):
+    """The clock running is not the same as the deadline being gone.
+    A stage that never returns is caught by `STAGE_LIMITS`, which is
+    the bound built for it, and reported."""
+    import asyncio
+
+    worker = _party_worker()
+    worker.TICK_STAMP = 0.01
+    seat = worker.seats[0]
+
+    hung = {"cancelled": False}
+
+    async def never():
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            hung["cancelled"] = True
+            raise
+
+    asyncio.run(worker._stage(seat, "script step", never(), limit=0.05))
+    assert hung["cancelled"], "the hung stage was left running"
+    assert any(e["kind"] == "stage-timeout" for e in seat.tel.questing), \
+        "it was cut off and nobody was told"
+
+
+def test_only_one_task_ever_steps_the_party_vm(qapp):
+    """`_script_step` is guarded by the DRIVE lock, which is per seat.
+    `_script_seat` hands the script to another seat when seat 0 goes
+    quiet and hands it back when it returns -- so seat 1 can be inside
+    `run_for` while seat 0's loop comes round, takes its own lock, and
+    steps the same instruction pointer."""
+    import asyncio
+
+    worker = _party_worker()
+    inside = {"now": 0, "most": 0}
+
+    class _Runner:
+        stale = False
+        running = True
+        steps = 0
+        failures = 0
+        last_error = ""
+
+        async def run_for(self, should_stop=None):
+            inside["now"] += 1
+            inside["most"] = max(inside["most"], inside["now"])
+            await asyncio.sleep(0.05)
+            inside["now"] -= 1
+            return True
+
+    worker.seats[0].runner = _Runner()
+
+    async def both():
+        await asyncio.gather(worker._script_step(worker.seats[0]),
+                             worker._script_step(worker.seats[1]))
+
+    asyncio.run(both())
+    assert inside["most"] == 1, \
+        "two tasks were inside one VM's burst at the same time"
+
+
 def test_a_lost_fight_is_written_down_at_all(qapp):
     """It was not. `FightRecord.won` is read by the export's win count
     and a red label in the panel, and by nothing else -- so rev
@@ -16085,6 +16217,12 @@ def _at_the_sigil(monkeypatch, goal="Go To Amy Brooks' Place in Knight's Court",
 
     monkeypatch.setattr(questing, "in_dialogue", in_dialogue)
     monkeypatch.setattr(questing, "near_interactable", near)
+    # These fixtures model a DUNGEON sigil, so its press-X prompt is a
+    # sigil's. `at_a_sigil` is the narrow read the hold's sensor uses;
+    # `near_interactable` stays broad for dialogue and the walk-through.
+    # A test that wants an NPC prompt instead patches `at_a_sigil` back
+    # to False -- see the Talk-NPC tests below.
+    monkeypatch.setattr(questing, "at_a_sigil", near)
     monkeypatch.setattr(questing, "in_battle", in_battle)
     monkeypatch.setattr(questing, "read_quest_position", marker_pos)
     return worker, seat, other
@@ -16217,6 +16355,7 @@ def test_a_boosters_prompt_beside_the_leader_is_a_sigil_sensor(monkeypatch):
         return True, ""
 
     monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "at_a_sigil", near)
     monkeypatch.setattr(questing, "press_x", press)
     asyncio.run(worker._maybe_count_hold(seat))
     assert worker._countdown_held(), "the sensor did not trigger the hold"
@@ -16253,6 +16392,7 @@ def test_no_helper_x_while_the_leader_cannot_board(monkeypatch):
         return True, ""
 
     monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "at_a_sigil", near)
     monkeypatch.setattr(questing, "press_x", press)
     asyncio.run(worker._maybe_count_hold(seat))
     assert worker._countdown_held()
@@ -16295,6 +16435,7 @@ def test_a_dead_prompt_is_walked_off_the_sigil_and_back(monkeypatch):
         return True, ""
 
     monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "at_a_sigil", near)
     monkeypatch.setattr(questing, "press_x", press)
     asyncio.run(worker._maybe_count_hold(seat))
     assert len(seat.client.tped) == 3, "no out-and-back refresh"
@@ -16331,6 +16472,7 @@ def test_a_mate_that_crossed_alone_releases_the_hold(monkeypatch):
         return True, ""
 
     monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "at_a_sigil", near)
     monkeypatch.setattr(questing, "press_x", press)
     asyncio.run(worker._maybe_count_hold(seat))
     assert worker._countdown_held()
@@ -16374,6 +16516,7 @@ def test_a_prompt_that_renders_after_the_hold_gets_the_leaders_x(
         return True, ""
 
     monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "at_a_sigil", near)
     monkeypatch.setattr(questing, "press_x", press)
     asyncio.run(worker._maybe_count_hold(seat))
     assert worker._countdown_held()
@@ -16412,6 +16555,7 @@ def test_the_leader_is_replanted_onto_the_sensed_sigil(monkeypatch):
         return True, ""
 
     monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "at_a_sigil", near)
     monkeypatch.setattr(questing, "press_x", press)
     asyncio.run(worker._maybe_count_hold(seat))
     assert seat.client.tped == [(400.0, 200.0, 0.0)], \
@@ -16454,6 +16598,7 @@ def test_the_hold_tries_again_instead_of_standing_still(monkeypatch):
         return True, ""
 
     monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "at_a_sigil", near)
     monkeypatch.setattr(questing, "press_x", press)
 
     asyncio.run(worker._maybe_count_hold(seat))
@@ -16483,6 +16628,67 @@ def test_the_hold_tries_again_instead_of_standing_still(monkeypatch):
     assert pressed == [seat.client, other.client]
 
 
+def test_the_step_off_happens_once_per_hold_not_once_per_retry(monkeypatch):
+    """The guard was preventing the entry it exists to protect.
+
+    `_join_leader`'s third rung steps the wizard 800 units off its pad
+    and back to re-trigger the range window, and its own docstring
+    accepts that this costs "one counter restart" — because stepping off
+    UN-JOINS a wizard that was counting. But `_retry_boarding` ran it
+    again every `COUNT_HOLD_RETRY` seconds, and at the 8.0s that used to
+    be, that is a reset every 8s against a countdown `COUNT_HOLD`
+    documents as ~10s. A real sigil could never finish.
+
+    Rev 09a0af80: every hold ran its full 45 seconds at roughly six
+    cycles apiece, and not one of them fired."""
+    import asyncio
+    import time
+
+    from deimos_bridge import questing
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+
+    async def only_the_helper(c):
+        return c is other.client       # the holder's own never renders
+
+    async def press(_c):
+        return True, ""
+
+    monkeypatch.setattr(questing, "near_interactable", only_the_helper)
+    monkeypatch.setattr(questing, "at_a_sigil", only_the_helper)
+    monkeypatch.setattr(questing, "press_x", press)
+
+    def step_offs():
+        return len([e for e in seat.tel.questing
+                    if e["kind"] == "countdown-hold"
+                    and "off the sigil and back" in e["detail"]])
+
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held()
+    assert step_offs() == 1, "the holder never stepped off at all"
+
+    # Four retries come due inside the same hold. The cheap rungs may
+    # run again -- polling for a prompt and re-planting onto the pad
+    # un-join nothing. The 800-unit step-off may not.
+    for _ in range(4):
+        worker._count_hold_retry = time.monotonic() - 1.0
+        asyncio.run(worker._maybe_count_hold(seat))
+    assert step_offs() == 1, \
+        (f"the hold un-joined the wizard {step_offs()} times in one hold, "
+         f"restarting the countdown it was guarding")
+
+
+def test_the_retry_cadence_outlasts_the_countdown_it_guards(monkeypatch):
+    """A second guard on the same mistake, stated as arithmetic: a retry
+    that could restart the counter must not come round faster than the
+    counter runs."""
+    from deimos_bridge.gui.live import LiveWorker
+
+    assert LiveWorker.COUNT_HOLD_RETRY > 10.0, \
+        ("the boarding retry is faster than the ~10s countdown "
+         "COUNT_HOLD documents, so a sigil can never finish counting")
+
+
 def test_a_marker_case_hold_has_something_to_try(monkeypatch):
     """Rev e6201303's first hold stood still for its full 45 seconds
     with a partner standing on the spot, and neither wizard pressed
@@ -16510,6 +16716,7 @@ def test_a_marker_case_hold_has_something_to_try(monkeypatch):
         return True, ""
 
     monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "at_a_sigil", near)
     monkeypatch.setattr(questing, "press_x", press)
     asyncio.run(worker._maybe_count_hold(seat))
     assert worker._countdown_held()
@@ -16545,6 +16752,7 @@ def test_an_evidenced_sigil_hold_rearms_instead_of_sweeping(monkeypatch):
         return True, ""
 
     monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "at_a_sigil", near)
     monkeypatch.setattr(questing, "press_x", press)
     asyncio.run(worker._maybe_count_hold(seat))
     assert worker._countdown_held()
@@ -16638,6 +16846,58 @@ def test_one_countdown_hold_per_visit_and_a_return_rearms(monkeypatch):
     assert worker._countdown_held(), "the return visit was not guarded"
 
 
+def test_a_talk_npc_prompt_is_not_a_sigil_and_holds_nothing(monkeypatch):
+    """Rev 09a0af80 spent 36% of a 25-minute run holding the script at
+    conversations. Five of its ten quest steps were `Talk To` steps, and
+    a Talk NPC raises the same `NPCRangeWin` a dungeon sigil does — so
+    the sensor, which asked only "is a partner at a press-X prompt",
+    read every one of them as a sigil mid-entry.
+
+    `at_quest_marker`'s own docstring already said the range window
+    "appears for *every* interactable in range: vendors, bank, the dye
+    shop, other players' housing objects". The discriminator was in the
+    tree and unused: only a sigil puts a Team Up button inside that
+    window."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+
+    async def prompt(c):
+        return c is other.client       # the partner is at SOMETHING
+
+    async def no_sigil(_c):
+        return False                   # ...but it has no Team Up button
+
+    monkeypatch.setattr(questing, "near_interactable", prompt)
+    monkeypatch.setattr(questing, "at_a_sigil", no_sigil)
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert not worker._count_hold_sigil, \
+        "a conversation was recorded as an evidenced sigil"
+    said = " ".join(e["detail"] for e in seat.tel.questing
+                    if e["kind"] == "countdown-hold")
+    assert "mid-entry" not in said, \
+        "the export claims the party is entering a sigil at a Talk NPC"
+
+
+def test_a_partner_that_walked_here_itself_is_still_evidence(monkeypatch):
+    """The other half — the case the sensor exists for must keep
+    working."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+
+    async def at_sigil(c):
+        return c is other.client
+
+    monkeypatch.setattr(questing, "at_a_sigil", at_sigil)
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._count_hold_sigil, "a real sigil sensor stopped working"
+
+
 def _only_the_helper_has_a_prompt(worker, seat, other, monkeypatch):
     """The run's own shape: the partner is at a press-X prompt beside
     this wizard, and this wizard's own prompt never renders however it
@@ -16653,6 +16913,7 @@ def _only_the_helper_has_a_prompt(worker, seat, other, monkeypatch):
         return True, ""
 
     monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "at_a_sigil", near)
     monkeypatch.setattr(questing, "press_x", press)
 
 
@@ -18888,6 +19149,333 @@ def test_the_dead_clock_starts_and_clears_on_the_goal_poll():
         questing.read_quest_position = original_pos
 
 
+# ------------------------------------------- confirming what was read
+def _goal_worker(monkeypatch, goals, positions=(), position=None):
+    """A one-seat worker whose quest reads come from these lists.
+
+    `goals` and `positions` are consumed one per read, and the last
+    entry repeats -- so a test writes the sequence it wants to
+    photograph and nothing else.
+    """
+    from deimos_bridge import questing
+    from deimos_bridge.gui.live import LiveWorker
+    from deimos_bridge.telemetry import Telemetry
+
+    body = position or _XYZ(0.0, 0.0, 0.0)
+
+    class _Body:
+        async def position(self):
+            return body
+
+    class _Client:
+        body = _Body()
+        root_window = _Win("root", [])
+
+        async def zone_name(self):
+            return "Zafaria/ZF_Z00_Hub"
+
+        async def is_loading(self):
+            return False
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    worker.status = type("S", (), {"emit": staticmethod(lambda *_: None)})()
+    worker.GOAL_POLL = 0.0
+    worker.GOAL_CONFIRM = 0.0
+    seat = worker.seats[0]
+    seat.client = _Client()
+
+    reads = {"goal": list(goals), "pos": list(positions)}
+
+    def _next(which):
+        queue = reads[which]
+        return queue.pop(0) if len(queue) > 1 else (queue[0] if queue
+                                                    else None)
+
+    async def read_goal(_c):
+        return _next("goal") or ""
+
+    async def read_position(_c):
+        got = _next("pos")
+        return (got, "") if got is not None else (None, "no marker")
+
+    async def read_name(_c):
+        return ""
+
+    monkeypatch.setattr(questing, "read_quest_goal", read_goal)
+    monkeypatch.setattr(questing, "read_quest_position", read_position)
+    monkeypatch.setattr(questing, "read_quest_name", read_name)
+    return worker, seat
+
+
+def test_one_poll_of_a_changed_goal_does_not_move_anything(monkeypatch):
+    """The goal read resolves a window path whose fifth element is an
+    unnamed list slot, and `window_from_path` returns the first match --
+    so which quest's line comes back can change with nothing having
+    happened in the game. Rev 09a0af80's quester alternated between a
+    Zafaria quest and a Wysteria one while standing still in the
+    Zafaria hub, and 23 rungs consume this one read.
+
+    A change has to be read twice before it counts."""
+    import asyncio
+
+    # Reads in order. A change costs two -- the read and its
+    # confirmation -- so poll one settles and poll two flaps.
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Sivella in Baobab Crown",
+                            "Talk To Sivella in Baobab Crown",
+                            "Talk To Sandor in Pigswick Academy",
+                            "Talk To Sivella in Baobab Crown"])
+    asyncio.run(worker._read_goal(seat))
+    settled = seat.goal
+    assert settled == "Talk To Sivella in Baobab Crown"
+
+    asyncio.run(worker._read_goal(seat))          # flaps, then flaps back
+    assert seat.goal == settled, \
+        "one read of an unnamed window slot moved the whole party"
+    assert any(e["kind"] == "goal-flapped" for e in seat.tel.questing), \
+        "it kept the right value and said nothing about why"
+
+
+def test_a_changed_goal_that_reads_twice_is_believed(monkeypatch):
+    """The confirmation must not cost a real quest step. Two agreeing
+    reads and it lands on the same poll it was read on."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Sivella in Baobab Crown"])
+    asyncio.run(worker._read_goal(seat))
+    assert seat.goal == "Talk To Sivella in Baobab Crown"
+    assert seat.goals_seen == ["Talk To Sivella in Baobab Crown"]
+    assert not [e for e in seat.tel.questing if e["kind"] == "goal-flapped"]
+
+
+def test_a_blank_goal_read_keeps_the_last_one(monkeypatch):
+    """`maybe_text` returns blank for a zero length, a mid-write
+    pointer or a decode failure, and a blank CLEARED the goal
+    unconditionally -- while the quest NAME beside it has kept its
+    previous value on a blank read since rev 30e83468, for exactly the
+    same reason. A blank is not evidence the wizard changed quest."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Sivella in Baobab Crown",
+                            "Talk To Sivella in Baobab Crown", ""])
+    asyncio.run(worker._read_goal(seat))
+    asyncio.run(worker._read_goal(seat))
+    assert seat.goal == "Talk To Sivella in Baobab Crown", \
+        "a transient blank threw away the goal 23 rungs read"
+
+
+def test_a_goal_that_will_not_read_for_long_enough_becomes_unknown(
+        monkeypatch):
+    """Kept forever, the previous value is invention rather than
+    memory. The same expiry the quest name has, and shorter, because
+    the goal is the read every rung consults."""
+    import asyncio
+    import time
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Sivella in Baobab Crown",
+                            "Talk To Sivella in Baobab Crown", ""])
+    asyncio.run(worker._read_goal(seat))
+    seat.goal_ok_at = time.monotonic() - (worker.GOAL_MAX_AGE + 1.0)
+    asyncio.run(worker._read_goal(seat))
+    assert seat.goal == "", "a dead read was kept as fact"
+
+
+def test_a_marker_that_has_just_come_near_is_read_twice(monkeypatch):
+    """`read_quest_position` resolves to a hook in the game's quest
+    ARROW render loop: one static pointer, last writer wins, no quest
+    identity attached to what it wrote. A marker arriving within arm's
+    reach is what `marker_case` gates the sigil rung on, and it is the
+    least trustworthy read in the poll."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Sivella in Baobab Crown"],
+        positions=[_XYZ(9000.0, 0.0, 0.0),     # far: believed at once
+                   _XYZ(20.0, 0.0, 0.0),       # near...
+                   _XYZ(9000.0, 0.0, 0.0)])    # ...and its own second
+                                               # opinion says otherwise
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away and seat.marker_away > worker.AT_THE_MARKER
+
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away is None, \
+        "a marker nobody can measure twice was taken as the objective"
+    assert any(e["kind"] == "marker-flapped" for e in seat.tel.questing)
+
+
+def test_a_marker_that_agrees_with_itself_is_believed(monkeypatch):
+    """Arriving is confirmed; it is not refused."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Sivella in Baobab Crown"],
+        positions=[_XYZ(20.0, 0.0, 0.0)])
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away is not None
+    assert seat.marker_away <= worker.AT_THE_MARKER
+    assert not [e for e in seat.tel.questing if e["kind"] == "marker-flapped"]
+
+
+def test_a_goal_in_another_world_is_not_this_spot(monkeypatch):
+    """The exact read that fired rev 09a0af80's hold: a WYSTERIA quest
+    whose marker read 81 units away, then 0, while the wizard stood in
+    the Zafaria hub. `MARKER_IN_ZONE` is the only guard against a
+    marker read in another zone's coordinate space and it assumes
+    another zone always comes back as six figures -- 98,813 and 115,018
+    are where the number came from. 81 goes straight through it.
+
+    The goal line said where it was the whole time. The suffix was
+    parsed and thrown away."""
+    from deimos_bridge.gui.live import LiveWorker
+    from deimos_bridge.telemetry import Telemetry
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    seat = worker.seats[0]
+    seat.zone_seen = "Zafaria/ZF_Z00_Hub"
+
+    seat.goal = "Talk To Sandor in Pigswick Academy"      # Wysteria
+    assert worker._marker_is_another_world(seat)
+
+    seat.goal = "Talk To Sivella in Baobab Crown"         # Zafaria
+    assert not worker._marker_is_another_world(seat)
+
+
+def test_an_unplaceable_goal_is_never_taken_as_evidence():
+    """Unknown is not "elsewhere". An area the data does not list, an
+    area two worlds share, a goal with no destination in it and a zone
+    that will not read all have to answer the same way -- this gates a
+    rung that holds the script, and holding it on a guess is the
+    failure it exists to stop."""
+    from deimos_bridge.gui.live import LiveWorker
+    from deimos_bridge.telemetry import Telemetry
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    seat = worker.seats[0]
+    seat.zone_seen = "Zafaria/ZF_Z00_Hub"
+    for goal in ("Defeat Maito",                       # no destination
+                 "Talk To Nobody in Nowhere At All",   # unlisted area
+                 "Talk To Somebody in Wizard City",    # three worlds list it
+                 ""):
+        seat.goal = goal
+        assert not worker._marker_is_another_world(seat), goal
+
+    seat.goal = "Talk To Sandor in Pigswick Academy"
+    seat.zone_seen = ""                                # zone will not read
+    assert not worker._marker_is_another_world(seat)
+
+
+def test_one_spot_cannot_freeze_the_script_forever(monkeypatch):
+    """`COUNT_HOLD` x `COUNT_HOLD_REPLAYS` x `COUNT_HOLD_DUDS` is 270
+    seconds per spot, and that product is only a bound if all three
+    counters hold. Two of them do not survive an ordinary run:
+    `count_hold_replays` is a per-seat field a dozen paths reset, and
+    the dud count was keyed through `seat.progress` -- which carries
+    the quest goal -- so rev 09a0af80's flapping tracker silently
+    re-keyed the memory and the count never reached three at all.
+
+    The ledger is the one bound nothing else can reset."""
+    import asyncio
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+    worker.COUNT_HOLD_EVERY = 0.0
+    worker.COUNT_HOLD_DUDS = 10_000          # let the other bounds off
+    worker.COUNT_HOLD_SPEND = worker.COUNT_HOLD * 2
+
+    for _ in range(4):
+        worker._count_hold_until = 0.0
+        worker._count_hold_last = -1e9
+        seat.count_hold_spot = None
+        seat.count_hold_replays = 0
+        seat.count_hold_seen = 1.0
+        # ...and the goal flaps, which used to re-key the memory
+        seat.goal = f"{seat.goal} "
+        asyncio.run(worker._maybe_count_hold(seat))
+
+    assert not worker._countdown_held(), \
+        "one spot went on freezing the script past its whole budget"
+    assert any(e["kind"] == "countdown-hold-refused"
+               and "min of held script" in e["detail"]
+               or "frozen here" in e.get("detail", "")
+               for e in seat.tel.questing), \
+        "it stopped and never said the spot had spent its budget"
+
+
+def test_a_sigil_that_finally_fires_owes_nothing(monkeypatch):
+    """A door that opens on the fourth try is still a door. Firing
+    clears the ledger with the dud count -- otherwise a slow dungeon
+    entrance walks itself into the ceiling and the guard stops
+    protecting the one thing it exists for."""
+    import asyncio
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+    worker.COUNT_HOLD_EVERY = 0.0
+    seat.count_hold_seen = 1.0
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._sigil_spent(seat) > 0
+
+    worker._sigil_fired(seat)
+    assert worker._sigil_spent(seat) == 0, \
+        "a spot that fired kept paying for the tries it took"
+
+
+def test_the_hold_refuses_a_marker_that_belongs_to_another_world(monkeypatch):
+    """End to end through the rung that actually held the script.
+
+    The wizard is in Marleybone, the marker reads eight units away, and
+    the goal says Pigswick Academy -- Wysteria. Rev 09a0af80 held the
+    script for spots exactly like this one and then spent the dud
+    budget proving nothing was there."""
+    import asyncio
+
+    worker, seat, other = _at_the_sigil(
+        monkeypatch, goal="Talk To Sandor in Pigswick Academy")
+    for s in (seat, other):
+        s.zone_seen = "Marleybone/MB_KnightsCourt"
+
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert not worker._countdown_held(), \
+        "the script was held for a marker in another world"
+    assert any(e["kind"] == "marker-another-world"
+               for e in seat.tel.questing), \
+        "it refused and did not say why"
+
+
+def test_the_hold_still_fires_for_a_marker_in_this_world(monkeypatch):
+    """The other half: a full zone path that the goal agrees with must
+    behave exactly as it did before the check existed."""
+    import asyncio
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+    for s in (seat, other):
+        s.zone_seen = "Marleybone/MB_KnightsCourt"
+
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held(), "a marker in this world was refused"
+
+
+def test_a_catch_up_is_not_aimed_at_another_world():
+    """`_marker_out_of_reach` bounds a catch-up by distance because a
+    quest teleport does not cross a zone boundary. A cross-world marker
+    read in that world's coordinate space can come back as any number
+    at all -- rev 09a0af80's came back as 81 -- so distance alone
+    cannot keep the party's one attempt off it."""
+    from deimos_bridge.gui.live import LiveWorker
+    from deimos_bridge.telemetry import Telemetry
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    seat = worker.seats[0]
+    seat.zone_seen = "Zafaria/ZF_Z00_Hub"
+    seat.marker_away = 81.0
+    seat.goal = "Talk To Sivella in Baobab Crown"
+    assert worker._marker_out_of_reach([seat]) is None
+
+    seat.goal = "Talk To Sandor in Pigswick Academy"
+    assert worker._marker_out_of_reach([seat]) == 81.0
+
+
 def test_a_dead_hook_triggers_the_rearm_and_writes_the_receipt(monkeypatch):
     import asyncio
     import time
@@ -20402,7 +20990,10 @@ def test_a_stale_runner_is_not_stepped_while_the_hold_is_on():
 
     from deimos_bridge.gui.live import LiveWorker
 
-    src = inspect.getsource(LiveWorker._script_step)
+    # `_script_step` is the one-stepper guard; `_step_the_vm` is the
+    # body it guards, and the stale check lives with the stepping.
+    src = (inspect.getsource(LiveWorker._script_step)
+           + inspect.getsource(LiveWorker._step_the_vm))
     assert "if not runner.stale:" in src
     stepped = src.index("run_for")
     handled = src.index("if runner.stale:")
