@@ -19017,6 +19017,279 @@ def test_the_dead_clock_starts_and_clears_on_the_goal_poll():
         questing.read_quest_position = original_pos
 
 
+# ------------------------------------------- confirming what was read
+def _goal_worker(monkeypatch, goals, positions=(), position=None):
+    """A one-seat worker whose quest reads come from these lists.
+
+    `goals` and `positions` are consumed one per read, and the last
+    entry repeats -- so a test writes the sequence it wants to
+    photograph and nothing else.
+    """
+    from deimos_bridge import questing
+    from deimos_bridge.gui.live import LiveWorker
+    from deimos_bridge.telemetry import Telemetry
+
+    body = position or _XYZ(0.0, 0.0, 0.0)
+
+    class _Body:
+        async def position(self):
+            return body
+
+    class _Client:
+        body = _Body()
+        root_window = _Win("root", [])
+
+        async def zone_name(self):
+            return "Zafaria/ZF_Z00_Hub"
+
+        async def is_loading(self):
+            return False
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    worker.status = type("S", (), {"emit": staticmethod(lambda *_: None)})()
+    worker.GOAL_POLL = 0.0
+    worker.GOAL_CONFIRM = 0.0
+    seat = worker.seats[0]
+    seat.client = _Client()
+
+    reads = {"goal": list(goals), "pos": list(positions)}
+
+    def _next(which):
+        queue = reads[which]
+        return queue.pop(0) if len(queue) > 1 else (queue[0] if queue
+                                                    else None)
+
+    async def read_goal(_c):
+        return _next("goal") or ""
+
+    async def read_position(_c):
+        got = _next("pos")
+        return (got, "") if got is not None else (None, "no marker")
+
+    async def read_name(_c):
+        return ""
+
+    monkeypatch.setattr(questing, "read_quest_goal", read_goal)
+    monkeypatch.setattr(questing, "read_quest_position", read_position)
+    monkeypatch.setattr(questing, "read_quest_name", read_name)
+    return worker, seat
+
+
+def test_one_poll_of_a_changed_goal_does_not_move_anything(monkeypatch):
+    """The goal read resolves a window path whose fifth element is an
+    unnamed list slot, and `window_from_path` returns the first match --
+    so which quest's line comes back can change with nothing having
+    happened in the game. Rev 09a0af80's quester alternated between a
+    Zafaria quest and a Wysteria one while standing still in the
+    Zafaria hub, and 23 rungs consume this one read.
+
+    A change has to be read twice before it counts."""
+    import asyncio
+
+    # Reads in order. A change costs two -- the read and its
+    # confirmation -- so poll one settles and poll two flaps.
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Sivella in Baobab Crown",
+                            "Talk To Sivella in Baobab Crown",
+                            "Talk To Sandor in Pigswick Academy",
+                            "Talk To Sivella in Baobab Crown"])
+    asyncio.run(worker._read_goal(seat))
+    settled = seat.goal
+    assert settled == "Talk To Sivella in Baobab Crown"
+
+    asyncio.run(worker._read_goal(seat))          # flaps, then flaps back
+    assert seat.goal == settled, \
+        "one read of an unnamed window slot moved the whole party"
+    assert any(e["kind"] == "goal-flapped" for e in seat.tel.questing), \
+        "it kept the right value and said nothing about why"
+
+
+def test_a_changed_goal_that_reads_twice_is_believed(monkeypatch):
+    """The confirmation must not cost a real quest step. Two agreeing
+    reads and it lands on the same poll it was read on."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Sivella in Baobab Crown"])
+    asyncio.run(worker._read_goal(seat))
+    assert seat.goal == "Talk To Sivella in Baobab Crown"
+    assert seat.goals_seen == ["Talk To Sivella in Baobab Crown"]
+    assert not [e for e in seat.tel.questing if e["kind"] == "goal-flapped"]
+
+
+def test_a_blank_goal_read_keeps_the_last_one(monkeypatch):
+    """`maybe_text` returns blank for a zero length, a mid-write
+    pointer or a decode failure, and a blank CLEARED the goal
+    unconditionally -- while the quest NAME beside it has kept its
+    previous value on a blank read since rev 30e83468, for exactly the
+    same reason. A blank is not evidence the wizard changed quest."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Sivella in Baobab Crown",
+                            "Talk To Sivella in Baobab Crown", ""])
+    asyncio.run(worker._read_goal(seat))
+    asyncio.run(worker._read_goal(seat))
+    assert seat.goal == "Talk To Sivella in Baobab Crown", \
+        "a transient blank threw away the goal 23 rungs read"
+
+
+def test_a_goal_that_will_not_read_for_long_enough_becomes_unknown(
+        monkeypatch):
+    """Kept forever, the previous value is invention rather than
+    memory. The same expiry the quest name has, and shorter, because
+    the goal is the read every rung consults."""
+    import asyncio
+    import time
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Sivella in Baobab Crown",
+                            "Talk To Sivella in Baobab Crown", ""])
+    asyncio.run(worker._read_goal(seat))
+    seat.goal_ok_at = time.monotonic() - (worker.GOAL_MAX_AGE + 1.0)
+    asyncio.run(worker._read_goal(seat))
+    assert seat.goal == "", "a dead read was kept as fact"
+
+
+def test_a_marker_that_has_just_come_near_is_read_twice(monkeypatch):
+    """`read_quest_position` resolves to a hook in the game's quest
+    ARROW render loop: one static pointer, last writer wins, no quest
+    identity attached to what it wrote. A marker arriving within arm's
+    reach is what `marker_case` gates the sigil rung on, and it is the
+    least trustworthy read in the poll."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Sivella in Baobab Crown"],
+        positions=[_XYZ(9000.0, 0.0, 0.0),     # far: believed at once
+                   _XYZ(20.0, 0.0, 0.0),       # near...
+                   _XYZ(9000.0, 0.0, 0.0)])    # ...and its own second
+                                               # opinion says otherwise
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away and seat.marker_away > worker.AT_THE_MARKER
+
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away is None, \
+        "a marker nobody can measure twice was taken as the objective"
+    assert any(e["kind"] == "marker-flapped" for e in seat.tel.questing)
+
+
+def test_a_marker_that_agrees_with_itself_is_believed(monkeypatch):
+    """Arriving is confirmed; it is not refused."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Sivella in Baobab Crown"],
+        positions=[_XYZ(20.0, 0.0, 0.0)])
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away is not None
+    assert seat.marker_away <= worker.AT_THE_MARKER
+    assert not [e for e in seat.tel.questing if e["kind"] == "marker-flapped"]
+
+
+def test_a_goal_in_another_world_is_not_this_spot(monkeypatch):
+    """The exact read that fired rev 09a0af80's hold: a WYSTERIA quest
+    whose marker read 81 units away, then 0, while the wizard stood in
+    the Zafaria hub. `MARKER_IN_ZONE` is the only guard against a
+    marker read in another zone's coordinate space and it assumes
+    another zone always comes back as six figures -- 98,813 and 115,018
+    are where the number came from. 81 goes straight through it.
+
+    The goal line said where it was the whole time. The suffix was
+    parsed and thrown away."""
+    from deimos_bridge.gui.live import LiveWorker
+    from deimos_bridge.telemetry import Telemetry
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    seat = worker.seats[0]
+    seat.zone_seen = "Zafaria/ZF_Z00_Hub"
+
+    seat.goal = "Talk To Sandor in Pigswick Academy"      # Wysteria
+    assert worker._marker_is_another_world(seat)
+
+    seat.goal = "Talk To Sivella in Baobab Crown"         # Zafaria
+    assert not worker._marker_is_another_world(seat)
+
+
+def test_an_unplaceable_goal_is_never_taken_as_evidence():
+    """Unknown is not "elsewhere". An area the data does not list, an
+    area two worlds share, a goal with no destination in it and a zone
+    that will not read all have to answer the same way -- this gates a
+    rung that holds the script, and holding it on a guess is the
+    failure it exists to stop."""
+    from deimos_bridge.gui.live import LiveWorker
+    from deimos_bridge.telemetry import Telemetry
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    seat = worker.seats[0]
+    seat.zone_seen = "Zafaria/ZF_Z00_Hub"
+    for goal in ("Defeat Maito",                       # no destination
+                 "Talk To Nobody in Nowhere At All",   # unlisted area
+                 "Talk To Somebody in Wizard City",    # three worlds list it
+                 ""):
+        seat.goal = goal
+        assert not worker._marker_is_another_world(seat), goal
+
+    seat.goal = "Talk To Sandor in Pigswick Academy"
+    seat.zone_seen = ""                                # zone will not read
+    assert not worker._marker_is_another_world(seat)
+
+
+def test_the_hold_refuses_a_marker_that_belongs_to_another_world(monkeypatch):
+    """End to end through the rung that actually held the script.
+
+    The wizard is in Marleybone, the marker reads eight units away, and
+    the goal says Pigswick Academy -- Wysteria. Rev 09a0af80 held the
+    script for spots exactly like this one and then spent the dud
+    budget proving nothing was there."""
+    import asyncio
+
+    worker, seat, other = _at_the_sigil(
+        monkeypatch, goal="Talk To Sandor in Pigswick Academy")
+    for s in (seat, other):
+        s.zone_seen = "Marleybone/MB_KnightsCourt"
+
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert not worker._countdown_held(), \
+        "the script was held for a marker in another world"
+    assert any(e["kind"] == "marker-another-world"
+               for e in seat.tel.questing), \
+        "it refused and did not say why"
+
+
+def test_the_hold_still_fires_for_a_marker_in_this_world(monkeypatch):
+    """The other half: a full zone path that the goal agrees with must
+    behave exactly as it did before the check existed."""
+    import asyncio
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+    for s in (seat, other):
+        s.zone_seen = "Marleybone/MB_KnightsCourt"
+
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held(), "a marker in this world was refused"
+
+
+def test_a_catch_up_is_not_aimed_at_another_world():
+    """`_marker_out_of_reach` bounds a catch-up by distance because a
+    quest teleport does not cross a zone boundary. A cross-world marker
+    read in that world's coordinate space can come back as any number
+    at all -- rev 09a0af80's came back as 81 -- so distance alone
+    cannot keep the party's one attempt off it."""
+    from deimos_bridge.gui.live import LiveWorker
+    from deimos_bridge.telemetry import Telemetry
+
+    worker = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    seat = worker.seats[0]
+    seat.zone_seen = "Zafaria/ZF_Z00_Hub"
+    seat.marker_away = 81.0
+    seat.goal = "Talk To Sivella in Baobab Crown"
+    assert worker._marker_out_of_reach([seat]) is None
+
+    seat.goal = "Talk To Sandor in Pigswick Academy"
+    assert worker._marker_out_of_reach([seat]) == 81.0
+
+
 def test_a_dead_hook_triggers_the_rearm_and_writes_the_receipt(monkeypatch):
     import asyncio
     import time

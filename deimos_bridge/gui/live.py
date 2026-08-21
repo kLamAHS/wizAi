@@ -167,6 +167,18 @@ class _Seat:
         #: `LiveWorker._check_in_step`.
         self.goal = ""
         self.goal_read = 0.0
+        #: when the goal last read as something, blank reads excluded.
+        #: A blank read keeps the previous value -- a blank is not
+        #: evidence the wizard changed quest -- but only for
+        #: `GOAL_MAX_AGE`, after which a kept value is invention. The
+        #: same rule the quest NAME has always had; the goal did not,
+        #: and cleared itself on every transient blank. See
+        #: `LiveWorker._note_goal`.
+        self.goal_ok_at = 0.0
+        #: a changed goal that has been read ONCE. It drives nothing
+        #: until a second read agrees with it. See
+        #: `LiveWorker._note_goal`.
+        self.goal_pending = ""
         #: every goal this wizard has held, in order. A wizard still on
         #: a step another has already left is the one behind -- see
         #: `LiveWorker._who_is_behind`.
@@ -3711,22 +3723,23 @@ class LiveWorker(QThread):
         except Exception:
             goal = ""
         if goal and goal != seat.goal:
-            seat.goal_at = now
-            # Did a Collect COUNT go up? That is the only evidence a
-            # wizard ever found the collectibles, and without it a
-            # stalled count means "never got there" rather than "the
-            # realm is picked clean". See `_maybe_realm_hop`.
-            was = questing.collect_count(seat.goal)
-            got = questing.collect_count(goal)
-            if got and was and got[0] == was[0] and got[1] > was[1]:
-                seat.collect_moved_at = now
-                seat.collect_moved_for = got[0]
-            # In order, and bounded. `_who_is_behind` needs to know that
-            # a step was HELD and left, which a single current value
-            # cannot say.
-            seat.goals_seen.append(goal)
-            del seat.goals_seen[:-12]
-        seat.goal = goal
+            # A CHANGE is confirmed before it is believed. This read
+            # resolves a window path whose fifth element is an UNNAMED
+            # list slot (`questing.py`), and `window_from_path` returns
+            # the FIRST match -- so which quest's line comes back can
+            # change between two reads with nothing having happened in
+            # the game. Rev 09a0af80's quester alternated between a
+            # Zafaria quest and a Wysteria one while standing still in
+            # the Zafaria hub, and 23 rungs consume `seat.goal`,
+            # including the ones that hold the script, teleport the
+            # party and pause the run.
+            #
+            # Deimos has carried a re-read for exactly this since
+            # before wizAi existed (`Deimos/src/questing.py`); it was
+            # never ported. One re-read costs `GOAL_CONFIRM`, and only
+            # on the poll where the goal changed.
+            goal = await self._confirmed_goal(seat, goal)
+        self._note_goal(seat, goal, now)
 
         # The quest NAME, alongside the goal and on the same poll. It is
         # what `questlist` can place in a questline; the goal cannot be
@@ -3761,15 +3774,34 @@ class LiveWorker(QThread):
         # the body's position. Consumed by `_start_catching_up`, which
         # cannot await -- and which must not start a catch-up for a
         # marker no within-zone teleport can reach. See `MARKER_IN_ZONE`.
+        was_away = seat.marker_away
         seat.marker_away = None
         marker = None
+        away = None
         try:
             marker, _why = await questing.read_quest_position(seat.client)
             if marker is not None and at is not None:
                 dx, dy = at.x - marker.x, at.y - marker.y
-                seat.marker_away = (dx * dx + dy * dy) ** 0.5
+                away = (dx * dx + dy * dy) ** 0.5
         except Exception:
             pass
+        if (away is not None and away <= self.AT_THE_MARKER
+                and (was_away is None or was_away > self.AT_THE_MARKER)):
+            # A marker that has just come within arm's reach is the
+            # single most consequential read this poll makes -- it is
+            # what `marker_case` gates the whole sigil rung on -- and
+            # it is the least trustworthy. `read_quest_position`
+            # resolves to a hook installed in the game's quest-ARROW
+            # render loop: one static pointer, last writer wins, with
+            # no quest identity attached to what it wrote. The Wysteria
+            # quest that flapped into rev 09a0af80's Zafaria hub read
+            # 81 units away, then 0.
+            #
+            # So arriving is confirmed and leaving is not: a marker
+            # going far needs no second opinion, because nothing acts
+            # on distance.
+            away = await self._confirmed_marker(seat, at, away)
+        seat.marker_away = away
         # The dead-hook clock. One failed read is noise -- a zone change
         # makes several fail in a row -- but a marker that will not read
         # for minutes WHILE the goal line reads fine is the quest arrow
@@ -3901,6 +3933,128 @@ class LiveWorker(QThread):
         if len(self._quest_zone) > self.QUEST_ZONE_MEMORY:
             oldest = min(self._quest_zone, key=lambda k: self._quest_zone[k][1])
             del self._quest_zone[oldest]
+
+    #: how long a second opinion on a changed quest read is worth
+    #: waiting for. Long enough that the two reads are not the same
+    #: memory snapshot, short enough to disappear inside a poll that
+    #: already runs every `GOAL_POLL`. Deimos waits three seconds for
+    #: the same purpose; a tick has other seats to serve.
+    GOAL_CONFIRM = 0.35
+    #: how long a goal that will not read is kept before it counts as
+    #: gone. The quest NAME has had this rule since rev 30e83468 and
+    #: the goal did not: a blank read CLEARED it, unconditionally, and
+    #: `maybe_text` returns blank for a zero length, a mid-write
+    #: pointer or a decode failure. Shorter than `NAME_MAX_AGE`
+    #: because the goal is the read every rung consults and a stale one
+    #: is more expensive than an unknown one.
+    GOAL_MAX_AGE = 120.0
+    #: units two reads of the same marker may differ by and still be
+    #: called the same marker. The idle animation and the body's own
+    #: drift account for tens; a different quest's marker is hundreds
+    #: to six figures away.
+    MARKER_AGREE = 150.0
+
+    async def _confirmed_goal(self, seat, first):
+        """A changed goal, read twice, or the previous one.
+
+        Returns `first` only when a second read agrees with it.
+        Otherwise the old goal stands and the disagreement is recorded
+        -- the next poll will read whatever is current and confirm it
+        then, so a real change costs at most one `GOAL_POLL`, and a
+        flap costs nothing at all.
+        """
+        from .. import questing
+
+        await asyncio.sleep(self.GOAL_CONFIRM)
+        try:
+            again = await questing.read_quest_goal(seat.client)
+        except Exception:
+            again = ""
+        if again == first:
+            return first
+        try:
+            seat.tel.note_questing(
+                "goal-flapped",
+                f"the quest tracker read {first!r} and then {again!r} "
+                f"{self.GOAL_CONFIRM:.2f}s later — keeping "
+                f"{seat.goal!r} rather than letting one read of an "
+                f"unnamed window slot move the party")
+        except Exception:
+            pass
+        return seat.goal
+
+    def _note_goal(self, seat, goal, now):
+        """Keep the freshest goal, and stop keeping a dead one.
+
+        The same rule `_note_name` has always had, for the same reason
+        and with the same expiry: a blank read is not evidence the
+        wizard changed quest, but a kept value becomes invention if it
+        is kept forever.
+        """
+        from .. import questing
+
+        if not goal:
+            if (seat.goal and seat.goal_ok_at
+                    and now - seat.goal_ok_at > self.GOAL_MAX_AGE):
+                seat.goal = ""
+            return
+        seat.goal_ok_at = now
+        if goal != seat.goal:
+            seat.goal_at = now
+            # Did a Collect COUNT go up? That is the only evidence a
+            # wizard ever found the collectibles, and without it a
+            # stalled count means "never got there" rather than "the
+            # realm is picked clean". See `_maybe_realm_hop`.
+            was = questing.collect_count(seat.goal)
+            got = questing.collect_count(goal)
+            if got and was and got[0] == was[0] and got[1] > was[1]:
+                seat.collect_moved_at = now
+                seat.collect_moved_for = got[0]
+            # In order, and bounded. `_who_is_behind` needs to know that
+            # a step was HELD and left, which a single current value
+            # cannot say.
+            seat.goals_seen.append(goal)
+            del seat.goals_seen[:-12]
+        seat.goal = goal
+
+    async def _confirmed_marker(self, seat, at, first):
+        """A marker that has just come near, read twice, or nothing.
+
+        None when the two reads disagree: a marker nobody can measure
+        twice is not a marker to teleport a party onto, and `None`
+        already means "no usable marker" to every rung that reads it.
+        """
+        from .. import questing
+
+        await asyncio.sleep(self.GOAL_CONFIRM)
+        try:
+            again, _why = await questing.read_quest_position(seat.client)
+        except Exception:
+            again = None
+        if again is None or at is None:
+            try:
+                seat.tel.note_questing(
+                    "marker-unconfirmed",
+                    f"the quest marker read {first:.0f} units away and "
+                    f"then would not read at all — not treating the "
+                    f"wizard as standing on its objective")
+            except Exception:
+                pass
+            return None
+        dx, dy = at.x - again.x, at.y - again.y
+        second = (dx * dx + dy * dy) ** 0.5
+        if abs(second - first) <= self.MARKER_AGREE:
+            return second
+        try:
+            seat.tel.note_questing(
+                "marker-flapped",
+                f"the quest marker read {first:.0f} units away and then "
+                f"{second:.0f} — the arrow hook is a last-writer-wins "
+                f"pointer with no quest attached to it, so neither read "
+                f"is evidence of where this wizard's objective is")
+        except Exception:
+            pass
+        return None
 
     def _note_name(self, seat, name, now):
         """Keep the freshest quest name, and stop keeping a dead one.
@@ -5945,6 +6099,30 @@ class LiveWorker(QThread):
         marker_case = (away is not None and away <= self.AT_THE_MARKER
                        and bool(goal)
                        and not questing.is_collect_goal(seat.goal))
+        if marker_case and self._marker_is_another_world(seat):
+            # A near marker for a goal that names another WORLD is not
+            # this wizard's objective, whatever the arrow says.
+            # `MARKER_IN_ZONE` was the only guard against a marker read
+            # in somebody else's coordinate space, and it assumes
+            # another zone always comes back as six figures -- rev
+            # 1843e387 logged 98,813 and 115,018, which is where the
+            # number came from. Rev 09a0af80's Wysteria marker, read
+            # from the Zafaria hub, came back as 81 and then 0 and went
+            # straight through it.
+            marker_case = False
+            self._say_once(
+                seat, f"marker-elsewhere:{seat.name}:{seat.goal}",
+                f"{seat.name}'s quest marker reads close, but its goal "
+                f"is in another world — not treating this spot as its "
+                f"objective",
+                kind="marker-another-world",
+                detail=(f"{seat.goal!r} names a destination in another "
+                        f"world while the wizard is in "
+                        f"{seat.zone_seen or 'an unread zone'}. The "
+                        f"quest arrow is one pointer with no quest "
+                        f"attached to it, and a marker read in another "
+                        f"world's coordinate space can land anywhere — "
+                        f"including on top of the wizard"))
         # The booster-as-sensor case, and it needs no marker at all:
         # "Talk To Hoi Mang in Crimson Fields" reads its marker from
         # INSIDE the dungeon -- past every distance gate -- while the
@@ -8739,7 +8917,31 @@ class LiveWorker(QThread):
             away = getattr(seat, "marker_away", None)
             if away is not None and away > self.MARKER_IN_ZONE:
                 return away
+            # ...and the same thing said the other way. A marker for a
+            # goal in another WORLD is out of reach at any distance:
+            # read in that world's coordinate space it can come back as
+            # any number at all, and rev 09a0af80's came back as 81.
+            # Spending the party's one catch-up attempt on it is the
+            # same waste this bound exists to prevent.
+            if away is not None and self._marker_is_another_world(seat):
+                return away
         return None
+
+    def _marker_is_another_world(self, seat):
+        """Does this seat's goal name a destination in another world?
+
+        False whenever either side is unknown -- an area the quest data
+        does not list, an area two worlds share, a goal with no
+        destination in it, a zone that will not read. This gates rungs
+        that hold the script and move the party, and refusing to act on
+        a guess is the whole point.
+        """
+        from .. import questlist
+
+        try:
+            return questlist.goal_is_elsewhere(seat.goal, seat.zone_seen)
+        except Exception:
+            return False
 
     def _written_off(self, group):
         """Has a catch-up already given up on this exact step?

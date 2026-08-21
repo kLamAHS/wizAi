@@ -426,6 +426,142 @@ def goal_disowns(quest_name, goal) -> bool:
     return bool(_loose_lookup(index, goal))
 
 
+#: area display names that name a world but no useful area, and areas
+#: whose name is a common word. Nothing is looked up under these -- an
+#: ambiguous area is answered "unknown", and unknown is never evidence.
+_VAGUE_AREAS = frozenset({"", "the commons", "commons", "hub", "tower",
+                          "shopping district", "the shopping district"})
+
+
+def goal_area(goal) -> str:
+    """The area the goal line says to go to, or "".
+
+    `"Talk To Hoi Mang in Crimson Fields"` -> `"Crimson Fields"`. The
+    HUD appends it to every goal that has a destination, `_strip_zone`
+    already knows where the seam is, and until now the suffix was cut
+    off and thrown away. It is the only part of a quest read that says
+    WHERE, independently of the quest arrow -- which matters because
+    the arrow is a single last-writer-wins pointer in the game's own
+    render loop, with no quest identity attached to it at all.
+
+    A trailing count is dropped with it: Collect goals read
+    `"Collect Cog in Triton Avenue (0 of 3)"`.
+    """
+    text = re.sub(r"<[^>]*>", "", goal or "").strip()
+    text = re.sub(r"\s*\([^)]*\)\s*$", "", text)
+    match = re.search(r"\s+in\s+([^,]+)$", text)
+    return match.group(1).strip() if match else ""
+
+
+def _area_key(area) -> str:
+    """The form both sides of an area-name comparison fold to.
+
+    The HUD writes the article the data leaves off -- "Defeat Belloq in
+    the Tanglewood Way" against an area recorded as "Tanglewood Way" --
+    and an area that will not match is answered "unknown", which
+    silently disables the check it was read for.
+    """
+    return re.sub(r"^the\s+", "", _norm(area))
+
+
+def _areas():
+    """Area display name -> the one world it is in, where there is one."""
+    index = _load()
+    built = getattr(index, "_areas", None)
+    if built is not None:
+        return built
+    built = {}
+    for quest in index.quests:
+        area = _area_key(quest.get("area") or "")
+        world = quest.get("world") or ""
+        if not area or not world or area in _VAGUE_AREAS:
+            continue
+        seen = built.get(area, world)
+        # An area name that two worlds share cannot answer the
+        # question. Recorded as None rather than dropped, so a later
+        # quest in a third world cannot revive it.
+        built[area] = world if seen == world else None
+    index._areas = built
+    return built
+
+
+def world_of_area(area) -> str:
+    """The world an area display name belongs to, or "" if unknown.
+
+    "" for an area the data does not list, and for one that two worlds
+    share. Both are "no answer", and the caller must treat them as
+    such: the questline data's `objectives` are empty for every world
+    past Arc 1, but `world` and `area` are populated for all 2,640
+    quests, so this answers across the whole game where the goal-text
+    placement path cannot.
+    """
+    return _areas().get(_area_key(area)) or ""
+
+
+def _world_key(world) -> str:
+    """A world name folded to the form both sides can be compared in.
+
+    The data writes `"Wizard City"`, the client writes `"WizardCity"`,
+    and one of them writes `"MooShu"` where the other writes
+    `"Mooshu"`. Spaces and case are the whole difference.
+    """
+    return re.sub(r"[^a-z0-9]", "", (world or "").lower())
+
+
+def _worlds() -> frozenset:
+    """Every world the quest data names, folded by `_world_key`."""
+    index = _load()
+    built = getattr(index, "_worlds", None)
+    if built is None:
+        built = frozenset(_world_key(q.get("world"))
+                          for q in index.quests if q.get("world"))
+        index._worlds = built
+    return built
+
+
+def world_of_zone(zone) -> str:
+    """The world a live zone name belongs to, or "".
+
+    The client's zone name is a path whose first segment is the world
+    in a compact form -- `"Zafaria/ZF_Z09_Drum_Jungle"`,
+    `"WizardCity/WC_Ravenwood"`, `"Zafaria/Interiors/ZF_Z09_I06_..."`.
+    Every zone in rev 09a0af80's export carries it.
+
+    "" when that segment is not a world the data knows -- a housing
+    instance, a PvP arena, a bare zone id with the prefix cut off. A
+    caller cannot tell "another world" from "a zone I cannot place"
+    unless this refuses to guess, and the callers gate rungs that hold
+    the script and move the party.
+    """
+    head = _world_key((zone or "").split("/")[0])
+    return head if head in _worlds() else ""
+
+
+def goal_is_elsewhere(goal, zone) -> bool:
+    """Does the goal name a destination in a DIFFERENT world?
+
+    False unless both sides are known and they disagree -- an unlisted
+    area, a name two worlds share, a goal with no `" in "` suffix and a
+    zone that will not read all answer False. Refusing to act on
+    "unknown" is the whole point: this gates a rung that holds the
+    script, and holding it on a guess is the failure it exists to stop.
+
+    The read it was written for: rev 09a0af80's quester, standing in
+    the Zafaria hub, alternated between a Zafaria quest whose marker
+    read 7,899 units away and a WYSTERIA quest whose marker read 81 and
+    then 0. `MARKER_IN_ZONE` assumes another zone always reads six
+    figures; a cross-world marker at 0-81 slips straight through it,
+    and everything downstream believed the wizard was standing on its
+    quest objective. The goal line said "in <a Wysteria area>" the
+    whole time.
+    """
+    mine = world_of_zone(zone)
+    theirs = world_of_area(goal_area(goal))
+    if not mine or not theirs:
+        return False
+    return _world_key(theirs) != mine
+
+
 def furthest_behind(positions):
     """(indices, gap, why) for the wizards that are genuinely behind.
 
