@@ -1622,6 +1622,138 @@ def test_the_wiring_reaches_the_exported_summary(qapp):
     assert tel.summary()["party"]["role"] == "booster"
 
 
+def test_the_wiring_is_re_stamped_from_what_the_run_actually_became(qapp):
+    """The block is written at connect time and every fact in it can
+    change afterwards. `_setup_script` has not run yet, no duel has
+    named a wizard yet, and the GUI writes `auto_quest`,
+    `booster_party`, `solo_script`, `follow_leader` and `leader`
+    straight onto the running worker while it works.
+
+    Rev 09a0af80's export said mode "follow the leader",
+    `scripted: false`, `script_drives: "nobody"` and leader "wizard 1"
+    -- for a scripted booster party. It was added for diagnosis, and it
+    blocked this audit."""
+    worker = _party_worker()
+    for seat in worker.seats:
+        seat.tel.party = worker._party_shape(seat)
+    assert worker.seats[0].tel.party["mode"] != "booster party"
+
+    # ...and now the run becomes what it really is.
+    worker.leader, worker.booster_party = 1, True
+    worker.script = "sub main { }"
+    worker.seats[1].wizard_name = "Konstantin V"
+
+    worker._restamp_party()
+    for seat in worker.seats:
+        assert seat.tel.party["mode"] == "booster party"
+        assert seat.tel.party["scripted"] is True
+        assert seat.tel.party["script_drives"] == "the leader only"
+        assert seat.tel.party["leader"] == "Konstantin V"
+    assert worker.seats[0].tel.party["role"] == "booster"
+    assert worker.seats[1].tel.party["role"] == "leader"
+
+
+def test_re_stamping_the_wiring_can_never_stop_the_run(qapp):
+    """It describes the run. Nothing that merely describes the run may
+    take it down -- the first version of the heartbeat read
+    `runner.steps` unguarded and killed a seat's loop with it."""
+    worker = _party_worker()
+
+    def boom(_seat):
+        raise RuntimeError("the shape could not be read")
+
+    worker._party_shape = boom
+    worker._restamp_party()          # must not raise
+
+
+def test_a_running_stage_keeps_its_seat_on_the_air(qapp):
+    """`seat.ticked_at` was stamped once at the top of the tick and
+    nowhere else, and one tick's stages sum to about 1,425 seconds
+    against a `DRIVER_QUIET` of 90. `STAGE_LIMITS["script step"]` is
+    240 on its own and a `waitfor zonechange` is bounded at 150 inside
+    it -- so one ordinary instruction took a seat past the liveness
+    threshold and handed the party's script to the other seat. Rev
+    09a0af80: `script-driver-moved` immediately followed by
+    `waitfor-gave-up`, which is one event reported twice."""
+    import asyncio
+    import time
+
+    worker = _party_worker()
+    worker.TICK_STAMP = 0.01
+    seat = worker.seats[0]
+    seat.ticked_at = time.monotonic()
+    began = seat.ticked_at
+
+    async def a_long_instruction():
+        await asyncio.sleep(0.12)
+
+    asyncio.run(worker._stage(seat, "script step", a_long_instruction(),
+                              limit=5.0))
+    assert seat.ticked_at > began, \
+        "a seat doing exactly what it was told went quiet and lost the script"
+
+
+def test_a_stage_that_hangs_is_still_cut_off(qapp):
+    """The clock running is not the same as the deadline being gone.
+    A stage that never returns is caught by `STAGE_LIMITS`, which is
+    the bound built for it, and reported."""
+    import asyncio
+
+    worker = _party_worker()
+    worker.TICK_STAMP = 0.01
+    seat = worker.seats[0]
+
+    hung = {"cancelled": False}
+
+    async def never():
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            hung["cancelled"] = True
+            raise
+
+    asyncio.run(worker._stage(seat, "script step", never(), limit=0.05))
+    assert hung["cancelled"], "the hung stage was left running"
+    assert any(e["kind"] == "stage-timeout" for e in seat.tel.questing), \
+        "it was cut off and nobody was told"
+
+
+def test_only_one_task_ever_steps_the_party_vm(qapp):
+    """`_script_step` is guarded by the DRIVE lock, which is per seat.
+    `_script_seat` hands the script to another seat when seat 0 goes
+    quiet and hands it back when it returns -- so seat 1 can be inside
+    `run_for` while seat 0's loop comes round, takes its own lock, and
+    steps the same instruction pointer."""
+    import asyncio
+
+    worker = _party_worker()
+    inside = {"now": 0, "most": 0}
+
+    class _Runner:
+        stale = False
+        running = True
+        steps = 0
+        failures = 0
+        last_error = ""
+
+        async def run_for(self, should_stop=None):
+            inside["now"] += 1
+            inside["most"] = max(inside["most"], inside["now"])
+            await asyncio.sleep(0.05)
+            inside["now"] -= 1
+            return True
+
+    worker.seats[0].runner = _Runner()
+
+    async def both():
+        await asyncio.gather(worker._script_step(worker.seats[0]),
+                             worker._script_step(worker.seats[1]))
+
+    asyncio.run(both())
+    assert inside["most"] == 1, \
+        "two tasks were inside one VM's burst at the same time"
+
+
 def test_a_lost_fight_is_written_down_at_all(qapp):
     """It was not. `FightRecord.won` is read by the export's win count
     and a red label in the panel, and by nothing else -- so rev
@@ -20804,7 +20936,10 @@ def test_a_stale_runner_is_not_stepped_while_the_hold_is_on():
 
     from deimos_bridge.gui.live import LiveWorker
 
-    src = inspect.getsource(LiveWorker._script_step)
+    # `_script_step` is the one-stepper guard; `_step_the_vm` is the
+    # body it guards, and the stale check lives with the stepping.
+    src = (inspect.getsource(LiveWorker._script_step)
+           + inspect.getsource(LiveWorker._step_the_vm))
     assert "if not runner.stale:" in src
     stepped = src.index("run_for")
     handled = src.index("if runner.stale:")

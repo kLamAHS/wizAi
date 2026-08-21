@@ -702,6 +702,12 @@ class LiveWorker(QThread):
         #: seat that owns it. Kept only so the handover is said once
         #: rather than every tick. See `_script_seat`.
         self._script_driver = None
+        #: True while some seat's tick is inside the party's one VM.
+        #: `_script_step` is guarded by the DRIVE lock, which is per
+        #: seat -- so when the driver moves and the original owner's
+        #: loop then comes back to life, two tasks hold two different
+        #: locks and step one instruction pointer. See `_script_step`.
+        self._vm_stepping = False
         #: the step count and when it last CHANGED, so a script that has
         #: stopped executing is a fact rather than an inference. See
         #: `_check_script_alive`.
@@ -918,8 +924,15 @@ class LiveWorker(QThread):
                 # exactly as stuck as one wedged outside it, and that
                 # nine-minute hole was the one place the timeline could
                 # not account for.
-                await self._heartbeat(seat, self._script_drives(seat),
-                                      fighting=fighting)
+                # Through `_stage`, not bare. It is the one remaining
+                # unbounded await in this loop despite the comment
+                # above saying every other one is inside a deadline,
+                # and it is a DIAGNOSTIC -- the instrument for finding
+                # a stuck wizard must never be the reason one is stuck.
+                await self._stage(seat, "the heartbeat",
+                                  self._heartbeat(seat,
+                                                  self._script_drives(seat),
+                                                  fighting=fighting))
                 if fighting or seat.in_upkeep:
                     await asyncio.sleep(0.5)
                     continue
@@ -1349,6 +1362,11 @@ class LiveWorker(QThread):
                     "reading the quest": 30.0,
                     "script": 20.0,
                     "script step": 240.0,
+                    # A handful of memory reads and a log line. Bounded
+                    # because it used to be awaited bare: a read that
+                    # never returns took the seat's whole tick with it,
+                    # and this is the stage that exists to REPORT that.
+                    "the heartbeat": 30.0,
                     "following the leader": 60.0,
                     "quest step": 60.0}
     #: the fallback for a stage with no entry above, including the
@@ -1466,9 +1484,20 @@ class LiveWorker(QThread):
         return got
 
     #: how long a seat's service loop may go without coming round before
-    #: another seat takes the script off it. Three ticks' worth of the
-    #: slowest stage, and well under the five minutes `_check_progress`
-    #: needs to notice anything at all.
+    #: another seat takes the script off it.
+    #:
+    #: This used to read "three ticks' worth of the slowest stage",
+    #: which was never true: `STAGE_LIMITS["script step"]` alone is
+    #: 240, and a `waitfor zonechange` is bounded at 150 inside it. A
+    #: seat doing exactly what the script told it to went quiet for
+    #: longer than this and lost the script to its partner -- rev
+    #: 09a0af80's `script-driver-moved` immediately followed by
+    #: `waitfor-gave-up`.
+    #:
+    #: A running stage now keeps the clock going (`_still_ticking`), so
+    #: this measures what it says: a loop that is not going round at
+    #: all. Ninety seconds of that is a wedged client, not a slow
+    #: instruction.
     DRIVER_QUIET = 90.0
 
     def _dialogue_is_ours(self):
@@ -1613,7 +1642,7 @@ class LiveWorker(QThread):
         if wheel:
             coro = self._at_the_wheel(seat, name, coro, started)
         try:
-            await asyncio.wait_for(coro, limit)
+            await self._still_ticking(seat, asyncio.wait_for(coro, limit))
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError:
@@ -1638,6 +1667,46 @@ class LiveWorker(QThread):
                            kind="stage-timeout", detail=detail)
         except Exception as exc:
             self._stage_failed(seat, name, exc)
+
+    #: how often a running stage restamps its seat's liveness clock.
+    #: Small against `DRIVER_QUIET`; large against anything the loop
+    #: does per tick.
+    TICK_STAMP = 5.0
+
+    async def _still_ticking(self, seat, awaitable):
+        """`awaitable`, with this seat's liveness clock kept running.
+
+        `seat.ticked_at` is stamped once at the top of the tick and
+        nowhere else, and one tick's stages sum to about 1,425 seconds
+        against a `DRIVER_QUIET` of 90. `STAGE_LIMITS["script step"]`
+        is 240 on its own, and a `waitfor zonechange` is bounded at 150
+        INSIDE it -- so one ordinary instruction took a seat past the
+        liveness threshold and handed the party's script to the other
+        seat. Rev 09a0af80's export has exactly that: `script-driver-
+        moved` followed by `waitfor-gave-up`, which is one event
+        reported twice, and the second seat picking up a program the
+        first was in the middle of.
+
+        A stage that is RUNNING is not a loop that has stopped coming
+        round. So the clock runs while it runs, and what `DRIVER_QUIET`
+        now measures is what its name says: a seat whose loop is not
+        going round at all -- wedged in `_read_in_battle`, or gone. A
+        stage that genuinely hangs is still caught, by its own deadline
+        in `STAGE_LIMITS`, which is the bound built for it.
+        """
+        import time
+
+        task = asyncio.ensure_future(awaitable)
+        try:
+            while True:
+                done, _pending = await asyncio.wait({task},
+                                                    timeout=self.TICK_STAMP)
+                seat.ticked_at = time.monotonic()
+                if done:
+                    return task.result()
+        finally:
+            if not task.done():
+                task.cancel()
 
     async def _at_the_wheel(self, seat, name, coro, started=None):
         """`coro`, holding this wizard's drive lock.
@@ -2000,6 +2069,26 @@ class LiveWorker(QThread):
         runner = owner.runner
         if runner is None:
             return
+        # One stepper, enforced. The stage above holds this SEAT's drive
+        # lock, and `_script_seat` can hand the script to another seat
+        # and hand it back: seat 1 picks it up while seat 0 is quiet,
+        # seat 0's loop comes round again, and now two tasks holding two
+        # different per-seat locks are inside `run_for` on one
+        # instruction pointer. Skipped rather than queued -- a second
+        # burst of the same program is not wanted late either, and
+        # waiting for it would spend this seat's whole stage deadline.
+        if self._vm_stepping:
+            return
+        self._vm_stepping = True
+        try:
+            await self._step_the_vm(seat, owner, runner)
+        finally:
+            self._vm_stepping = False
+
+    async def _step_the_vm(self, seat, owner, runner):
+        """The body of `_script_step`, under its one-stepper guard."""
+        import time
+
         if not runner.stale:
             done = await runner.run_for(
                 should_stop=lambda: self._stop or seat.in_upkeep)
@@ -2486,6 +2575,32 @@ class LiveWorker(QThread):
                               if self._solo_pilot() or self.booster_party
                               else "every seat"),
         }
+
+    def _restamp_party(self):
+        """Rewrite every seat's party block from what is true NOW.
+
+        `_party_shape` is stamped once at connect time, and every fact
+        in it can change afterwards: `_setup_script` has not run yet,
+        no duel has named a wizard yet, and the GUI writes
+        `auto_quest`, `booster_party`, `solo_script`, `follow_leader`
+        and `leader` straight onto the running worker while it works.
+
+        So a block written once is a claim about a run that had not
+        started. Rev 09a0af80's export said mode "follow the leader",
+        `scripted: false`, `script_drives: "nobody"` and leader
+        "wizard 1" -- for a scripted booster party. Every other line in
+        an export means something different depending on this one, and
+        this one was wrong.
+
+        Never raises: it describes the run, and nothing that merely
+        describes the run may stop it.
+        """
+        for seat in self.seats:
+            try:
+                if seat.tel is not None:
+                    seat.tel.party = self._party_shape(seat)
+            except Exception:
+                pass
 
     #: how many times one opening may be lost before the party is told
     #: it is a wall rather than bad luck. Two, because the second loss
@@ -3397,6 +3512,18 @@ class LiveWorker(QThread):
                 # answer which mode produced them at all. It cost an
                 # afternoon of reading rungs backwards to work out
                 # which wizard was even supposed to be leading.
+                # ...and re-stamped as the run goes on. This is the
+                # connect-time snapshot: it is written BEFORE the
+                # script is loaded, BEFORE the first duel learns
+                # `wizard_name`, and before any GUI push -- and the GUI
+                # then mutates `auto_quest`, `booster_party`,
+                # `solo_script`, `follow_leader` and `leader` on the
+                # RUNNING worker. Rev 09a0af80's export reported mode
+                # "follow the leader", `scripted: false`,
+                # `script_drives: "nobody"` and leader "wizard 1" for a
+                # run that plainly had a script and was a booster
+                # party. The block was added for diagnosis and it
+                # blocked the diagnosis. See `_restamp_party`.
                 seat.tel.party = self._party_shape(seat)
                 # Before a single fight: the seat number is knowable now,
                 # the wizard's name is not until a duel names it. Half an
@@ -3484,6 +3611,11 @@ class LiveWorker(QThread):
                 # must not survive a failed run.
                 await self._hotkeys.stop()
                 self._hotkeys = None
+            # The export is written after this. Whatever the run
+            # ACTUALLY was -- the mode the GUI switched it to, the
+            # script it was given, the names the duels learned -- is
+            # known now and was not when the block was first stamped.
+            self._restamp_party()
             for seat in self.seats:
                 if seat.runner is not None:
                     seat.runner.stop()
@@ -4150,6 +4282,10 @@ class LiveWorker(QThread):
         if now - seat.beat_at < self.HEARTBEAT_EVERY:
             return
         seat.beat_at = now
+        # Once a minute is often enough to catch a mode the operator
+        # switched mid-run, and cheap: `_party_shape` reads fields off
+        # `self` and touches no client.
+        self._restamp_party()
 
         # Nothing a report does may take the run down. This is the whole
         # body, not just the write, and it is not defensiveness for its
