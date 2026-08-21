@@ -6017,6 +6017,43 @@ class LiveWorker(QThread):
                     duds.pop(key, None)
         return duds.get(where, 0)
 
+    #: total seconds of held script one spot may ever cost.
+    #:
+    #: `COUNT_HOLD` (45) x `COUNT_HOLD_REPLAYS` (2) x
+    #: `COUNT_HOLD_DUDS` (3) is 270 seconds per spot, and that product
+    #: is only a bound if all three counters hold. Two of them do not
+    #: survive an ordinary run: `count_hold_replays` is a per-seat
+    #: field that any of a dozen paths resets, and the dud count was
+    #: keyed through `seat.progress` -- which carries the quest goal --
+    #: so rev 09a0af80's flapping tracker silently re-keyed the memory
+    #: and the count never reached three at all.
+    #:
+    #: This one cannot be reset by anything except the spot actually
+    #: firing. It is deliberately larger than the nominal 270: it is
+    #: not a tighter policy, it is the backstop that makes the policy
+    #: true.
+    COUNT_HOLD_SPEND = 300.0
+
+    def _sigil_spent(self, seat, add=0.0, zone=None):
+        """Seconds of held script this spot has cost, ever.
+
+        Same key as `_sigil_dud` and cleared by the same event -- a
+        spot that fires is a sigil, and a sigil that took four tries is
+        still a sigil.
+        """
+        where = self._sigil_cell(seat, zone=zone)
+        if not where[1]:
+            return 0.0
+        spent = getattr(self, "_sigil_spends", None)
+        if spent is None:
+            spent = self._sigil_spends = {}
+        if add:
+            spent[where] = spent.get(where, 0.0) + add
+            if len(spent) > 64:
+                for key in list(spent)[:16]:
+                    spent.pop(key, None)
+        return spent.get(where, 0.0)
+
     def _sigil_fired(self, seat):
         """This spot IS a sigil after all: forget its failures.
 
@@ -6025,11 +6062,11 @@ class LiveWorker(QThread):
         runs `zone_seen` is the far side of the door and would look up
         a spot that has never been held at.
         """
-        duds = getattr(self, "_sigil_duds", None)
-        if not duds:
-            return
         where = self._sigil_cell(seat, zone=self._count_hold_zone)
-        duds.pop(where, None)
+        for ledger in (getattr(self, "_sigil_duds", None),
+                       getattr(self, "_sigil_spends", None)):
+            if ledger:
+                ledger.pop(where, None)
 
     async def _maybe_count_hold(self, seat):
         """Hold the script while a dungeon sigil may be counting down.
@@ -6419,6 +6456,27 @@ class LiveWorker(QThread):
             return
 
         seat.count_hold_spot = seat.progress
+        spent = self._sigil_spent(seat)
+        if spent >= self.COUNT_HOLD_SPEND:
+            # The total, independent of how the visits were counted.
+            # Everything else that bounds this rung is a counter some
+            # other path can reset; this is a clock that only the spot
+            # firing can stop.
+            seat.count_hold_seen = None
+            self._count_hold_last = now
+            self._say_once(
+                seat, f"sigil-spent:{self._sigil_cell(seat)}",
+                f"{seat.name} is not holding here again — this spot has "
+                f"already cost {spent / 60:.0f} min of held script and "
+                f"never fired",
+                kind="countdown-hold-refused",
+                detail=(f"declined to hold the script at this spot: it "
+                        f"has spent {spent:.0f}s frozen here across "
+                        f"every visit, against a ceiling of "
+                        f"{self.COUNT_HOLD_SPEND:.0f}s. Whatever is "
+                        f"here, four minutes of a stopped script has "
+                        f"not got the party through it"))
+            return
         duds = self._sigil_dud(seat)
         if duds >= self.COUNT_HOLD_DUDS:
             # This spot has taken three full holds and never fired. It
@@ -6450,6 +6508,17 @@ class LiveWorker(QThread):
             return
         seat.count_hold_seen = None
         self._count_hold_last = now
+        # Charged when the hold is COMMITTED, at its full length,
+        # rather than measured at whichever of the half-dozen exits
+        # ends it. Deliberately: the ledger's job is to be the one
+        # bound nothing else can reset, and a charge that depends on
+        # reaching a particular exit is a charge some path can skip. A
+        # spot released early by its goal advancing is over-charged by
+        # the difference -- and a spot where the goal advances is a
+        # conversation, which is what this ceiling is for. A spot that
+        # FIRES has its ledger cleared outright, so a real sigil never
+        # pays for the tries it took.
+        self._sigil_spent(seat, add=self.COUNT_HOLD)
         self._count_hold_until = now + self.COUNT_HOLD
         self._count_hold_zone = seat.zone_seen
         self._count_hold_seat = seat.index

@@ -19367,6 +19367,60 @@ def test_an_unplaceable_goal_is_never_taken_as_evidence():
     assert not worker._marker_is_another_world(seat)
 
 
+def test_one_spot_cannot_freeze_the_script_forever(monkeypatch):
+    """`COUNT_HOLD` x `COUNT_HOLD_REPLAYS` x `COUNT_HOLD_DUDS` is 270
+    seconds per spot, and that product is only a bound if all three
+    counters hold. Two of them do not survive an ordinary run:
+    `count_hold_replays` is a per-seat field a dozen paths reset, and
+    the dud count was keyed through `seat.progress` -- which carries
+    the quest goal -- so rev 09a0af80's flapping tracker silently
+    re-keyed the memory and the count never reached three at all.
+
+    The ledger is the one bound nothing else can reset."""
+    import asyncio
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+    worker.COUNT_HOLD_EVERY = 0.0
+    worker.COUNT_HOLD_DUDS = 10_000          # let the other bounds off
+    worker.COUNT_HOLD_SPEND = worker.COUNT_HOLD * 2
+
+    for _ in range(4):
+        worker._count_hold_until = 0.0
+        worker._count_hold_last = -1e9
+        seat.count_hold_spot = None
+        seat.count_hold_replays = 0
+        seat.count_hold_seen = 1.0
+        # ...and the goal flaps, which used to re-key the memory
+        seat.goal = f"{seat.goal} "
+        asyncio.run(worker._maybe_count_hold(seat))
+
+    assert not worker._countdown_held(), \
+        "one spot went on freezing the script past its whole budget"
+    assert any(e["kind"] == "countdown-hold-refused"
+               and "min of held script" in e["detail"]
+               or "frozen here" in e.get("detail", "")
+               for e in seat.tel.questing), \
+        "it stopped and never said the spot had spent its budget"
+
+
+def test_a_sigil_that_finally_fires_owes_nothing(monkeypatch):
+    """A door that opens on the fourth try is still a door. Firing
+    clears the ledger with the dud count -- otherwise a slow dungeon
+    entrance walks itself into the ceiling and the guard stops
+    protecting the one thing it exists for."""
+    import asyncio
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+    worker.COUNT_HOLD_EVERY = 0.0
+    seat.count_hold_seen = 1.0
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._sigil_spent(seat) > 0
+
+    worker._sigil_fired(seat)
+    assert worker._sigil_spent(seat) == 0, \
+        "a spot that fired kept paying for the tries it took"
+
+
 def test_the_hold_refuses_a_marker_that_belongs_to_another_world(monkeypatch):
     """End to end through the rung that actually held the script.
 
