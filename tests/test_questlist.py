@@ -195,6 +195,46 @@ def test_an_unknown_quest_cannot_be_disowned():
         "Fight the Kraken of Nonexistent Bay", "Talk To Sergeant Major Talbot")
 
 
+# Rev 1f912030 walked Wizard City main #2, #3 and #4 and read all three
+# as unplaceable — which destroys the main-line progress measurement and,
+# ten minutes in, arms the questline recovery against a wizard that is
+# perfectly on track. The docstring above predicted the cause ("the
+# data's objectives are incomplete in places") and only guarded the case
+# where NOTHING claims the goal.
+
+def test_a_quest_that_lists_no_objectives_is_never_disowned():
+    """`Skeleton Crew` (WC #3) and `Monsters and Mazes` (#4) carry an
+    empty objectives list, so the loop that lets a quest defend itself
+    never ran and the claimant convicted it unopposed. A quest that
+    cannot name one step of its own cannot be shown not to own this
+    one."""
+    for name, goal in (("Skeleton Crew",
+                        "Talk To Ceren Nightchant in Unicorn Way"),
+                       ("Monsters and Mazes",
+                        "Talk to Lady Oriel in Unicorn Way")):
+        assert questlist.position_of(name).on_main, name
+        assert not questlist._load().by_name[
+            questlist._norm(name)].get("objectives"), \
+            f"{name} grew objectives — pick another empty one"
+        assert not questlist.goal_disowns(name, goal), (name, goal)
+
+
+def test_a_side_quest_claiming_the_goal_is_not_evidence():
+    """`Ghost Hunters` is Wizard City main #2 and its goal `Talk To
+    Private Connelly in Unicorn Way` is claimed by `Unicorn's Folly` —
+    a side quest that sends you to the same soldier. Side quests share
+    the main line's NPCs constantly; that is what a side quest in
+    Unicorn Way IS. The failure this rung exists for is a name one
+    MAIN-LINE quest stale."""
+    folly = questlist.position_of("Unicorn's Folly")
+    assert folly.known and not folly.on_main, "pick another side quest"
+    assert questlist._loose_lookup(
+        questlist._load(), "Talk To Private Connelly in Unicorn Way"), \
+        "nothing claims it, so this proves nothing either way"
+    assert not questlist.goal_disowns(
+        "Ghost Hunters", "Talk To Private Connelly in Unicorn Way")
+
+
 def test_the_hud_dropping_a_title_still_finds_the_quest():
     """The HUD tracks `Talk To Gordon Flemming` for quests the data
     records as `Talk to Dr. Gordon Flemming`. Every quest listing him

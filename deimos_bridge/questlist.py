@@ -411,6 +411,26 @@ def goal_disowns(quest_name, goal) -> bool:
     -- the data's objectives are incomplete in places (`Into the Map
     Room` lists a prose note instead of steps), and distrusting the
     name over that would unplace every wizard walking such a quest.
+
+    That last sentence was the whole prediction and it was not guarded.
+    Rev 1f912030 walked Wizard City main #2, #3 and #4 and read all
+    three as unplaceable:
+
+      * `Skeleton Crew` (#3) and `Monsters and Mazes` (#4) list NO
+        objectives at all. A quest that cannot name one step of its own
+        can never be shown not to own this one -- and the loop below
+        simply did not run, so `_loose_lookup` convicted it unopposed.
+      * `Ghost Hunters` (#2) lists one summary line, `Defeat 3 Lost
+        Souls`, and its goal `Talk To Private Connelly in Unicorn Way`
+        was claimed by `Unicorn's Folly` -- a SIDE quest that happens to
+        send you to the same soldier. Side quests share the main line's
+        NPCs constantly; that is what a side quest in Unicorn Way IS.
+
+    So both halves now need evidence. The named quest must list steps to
+    be measured against, and the claimant must be ON THE LINE -- because
+    the failure this exists for is a name one MAIN-LINE quest stale (rev
+    30e83468: `Eye of Krok` #18 held while the goal had moved to #20),
+    and a side quest sharing an NPC is not that.
     """
     index = _load()
     quest = index.by_name.get(_norm(quest_name))
@@ -419,11 +439,16 @@ def goal_disowns(quest_name, goal) -> bool:
     goal_t = _tokens(_strip_zone(goal))
     if len(goal_t) < 2:
         return False
-    for objective in quest.get("objectives") or ():
-        theirs = _tokens(_strip_zone(objective))
-        if len(theirs) >= 2 and (goal_t <= theirs or theirs <= goal_t):
+    mine = [_tokens(_strip_zone(o)) for o in quest.get("objectives") or ()]
+    mine = [t for t in mine if len(t) >= 2]
+    if not mine:
+        return False
+    for theirs in mine:
+        if goal_t <= theirs or theirs <= goal_t:
             return False
-    return bool(_loose_lookup(index, goal))
+    return any(other.get("questline") == "main"
+               and other.get("questline_order") is not None
+               for other in _loose_lookup(index, goal))
 
 
 #: area display names a world hub may legitimately be hiding under.
