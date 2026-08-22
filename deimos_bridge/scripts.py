@@ -1075,11 +1075,14 @@ class ScriptRunner:
             self.failures += 1
             self.stale = True
             self.stale_sig = f"ip {self._ip()}: step-timeout"
+            here = self._at_the_ip()
             self.last_error = (
                 f"one instruction ran for {self.STEP_LIMIT:.0f}s without "
-                f"finishing — a 'waitfor…' whose condition never came. "
-                f"Cancelling it leaves the VM half-way through an "
-                f"instruction, so the script is being reloaded")
+                f"finishing"
+                + (f" — instruction {self._ip()}, `{here}`"
+                   if here else " — a 'waitfor…' whose condition never came")
+                + f". Cancelling it leaves the VM half-way through an "
+                  f"instruction, so the script is being reloaded")
             return False
         except Exception as exc:
             self.failures += 1
@@ -1104,6 +1107,34 @@ class ScriptRunner:
         """Where the VM is, or None if it will not say."""
         task = getattr(self.vm, "current_task", None)
         return getattr(task, "ip", None)
+
+    #: how much of the hung instruction's text is worth carrying into
+    #: an export line. A `waitfor` with a long window path is the
+    #: common case and the head of it is the identifying part.
+    HUNG_INSTRUCTION_CHARS = 120
+
+    def _at_the_ip(self):
+        """The instruction the VM is sitting on, as text, or "".
+
+        `_ip` has always been computed and then dropped: `stale_sig`
+        carried it for the crash-loop backoff and `last_error` -- the
+        string that actually reaches the export -- was a constant. Rev
+        a4912b2b reloaded 32 times, about 96 minutes of the run, every
+        one of them saying "a 'waitfor…' whose condition never came"
+        and none of them saying WHICH.
+
+        `VM.step` reads `self.program[self.current_task.ip]`, so the
+        instruction is one index away and its `__repr__` is already the
+        kind and its data.
+        """
+        try:
+            ip = self._ip()
+            program = getattr(self.vm, "program", None)
+            if ip is None or not program or not (0 <= ip < len(program)):
+                return ""
+            return repr(program[ip])[:self.HUNG_INSTRUCTION_CHARS]
+        except Exception:
+            return ""
 
     async def run_for(self, seconds=None, should_stop=None) -> int:
         """Step until the budget runs out. Returns instructions executed.

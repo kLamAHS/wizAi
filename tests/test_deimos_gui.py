@@ -10057,6 +10057,66 @@ def test_an_instruction_that_never_finishes_reloads_the_script(monkeypatch):
     assert runner.stale is False
 
 
+def test_a_hung_instruction_is_named_in_the_reason(monkeypatch, qapp):
+    """`_ip` has always been computed and then dropped: `stale_sig`
+    carried it for the crash-loop backoff and `last_error` — the string
+    that actually reaches the export — was a constant.
+
+    Rev a4912b2b reloaded 32 times, about 96 minutes of a 6.7-hour run,
+    every one of them saying "a 'waitfor…' whose condition never came"
+    and none of them saying WHICH. `VM.step` reads
+    `self.program[self.current_task.ip]`, so the instruction is one
+    index away and its repr is already the kind and its data."""
+    import asyncio
+
+    from deimos_bridge.scripts import ScriptRunner
+
+    class _Instruction:
+        def __repr__(self):
+            return "waitfor_zonechange None"
+
+    class _Hangs:
+        running = True
+        program = ["something", "else", _Instruction()]
+        current_task = type("T", (), {"ip": 2})()
+
+        async def step(self):
+            await asyncio.Event().wait()
+
+        def kill(self):
+            pass
+
+    runner = ScriptRunner(_Hangs(), "src")
+    runner.STEP_LIMIT = 0.2
+    assert asyncio.run(runner.step()) is False
+    assert "waitfor_zonechange" in runner.last_error, runner.last_error
+    assert "instruction 2" in runner.last_error, \
+        "the instruction pointer was computed and thrown away again"
+
+
+def test_an_unreadable_ip_still_gives_the_old_sentence(monkeypatch, qapp):
+    """A VM that will not say where it is must not lose the message it
+    always had."""
+    import asyncio
+
+    from deimos_bridge.scripts import ScriptRunner
+
+    class _Hangs:
+        running = True
+
+        async def step(self):
+            await asyncio.Event().wait()
+
+        def kill(self):
+            pass
+
+    runner = ScriptRunner(_Hangs(), "src")
+    runner.STEP_LIMIT = 0.2
+    assert asyncio.run(runner.step()) is False
+    assert "without finishing" in runner.last_error
+    assert "whose condition never came" in runner.last_error
+
+
 def test_the_script_stage_limit_sits_above_the_runners_own(qapp):
     """Otherwise the stage cancel fires first and cancels an instruction
     the runner was going to bound and reload by itself."""
@@ -15739,16 +15799,91 @@ def _followers(monkeypatch, reason):
     return worker, seat, boss, asked
 
 
-def test_a_friends_list_that_never_reaches_the_game_is_written_off(
-        monkeypatch):
-    """A client-side defect that is 0-for-N has to have an exit.
-
-    Rev ebc4aff8's booster paid for it 19 times over 41 minutes at a
-    flat 72-second cadence — 45s of timeout per name spelling, up to
-    three spellings — with an identical reason every time and no
-    widening interval. `route-impassable` fired once per route and
-    changed nothing; `cross_zone_fails` counted and nothing read it."""
+def _keep_failing(worker, seat, monkeypatch, times, apart=0.0):
+    """Drive `times` cross-zone follows, optionally spread through time."""
     import asyncio
+    import time
+
+    clock = {"now": time.monotonic()}
+    real = time.monotonic
+    monkeypatch.setattr(time, "monotonic", lambda: clock["now"])
+    try:
+        for _ in range(times):
+            seat.followed_at = -1e9
+            asyncio.run(worker._follow_step(seat.client, seat))
+            clock["now"] += apart
+    finally:
+        monkeypatch.setattr(time, "monotonic", real)
+    return clock
+
+
+def test_a_ten_second_blip_never_writes_the_friends_list_off(monkeypatch):
+    """The regression that cost rev a4912b2b five hours.
+
+    `FOLLOW_EVERY` is 2.5s, so the old threshold of four consecutive
+    failures was **ten seconds** — and it set a flag cleared nowhere,
+    which it could not have been, because the flag suppressed the
+    friends-list call whose success was the only thing that reset the
+    streak. A one-way door by construction.
+
+    Ninety minutes of a follow that had not missed once, 45 zone
+    changes, nine dungeon interiors, 25 fights and 25 wins. Then ten
+    seconds of UI trouble, and for the remaining five hours the booster
+    changed zone twice while the quester went 4 and 26 — 22 of those
+    losses to one 12,345 HP board it walked into 23 times alone.
+
+    A streak has to be consecutive in TIME as well as in count."""
+    worker, seat, boss, asked = _followers(
+        monkeypatch,
+        "the friends-list UI never came up on this client, so the "
+        "teleport was never attempted (No child window named "
+        "NewFriendsListWindow; hardened copy)")
+
+    _keep_failing(worker, seat, monkeypatch,
+                  worker.FRIENDS_UI_GIVE_UP + 2, apart=2.5)
+
+    assert not worker._friends_list_rested(seat), \
+        "ten seconds of UI trouble rested the list for the run"
+    assert all(a is False for a in asked), \
+        "it stopped trying the one mechanism that was working"
+    assert not [e for e in seat.tel.questing
+                if e["kind"] == "friends-list-resting"]
+
+
+def test_a_list_that_keeps_failing_is_rested_and_then_tried_again(
+        monkeypatch):
+    """A real 0-for-N still has to have an exit — and a way back. The
+    rest ends by itself, because a guard must never suppress the
+    evidence that would lift it."""
+    worker, seat, boss, asked = _followers(
+        monkeypatch,
+        "the friends-list UI never came up on this client, so the "
+        "teleport was never attempted (No child window named "
+        "NewFriendsListWindow; hardened copy)")
+
+    spread = worker.FRIENDS_UI_WINDOW / (worker.FRIENDS_UI_GIVE_UP - 1) + 0.1
+    clock = _keep_failing(worker, seat, monkeypatch,
+                          worker.FRIENDS_UI_GIVE_UP, apart=spread)
+
+    assert worker._friends_list_rested(seat), "a real streak was ignored"
+    said = [e for e in seat.tel.questing
+            if e["kind"] == "friends-list-resting"]
+    assert len(said) == 1, "said it once per attempt, or never"
+    assert "tried again" in said[0]["detail"], \
+        "it read as a final verdict, which is what the last one was"
+
+    # ...and the rest ends.
+    import time
+    monkeypatch.setattr(
+        time, "monotonic",
+        lambda: clock["now"] + worker.FRIENDS_UI_REST + 1.0)
+    assert not worker._friends_list_rested(seat), \
+        "the rest never expired — the guard is a one-way door again"
+
+
+def test_the_rest_doubles_so_a_dead_client_is_cheap(monkeypatch):
+    """One attempt per rest instead of one every `FOLLOW_EVERY`, without
+    ever being permanent."""
     import time
 
     worker, seat, boss, asked = _followers(
@@ -15756,19 +15891,24 @@ def test_a_friends_list_that_never_reaches_the_game_is_written_off(
         "the friends-list UI never came up on this client, so the "
         "teleport was never attempted (No child window named "
         "NewFriendsListWindow; hardened copy)")
+    spread = worker.FRIENDS_UI_WINDOW / (worker.FRIENDS_UI_GIVE_UP - 1) + 0.1
 
-    for _ in range(worker.FRIENDS_UI_GIVE_UP + 2):
-        seat.followed_at = 0.0
-        asyncio.run(worker._follow_step(seat.client, seat))
+    rests = []
+    now = time.monotonic()
+    for _ in range(3):
+        monkeypatch.setattr(time, "monotonic", lambda n=now: n)
+        seat.friends_ui_rest_until = 0.0        # the last rest expired
+        clock = _keep_failing(worker, seat, monkeypatch,
+                              worker.FRIENDS_UI_GIVE_UP, apart=spread)
+        rests.append(seat.friends_ui_rest)
+        now = clock["now"]
 
-    assert seat.friends_ui_dead, "it never stopped paying for the list"
-    assert asked[-1] is True, "the last attempt still went to the list"
-    said = [e for e in seat.tel.questing
-            if e["kind"] == "friends-list-written-off"]
-    assert len(said) == 1, "said it once per attempt, or never"
+    assert rests == sorted(rests) and rests[-1] > rests[0], \
+        f"the rest did not lengthen: {rests}"
+    assert rests[-1] <= worker.FRIENDS_UI_REST_MAX
 
 
-def test_a_game_rule_never_writes_the_friends_list_off(monkeypatch):
+def test_a_game_rule_never_rests_the_friends_list(monkeypatch):
     """"Your friend is busy" and "this instance is closed" arrive from
     the GAME after the teleport is requested. They are rules to route
     around, not a broken client, and they come right by themselves the
@@ -15778,11 +15918,11 @@ def test_a_game_rule_never_writes_the_friends_list_off(monkeypatch):
     worker, seat, boss, asked = _followers(
         monkeypatch, "your friend is busy and cannot be teleported to")
 
-    for _ in range(worker.FRIENDS_UI_GIVE_UP + 4):
-        seat.followed_at = 0.0
-        asyncio.run(worker._follow_step(seat.client, seat))
+    _keep_failing(worker, seat, monkeypatch,
+                  worker.FRIENDS_UI_GIVE_UP + 4,
+                  apart=worker.FRIENDS_UI_WINDOW)
 
-    assert not seat.friends_ui_dead, \
+    assert not worker._friends_list_rested(seat), \
         "a game rule was mistaken for a broken client"
     assert all(a is False for a in asked)
 
@@ -19009,6 +19149,128 @@ def test_a_lost_duel_is_left_rather_than_played_out(qapp):
     assert seat.flee_asked, "it watched the wizard die and said so"
     said = [e for e in seat.tel.questing if e["kind"] == "fleeing"]
     assert said and "chooses the death" in said[0]["detail"]
+
+
+def _walled(worker, seat, opening, n=None, alone=True):
+    """Give this seat `n` recorded losses to one board."""
+    import time
+
+    now = time.monotonic()
+    n = worker.BOSS_WALL_LOSSES if n is None else n
+    seat.lost_to[opening] = [(now - 60.0 * (i + 1), alone) for i in range(n)]
+
+
+def _round_one(worker, seat, opening, seats_in_plan=1):
+    """Round 1 of a fresh duel on this board, through `_on_decision`'s
+    watcher."""
+    from deimos_bridge.telemetry import RoundRecord
+
+    seat.tel.start_fight()
+    seat.tel.fights[-1].opening = opening
+    seat.flee_asked = False
+    rec = RoundRecord(fight=seat.tel.fights[-1].index, round=1,
+                      player_hp=2573.0, player_max_hp=2573.0,
+                      seats_in_plan=seats_in_plan)
+    worker._watch_for_a_known_wall(seat, rec)
+    return rec
+
+
+def test_a_board_that_beat_this_wizard_twice_alone_is_left_on_round_one(qapp):
+    """`boss-wall` has been able to say this since it was written —
+    "Walking back in a third time costs the same minutes and learns
+    nothing: either the party has to arrive together or this fight
+    needs a different deck" — and that is where it stopped.
+
+    Rev a4912b2b: it fired at t=8927.8 after the second loss to
+    `Maudit Soulban@10520 + Fomori Giant@1825`, and Konstantin walked
+    back into that 12,345 HP board twenty-one more times over the next
+    four and a half hours, losing every one. Round one, because the
+    whole saving is not fighting it."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    board = "Maudit Soulban@10520+Fomori Giant@1825"
+    _walled(worker, seat, board)
+
+    _round_one(worker, seat, board)
+    assert seat.flee_asked, "it walked into the wall a third time"
+    said = [e for e in seat.tel.questing if e["kind"] == "wall-refused"]
+    assert said and "the party arriving together is what opens it" \
+        in said[0]["detail"]
+
+
+def test_the_wall_watcher_is_wired_into_the_decision_hook():
+    """A watcher nothing calls is a comment. It has to run on the same
+    per-round path the unwinnable verdict does, and BEFORE the rollout
+    evidence, because a board that has already won twice needs no
+    rollout at all."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._on_decision)
+    assert "_watch_for_a_known_wall" in src, \
+        "the wall watcher exists and nothing calls it"
+
+
+def test_a_wall_is_fought_when_the_party_is_actually_there(qapp):
+    """The condition that makes a wall passable is the party, and
+    `_maybe_flee` already tests for it — so the wall opens by itself the
+    moment the booster arrives, with no separate unlock to get wrong."""
+    worker = _party_worker()
+    seat, other = worker.seats
+    board = "Maudit Soulban@10520+Fomori Giant@1825"
+    _walled(worker, seat, board)
+
+    _round_one(worker, seat, board, seats_in_plan=2)
+    assert not seat.flee_asked, "it fled a fight its booster had joined"
+
+    # ...and the same board with the partner merely IN the duel.
+    other.client, other.in_duel = object(), True
+    _round_one(worker, seat, board, seats_in_plan=1)
+    assert not seat.flee_asked
+
+
+def test_a_board_that_beat_the_whole_party_is_not_called_a_wall(qapp):
+    """A board that beats a lone wizard is a wall the party can walk
+    through together. A board that beats the whole party is a different
+    problem with a different fix, and refusing it on round one would
+    close the only door that was open."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    board = "Maudit Soulban@10520+Fomori Giant@1825"
+    _walled(worker, seat, board, alone=False)
+
+    _round_one(worker, seat, board)
+    assert not seat.flee_asked
+
+
+def test_the_wall_memory_ages_out(qapp):
+    """A board re-tried an hour later is a fresh question — the wizard
+    may have levelled, re-decked, or the party may be back — and a
+    memory that never ages turns one bad afternoon into a permanent
+    no-go."""
+    import time
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    board = "Maudit Soulban@10520+Fomori Giant@1825"
+    now = time.monotonic()
+    seat.lost_to[board] = [(now - worker.WALL_MEMORY - 60.0, True)] * 2
+
+    _round_one(worker, seat, board)
+    assert not seat.flee_asked, "an hour-old wall was still closed"
+
+
+def test_one_loss_is_not_a_wall(qapp):
+    """Two, because the second loss is the first evidence that the
+    first was not variance."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    board = "Maudit Soulban@10520+Fomori Giant@1825"
+    _walled(worker, seat, board, n=1)
+
+    _round_one(worker, seat, board)
+    assert not seat.flee_asked
 
 
 def test_a_duel_the_party_is_still_swinging_in_is_not_fled(qapp):
