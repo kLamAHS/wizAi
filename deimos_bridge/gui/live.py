@@ -418,6 +418,16 @@ class _Seat:
         self.zone_seen = None
         #: when `zone_seen` last CHANGED.
         self.zone_since = 0.0
+        #: zones this wizard has been in recently, zone -> when it was
+        #: last left. A return to one inside `ZONE_BOUNCE_WINDOW` is a
+        #: shuttle, not progress -- the same test `cells_seen` gives
+        #: positions, one coordinate up. See
+        #: `LiveWorker._nothing_achieved_since`.
+        self.zones_seen = {}
+        #: when this wizard last reached a zone it had NOT just come
+        #: from. The achievement clock reads this rather than
+        #: `zone_since`, which every bounce restamps.
+        self.zone_fresh_at = 0.0
         #: zones this seat has already been rejoined INTO, and when.
         #: The backstop against dragging a wizard in a circle.
         self.rejoin_history = []
@@ -479,6 +489,13 @@ class _Seat:
         #: twice is a wall; the outcome used to be recorded and read by
         #: nothing but the win count. See `_note_the_loss`.
         self.lost_to = {}
+        #: opening -> [(when, the goal held at the time)] for fights this
+        #: wizard WON. The mirror of `lost_to`, and it answers the
+        #: failure wearing the opposite face: eight identical victories
+        #: with an unmoving goal is as stuck as eight defeats. See
+        #: `LiveWorker._watch_for_a_winning_loop`.
+        self.won_to = {}
+        self.said_loop = ""
         #: consecutive rounds where every line the rollout tried ended
         #: with this wizard dead, and the fight that was last reported
         #: for. See `_watch_for_a_fight_that_cannot_be_won`.
@@ -2709,6 +2726,78 @@ class LiveWorker(QThread):
     #: third costs another ten minutes to learn nothing.
     BOSS_WALL_LOSSES = 2
 
+    #: how many times one board may be beaten, with the quest goal
+    #: unchanged throughout, before the run is looping rather than
+    #: questing.
+    #:
+    #: Rev f27693c2's last thirty minutes: `Calista@9680+Black Cap@1740`
+    #: killed EIGHT times, won every one, `The Wild <-> Cave of Anguish`
+    #: eight times, and the goal `Talk To Deirdre Madden in The Wild`
+    #: never moved. Three is where a respawning mob on the route stops
+    #: being an explanation.
+    WINNING_LOOP = 3
+    #: how long a win is remembered against its board. A grind that
+    #: comes back an hour later is a fresh question.
+    WIN_MEMORY = 1800.0
+
+    def _watch_for_a_winning_loop(self, seat, won):
+        """Notice a fight this wizard keeps winning to no effect.
+
+        `lost_to` has remembered defeats since rev 8ebfcf70 and Phase H
+        acts on them. Nothing remembered victories, because a victory
+        looks like the system working -- and it is, right up until the
+        same board is beaten for the third time with the quest goal
+        exactly where it was.
+
+        The goal is the whole discriminator. A board beaten repeatedly
+        while the goal ADVANCES is a respawning mob on the route, which
+        is normal and must not trip this; the same board beaten while
+        the goal stands still is a program going round in a circle.
+        """
+        import time
+
+        if won is not True or not seat.tel.fights:
+            return
+        fight = seat.tel.fights[-1]
+        opening = getattr(fight, "opening", "") or ""
+        goal = (seat.goal or "").strip()
+        if not opening or not goal:
+            return
+        now = time.monotonic()
+        seen = [(t, g) for t, g in seat.won_to.get(opening, ())
+                if now - t <= self.WIN_MEMORY]
+        seen.append((now, goal))
+        seat.won_to[opening] = seen
+        if len(seat.won_to) > 16:
+            seat.won_to.pop(next(iter(seat.won_to)), None)
+        onthis = [t for t, g in seen if g == goal]
+        if len(onthis) < self.WINNING_LOOP:
+            return
+        key = f"{opening}|{goal}"
+        if seat.said_loop == key:
+            return
+        seat.said_loop = key
+        said = (f"{seat.name} has now beaten {opening} {len(onthis)} times "
+                f"without {goal!r} moving. Winning is not progress on its "
+                f"own — the same board, the same step, and the party is "
+                f"going round in a circle rather than through it")
+        for other in self.seats:
+            try:
+                other.tel.note_questing("winning-loop", said)
+            except Exception:
+                pass
+        self._say(seat, said)
+        # ...and hand it to the actor that already exists for "the
+        # script is looping and getting nowhere". wizAi cannot walk to
+        # an NPC itself; a restart replays the route dispatch, which is
+        # what put the party in the instance in the first place.
+        if now - self._script_restarted_at < self.SCRIPT_RESTART_EVERY:
+            return
+        self._restart_the_script(
+            seat, said + ". Restarting the script so its route dispatch "
+                         "runs fresh against the step the party is "
+                         "actually on")
+
     def _note_the_loss(self, seat, won):
         """Record a defeat, and say when one keeps happening.
 
@@ -3916,6 +4005,7 @@ class LiveWorker(QThread):
             won = await self._fight_outcome(seat.client, seat)
             seat.tel.end_fight(won)
             self._note_the_loss(seat, won)
+            self._watch_for_a_winning_loop(seat, won)
             self.seat_fight_done.emit(seat.index, seat.fought)
             if seat.index == 0:
                 self.fight_done.emit(seat.fought)
@@ -4148,6 +4238,13 @@ class LiveWorker(QThread):
     #: stood on within this window, same zone and same goal, has not
     #: gone anywhere -- it has bounced.
     OSCILLATION_WINDOW = 180.0
+    #: how long a ZONE is remembered for the same test. Longer than
+    #: `OSCILLATION_WINDOW`, because a zone round trip is a slower thing
+    #: than a position one: rev f27693c2's party shuttled
+    #: `The Wild -> Cave of Anguish -> The Wild` eight times on a
+    #: ~250-second cycle, which a three-minute window would have called
+    #: eight fresh arrivals.
+    ZONE_BOUNCE_WINDOW = 900.0
     #: how long a quest name that will not read is kept before it counts
     #: as unknown. Keeping the previous value on a blank read is right
     #: (a blank is not evidence of change) -- for a while. Past this,
@@ -5170,7 +5267,6 @@ class LiveWorker(QThread):
             return
         if now - self._script_restarted_at < self.SCRIPT_RESTART_EVERY:
             return
-        self._script_restarted_at = now
         if on_it:
             stuck_at = (f"this wizard standing ON its quest marker "
                         f"({away:,.0f} away) and nothing changing")
@@ -5184,6 +5280,23 @@ class LiveWorker(QThread):
                 f"Restarting it so its route dispatch runs fresh against "
                 f"the party's current quest — the operator's manual reset, "
                 f"automated")
+        self._restart_the_script(seat, said)
+
+    def _restart_the_script(self, seat, said):
+        """Restart the party's script and say so. Throttled by the caller.
+
+        Split out so a second caller can reach it: `_maybe_restart_script`
+        decides the marker-shaped cases, and `_watch_for_a_winning_loop`
+        decides the "this program keeps doing the same thing" one. Both
+        want the same action and the same sentence structure, and
+        neither should own the other's gates.
+        """
+        import time
+
+        runner = self.seats[0].runner
+        if runner is None:
+            return
+        self._script_restarted_at = time.monotonic()
         ok = runner.restart()
         skipped = list(getattr(runner, "skipped_setup", None) or ())
         if not ok:
@@ -6020,11 +6133,32 @@ class LiveWorker(QThread):
     #: gather's teleports, prompt polls and X presses ARE late joins,
     #: then the instance load takes seconds more. Rev 7e1980b5: a 20s
     #: hold expired at t+20.0 and the script's safe-area teleport
-    #: landed at t+20.1, one tick after, mid-entry. The release on a
-    #: zone change is immediate, so a too-long hold at a real sigil
-    #: costs nothing; only a hold at a non-sigil pays the full length,
-    #: once per visit.
-    COUNT_HOLD = 45.0
+    #: landed at t+20.1, one tick after, mid-entry.
+    #:
+    #: 45 was chosen on the reasoning that "a too-long hold at a real
+    #: sigil costs nothing; only a hold at a non-sigil pays the full
+    #: length". The first half is true and the second is the whole
+    #: cost: at rev f27693c2, 19 of 34 episodes ran the clock out and
+    #: fired nothing -- 855 seconds, 17% of an 81-minute run.
+    #:
+    #: So it is measured now rather than argued. Across **151
+    #: successful holds in every export ever taken**, the distribution
+    #: of how long the guard actually needed is:
+    #:
+    #:     median 15.6s | p90 27.7s | p95 32.6s | longest 43.5s
+    #:
+    #: and the trade at each length is
+    #:
+    #:     40s -> loses  1 of 151 fires (1%), saves 11% of the waste
+    #:     35s -> loses  4 of 151 fires (3%), saves 22%
+    #:     30s -> loses 12 of 151 fires (8%), saves 33%
+    #:
+    #: 35 buys a fifth of the waste for 3% of the fires, and a lost
+    #: fire costs one re-approach where a dead hold costs the full
+    #: length every time. Re-judge it from the same numbers: pair
+    #: `countdown-hold` with `countdown-hold-over` in any export and
+    #: histogram the episodes that ended "the zone changed".
+    COUNT_HOLD = 35.0
     #: how many times an EVIDENCED sigil (a helper's prompt seen and
     #: pressed) re-arms its hold after expiring unfired, before the
     #: spot is left to the script's own entry machinery.
@@ -6620,12 +6754,22 @@ class LiveWorker(QThread):
                                f"that have held and never fired"
                                if duds > 1 else ""))
                     return
+                # ...and it pays into the memory that stops the next
+                # one. This branch produced 10 of rev f27693c2's 19
+                # dead holds and charged NOTHING, so `COUNT_HOLD_DUDS`
+                # -- the backstop written for "this spot has held three
+                # times and never fired" -- was inert for the commonest
+                # case. Every branch that spends a full hold and gets
+                # nothing has to pay.
+                duds = self._sigil_dud(seat, +1)
                 seat.tel.note_questing(
                     "countdown-hold-over",
                     f"held {self.COUNT_HOLD:.0f}s and no zone change came — "
                     f"not a counting sigil (or the countdown was already "
                     f"lost). The state left standing is the walk-in door's "
-                    f"exactly, so the sweep gets it before the script does")
+                    f"exactly, so the sweep gets it before the script does"
+                    + (f". That is {duds} visit(s) to this spot that have "
+                       f"held and never fired" if duds > 1 else ""))
                 # An expired hold IS the walk-through's evidence, already
                 # aged: at the marker, no prompt, the hold's length of
                 # proven nothing. Rev d3ed4d3c spent seven minutes at
@@ -7780,14 +7924,54 @@ class LiveWorker(QThread):
     def _nothing_achieved_since(self, seat):
         """When this wizard last achieved anything, as a monotonic stamp.
 
-        A changed goal or a changed zone. Deliberately NOT a changed
-        position: a wizard being teleported around one zone by a retry
-        loop is the failure, not the refutation of it.
+        A changed goal, or arrival in a zone it has not just come from.
+        Deliberately NOT a changed position: a wizard being teleported
+        around one zone by a retry loop is the failure, not the
+        refutation of it.
+
+        And deliberately not a changed ZONE either, which is the half
+        this missed. `zone_since` is restamped on any zone change at
+        all, so a wizard shuttling between two of them looks productive
+        forever -- the clock written to survive the script's position
+        teleports did not survive its zone teleports. Rev f27693c2:
+        thirty minutes on one unchanged goal, `The Wild <-> Cave of
+        Anguish` eight times, `Calista@9680+Black Cap@1740` killed
+        eight times and won every time, and **not one** escalation line
+        in the export, because every clock the ladder reads was being
+        reset twice a cycle.
+
+        `zone_since` keeps its own meaning for the rungs that want
+        "when did this wizard last change zone". This is the one asking
+        whether anything was achieved, and a lap is not.
         """
-        stamps = [t for t in (seat.goal_at, seat.zone_since,
+        stamps = [t for t in (seat.goal_at, seat.zone_fresh_at,
                               seat.progress_at if not seat.goal_at
-                              and not seat.zone_since else 0.0) if t]
+                              and not seat.zone_fresh_at else 0.0) if t]
         return max(stamps) if stamps else seat.progress_at
+
+    def _note_zone(self, seat, zone, now):
+        """Stamp the zone clocks, telling a lap from a journey.
+
+        `zone_since` moves on every change, as it always has. The
+        achievement clock moves only for a zone this wizard has not
+        been in within `ZONE_BOUNCE_WINDOW` -- one coordinate up from
+        the test `_note_progress` gives position cells, and for the
+        same reason.
+        """
+        was = seat.zone_seen
+        if zone == was:
+            return
+        if was:
+            seat.zones_seen[was] = now
+            if len(seat.zones_seen) > 16:
+                cut = now - self.ZONE_BOUNCE_WINDOW
+                for name, at in list(seat.zones_seen.items()):
+                    if at < cut:
+                        del seat.zones_seen[name]
+        seat.zone_since = now
+        if now - seat.zones_seen.get(zone, -1e9) >= self.ZONE_BOUNCE_WINDOW:
+            seat.zone_fresh_at = now
+        seat.zone_seen = zone
 
     def _check_progress(self, seat):
         """Say so when a running script is getting nowhere.
@@ -9151,9 +9335,7 @@ class LiveWorker(QThread):
                             "zone", f"{seat.zone_seen} -> {zones[seat]}")
                     except Exception:
                         pass
-                if zones[seat] != seat.zone_seen:
-                    seat.zone_since = now
-                seat.zone_seen = zones[seat]
+                self._note_zone(seat, zones[seat], now)
             if spot is not None and zones[seat]:
                 seat.last_spot = spot
                 seat.last_spot_zone = zones[seat]

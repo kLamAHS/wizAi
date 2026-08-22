@@ -19151,6 +19151,139 @@ def test_a_lost_duel_is_left_rather_than_played_out(qapp):
     assert said and "chooses the death" in said[0]["detail"]
 
 
+def _won_a_fight(worker, seat, opening, goal):
+    """Play one winning fight against this board, on this goal."""
+    seat.goal = goal
+    seat.tel.start_fight()
+    seat.tel.fights[-1].opening = opening
+    worker._watch_for_a_winning_loop(seat, True)
+
+
+def test_beating_one_board_over_and_over_on_one_step_is_a_loop(qapp):
+    """Rev f27693c2's last thirty minutes: `Calista@9680+Black Cap@1740`
+    killed EIGHT times, won every one, `The Wild <-> Cave of Anguish`
+    eight times, and the goal `Talk To Deirdre Madden in The Wild` never
+    moved. Nothing said a word, because every rung that could have was
+    watching for defeats and every clock was being reset by the laps.
+
+    `lost_to` has remembered defeats since rev 8ebfcf70. A victory looks
+    like the system working — and it is, right up until the same board
+    is beaten a third time with the step exactly where it was."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.runner = None                       # no restart in this test
+    board = "Calista@9680+Black Cap@1740"
+    goal = "Talk To Deirdre Madden in The Wild"
+
+    for _ in range(worker.WINNING_LOOP):
+        _won_a_fight(worker, seat, board, goal)
+
+    said = [e for e in seat.tel.questing if e["kind"] == "winning-loop"]
+    assert said, "eight identical wins and not a word"
+    assert "without 'Talk To Deirdre Madden in The Wild' moving" \
+        in said[0]["detail"]
+
+    # ...once per (board, step), not once per win.
+    for _ in range(4):
+        _won_a_fight(worker, seat, board, goal)
+    assert len([e for e in seat.tel.questing
+                if e["kind"] == "winning-loop"]) == 1
+
+
+def test_the_winning_loop_watcher_is_wired_into_the_fight_loop():
+    """A watcher nothing calls is a comment. It has to run where every
+    fight ends, beside `_note_the_loss`, which is the rung that already
+    owns the opposite face of this."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._fight_loop)
+    assert "_watch_for_a_winning_loop" in src, \
+        "the winning-loop watcher exists and nothing calls it"
+    assert src.index("_note_the_loss") < src.index("_watch_for_a_winning_loop")
+
+
+def test_a_board_beaten_while_the_step_advances_is_just_a_mob(qapp):
+    """The goal is the whole discriminator. A respawning mob on the
+    route is normal, and calling that a loop would fire on every run
+    that fights its way down a street."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.runner = None
+    board = "Night Goblin@1695+Black Cap@1740"
+
+    for i in range(worker.WINNING_LOOP + 3):
+        _won_a_fight(worker, seat, board, f"step number {i}")
+
+    assert not [e for e in seat.tel.questing if e["kind"] == "winning-loop"]
+
+
+def test_a_loss_is_not_counted_as_a_lap(qapp):
+    """`lost_to` and Phase H own defeats. This rung is about the other
+    face, and mixing them would double-count one bad fight."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.runner = None
+    board = "Calista@9680+Black Cap@1740"
+    seat.goal = "Talk To Deirdre Madden in The Wild"
+    for _ in range(worker.WINNING_LOOP + 2):
+        seat.tel.start_fight()
+        seat.tel.fights[-1].opening = board
+        worker._watch_for_a_winning_loop(seat, False)
+    assert not [e for e in seat.tel.questing if e["kind"] == "winning-loop"]
+
+
+def test_the_win_memory_ages_out(qapp):
+    """A grind that comes back an hour later is a fresh question."""
+    import time
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.runner = None
+    board = "Calista@9680+Black Cap@1740"
+    goal = "Talk To Deirdre Madden in The Wild"
+    old = time.monotonic() - worker.WIN_MEMORY - 60
+    seat.won_to[board] = [(old, goal)] * (worker.WINNING_LOOP + 2)
+
+    _won_a_fight(worker, seat, board, goal)
+    assert not [e for e in seat.tel.questing if e["kind"] == "winning-loop"]
+
+
+def test_a_winning_loop_hands_off_to_the_script_restart(qapp):
+    """wizAi cannot walk to an NPC itself. A restart replays the route
+    dispatch, which is what put the party in the instance in the first
+    place — and it is throttled by the same clock every other restart
+    honours, so a loop cannot become a metronome."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    board = "Calista@9680+Black Cap@1740"
+    goal = "Talk To Deirdre Madden in The Wild"
+
+    restarted = []
+
+    class _Runner:
+        skipped_setup = ()
+
+        def restart(self):
+            restarted.append(True)
+            return True
+
+    worker.seats[0].runner = _Runner()
+    worker._script_restarted_at = -1e9
+    for _ in range(worker.WINNING_LOOP):
+        _won_a_fight(worker, seat, board, goal)
+
+    assert restarted, "the loop was reported and nothing acted"
+    assert [e for e in seat.tel.questing if e["kind"] == "script-restarted"]
+
+    # ...and the throttle holds against the next loop.
+    seat.said_loop = ""
+    for _ in range(worker.WINNING_LOOP):
+        _won_a_fight(worker, seat, board, goal)
+    assert len(restarted) == 1, "a loop became a restart metronome"
+
+
 def _walled(worker, seat, opening, n=None, alone=True):
     """Give this seat `n` recorded losses to one board."""
     import time
@@ -20442,6 +20575,76 @@ def test_the_stall_escalation_runs_on_a_clock_the_script_cannot_reset(qapp):
     assert time.monotonic() - worker._nothing_achieved_since(seat) < 5.0
 
 
+def test_shuttling_between_two_zones_is_not_progress(qapp):
+    """Rev f27693c2's last thirty minutes: the goal sat unchanged on
+    `Talk To Deirdre Madden in The Wild` while the party shuttled
+    `The Wild <-> Cave of Anguish` eight times and killed
+    `Calista@9680+Black Cap@1740` eight times, winning every one — and
+    **not one** escalation line reached the export, because
+    `zone_since` is restamped on any zone change at all and every clock
+    the ladder reads was being reset twice a cycle.
+
+    The achievement clock survived the script's position teleports and
+    not its zone teleports."""
+    import time
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    now = time.monotonic() - 1800.0
+    seat.goal_at = now
+    worker._note_zone(seat, "Avalon/AV_Z04_TheWild", now)
+
+    # eight laps, a couple of minutes apart, exactly as the run did.
+    # The FIRST arrival in the cave is real progress and counts; the
+    # seven round trips after it are the lap.
+    for i in range(8):
+        worker._note_zone(seat, "Avalon/Interiors/AV_Z04_Cave02",
+                          now + 250 * i + 100)
+        worker._note_zone(seat, "Avalon/AV_Z04_TheWild",
+                          now + 250 * i + 200)
+
+    assert seat.zone_fresh_at == now + 100, \
+        "the round trips read as fresh arrivals — the shuttle looked "\
+        "like travel"
+    stalled = time.monotonic() - worker._nothing_achieved_since(seat)
+    assert stalled > 1500.0, \
+        f"the stall clock reads {stalled:.0f}s — the shuttle reset it"
+    assert seat.zone_since == now + 250 * 7 + 200, \
+        "`zone_since` must keep its own meaning for the rungs that use it"
+
+
+def test_a_zone_it_has_not_just_come_from_is_still_progress(qapp):
+    """The half that must not change. A party actually travelling is
+    the normal case, and calling that a stall would fire on every run."""
+    import time
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    now = time.monotonic()
+    for i, zone in enumerate(("Avalon/AV_Z00_Hub", "Avalon/AV_Z02_HighRoad",
+                              "Avalon/AV_Z03_CaerLyon",
+                              "Avalon/AV_Z04_TheWild")):
+        worker._note_zone(seat, zone, now + i)
+    assert seat.zone_fresh_at == now + 3, "a real journey was called a lap"
+    assert time.monotonic() - worker._nothing_achieved_since(seat) < 5.0
+
+
+def test_a_zone_revisited_long_afterwards_is_progress_again(qapp):
+    """A lap is a lap for a while. Coming back to the world hub an hour
+    later is a journey, and the memory has to age or a long run writes
+    off everywhere it has ever been."""
+    import time
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    now = time.monotonic()
+    worker._note_zone(seat, "Avalon/AV_Z00_Hub", now)
+    worker._note_zone(seat, "Avalon/AV_Z02_HighRoad", now + 10)
+    late = now + worker.ZONE_BOUNCE_WINDOW + 60
+    worker._note_zone(seat, "Avalon/AV_Z00_Hub", late)
+    assert seat.zone_fresh_at == late, "the zone memory never ages"
+
+
 def test_a_new_cell_does_not_clear_the_stall_escalation(qapp):
     """The 5/10/20/40/80-minute band scheme exists so the export shows a
     stall GROWING. Clearing it on a new position cell collapsed it to
@@ -20591,6 +20794,56 @@ def test_a_sigil_that_finally_fires_owes_nothing(monkeypatch):
     worker._sigil_fired(seat)
     assert worker._sigil_spent(seat) == 0, \
         "a spot that fired kept paying for the tries it took"
+
+
+def test_a_plain_marker_hold_that_fires_nothing_charges_a_dud(monkeypatch):
+    """`COUNT_HOLD_DUDS` is documented as the backstop for "this spot
+    has taken three full holds and never fired", and the whole
+    `_sigil_cell` re-keying exists so that count can accumulate. The
+    branch that produced 10 of rev f27693c2's 19 dead holds charged
+    nothing into it, so the counter it protects was inert for the
+    commonest case."""
+    import asyncio
+    import time
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+    worker.COUNT_HOLD_EVERY = 0.0
+    before = worker._sigil_dud(seat)
+
+    seat.count_hold_seen = time.monotonic() - 1.0
+    asyncio.run(worker._maybe_count_hold(seat))       # arms the hold
+    assert worker._countdown_held(), "the hold never armed"
+
+    worker._count_hold_until = time.monotonic() - 1.0  # it ran out
+    asyncio.run(worker._maybe_count_hold(seat))        # notices expiry
+
+    assert worker._sigil_dud(seat) == before + 1, \
+        "a full hold that fired nothing paid nothing into the memory "\
+        "that stops the next one"
+    said = [e for e in seat.tel.questing
+            if e["kind"] == "countdown-hold-over"
+            and "not a counting sigil" in e["detail"]]
+    assert said, "it expired down some other branch than the one under test"
+
+
+def test_the_hold_fits_the_measured_shape_of_a_real_countdown(qapp):
+    """Measured, not argued. Across 151 successful holds in every export
+    ever taken the guard needed a median of 15.6s, p95 32.6s, and never
+    more than 43.5s — while 19 of rev f27693c2's 34 episodes ran the
+    clock out and fired nothing, 17% of an 81-minute run.
+
+    The hold has to sit above the p95 of what a real countdown needs and
+    well below the length that made dead holds the run's biggest single
+    cost."""
+    from deimos_bridge.gui.live import LiveWorker
+
+    assert 32.6 <= LiveWorker.COUNT_HOLD <= 40.0, \
+        (f"COUNT_HOLD is {LiveWorker.COUNT_HOLD}s: below the p95 of "
+         f"successful holds (32.6s) it starts costing real entries, and "
+         f"above 40 it is back to paying the full length at every "
+         f"non-sigil")
+    assert LiveWorker.COUNT_HOLD > LiveWorker.COUNT_HOLD_RETRY, \
+        "a hold shorter than its own retry cadence retries nothing"
 
 
 def test_a_partners_prompt_charges_one_dud_per_visit_not_per_tick(
