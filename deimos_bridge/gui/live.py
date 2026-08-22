@@ -449,7 +449,17 @@ class _Seat:
         #: `FRIENDS_UI_GIVE_UP` the friends list is written off for this
         #: client and the walk ladder is used directly.
         self.friends_ui_fails = 0
-        self.friends_ui_dead = False
+        #: when the current streak started and when it last grew, so a
+        #: streak has to be consecutive in TIME and not only in count.
+        self.friends_ui_first_fail = 0.0
+        self.friends_ui_last_fail = 0.0
+        #: until when the friends list is rested, and how long the last
+        #: rest was (it doubles). NEVER a permanent write-off: the rest
+        #: suppresses the very call whose success would clear it, so a
+        #: flag that only the call could lift is a one-way door. See
+        #: `LiveWorker._note_friends_ui`.
+        self.friends_ui_rest_until = 0.0
+        self.friends_ui_rest = 0.0
         #: set when the policy has given up on the duel this seat is in
         #: and it should be left. Read by the combat handler at the top
         #: of its round, because that coroutine owns the mouse. See
@@ -2740,8 +2750,13 @@ class LiveWorker(QThread):
             + ". This is the only place a defeat is written down: the "
             "fight record's outcome is read by the win count and nothing "
             "else")
+        # (when, was it alone). The second half is what makes the
+        # memory actionable rather than merely sad: a board that beats a
+        # LONE wizard twice is a wall the party can walk through
+        # together, and a board that beats the whole party is a
+        # different problem with a different fix.
         seen = seat.lost_to.setdefault(opening, [])
-        seen.append(now)
+        seen.append((now, alone))
         if len(seen) != self.BOSS_WALL_LOSSES:
             return
         live = [s for s in self.seats if s.client is not None]
@@ -3249,7 +3264,7 @@ class LiveWorker(QThread):
             # ladder rather than spending another 45s per name spelling
             # on a friends list that has failed on wizAi's side of the
             # glass `FRIENDS_UI_GIVE_UP` times running.
-            no_friends_list=seat.friends_ui_dead)
+            no_friends_list=self._friends_list_rested(seat))
         # A teleport the GAME refuses is not a wizAi failure to retry
         # harder: most dungeon instances allow friends-list ports and
         # some do not, and inside one that does not, every retry is
@@ -3272,6 +3287,12 @@ class LiveWorker(QThread):
             seat.follow_fails = 0
             seat.cross_zone_fails = 0
             seat.friends_ui_fails = 0
+            seat.friends_ui_first_fail = 0.0
+            # A follow that worked is the proof the rest was waiting
+            # for: back to full service, and the next rest starts short
+            # again rather than at the doubled length.
+            seat.friends_ui_rest = 0.0
+            seat.friends_ui_rest_until = 0.0
             return
         # A follower that cannot reach its leader is the failure that
         # makes the whole party pointless, so it is said -- but
@@ -4580,15 +4601,43 @@ class LiveWorker(QThread):
             pass
 
     #: consecutive friends-list failures on wizAi's own side before the
-    #: list is written off for that client.
+    #: list is RESTED for that client.
     #:
     #: Rev ebc4aff8's booster paid for it 19 times over 41 minutes at a
     #: flat 72-second cadence -- 45s of timeout per name spelling, up to
     #: three spellings -- with an identical reason every time and no
-    #: widening interval. `route-impassable` fired once per route and
-    #: changed nothing; `cross_zone_fails` counted and nothing read it.
-    #: A client-side defect that is 0-for-19 has to have an exit.
-    FRIENDS_UI_GIVE_UP = 4
+    #: widening interval. A client-side defect that is 0-for-19 has to
+    #: have an exit.
+    #:
+    #: It also has to have a way BACK. Rev a4912b2b is what the missing
+    #: half costs: this was four consecutive failures written off for
+    #: the rest of the run, `FOLLOW_EVERY` is 2.5s, so **ten seconds**
+    #: of UI trouble ended a party that had just followed its leader
+    #: through 45 zone changes and nine dungeon interiors without
+    #: missing once. The five hours after it: the booster changed zone
+    #: TWICE, and the quester -- 25 wins and no losses up to that point
+    #: -- went 4 and 26, losing 22 of them to a single 12,345 HP board
+    #: it walked into 23 times alone.
+    #:
+    #: Ten is a streak; four is a hiccup with a stopwatch on it.
+    FRIENDS_UI_GIVE_UP = 10
+
+    #: the streak has to span at least this long to mean anything. Four
+    #: failures 2.5s apart is one bad moment for the window; the same
+    #: four spread over a minute is a client that is not answering.
+    FRIENDS_UI_WINDOW = 60.0
+    #: how long the list is rested the first time, and the ceiling the
+    #: doubling stops at. A rested client costs one attempt per rest
+    #: instead of one every `FOLLOW_EVERY`; a recovered one is back in
+    #: service within a minute.
+    FRIENDS_UI_REST = 60.0
+    FRIENDS_UI_REST_MAX = 900.0
+
+    def _friends_list_rested(self, seat):
+        """Is this seat's friends list resting right now?"""
+        import time
+
+        return time.monotonic() < seat.friends_ui_rest_until
 
     def _note_friends_ui(self, seat, why):
         """Count a cross-zone follow that failed on OUR side, not the game's.
@@ -4597,28 +4646,64 @@ class LiveWorker(QThread):
         and "this instance is closed" arrive from the game AFTER the
         teleport is requested; a missing window is wizAi failing to
         drive its own UI two steps earlier. Only the second is worth
-        giving up on, because only the second cannot come right by
+        resting on, because only the second cannot come right by
         itself.
+
+        A REST, never a write-off. The first version set a flag that is
+        cleared nowhere -- and it could not have been cleared, because
+        the flag suppressed the friends-list call whose success was the
+        only thing that reset the streak. A guard must never suppress
+        the evidence that would lift it, and this one was a one-way
+        door by construction: ten seconds of UI trouble at rev a4912b2b
+        ended a working party for five hours.
+
+        So: a streak that spans real time rests the list, the rest
+        doubles while the failures keep coming, and every rest ends by
+        itself. A client that has come right is used again a minute
+        later; one that has not costs one attempt per rest.
         """
+        import time
+
         from .. import party
 
+        now = time.monotonic()
         if not party.never_asked(why):
             seat.friends_ui_fails = 0
+            seat.friends_ui_first_fail = 0.0
             return
+        if seat.friends_ui_fails and \
+                now - seat.friends_ui_last_fail > self.FRIENDS_UI_WINDOW:
+            # The last one was long enough ago to be a different
+            # episode. Streaks are consecutive in TIME as well as in
+            # count.
+            seat.friends_ui_fails = 0
+            seat.friends_ui_first_fail = 0.0
+        if not seat.friends_ui_fails:
+            seat.friends_ui_first_fail = now
         seat.friends_ui_fails += 1
-        if seat.friends_ui_dead \
-                or seat.friends_ui_fails < self.FRIENDS_UI_GIVE_UP:
+        seat.friends_ui_last_fail = now
+        if self._friends_list_rested(seat):
             return
-        seat.friends_ui_dead = True
+        spanned = now - seat.friends_ui_first_fail
+        if seat.friends_ui_fails < self.FRIENDS_UI_GIVE_UP \
+                or spanned < self.FRIENDS_UI_WINDOW:
+            return
+        rest = min(max(seat.friends_ui_rest * 2, self.FRIENDS_UI_REST),
+                   self.FRIENDS_UI_REST_MAX)
+        seat.friends_ui_rest = rest
+        seat.friends_ui_rest_until = now + rest
+        seat.friends_ui_fails = 0
+        seat.friends_ui_first_fail = 0.0
         said = (f"{seat.name}'s friends list has failed "
-                f"{seat.friends_ui_fails} times running on this client's "
-                f"own UI, never reaching the game — not using it again "
-                f"this run. Following {'the leader'} by the doors it "
-                f"walks instead")
+                f"{self.FRIENDS_UI_GIVE_UP} times over "
+                f"{spanned / 60:.0f} min on this client's own UI, never "
+                f"reaching the game — resting it for {rest / 60:.0f} min "
+                f"and following the leader by the doors it walks. It "
+                f"will be tried again after that")
         for other in self.seats:
             try:
                 other.tel.note_questing(
-                    "friends-list-written-off",
+                    "friends-list-resting",
                     said + f". Latest reason: {why}. " + party.UI_HINT)
             except Exception:
                 pass
@@ -10354,6 +10439,9 @@ class LiveWorker(QThread):
         if seat.tel.fights:
             seat.tel.fights[-1].damage_taken += rec.incoming
         self._watch_for_a_fight_that_cannot_be_won(seat, rec)
+        # ...and the board it has already lost to, which needs no
+        # rollout at all: the evidence is two previous defeats.
+        self._watch_for_a_known_wall(seat, rec)
         self._say_why_it_planned_alone(seat, rec)
         self.seat_round_done.emit(seat.index, rec)
         if seat.index == 0:
@@ -10503,7 +10591,56 @@ class LiveWorker(QThread):
     #: there and the run never got it back.
     FLEE_WHEN_LOST = True
 
-    def _maybe_flee(self, seat, rec, opening):
+    #: how long a wall is remembered. A board re-tried an hour later is
+    #: a fresh question -- the wizard may have levelled, re-decked, or
+    #: the party may be back -- and a memory that never ages turns one
+    #: bad afternoon into a permanent no-go.
+    WALL_MEMORY = 3600.0
+
+    def _is_a_known_wall(self, seat, opening):
+        """Has this board already beaten this wizard ALONE, twice?"""
+        import time
+
+        if not opening:
+            return False
+        now = time.monotonic()
+        alone = [t for t, was_alone in seat.lost_to.get(opening, ())
+                 if was_alone and now - t <= self.WALL_MEMORY]
+        return len(alone) >= self.BOSS_WALL_LOSSES
+
+    def _watch_for_a_known_wall(self, seat, rec):
+        """Leave, on round one, a board that has already won twice.
+
+        `boss-wall` has been able to say this since it was written --
+        "Walking back in a third time costs the same minutes and learns
+        nothing: either the party has to arrive together or this fight
+        needs a different deck" -- and that is where it stopped. Rev
+        a4912b2b: it fired at t=8927.8 after the second loss to
+        `Maudit Soulban@10520 + Fomori Giant@1825`, and Konstantin
+        walked back into that 12,345 HP board **twenty-one more times**
+        over the next four and a half hours, losing every one.
+
+        Round one, because the whole saving is not fighting it. And
+        only while alone: `_maybe_flee` already refuses when a
+        party-mate is in the duel, which is exactly the condition that
+        makes a wall passable -- so the wall opens by itself the moment
+        the booster arrives, with no separate unlock to get wrong.
+        """
+        if (rec.round or 0) != 1:
+            return
+        fight = seat.tel.fights[-1] if seat.tel.fights else None
+        opening = getattr(fight, "opening", "") or ""
+        if not self._is_a_known_wall(seat, opening):
+            return
+        self._maybe_flee(
+            seat, rec, opening,
+            why=(f"this board has already beaten {seat.name} "
+                 f"{self.BOSS_WALL_LOSSES} times while it was alone, and "
+                 f"it is alone again. Walking back in costs the same "
+                 f"minutes and learns nothing — the party arriving "
+                 f"together is what opens it"))
+
+    def _maybe_flee(self, seat, rec, opening, why=""):
         """Ask the duel to be left, on the coroutine that owns the mouse.
 
         A flag rather than a click: the combat handler holds the mouse
@@ -10527,6 +10664,17 @@ class LiveWorker(QThread):
         if others:
             return
         seat.flee_asked = True
+        if why:
+            for other in self.seats:
+                try:
+                    other.tel.note_questing(
+                        "wall-refused",
+                        f"leaving the duel against {opening}: {why}")
+                except Exception:
+                    pass
+            self._say(seat, f"{seat.name} is not fighting {opening} alone "
+                            f"again — it has already lost to it twice")
+            return
         for other in self.seats:
             try:
                 other.tel.note_questing(
