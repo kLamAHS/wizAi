@@ -481,6 +481,18 @@ class _Seat:
         #: of its round, because that coroutine owns the mouse. See
         #: `LiveWorker._maybe_flee`.
         self.flee_asked = False
+        #: how many cards this seat last held, and WHEN, as
+        #: (in hand + unreadable, monotonic). Stamped once per round in
+        #: `_on_decision`, which is the one place every seat's board
+        #: passes through on one thread -- so unlike `rec.at`, which is
+        #: each Telemetry's own clock started at its own first record,
+        #: these stamps are comparable BETWEEN seats. That is the whole
+        #: reason it exists: the flee rule is about the party's hands,
+        #: not this wizard's. See `_still_holding_cards`.
+        self.hand_seen = None
+        #: how many rounds the combat handler has actually clicked Flee
+        #: for this duel. See `LiveWorker.FLEE_TRIES`.
+        self.flee_tries = 0
         #: did this wizard hit zero health during the fight it is in?
         #: Latched by `on_defeated`, which is the only moment it is
         #: readable -- `_fight_outcome` runs after the game respawns the
@@ -4179,8 +4191,8 @@ class LiveWorker(QThread):
                 backend.on_failed_cast = self._failed_cast_hook(seat)
                 backend.on_school_mismatch = self._school_hook(seat)
                 backend.on_defeated = self._defeated_hook(seat)
-                backend.should_flee = (
-                    lambda s=seat: bool(s.flee_asked) and not self._stop)
+                backend.should_flee = lambda s=seat: self._flee_now(s)
+                backend.on_flee_failed = self._flee_failed_hook(seat)
                 backend.on_slow_cast = self._slow_cast_hook(seat)
                 backend.on_round_timing = self._round_timing_hook(seat)
                 # Bound late and read per round: the rate only becomes
@@ -4373,6 +4385,7 @@ class LiveWorker(QThread):
             # rounds belongs to the duel that produced it.
             seat.no_line_survives = 0
             seat.flee_asked = False
+            seat.flee_tries = 0
             seat.died_this_fight = False
             try:
                 # blocks until a duel starts, then plays it out -- but
@@ -4560,30 +4573,52 @@ class LiveWorker(QThread):
                 away = (dx * dx + dy * dy) ** 0.5
         except Exception:
             pass
-        if (away is not None and away <= self.AT_THE_MARKER
-                and (was_away is None or was_away > self.AT_THE_MARKER)
-                and now - seat.marker_flapped_at <= self.MARKER_FLAP_REST):
+        # A marker that has just come within arm's reach is the single
+        # most consequential read this poll makes -- it is what
+        # `marker_case` gates the whole sigil rung on -- and it is the
+        # least trustworthy. `read_quest_position` resolves to a hook
+        # installed in the game's quest-ARROW render loop: one static
+        # pointer, last writer wins, with no quest identity attached to
+        # what it wrote. The Wysteria quest that flapped into rev
+        # 09a0af80's Zafaria hub read 81 units away, then 0.
+        arriving = (away is not None and away <= self.AT_THE_MARKER
+                    and (was_away is None or was_away > self.AT_THE_MARKER))
+        # ...and the mirror of it. This comment used to read "arriving
+        # is confirmed and leaving is not: a marker going far needs no
+        # second opinion, because nothing acts on distance", and that
+        # stopped being true the moment `_marker_out_of_reach` started
+        # gating catch-ups on `marker_away > MARKER_IN_ZONE`. Three
+        # rungs act on a far reading now -- that one,
+        # `_quest_the_missed_step` (which hops at the same hook) and
+        # `_desperate_hop`.
+        #
+        # Rev 36d7c152 is the bill. Thomas read 170 away at t=1698,
+        # `catch-up-out-of-zone` said "113,557 away, which is another
+        # zone" at t=1733, and t=1763 read 30 -- same zone, same goal,
+        # 65 seconds. Twice more: 148 -> 26,459 -> 270, and 9,965 ->
+        # 24,893 -> 2,015. Three catch-ups started, two gave up with
+        # "nothing is attempting this step", and the script sat frozen
+        # for 348s while they did.
+        leaving = (away is not None and away > self.MARKER_IN_ZONE
+                   and was_away is not None
+                   and was_away <= self.MARKER_IN_ZONE)
+        resting = now - seat.marker_flapped_at <= self.MARKER_FLAP_REST
+        if arriving and resting:
             # Still disbelieved from a moment ago. Suppress the reading
             # rather than re-confirming it: `marker_away` is None after
             # a flap, and None IS the far-to-near transition that arms
             # the confirmation -- so without this a hook that flaps on
             # every read pays `GOAL_CONFIRM` twice a second forever.
             away = None
-        elif (away is not None and away <= self.AT_THE_MARKER
-                and (was_away is None or was_away > self.AT_THE_MARKER)):
-            # A marker that has just come within arm's reach is the
-            # single most consequential read this poll makes -- it is
-            # what `marker_case` gates the whole sigil rung on -- and
-            # it is the least trustworthy. `read_quest_position`
-            # resolves to a hook installed in the game's quest-ARROW
-            # render loop: one static pointer, last writer wins, with
-            # no quest identity attached to what it wrote. The Wysteria
-            # quest that flapped into rev 09a0af80's Zafaria hub read
-            # 81 units away, then 0.
-            #
-            # So arriving is confirmed and leaving is not: a marker
-            # going far needs no second opinion, because nothing acts
-            # on distance.
+        elif leaving and resting:
+            # Same rest, opposite fallback. A far reading nobody
+            # believes is not evidence the objective MOVED, so what is
+            # kept is what was last believed rather than nothing:
+            # `None` would hand the catch-up "no marker to aim at",
+            # which is the other way to refuse it for a read that was
+            # never real.
+            away = was_away
+        elif arriving:
             away = await self._confirmed_marker(seat, marker, at, away)
             if away is None:
                 # Disbelieved, and that has to be sticky for a moment.
@@ -4594,6 +4629,14 @@ class LiveWorker(QThread):
                 # which is what `_desperate_hop` and the catch-up read
                 # as "no marker to aim at".
                 seat.marker_flapped_at = now
+        elif leaving:
+            confirmed = await self._confirmed_marker(
+                seat, marker, at, away, case="leaving")
+            if confirmed is None:
+                seat.marker_flapped_at = now
+                away = was_away
+            else:
+                away = confirmed
         seat.marker_away = away
         # The dead-hook clock. One failed read is noise -- a zone change
         # makes several fail in a row -- but a marker that will not read
@@ -4849,8 +4892,9 @@ class LiveWorker(QThread):
             del seat.goals_seen[:-12]
         seat.goal = goal
 
-    async def _confirmed_marker(self, seat, marker, at, first):
-        """A marker that has just come near, read twice, or nothing.
+    async def _confirmed_marker(self, seat, marker, at, first,
+                                case="arriving"):
+        """A marker that has just crossed a threshold, read twice, or None.
 
         The two MARKERS are compared to each other, not two distances
         measured from one body position. That is the whole difference
@@ -4865,6 +4909,12 @@ class LiveWorker(QThread):
         None when the two disagree: a marker nobody can measure twice
         is not a marker to teleport a party onto, and `None` already
         means "no usable marker" to every rung that reads it.
+
+        `case` names which crossing is being confirmed, for the message
+        only. "arriving" is the far-to-near one this was written for;
+        "leaving" is the near-to-far one the catch-up made
+        consequential -- see `_note_goal`. The mechanism is identical
+        because the failure is: one pointer, last writer wins.
         """
         from .. import questing
 
@@ -4873,13 +4923,15 @@ class LiveWorker(QThread):
             again, _why = await questing.read_quest_position(seat.client)
         except Exception:
             again = None
+        landed = ("not treating the wizard as standing on its objective"
+                  if case == "arriving" else
+                  "not treating the objective as out of reach")
         if again is None or at is None or marker is None:
             try:
                 seat.tel.note_questing(
                     "marker-unconfirmed",
-                    f"the quest marker read {first:.0f} units away and "
-                    f"then would not read at all — not treating the "
-                    f"wizard as standing on its objective")
+                    f"the quest marker read {first:,.0f} units away and "
+                    f"then would not read at all — {landed}")
             except Exception:
                 pass
             return None
@@ -4899,11 +4951,12 @@ class LiveWorker(QThread):
         try:
             seat.tel.note_questing(
                 "marker-flapped",
-                f"the quest marker moved {moved:.0f} units between two "
-                f"reads {self.GOAL_CONFIRM:.2f}s apart — the arrow hook "
-                f"is a last-writer-wins pointer with no quest attached "
-                f"to it, so neither read is evidence of where this "
-                f"wizard's objective is")
+                f"the quest marker moved {moved:,.0f} units between two "
+                f"reads {self.GOAL_CONFIRM:.2f}s apart, on a reading of "
+                f"{first:,.0f} away — the arrow hook is a "
+                f"last-writer-wins pointer with no quest attached to "
+                f"it, so neither read is evidence of where this "
+                f"wizard's objective is. {landed[0].upper()}{landed[1:]}")
         except Exception:
             pass
         return None
@@ -10978,6 +11031,35 @@ class LiveWorker(QThread):
                           f"{' and '.join(s.name for s in caught)} caught up; "
                           f"still finishing the step for "
                           f"{' and '.join(s.name for s in seats)}")
+        # The entry conditions, asked again. `_check_in_step` refuses
+        # to START a catch-up whose laggard has no usable marker or one
+        # a within-zone hop cannot reach -- and nothing asked either
+        # question afterwards, so a catch-up whose step went
+        # un-attemptable mid-flight held the whole party until
+        # `CATCH_UP_IDLE` timed it out. Rev 36d7c152 spent 90s that way
+        # twice, and the second time the script sat frozen at 17,560
+        # instructions for 348s while the other quester -- which was
+        # making progress -- was dragged around behind the laggard.
+        #
+        # `_quest_the_missed_step` hops at the quest marker, so no
+        # marker means nothing is attempting the step, which is exactly
+        # what the give-up line ended up saying five minutes later.
+        blind = next((self._marker_unusable(s) for s in seats
+                      if self._marker_unusable(s)), "")
+        away = self._marker_out_of_reach(seats)
+        if blind or away is not None:
+            names = " and ".join(s.name for s in seats)
+            self._stop_catching_up(
+                "catch-up-unreachable",
+                f"{names}'s step stopped being one wizAi can drive — "
+                + (blind if blind else
+                   f"its objective now reads {away:,.0f} away, which is "
+                   f"another zone and not somewhere a quest teleport can "
+                   f"go")
+                + f". Still {gap} quest(s) behind. Handing the wizards "
+                  f"back to the script now rather than holding the party "
+                  f"for a step nothing is attempting")
+            return
         if gap < state["gap"]:
             # Progress, so the stall clock restarts even if the goal
             # line happened not to change.
@@ -11333,6 +11415,19 @@ class LiveWorker(QThread):
     def _school_hook(self, seat):
         return lambda actual: self._on_school_mismatch(actual, seat)
 
+    def _flee_failed_hook(self, seat):
+        """The flee click threw. Its own line in the export."""
+        def failed(why):
+            try:
+                seat.tel.note_questing(
+                    "flee-failed",
+                    f"{seat.name} tried to leave the duel and could not: "
+                    f"{why}")
+            except Exception:
+                pass
+            self._say(seat, f"{seat.name} could not leave the duel — {why}")
+        return failed
+
     def _slow_cast_hook(self, seat):
         """A retry notice. Status only -- the round is still in play."""
         return lambda message: self._say(seat, message)
@@ -11460,6 +11555,16 @@ class LiveWorker(QThread):
             getattr(backend, "_measured_incoming", 0.0) or 0.0)
         if seat.tel.fights:
             seat.tel.fights[-1].damage_taken += rec.incoming
+        # What this wizard is holding, for the party-wide read the flee
+        # rule needs. `hidden` counts: a card the resolver could not
+        # name is still a card in the hand, and treating an unreadable
+        # hand as an empty one would flee a wizard that has a board to
+        # play -- Crispulo carried a hidden `Minion Myth 000` in 24 of
+        # rev 36d7c152's rounds.
+        import time as _time
+
+        seat.hand_seen = (len(rec.hand or ()) + len(rec.hidden or ()),
+                          _time.monotonic())
         self._watch_for_a_fight_that_cannot_be_won(seat, rec)
         # ...and the board it has already lost to, which needs no
         # rollout at all: the evidence is two previous defeats.
@@ -11582,17 +11687,32 @@ class LiveWorker(QThread):
         alone = (f", and {seat.name} is planning them alone while "
                  f"{len(live)} wizard(s) are in the run"
                  if with_me <= 1 and len(live) > 1 else "")
+        horizon = next((h for h in (getattr(c, "horizon", None)
+                                    if not isinstance(c, dict)
+                                    else c.get("horizon")
+                                    for c in cands) if h), None)
         for other in self.seats:
             try:
                 other.tel.note_questing(
                     "unwinnable",
+                    # What the predicate actually knows, and no more.
+                    # `is_sentinel` scores a predicted DEATH at
+                    # horizon+2 and a rollout that merely ran out of
+                    # turns at horizon+1, both minus a kill credit of
+                    # up to 1.6 -- overlapping bands, so the score
+                    # cannot separate them and this line used to assert
+                    # the death anyway. Rev 36d7c152 said it twice
+                    # about fights the party won, once at full health.
                     f"{seat.no_line_survives} rounds in a row against "
-                    f"{opening} where every line the rollout tried — "
-                    f"including passing — ended with {seat.name} dead"
-                    f"{alone}. At {rec.player_hp:.0f} of "
-                    f"{rec.player_max_hp:.0f} health. This is the policy's "
-                    f"own verdict, and it has been available since the "
-                    f"round it first appeared")
+                    f"{opening} where no line the rollout tried — "
+                    f"including passing — cleared the board inside its "
+                    f"{horizon or '?'}-turn horizon{alone}. At "
+                    f"{rec.player_hp:.0f} of {rec.player_max_hp:.0f} "
+                    f"health. The rollout prices this wizard clearing the "
+                    f"board ALONE, so in a party it is a floor rather "
+                    f"than a forecast — nothing is left on it, and the "
+                    f"duel is only left when every wizard on this side "
+                    f"has run out of cards")
             except Exception:
                 pass
         self._say(seat,
@@ -11600,18 +11720,92 @@ class LiveWorker(QThread):
                   f"{seat.no_line_survives} rounds running")
         self._maybe_flee(seat, rec, opening)
 
-    #: whether a duel the policy has given up on is fled rather than
+    #: whether a duel the run has given up on is fled rather than
     #: played out to the death.
     #:
-    #: The verdict has always been available and was always only
-    #: reported: "Reported, not acted on. What to DO about it depends on
-    #: why the line is missing". That is true of the CAUSE and not of
-    #: the round in front of us -- once every line including passing
-    #: ends in this wizard's death, playing on chooses the death. Rev
-    #: ebc4aff8's Konstantin fought four more rounds after the verdict,
-    #: died, and was sent to the Commons; the script lost its place
-    #: there and the run never got it back.
+    #: Still true that a death is expensive: rev ebc4aff8's Konstantin
+    #: fought four more rounds after the verdict, died, was sent to the
+    #: Commons, and the script lost its place there for the rest of a
+    #: 206-minute run. What changed is WHAT COUNTS as having given up.
+    #:
+    #: It used to be the rollout's verdict, and rev 36d7c152 is that
+    #: verdict being wrong twice in one run. Crispulo's fight 5 opened
+    #: against `Foulgaze@550+Haunted Minion@135` with all nine lines
+    #: sentinel at 679 of 679 health -- full health, round one -- and
+    #: the fight was won in TWO rounds. Its fight 4 ran five consecutive
+    #: rounds where every line was above the horizon+1 band that only a
+    #: predicted death can reach, while its health sat flat at 550/679,
+    #: and the party won in twelve. The rollout prices ONE wizard
+    #: clearing a four-mob board alone while absorbing all of the
+    #: incoming; that is not the fight three wizards are in.
+    #:
+    #: So the trigger is now the operator's, and it is an observation
+    #: rather than a prediction: "only flee if there are no cards in
+    #: hand across all combatants else continue combat". A side with a
+    #: card left has something that can change the board. A side with
+    #: none has decked out, which is the one state where playing on
+    #: provably chooses the death. See `_still_holding_cards`.
+    #:
+    #: Measured against rev 36d7c152: no round of that run had an empty
+    #: hand -- 3 to 7 readable cards, every round, both questers -- so
+    #: this rule fires zero times on it, which is what the operator
+    #: asked for.
     FLEE_WHEN_LOST = True
+
+    #: how long a seat's hand reading is worth voting with. Rounds ran
+    #: 29-37s apart in rev 36d7c152, so this is about three of them:
+    #: long enough that a partner mid-cast still counts, short enough
+    #: that a record left over from a FINISHED fight cannot.
+    HAND_READ_FRESH = 120.0
+
+    #: how many rounds the handler may click Flee before the run accepts
+    #: that the duel is not going to be left, and plays it.
+    #:
+    #: There was no bound. `flee_asked` was set once and cleared only at
+    #: the NEXT fight, so `WizAiCombatHandler._maybe_flee` clicked the
+    #: button at the top of every round for the rest of the duel -- and
+    #: a click that lands and does nothing returns True and reports
+    #: nothing. Rev 36d7c152: `fleeing` at t=3152.8, still `in a duel`
+    #: at t=3183.1 and t=3243.2. "the trying to forfeit is annoying."
+    #:
+    #: Three, because a round is 30s here: enough for a confirmation
+    #: window or a zone load to resolve, and short enough that the
+    #: operator is not watching it click Flee for two minutes.
+    FLEE_TRIES = 3
+
+    def _flee_now(self, seat):
+        """Should the handler click Flee this round? Counts the tries.
+
+        Asked once a round by the combat coroutine, which owns the
+        mouse. Being asked AGAIN is the evidence that the last click did
+        not take -- the handler only reaches this at the top of a round
+        it is still in -- so the counter lives here rather than in the
+        backend, where the give-up would have nowhere to be reported.
+        """
+        if not seat.flee_asked or self._stop:
+            return False
+        seat.flee_tries += 1
+        if seat.flee_tries <= self.FLEE_TRIES:
+            return True
+        seat.flee_asked = False
+        fight = seat.tel.fights[-1] if seat.tel.fights else None
+        opening = getattr(fight, "opening", "") or "this board"
+        for other in self.seats:
+            try:
+                other.tel.note_questing(
+                    "flee-failed",
+                    f"{seat.name} clicked Flee at the top of "
+                    f"{self.FLEE_TRIES} rounds against {opening} and is "
+                    f"still in the duel — the button is not taking (a "
+                    f"confirmation window, a dungeon that refuses it, or "
+                    f"a click that landed on nothing). Playing the fight "
+                    f"out rather than spending every remaining round on a "
+                    f"button that does not work")
+            except Exception:
+                pass
+        self._say(seat, f"{seat.name} could not leave {opening} in "
+                        f"{self.FLEE_TRIES} tries — playing it out")
+        return False
 
     #: how long a wall is remembered. A board re-tried an hour later is
     #: a fresh question -- the wizard may have levelled, re-decked, or
@@ -11662,6 +11856,45 @@ class LiveWorker(QThread):
                  f"minutes and learns nothing — the party arriving "
                  f"together is what opens it"))
 
+    def _still_holding_cards(self, seat, rec):
+        """Who on this side of the duel still has a card, as a sentence.
+
+        "" means nobody does -- the whole side has decked out, and that
+        is the only state this run leaves a duel for. See
+        `FLEE_WHEN_LOST` for why the rollout's verdict stopped being the
+        trigger.
+
+        Cannot-tell counts as holding. A seat in the duel whose hand
+        was never read, or was read two minutes ago, is not evidence of
+        an empty hand -- and the operator's rule ends "else continue
+        combat", so every ambiguity resolves to staying. The same goes
+        for a hand whose cards would not resolve: `hidden` is counted
+        with `hand` when the stamp is taken, because an unreadable card
+        is still a card to play.
+        """
+        import time
+
+        holding = []
+        blind = []
+        mine = len(rec.hand or ()) + len(rec.hidden or ())
+        if mine:
+            holding.append(f"{seat.name} holds {mine}")
+        now = time.monotonic()
+        for other in self.seats:
+            if other is seat or other.client is None or not other.in_duel:
+                continue
+            seen = getattr(other, "hand_seen", None)
+            if not seen or now - seen[1] > self.HAND_READ_FRESH:
+                blind.append(other.name)
+                continue
+            if seen[0]:
+                holding.append(f"{other.name} holds {seen[0]}")
+        if holding or blind:
+            said = " and ".join(holding + [f"{n}'s hand has not been read "
+                                           f"this round" for n in blind])
+            return said
+        return ""
+
     def _maybe_flee(self, seat, rec, opening, why=""):
         """Ask the duel to be left, on the coroutine that owns the mouse.
 
@@ -11674,6 +11907,19 @@ class LiveWorker(QThread):
         the game offers its own flee button there -- and not while a
         party-mate is still swinging, because the verdict is about THIS
         wizard's lines and a partner's cast can change the board.
+
+        And, for the unwinnable path, not while ANY wizard on this side
+        of the duel still has a card in hand. That is the operator's
+        rule and it replaces the rollout as the trigger; see
+        `FLEE_WHEN_LOST` and `_still_holding_cards`.
+
+        The `why` path -- `_watch_for_a_known_wall` -- is deliberately
+        NOT under that rule. It leaves on round one, before any damage,
+        on the evidence of two recorded losses to this exact board while
+        alone; it is a refusal to start a fight rather than a forfeit of
+        one in progress, and it fired zero times in the run that
+        prompted the rule. One `and not why` on the guard below brings
+        it under the same rule if that turns out to be wanted.
         """
         if not self.FLEE_WHEN_LOST or seat.client is None:
             return
@@ -11681,11 +11927,40 @@ class LiveWorker(QThread):
             return
         if (rec.seats_in_plan or 1) > 1:
             return
-        others = [s for s in self.seats
-                  if s is not seat and s.client is not None and s.in_duel]
-        if others:
-            return
+        if why:
+            # The wall path keeps the guard it was written with: a
+            # party-mate in the circle is exactly what makes a wall
+            # passable, so the wall opens by itself when the booster
+            # arrives.
+            if any(s is not seat and s.client is not None and s.in_duel
+                   for s in self.seats):
+                return
+        else:
+            # ...and the unwinnable path is the operator's rule, which
+            # is about HANDS rather than bodies: "only flee if there
+            # are no cards in hand across all combatants else continue
+            # combat". It subsumes the old "a party-mate is still
+            # swinging" guard -- a mate in the circle almost always
+            # holds cards, and when it genuinely does not, both wizards
+            # have decked out and leaving together is the right answer
+            # rather than the forbidden one.
+            holding = self._still_holding_cards(seat, rec)
+            if holding:
+                self._say_once(
+                    seat, f"fight-on:{opening}",
+                    f"{seat.name} has no surviving line against {opening}, "
+                    f"and is playing on anyway — {holding}",
+                    kind="flee-refused",
+                    detail=(f"not leaving {opening}: the rollout has no "
+                            f"line inside its horizon, but {holding}. A "
+                            f"side with a card left has something that can "
+                            f"change the board, and this verdict has been "
+                            f"wrong at FULL health in a fight the party "
+                            f"went on to win in two rounds. Only a side "
+                            f"that has run out of cards is left"))
+                return
         seat.flee_asked = True
+        seat.flee_tries = 0
         if why:
             for other in self.seats:
                 try:

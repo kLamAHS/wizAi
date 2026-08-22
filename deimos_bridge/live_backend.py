@@ -213,6 +213,13 @@ class WizAiBackend:
         #: coroutine is the one that owns the mouse. See
         #: `WizAiCombatHandler._maybe_flee`.
         self.should_flee = None
+        #: optional callback(why) when the flee click threw. Its own
+        #: channel rather than `on_slow_cast`, for the same reason
+        #: `report_slow_cast` is not `on_failed_cast`: a duel that could
+        #: not be left is not a slow cast, and an operator reading the
+        #: export for "why is it still clicking Flee" has to be able to
+        #: find it. See `WizAiCombatHandler._maybe_flee`.
+        self.on_flee_failed = None
         #: optional callback() -> enemy health this wizard removes per
         #: round, for the coordinator to hand the OTHER seats' rollouts.
         #: A hook rather than a `Telemetry` reference because the backend
@@ -1096,6 +1103,20 @@ class WizAiBackend:
         if self.on_recovery_failed:
             self.on_recovery_failed(why)
 
+    def report_flee_failed(self, why):
+        """The duel could not be left.
+
+        Silent until this existed. `_maybe_flee` swallowed the exception
+        onto the slow-cast channel and a click that LANDED and did
+        nothing was not reported at all -- so rev 36d7c152's Thomas set
+        the flag at t=3152.8 and was still in the duel at t=3243.2,
+        with the handler clicking Flee at the top of every round and
+        nothing in the export saying so. That is the "trying to forfeit"
+        the operator watched.
+        """
+        if self.on_flee_failed:
+            self.on_flee_failed(why)
+
     def report_slow_cast(self, card_name):
         """The fast cast did not take; trying again slowly.
 
@@ -1382,8 +1403,8 @@ class WizAiCombatHandler:
             async with self.client.mouse_handler:
                 await self.flee_button()
         except Exception as exc:
-            self._report("report_slow_cast",
-                         f"the duel could not be left "
+            self._report("report_flee_failed",
+                         f"the flee click threw "
                          f"({type(exc).__name__}: {exc})")
             return False
         hive = getattr(self.backend, "coordinator", None)

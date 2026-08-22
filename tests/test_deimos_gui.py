@@ -1475,9 +1475,18 @@ def _lose_a_fight(worker, seat, opening, rounds=20, seats_in_plan=1):
     worker._note_the_loss(seat, False)
 
 
-def _no_line_round(worker, seat, hp=1998.0, died=True, n=4, seats_in_plan=1):
+def _no_line_round(worker, seat, hp=1998.0, died=True, n=4, seats_in_plan=1,
+                   hand=(), hidden=()):
     """One round whose candidate set either all died or did not, pushed
-    through the same path `_on_decision` uses."""
+    through the same path `_on_decision` uses.
+
+    The hand defaults to EMPTY, which since the deck-out rule means a
+    wizard that has run out of cards — the one state the run leaves a
+    duel for. Tests that want the ordinary case, a wizard with a board
+    to play, pass one. See `LiveWorker._still_holding_cards`.
+    """
+    import time
+
     from deimos_bridge.telemetry import RoundRecord
 
     fight = seat.tel.fights[-1].index if seat.tel.fights else 1
@@ -1486,8 +1495,12 @@ def _no_line_round(worker, seat, hp=1998.0, died=True, n=4, seats_in_plan=1):
              for i in range(n)]
     rec = RoundRecord(fight=fight, round=len(seat.tel.rounds) + 1,
                       candidates=cands, player_hp=hp, player_max_hp=1998.0,
-                      seats_in_plan=seats_in_plan)
+                      seats_in_plan=seats_in_plan,
+                      hand=list(hand), hidden=list(hidden))
     seat.tel.rounds.append(rec)
+    # What `_on_decision` stamps, so a partner reading this seat's hand
+    # sees what the round saw.
+    seat.hand_seen = (len(rec.hand) + len(rec.hidden), time.monotonic())
     worker._watch_for_a_fight_that_cannot_be_won(seat, rec)
     return rec
 
@@ -19305,6 +19318,8 @@ def test_a_lost_duel_is_left_rather_than_played_out(qapp):
     for _ in range(worker.UNWINNABLE_ROUNDS):
         _no_line_round(worker, seat, hp=121.0)
 
+    # `_no_line_round`'s hand defaults to empty, which is the deck-out
+    # the flee now requires. See the rule's own tests below.
     assert seat.flee_asked, "it watched the wizard die and said so"
     said = [e for e in seat.tel.questing if e["kind"] == "fleeing"]
     assert said and "chooses the death" in said[0]["detail"]
@@ -19616,7 +19631,11 @@ def test_one_loss_is_not_a_wall(qapp):
 def test_a_duel_the_party_is_still_swinging_in_is_not_fled(qapp):
     """The verdict is about THIS wizard's lines. A party-mate's cast can
     change the board, and leaving would take the quester out of a fight
-    its booster is winning."""
+    its booster is winning.
+
+    Reached through the deck-out rule now rather than a body count: a
+    partner in the circle whose hand has not been read is a cannot-tell,
+    and the operator's rule ends "else continue combat"."""
     worker = _party_worker()
     seat, other = worker.seats[0], worker.seats[1]
     other.client, other.in_duel = object(), True
@@ -25754,3 +25773,299 @@ def test_a_solo_pilots_followers_do_not_stop_it_holding_for_a_sigil(
         "a solo pilot's follower was read as a quester on another quest"
     asyncio.run(worker._maybe_count_hold(seat))
     assert worker._countdown_held()
+
+
+# ---------------------------------------------------------------------
+# Run 12 (rev 36d7c152): the forfeit, and the arrow that lies about
+# distance.
+# ---------------------------------------------------------------------
+
+
+def test_a_wizard_with_cards_in_hand_plays_on(qapp):
+    """The operator's rule: "only flee if there are no cards in hand
+    across all combatants else continue combat".
+
+    The rollout's verdict was the trigger and rev 36d7c152 is it being
+    wrong twice in one run. Críspulo's fight 5 opened against
+    `Foulgaze@550+Haunted Minion@135` with all nine lines sentinel at
+    679 of 679 health — full health, round one — and the fight was won
+    in TWO rounds. Its fight 4 ran five consecutive rounds of the same
+    verdict while its health sat flat at 550/679, and the party won in
+    twelve. No round of that run had an empty hand."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.tel.start_fight()
+    seat.tel.fights[-1].opening = "Foulgaze@550+Haunted Minion@135"
+    for _ in range(worker.UNWINNABLE_ROUNDS):
+        _no_line_round(worker, seat, hp=467.0,
+                       hand=["Bloodbat", "Lightning Strike", "Pixie"])
+
+    assert not seat.flee_asked, "it forfeited a fight it still had cards for"
+    refused = [e for e in seat.tel.questing if e["kind"] == "flee-refused"]
+    assert refused and "holds 3" in refused[0]["detail"], refused
+    assert not [e for e in seat.tel.questing if e["kind"] == "fleeing"]
+    # ...and it still SAYS the line is hopeless. The verdict is worth
+    # having; it just does not decide this.
+    assert [e for e in seat.tel.questing if e["kind"] == "unwinnable"]
+
+
+def test_an_unreadable_hand_is_not_an_empty_one(qapp):
+    """`hidden` counts. Críspulo carried a hidden `Minion Myth 000` in
+    24 of rev 36d7c152's rounds — a card the resolver could not name is
+    still a card to play, and reading the hand as empty would forfeit a
+    wizard holding a board."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.tel.start_fight()
+    for _ in range(worker.UNWINNABLE_ROUNDS):
+        _no_line_round(worker, seat, hp=121.0, hand=[],
+                       hidden=["Minion Myth 000"])
+
+    assert not seat.flee_asked, "an unreadable hand was read as a deck-out"
+    refused = [e for e in seat.tel.questing if e["kind"] == "flee-refused"]
+    assert refused and "holds 1" in refused[0]["detail"]
+
+
+def test_a_partner_holding_cards_keeps_the_wizard_in_the_duel(qapp):
+    """"Across all combatants" is the operator's phrase, and it is what
+    the rule reads. A partner in the circle with a board to play can
+    change this wizard's board."""
+    import time
+
+    worker = _party_worker()
+    seat, other = worker.seats[0], worker.seats[1]
+    other.client, other.in_duel = object(), True
+    other.hand_seen = (4, time.monotonic())
+    seat.tel.start_fight()
+    for _ in range(worker.UNWINNABLE_ROUNDS):
+        _no_line_round(worker, seat, hp=121.0)      # this seat IS out
+
+    assert not seat.flee_asked
+    refused = [e for e in seat.tel.questing if e["kind"] == "flee-refused"]
+    assert refused and f"{other.name} holds 4" in refused[0]["detail"], \
+        refused
+
+
+def test_a_partner_whose_hand_was_never_read_keeps_it_in_too(qapp):
+    """Cannot-tell is not a deck-out. The rule ends "else continue
+    combat", so every ambiguity resolves to staying — and a reading
+    older than `HAND_READ_FRESH` is a record left over from a finished
+    fight, not this round's hand."""
+    import time
+
+    worker = _party_worker()
+    seat, other = worker.seats[0], worker.seats[1]
+    other.client, other.in_duel = object(), True
+    seat.tel.start_fight()
+    for _ in range(worker.UNWINNABLE_ROUNDS):
+        _no_line_round(worker, seat, hp=121.0)
+    assert not seat.flee_asked, "a partner whose hand is unknown was ignored"
+    assert "has not been read" in [
+        e for e in seat.tel.questing if e["kind"] == "flee-refused"
+    ][0]["detail"]
+
+    # ...and a stale one is the same answer.
+    seat.flee_asked = False
+    other.hand_seen = (0, time.monotonic() - worker.HAND_READ_FRESH - 1)
+    seat.unwinnable_said_for = None
+    seat.no_line_survives = 0
+    for _ in range(worker.UNWINNABLE_ROUNDS):
+        _no_line_round(worker, seat, hp=121.0)
+    assert not seat.flee_asked, "a two-minute-old reading was voted with"
+
+
+def test_a_side_that_has_run_out_of_cards_does_leave(qapp):
+    """The one state where playing on provably chooses the death: nobody
+    on this side has a card left, so nothing anybody does can change the
+    board."""
+    import time
+
+    worker = _party_worker()
+    seat, other = worker.seats[0], worker.seats[1]
+    other.client, other.in_duel = object(), True
+    other.hand_seen = (0, time.monotonic())
+    seat.tel.start_fight()
+    seat.tel.fights[-1].opening = "Foulgaze@550+Haunted Minion@135"
+    for _ in range(worker.UNWINNABLE_ROUNDS):
+        _no_line_round(worker, seat, hp=121.0)
+
+    assert seat.flee_asked, "a decked-out party stayed to be killed"
+    assert [e for e in seat.tel.questing if e["kind"] == "fleeing"]
+
+
+def test_the_unwinnable_line_does_not_assert_a_death_it_cannot_know(qapp):
+    """`policies._rollout` scores a predicted death at `horizon + 2` and
+    a rollout that merely ran out of turns at `horizon + 1`, both minus
+    a kill credit of up to 1.6 — overlapping bands. `is_sentinel` cannot
+    separate them and the line asserted the death anyway, twice, about
+    fights the party won."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.tel.start_fight()
+    seat.tel.fights[-1].opening = "The Harvest Lord@510+Rotted Fodder@150"
+    for _ in range(worker.UNWINNABLE_ROUNDS):
+        _no_line_round(worker, seat, hp=550.0, hand=["Bloodbat"])
+    said = [e for e in seat.tel.questing if e["kind"] == "unwinnable"][0]
+
+    assert "dead" not in said["detail"], said["detail"]
+    assert "cleared the board inside its 12-turn horizon" in said["detail"]
+    assert "ALONE" in said["detail"], \
+        "the reader needs to know the rollout prices a solo clear"
+
+
+def test_a_flee_that_does_not_take_stops_and_says_so(qapp):
+    """`fleeing` at t=3152.8 in rev 36d7c152, and Thomas was still `in a
+    duel` at t=3183.1 and t=3243.2 — the handler clicking Flee at the
+    top of every round with no bound and nothing in the export saying
+    the button was not working. "the trying to forfeit is annoying"."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.tel.start_fight()
+    seat.tel.fights[-1].opening = "Foulgaze@550+Haunted Minion@135"
+    seat.flee_asked = True
+    seat.flee_tries = 0
+
+    # The handler asks once at the top of each round it is still in.
+    assert [worker._flee_now(seat) for _ in range(worker.FLEE_TRIES)] == \
+        [True] * worker.FLEE_TRIES
+    assert worker._flee_now(seat) is False, "it clicked Flee forever"
+    assert not seat.flee_asked
+    failed = [e for e in seat.tel.questing if e["kind"] == "flee-failed"]
+    assert failed and "Foulgaze@550" in failed[0]["detail"]
+    assert "playing the fight out" in failed[0]["detail"].lower()
+
+
+def test_a_flee_click_that_throws_gets_its_own_line(qapp):
+    """It was swallowed onto the slow-cast channel, where a reader
+    looking for "why is it still in the duel" would never find it."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    worker._flee_failed_hook(seat)("the Flee window was not there")
+    failed = [e for e in seat.tel.questing if e["kind"] == "flee-failed"]
+    assert failed and "was not there" in failed[0]["detail"]
+
+
+def test_a_marker_that_has_just_gone_FAR_is_read_twice_too(monkeypatch):
+    """The comment said "arriving is confirmed and leaving is not: a
+    marker going far needs no second opinion, because nothing acts on
+    distance". That stopped being true when `_marker_out_of_reach`
+    started gating every catch-up on `marker_away > MARKER_IN_ZONE`.
+
+    Rev 36d7c152: Thomas read 170 away at t=1698, `catch-up-out-of-zone`
+    said "113,557 away, which is another zone" at t=1733, and t=1763
+    read 30 — same zone, same goal, 65 seconds. Three catch-ups started
+    on that hook, two gave up with "nothing is attempting this step",
+    and the script sat frozen for 348s while they did."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Go To Galvanost Tower in Triton Avenue"],
+        positions=[_XYZ(5000.0, 0.0, 0.0),       # in zone, believed
+                   _XYZ(113557.0, 0.0, 0.0),     # out of zone...
+                   _XYZ(30.0, 0.0, 0.0)])        # ...and contradicted
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away == 5000.0
+
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away == 5000.0, \
+        "a single far read nobody could confirm became the objective"
+    assert [e for e in seat.tel.questing if e["kind"] == "marker-flapped"]
+    # And the catch-up is not refused on the strength of it.
+    assert worker._marker_out_of_reach([seat]) is None
+
+
+def test_two_agreeing_far_reads_ARE_believed(monkeypatch):
+    """The control. A wizard whose objective really is in another zone
+    still has its catch-up refused — the confirmation only asks the
+    hook to say the same thing twice, and a real marker does."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Merle Ambrose in The Commons"],
+        positions=[_XYZ(5000.0, 0.0, 0.0),
+                   _XYZ(113557.0, 0.0, 0.0),
+                   _XYZ(113557.0, 0.0, 0.0)])
+    asyncio.run(worker._read_goal(seat))
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away == 113557.0, "a real cross-zone marker was lost"
+    assert worker._marker_out_of_reach([seat]) == 113557.0
+
+
+def test_a_hook_that_flaps_far_pays_one_confirmation_not_one_a_poll(
+        monkeypatch):
+    """The same rest the near case has, for the same reason: a hook
+    that disagrees with itself on every read must not pay `GOAL_CONFIRM`
+    twice a second forever."""
+    import asyncio
+    import time
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Go To Galvanost Tower in Triton Avenue"],
+        positions=[_XYZ(5000.0, 0.0, 0.0),
+                   _XYZ(113557.0, 0.0, 0.0),
+                   _XYZ(30.0, 0.0, 0.0),
+                   _XYZ(113557.0, 0.0, 0.0),
+                   _XYZ(113557.0, 0.0, 0.0)])
+    asyncio.run(worker._read_goal(seat))
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_flapped_at > 0, "the disbelief did not rest"
+    flapped = len([e for e in seat.tel.questing
+                   if e["kind"] == "marker-flapped"])
+    asyncio.run(worker._read_goal(seat))
+    assert len([e for e in seat.tel.questing
+                if e["kind"] == "marker-flapped"]) == flapped, \
+        "it re-confirmed a reading it had just disbelieved"
+    assert seat.marker_away == 5000.0, \
+        "the last believed distance was dropped rather than kept"
+
+    # ...and when the rest expires the confirmation runs again, so a
+    # marker that IS out of zone is believed on its second opinion.
+    seat.marker_flapped_at = time.monotonic() - worker.MARKER_FLAP_REST - 1
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away == 113557.0, "the rest never expired"
+
+
+def test_a_catch_up_whose_step_stops_being_drivable_ends_at_once(qapp):
+    """`_check_in_step` refuses to START a catch-up whose laggard has no
+    usable marker; nothing asked again afterwards, so a catch-up whose
+    step went un-attemptable mid-flight held the party until
+    `CATCH_UP_IDLE` timed it out. Rev 36d7c152 spent 90s that way twice,
+    and the second time the script sat frozen at 17,560 instructions for
+    348s while the other quester was dragged along behind."""
+    import time
+
+    worker = _two_quester_party()
+    lead = worker.seats[0]
+    lead.marker_away = 900.0
+    worker._start_catching_up(lead, 4, "the questline says so")
+    lead.progress = ("WC_Firecat", (1, 1, 0), "step 18")
+    lead.progress_at = time.monotonic()
+    worker._check_caught_up()
+    assert worker._catching_up() == [lead], "it gave up on a drivable step"
+
+    # The arrow goes dead: `hop_once` has nothing to aim at, which is
+    # exactly what the give-up line said five minutes later.
+    lead.marker_away = None
+    lead.marker_dead_since = time.monotonic() - 600
+    worker._check_caught_up()
+    assert worker._catching_up() == []
+    said = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "catch-up-unreachable"]
+    assert said and "quest arrow is off" in said[0]["detail"], said
+
+
+def test_a_catch_up_whose_step_goes_out_of_zone_ends_too(qapp):
+    """The other entry condition, asked again for the same reason."""
+    import time
+
+    worker = _two_quester_party()
+    lead = worker.seats[0]
+    lead.marker_away = 900.0
+    worker._start_catching_up(lead, 4, "the questline says so")
+    lead.progress_at = time.monotonic()
+    lead.marker_away = 113557.0
+    worker._check_caught_up()
+    assert worker._catching_up() == []
+    said = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "catch-up-unreachable"]
+    assert said and "113,557 away" in said[0]["detail"], said
