@@ -14796,6 +14796,149 @@ def test_party_mode_is_untouched_by_the_solo_plumbing(monkeypatch):
     assert len(built["clients"]) == 3
 
 
+# ---- a booster party is the script's questing group, plus muscle
+#
+# Rev 1f912030. The operator: "wizards 2 and 3 are supposed to be
+# questing (boostees) with script... oz is the booster". Phase P guessed
+# that a boostee walks its OWN line with wizAi's navigator; what the
+# preset's `Questee2`… settings are for — and what the operator has — is
+# several wizards walking ONE line together. So the VM is compiled over
+# the questing crew, leader first as p1, and the muscle is left out of
+# it for wizAi's follow.
+
+_MULTI_ACCOUNT = ('###deimos_expertmode\n'
+                  '# @clients: > 1\n'
+                  'var Main_Account = "QuestingAccountName"\n'
+                  'var Main_Account_School = "SchoolGoesHere"\n'
+                  'var Questee2 = "QuestingAccountName"\n'
+                  'var Questee2_School = "SchoolGoesHere"\n'
+                  'if NOT Main_Account = "QuestingAccountName" { }\n'
+                  'if NOT Main_Account_School = "SchoolGoesHere" { }\n'
+                  'if NOT Questee2 = "QuestingAccountName" { }\n'
+                  'if NOT Questee2_School = "SchoolGoesHere" { }\n')
+
+
+def _crewed_party(monkeypatch, boosters=(0,), leader=2):
+    """A three-seat booster party, and what `make_runner` was handed."""
+    from deimos_bridge import scripts
+
+    worker, _read = _zoned_party(["KT_Hub"] * 3)
+    worker.booster_party = True
+    worker.solo_script = True
+    worker.leader = leader
+    worker.boosters = set(boosters)
+    worker.script = _MULTI_ACCOUNT
+    built = {}
+
+    def fake_runner(clients, source, solo=False):
+        built.update(clients=list(clients), source=source, solo=solo)
+        return type("R", (), {"running": True})()
+
+    monkeypatch.setattr(scripts, "make_runner", fake_runner)
+    return worker, built
+
+
+def _build_the_script(worker):
+    import asyncio
+
+    # Seat 0 owns the runner in production; the crew comes from
+    # `_script_party`, not from whoever reports.
+    asyncio.run(worker._setup_script(worker.seats[0].client,
+                                     worker.seats[0]))
+
+
+def test_a_second_quester_puts_both_clients_in_the_vm(monkeypatch):
+    """The preset gates every multi-client branch on `if NOT Questee2 =
+    "<placeholder>"`, so filling the accounts is the ON switch — and
+    `solo_source`, which the one-quester path uses, is the OFF switch.
+    Leader first, because the preset's Main_Account is p1."""
+    worker, built = _crewed_party(monkeypatch, boosters=(0,), leader=2)
+    _build_the_script(worker)
+
+    assert built["solo"] is False
+    assert built["clients"] == [worker.seats[2].client,
+                                worker.seats[1].client], \
+        "the leader has to be p1, and the muscle must not be in the VM"
+    assert worker.seats[0].client not in built["clients"]
+    assert '"w2"' in built["source"] and '"w1"' in built["source"], \
+        "the accounts were not filled, so the multi-client branches stay cold"
+    assert worker._script_crew == {1, 2}
+    said = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "script-party"]
+    assert said and "w2 and w1" in said[0]["detail"]
+
+
+def test_one_quester_still_gets_the_solo_vm(monkeypatch):
+    """Byte for byte what booster mode has always done."""
+    worker, built = _crewed_party(monkeypatch, boosters=(0, 1), leader=2)
+    _build_the_script(worker)
+
+    assert built["solo"] is True
+    assert built["clients"] == [worker.seats[2].client]
+    assert '"w2"' not in built["source"], \
+        "solo_source must put the account placeholders back"
+    assert worker._script_crew == {2}
+
+
+def test_a_quester_that_has_not_named_itself_downgrades_loudly(monkeypatch):
+    """`configure` can only fill a name it has, and a half-filled preset
+    leaves its own guards off. Falling back is right; falling back
+    silently would leave a wizard nothing drives and nothing follows —
+    which is exactly what the operator saw."""
+    worker, built = _crewed_party(monkeypatch, boosters=(0,), leader=2)
+    worker.seats[1].wizard_name = ""
+    _build_the_script(worker)
+
+    assert built["solo"] is True
+    assert built["clients"] == [worker.seats[2].client]
+    assert worker._script_crew == {2}
+    said = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "script-party-downgraded"]
+    assert said, [e["kind"] for e in worker.seats[0].tel.questing]
+    assert "has not named itself" in said[0]["detail"]
+
+
+def test_a_preset_that_wants_more_wizards_downgrades_loudly(monkeypatch):
+    worker, built = _crewed_party(monkeypatch, boosters=(0,), leader=2)
+    worker.script = worker.script.replace("@clients: > 1", "@clients: 4")
+    _build_the_script(worker)
+
+    assert built["solo"] is True
+    said = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "script-party-downgraded"]
+    assert said and "asks for 4 wizards" in said[0]["detail"]
+
+
+def test_the_script_drives_every_quester_and_no_muscle(monkeypatch):
+    """Read off what the VM was BUILT over, not off what the roles say
+    now: a build that downgraded must not leave a boostee believing the
+    script is moving it."""
+    worker, _built = _crewed_party(monkeypatch, boosters=(0,), leader=2)
+    _build_the_script(worker)
+    worker.seats[0].runner = worker.seats[0].runner \
+        or type("R", (), {"running": True})()
+
+    assert [worker._script_drives(s) for s in worker.seats] == \
+        [False, True, True]
+    # ...and one VM over both means ONE questline, so every party rule
+    # that assumes a single "where the party is" is right again.
+    assert not worker._many_questlines()
+
+
+def test_a_downgraded_build_leaves_the_boostee_to_the_navigator(monkeypatch):
+    worker, _built = _crewed_party(monkeypatch, boosters=(0,), leader=2)
+    worker.seats[1].wizard_name = ""
+    _build_the_script(worker)
+    worker.seats[0].runner = worker.seats[0].runner \
+        or type("R", (), {"running": True})()
+
+    assert [worker._script_drives(s) for s in worker.seats] == \
+        [False, False, True], "a boostee outside the VM must not read driven"
+    assert worker._is_boostee(worker.seats[1]), "so the navigator has it"
+    assert worker._many_questlines(), \
+        "the fallback really does walk two lines"
+
+
 def test_the_window_offers_the_solo_pilot_and_passes_it_through(qapp):
     import inspect
 
@@ -14963,12 +15106,23 @@ def test_the_questing_tab_mode_and_checkboxes_agree_both_ways(qapp):
 
     # the live feed renders a row
     win.on_seat_quest(0, {"name": "Konstantin", "doing": "pilot (script)",
+                          "role": "leader",
                           "zone": "Krokotopia/KT_Hub", "quest": "Payback",
                           "goal": "Talk To X", "line": "#13 (Krokotopia)",
                           "marker": 98813.0, "idle": 400.0})
-    assert win.quest_table.item(0, 0).text() == "Konstantin"
-    assert win.quest_table.item(0, 6).text() == "other zone"
-    assert "min" in win.quest_table.item(0, 7).text()
+
+    # By header, not by index: the columns have moved once already and
+    # a test pinned to a number breaks for the wrong reason.
+    def cell(header):
+        t = win.quest_table
+        col = [t.horizontalHeaderItem(c).text()
+               for c in range(t.columnCount())].index(header)
+        return t.item(0, col).text()
+
+    assert cell("Wizard") == "Konstantin"
+    assert cell("Role") == "leader"
+    assert cell("Marker") == "other zone"
+    assert "min" in cell("Still for")
 
     import inspect
     src = inspect.getsource(MainWindow.on_start_live)
@@ -24662,19 +24816,39 @@ def test_the_export_names_a_boostee_and_counts_the_questlines(qapp):
     assert plain._party_shape(plain.seats[0])["questers"] == 1
 
 
-def test_the_boosters_row_spells_todays_behaviour_when_untouched(qapp):
-    """An untouched row hands the worker the same None the attribute
-    already defaults to, so a party nobody configured is unchanged."""
+def test_the_questers_row_spells_todays_behaviour_when_untouched(qapp):
+    """The row asks who QUESTS — the way somebody looks for it. Rev
+    1f912030's operator wanted two questers, found a row labelled
+    "Boosters", ticked all three and got one quester: "there was no
+    option to select questers". Untouched it still means what booster
+    mode has always meant, so a party nobody configured is unchanged."""
     from deimos_bridge.gui.app import MainWindow
 
     win = MainWindow(Telemetry())
     win.booster_party = True
     win.leader_pick.setCurrentIndex(0)
+    win._sync_quester_row()
     assert win.booster_seats(3) is None, "an untouched row invented a role"
-    win.booster_picks[1].setChecked(False)
-    assert win.booster_seats(3) == {2}
+    win.quester_picks[1].setChecked(True)        # wizard 2 quests too
+    assert win.booster_seats(3) == {2}, "ticking a quester made it muscle"
     # ...and outside booster mode the row means nothing at all.
     win.booster_party = False
+    assert win.booster_seats(3) is None
+
+
+def test_the_leaders_own_box_is_ticked_and_locked(qapp):
+    """`_is_booster` refuses the leader outright, so a box that could be
+    unticked would be a control that lies. It tracks the picker."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.booster_party = True
+    win.leader_pick.setCurrentIndex(2)
+    win._sync_quester_row()
+    assert win.quester_picks[2].isChecked()
+    assert not win.quester_picks[2].isEnabled()
+    assert win.quester_picks[0].isEnabled()
+    # ...and the leader questing does not make the others muscle-free.
     assert win.booster_seats(3) is None
 
 
@@ -24896,9 +25070,7 @@ def test_switching_the_wiring_mid_run_rebuilds_the_script(qapp, monkeypatch):
         runner = _LiveRunner()
         runner.stop = lambda: None
         s.runner = runner
-        s.script_wiring_built = (worker._solo_pilot(),
-                                 worker.leader if worker._solo_pilot()
-                                 else None)
+        s.script_wiring_built = worker._script_wiring()
 
     monkeypatch.setattr(worker, "_setup_script", setup)
     monkeypatch.setattr(worker, "_scripted", lambda s: True)

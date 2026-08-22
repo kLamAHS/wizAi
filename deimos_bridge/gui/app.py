@@ -2304,26 +2304,32 @@ class MainWindow(QMainWindow):
             "the one wizard whose questline a booster run levels. "
             "Read at Play live.")
         row.addWidget(self.leader_pick)
-        # Which wizards are MUSCLE, in booster mode. Every non-leader
-        # ticked is what the mode has always meant, so an untouched row
-        # spells today's behaviour exactly; untick one and it becomes a
-        # BOOSTEE — a second quester walking its own line with wizAi's
-        # navigator, sharing the party's boosters.
-        row.addWidget(_label("Boosters", PALETTE["muted"]))
-        self.booster_picks = []
+        # Which wizards QUEST, in booster mode — everyone else is
+        # muscle. Named the way somebody looks for it: rev 1f912030's
+        # operator wanted two questers, found a row labelled "Boosters",
+        # ticked all three, and got the one-quester party that spells —
+        # "there was no option to select questers". The leader is always
+        # one and its box says so.
+        row.addWidget(_label("Questers", PALETTE["muted"]))
+        self.quester_picks = []
+        #: what the OPERATOR asked for, per wizard, kept apart from the
+        #: box state because the leader's box is forced ticked while it
+        #: leads. Without this, moving the Leader leaves the wizard it
+        #: was ticked as a quester nobody chose.
+        self._quester_wanted = [False] * MAX_WIZARDS
         for i in range(MAX_WIZARDS):
             box = QCheckBox(str(i + 1))
-            box.setChecked(True)
             box.setToolTip(
-                "Booster party only. A ticked wizard is muscle: it joins "
-                "the quester's fights and does not quest. Unticked, it is "
-                "a second quester — it walks its own questline with "
-                "wizAi's navigator (not the script, which drives one "
-                "wizard) and the boosters join whichever quester is "
-                "fighting. The leader always quests. Read live.")
-            box.toggled.connect(self._push_quest_mode)
-            self.booster_picks.append(box)
+                "Booster party only. A ticked wizard QUESTS: the script "
+                "is compiled over it alongside the leader, both walking "
+                "the same questline, with the preset's own multi-account "
+                "settings filled in. Everyone unticked is muscle — it "
+                "joins whichever quester is fighting and never quests. "
+                "The leader always quests. Read live.")
+            box.toggled.connect(lambda on, n=i: self._quester_ticked(n, on))
+            self.quester_picks.append(box)
             row.addWidget(box)
+        self.leader_pick.currentIndexChanged.connect(self._sync_quester_row)
         self.quest_script_btn = QPushButton("Choose script…")
         self.quest_script_btn.clicked.connect(self.on_edit_script)
         row.addWidget(self.quest_script_btn)
@@ -2375,8 +2381,9 @@ class MainWindow(QMainWindow):
         act.addStretch()
         v.addLayout(act)
 
-        self.quest_table = _table(["Wizard", "Doing", "Zone", "Quest",
-                                   "Goal", "Line", "Marker", "Still for"])
+        self.quest_table = _table(["Wizard", "Role", "Doing", "Zone",
+                                   "Quest", "Goal", "Line", "Marker",
+                                   "Still for"])
         v.addWidget(self.quest_table)
         v.addStretch()
 
@@ -2448,32 +2455,60 @@ class MainWindow(QMainWindow):
     def booster_seats(self, seats):
         """Which seat indices boost, or None for "every non-leader".
 
-        None is what booster-party mode has always meant, and an
-        untouched Boosters row spells exactly that — so a party nobody
-        has configured hands the worker the same value the attribute
-        already defaults to, and every existing run is byte for byte
-        unchanged. Anything narrower means the seats left out are
-        boostees.
+        The row asks who QUESTS; the worker wants who does not, because
+        `LiveWorker.boosters` is the set the script VM excludes. None is
+        what booster-party mode has always meant, and an untouched row —
+        nobody ticked but the leader — spells exactly that, so a party
+        nobody has configured hands the worker the value the attribute
+        already defaults to and every existing run is unchanged.
         """
         if not getattr(self, "booster_party", False):
             return None
         lead = self.leader_pick.currentIndex()
-        # The leader is a quester whatever its own box says, so its
-        # index never belongs in here — leaving it in would put a
-        # contradiction in the export and in every `role` read off it.
-        picked = {i for i, box in enumerate(self.booster_picks[:seats])
-                  if box.isChecked()} - {lead}
+        # The leader quests whatever its own box says.
+        questers = {i for i, box in enumerate(self.quester_picks[:seats])
+                    if box.isChecked()} | {lead}
+        boosters = {i for i in range(seats) if i not in questers}
         every = {i for i in range(seats) if i != lead}
-        return None if picked >= every else picked
+        return None if boosters >= every else boosters
+
+    def _quester_ticked(self, index, on):
+        """Remember the operator's own choice, then push it live.
+
+        Kept apart from the box state because the leader's box is
+        forced — see `_sync_quester_row`.
+        """
+        self._quester_wanted[index] = bool(on)
+        self._push_quest_mode()
+
+    def _sync_quester_row(self, *_a):
+        """The leader's own box, ticked and locked; the rest, as asked.
+
+        The leader cannot be anything but a quester — `_is_booster`
+        refuses it outright — so a box that could be unticked would be a
+        control that lies. And when the Leader picker MOVES, the wizard
+        it was goes back to what the operator actually asked for rather
+        than staying a quester by accident. Tracks the picker, mid-run
+        included.
+        """
+        lead = self.leader_pick.currentIndex()
+        booster = getattr(self, "booster_party", False)
+        for i, box in enumerate(getattr(self, "quester_picks", ())):
+            leading = i == lead
+            want = True if leading else self._quester_wanted[i]
+            if box.isChecked() != want:
+                box.blockSignals(True)
+                box.setChecked(want)
+                box.blockSignals(False)
+            # Muscle is a booster-party idea and nothing else; leaving
+            # the row live in the other modes would let somebody spell a
+            # role the run cannot have.
+            box.setEnabled(booster and not leading)
 
     def _sync_quest_mode(self, _on=None):
         """Point the dropdown at whatever the checkboxes now say."""
         booster = getattr(self, "booster_party", False)
-        for box in getattr(self, "booster_picks", ()):
-            # Muscle is a booster-party idea and nothing else. Leaving
-            # the row live in the other modes would let somebody spell
-            # a role the run cannot have.
-            box.setEnabled(booster)
+        self._sync_quester_row()
         flags = (self.auto_quest.isChecked(), self.use_script.isChecked(),
                  self.solo_script.isChecked(), booster)
         for i, (_name, mode) in enumerate(self.QUEST_MODES):
@@ -2500,7 +2535,10 @@ class MainWindow(QMainWindow):
             t.setRowCount(index + 1)
         marker = row.get("marker")
         idle = row.get("idle") or 0.0
-        cells = (row.get("name", ""), row.get("doing", ""),
+        # Role beside Doing: the two differ exactly when something is
+        # wrong, and the role had no home outside the export until now.
+        cells = (row.get("name", ""), row.get("role", ""),
+                 row.get("doing", ""),
                  row.get("zone", "").rsplit("/", 1)[-1],
                  row.get("quest", ""), row.get("goal", ""),
                  row.get("line", ""),
@@ -2508,7 +2546,7 @@ class MainWindow(QMainWindow):
                  ("other zone" if marker > 20000 else f"{marker:,.0f}"),
                  f"{idle / 60:.0f} min" if idle >= 60 else "")
         for col, text in enumerate(cells):
-            color = PALETTE["bad"] if (col == 7 and idle >= 300) else None
+            color = PALETTE["bad"] if (col == 8 and idle >= 300) else None
             t.setItem(index, col, _cell(str(text), color))
 
     def on_edit_script(self):

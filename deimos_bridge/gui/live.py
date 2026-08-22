@@ -697,6 +697,15 @@ class LiveWorker(QThread):
         #: checkboxes can spell this combination even though no mode
         #: names it; said out loud in `_go`.
         self._booster_solo_forced = False
+        #: the seat indices the script VM was actually BUILT over.
+        #: `_script_drives` reads this rather than re-deriving the crew,
+        #: because a build that downgraded (a name not read yet, a
+        #: preset that wants more wizards) must not leave a boostee
+        #: believing the script is moving it -- a wizard nothing drives
+        #: and nothing follows just stands there, which is precisely
+        #: what the operator saw: "the other boostee wizard didnt join
+        #: combat". Empty until a runner is built.
+        self._script_crew = set()
         if self.booster_party and self.script and not self.solo_script:
             self.solo_script = True
             self._booster_solo_forced = True
@@ -2072,6 +2081,14 @@ class LiveWorker(QThread):
         runner = self.seats[0].runner
         if runner is None or not runner.running:
             return False
+        if self.booster_party and len(self.seats) > 1:
+            # The VM holds the questing crew and never the muscle. Read
+            # off what was BUILT, not off what the roles say now: a
+            # build that downgraded to the pilot alone must not leave a
+            # boostee thinking it is driven. See `_script_crew`.
+            crew = self._script_crew
+            return (seat.index in crew if crew
+                    else seat.index == self.leader)
         if self.solo_script:
             return seat.index == self.leader
         return True
@@ -2122,20 +2139,20 @@ class LiveWorker(QThread):
         # "Booster party + script" and pointed Leader at the quester
         # while a whole-party build kept running, and the script went
         # on walking the BOOSTER's questline with the quester in tow.
-        wiring = (self._solo_pilot(),
-                  self.leader if self._solo_pilot() else None)
+        wiring = self._script_wiring()
         if seat.script_source == want \
                 and seat.script_debug_built == self.script_debug \
                 and seat.script_wiring_built == wiring:
             return
         if seat.script_source == want and seat.runner is not None:
             if seat.script_wiring_built != wiring:
-                solo, lead = wiring
+                crew = [self.seats[i].name
+                        for i in wiring[2] if i < len(self.seats)]
                 self._say(seat,
                           ("the questing mode changed — rebuilding the "
                            "script over "
-                           + (f"{self.seats[lead].name} alone"
-                              if solo else "the whole party")
+                           + (" and ".join(crew) if crew
+                              else "the whole party")
                            + " (a reload re-runs the route from the top; "
                              "its one-time setup stays skipped)"))
             else:
@@ -3243,9 +3260,7 @@ class LiveWorker(QThread):
         seat = self._seat_for(client) if seat is None else seat
         seat.script_source = self.script or ""
         seat.script_debug_built = self.script_debug
-        seat.script_wiring_built = (self._solo_pilot(),
-                                    self.leader if self._solo_pilot()
-                                    else None)
+        seat.script_wiring_built = self._script_wiring()
         seat.script_said = False
         party = [s.client for s in self.seats if s.client is not None]
         try:
@@ -3273,6 +3288,65 @@ class LiveWorker(QThread):
                     kind="sigil-steadied",
                     detail="the Enter_Sigil sleep-10 bet was replaced "
                            "at load; see scripts.steady_sigil")
+            crew = self._script_party()
+            # More than one quester means the preset's OWN multi-account
+            # mode -- `Questee2`… are additional wizards walking the same
+            # line -- so the accounts get filled rather than reset, and
+            # the VM is compiled over every questing client. Two things
+            # can make that impossible, and both downgrade to the solo
+            # build LOUDLY: a wizard whose name has not been read yet
+            # (nothing to fill, so the preset's guards would stay off and
+            # its multi-client branches cold), and a preset whose own
+            # `@clients` header asks for more wizards than are questing.
+            downgraded = ""
+            if len(crew) > 1:
+                unnamed = [s.name for s in crew if not s.wizard_name]
+                needs = scripts.wants_clients(source)
+                if unnamed:
+                    downgraded = (f"{' and '.join(unnamed)} has not named "
+                                  f"itself yet, so its account settings "
+                                  f"cannot be filled in")
+                elif needs > len(crew):
+                    downgraded = (f"this script's '@clients' header asks "
+                                  f"for {needs} wizards and {len(crew)} "
+                                  f"are questing")
+                if downgraded:
+                    crew = crew[:1]
+            if self._solo_pilot() and len(crew) > 1:
+                pilot = crew[0]
+                # Real names, not placeholders: the preset gates every
+                # multi-client branch on `if NOT Questee2 =
+                # "<placeholder>"`, so filling them is the ON switch and
+                # `solo_source` is the OFF switch. Leader first, so the
+                # leader is `p1` and the preset's Main_Account.
+                source, filled = scripts.configure(
+                    source, [(s.wizard_name, s.school) for s in crew])
+                source, skipped_setup = self._fresh_source(seat, source)
+                seat.runner = scripts.make_runner(
+                    [s.client for s in crew], source)
+                seat.script_built = True
+                self._script_crew = {s.index for s in crew}
+                seat.runner.skipped_setup = list(skipped_setup)
+                if skipped_setup:
+                    self._note_reload(
+                        seat, "the script was rebuilt (its text changed)",
+                        seat.runner)
+                said = (f"script loaded — booster party: the script quests "
+                        f"{' and '.join(s.name for s in crew)} together on "
+                        f"one questline"
+                        + (f" ({len(filled)} account setting(s) filled in "
+                           f"so its multi-client branches switch on)"
+                           if filled else "")
+                        + "; the boosters are wizAi's — they keep to "
+                          "whichever quester is fighting and join it, "
+                          "their own journals ignored")
+                for other in self.seats:
+                    try:
+                        other.tel.note_questing("script-party", said)
+                    except Exception:
+                        pass
+                self._say(seat, said)
+                return
             if self._solo_pilot():
                 # The pilot's client and nobody else's. `solo_source`
                 # puts the account settings back to their placeholders
@@ -3282,7 +3356,8 @@ class LiveWorker(QThread):
                 # of the party is wizAi's to move: `_follows` says they
                 # chase the pilot, and the hivemind has them the moment
                 # they step into its duels.
-                pilot = self.seats[self.leader]
+                pilot = crew[0]
+                self._script_crew = {pilot.index}
                 source, reset = scripts.solo_source(source)
                 source, skipped_setup = self._fresh_source(seat, source)
                 seat.runner = scripts.make_runner(
@@ -3317,7 +3392,25 @@ class LiveWorker(QThread):
                           + (". Booster party with a script means exactly "
                              "this, so solo-pilot wiring was engaged even "
                              "though its checkbox was off"
-                             if self._booster_solo_forced else ""))
+                             if self._booster_solo_forced else "")
+                          + (f". A second quester was asked for and cannot "
+                             f"be script-driven — {downgraded} — so it "
+                             f"walks its own marker with wizAi's navigator "
+                             f"instead, which has no dungeon routes"
+                             if downgraded else ""))
+                if downgraded:
+                    for other in self.seats:
+                        try:
+                            other.tel.note_questing(
+                                "script-party-downgraded",
+                                f"the script was built over {pilot.name} "
+                                f"alone though more wizards are set to "
+                                f"quest: {downgraded}. They fall back to "
+                                f"wizAi's navigator — marker to marker, no "
+                                f"dungeon routes — until this clears, and "
+                                f"the VM is rebuilt the moment it does")
+                        except Exception:
+                            pass
                 return
             source, skipped_setup = self._fresh_source(seat, source)
             seat.runner = scripts.make_runner(party or [client], source)
@@ -3418,7 +3511,7 @@ class LiveWorker(QThread):
                 and seat.index not in self.boosters)
 
     def _questers(self):
-        """Every seat this run is levelling, leader first.
+        """Every seat this run is levelling, in seat order.
 
         The whole party outside booster mode -- a solo-pilot party
         levels every wizard in it. In booster mode, whoever is not
@@ -3427,6 +3520,46 @@ class LiveWorker(QThread):
         if not self.booster_party:
             return list(self.seats)
         return [s for s in self.seats if not self._is_booster(s)]
+
+    def _script_party(self):
+        """The seats the VM is built over, LEADER FIRST so it is `p1`.
+
+        The model this mode turned out to want, and it is simpler than
+        the one Phase P guessed at: a booster party is the script's
+        questing group plus muscle. Boosters are the seats the VM
+        EXCLUDES; every other seat is in it, script-driven, on the
+        party's one questline.
+
+        That is what the TTS presets' multi-account settings are for --
+        `Questee2`… are additional wizards walking the SAME line, not
+        second questlines -- and it is what the operator described:
+        "wizards 2 and 3 are supposed to be questing (boostees) with
+        script... oz is the booster".
+
+        Leader first because the preset's `Main_Account` is `p1` and
+        every friend-teleport in it aims from there.
+        """
+        if self.booster_party and len(self.seats) > 1:
+            pilot = self.seats[self.leader]
+            return [pilot] + [s for s in self._questers() if s is not pilot]
+        if self._solo_pilot():
+            return [self.seats[self.leader]]
+        return list(self.seats)
+
+    def _script_wiring(self):
+        """What the runner must be BUILT from, as a comparable value.
+
+        Not a flag it reads: switching the mode, the Leader or a
+        Questers tick changes the client list the VM is compiled over.
+        The wizard NAMES are in here too, because `scripts.configure`
+        can only fill a preset's account settings once a name has been
+        read -- so the multi-quester VM comes up on the tick after
+        `_resolve_party_names` learns them, rather than never.
+        """
+        solo = self._solo_pilot()
+        crew = tuple(s.index for s in self._script_party())
+        return (solo, self.leader if solo else None, crew,
+                tuple(self.seats[i].wizard_name or "" for i in crew))
 
     def _many_questlines(self):
         """Is this run levelling more than one questline at once?
@@ -3438,7 +3571,14 @@ class LiveWorker(QThread):
         walks the leader's route. So "where the party is" has a single
         answer everywhere else, and every rule built on that keeps it.
         """
-        return self.booster_party and len(self._questers()) > 1
+        if not (self.booster_party and len(self._questers()) > 1):
+            return False
+        # ...unless one VM is driving them, which is the normal case
+        # now: `_script_party` compiles the script over every quester,
+        # so they walk ONE line to one place and every party rule that
+        # assumes that is right again. Only the navigator fallback --
+        # no script, or a build that downgraded -- really has two.
+        return len(self._script_crew) < 2
 
     def _boost_target(self, seat):
         """The quester this booster is here for, right now.
@@ -4756,6 +4896,12 @@ class LiveWorker(QThread):
             doing = "catching up"
         elif self._is_booster(seat):
             doing = "boosting"
+        elif self._is_boostee(seat):
+            # Set to quest but not in the VM: the script could not take
+            # its account, so wizAi's navigator has it. Named, because
+            # the tab said "idle" for this and the operator read that
+            # as the wizard doing nothing at all.
+            doing = "questing (own navigator)"
         elif self._follows(seat):
             doing = ("following + own steps" if self._solo_pilot()
                      else "following")
@@ -4766,6 +4912,14 @@ class LiveWorker(QThread):
             doing = "idle"
         return {
             "name": seat.name,
+            # What this wizard is FOR, beside what it is doing. The two
+            # differ exactly when something is wrong, and until now the
+            # only place the role appeared was the export, read after
+            # the run: rev 1f912030's operator set a wizard to quest,
+            # got a booster, and had no way to see it.
+            "role": ("leader" if seat.index == self.leader else
+                     "booster" if self._is_booster(seat) else
+                     "quester" if self._is_boostee(seat) else "follower"),
             "zone": zone or "",
             "quest": seat.quest_name or "",
             "goal": seat.goal or "",
