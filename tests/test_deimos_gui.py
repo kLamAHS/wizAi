@@ -21365,6 +21365,151 @@ def test_a_quest_that_is_not_in_the_book_is_reported_as_such(monkeypatch):
     assert "txtGoal" not in book.clicked
 
 
+# ---- past the first four entries
+#
+# Rev f27693c2's run 8. The quester's tracker fell onto a Wizard City
+# side quest, the script's own lost-quest routine walked the party to
+# Triton Avenue, and 24 of the run's 41 minutes went on level-10
+# content. The cure finally ran at t=2431 and the export carries the
+# page it read: "Wizard City Unicorn Way ... Firecat Alley ... Cyclops
+# Lane". A wizard freshly through the journal's Quest Finder carries a
+# page of newly accepted side quests -- which is exactly the state this
+# cure is FOR, and exactly the state where the first four entries hold
+# none of the answers. It concluded the Avalon quest had never been
+# accepted and stood down for another thirty minutes.
+
+class _PagedBook(_TrackedBook):
+    """A journal with more accepted quests than fit on one page.
+
+    `btnRight` turns to the next; `pager=False` builds the same journal
+    with no way forward at all, which is the case the report has to be
+    honest about.
+    """
+
+    def __init__(self, pages, tracked="", pager=True, **kw):
+        self.pages = [list(p) for p in pages]
+        self.page = 0
+        super().__init__(listing=self.pages[0], tracked=tracked, **kw)
+        self.all_listing = list(self.pages[0])
+        kids = self.root_window._children[0]._children[0]._children[0]
+        kids._children.append(_RWin("btnRight" if pager
+                                    else "QuestLogUpButton"))
+        book = self
+        inner = self.mouse_handler.click_window
+
+        class _M:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def click_window(self, win):
+                name = await win.name()
+                if name in ("btnRight", "QuestLogAllButton"):
+                    book.clicked.append(name)
+                    # The last page turned again renders the same four:
+                    # that is how a real journal ends, and how a control
+                    # that is not a pager behaves every time.
+                    book.page = (0 if name == "QuestLogAllButton"
+                                 else min(book.page + 1,
+                                          len(book.pages) - 1))
+                    book.listing = list(book.pages[book.page])
+                    return
+                await inner(win)
+
+        self.mouse_handler = _M()
+
+
+def test_a_quest_behind_the_first_page_is_found_and_selected(monkeypatch):
+    """The whole of run 8's last failure. The quest was in the book;
+    the read could not reach it."""
+    import asyncio
+
+    questing = _fast_select(monkeypatch)
+    book = _PagedBook([["Know Thine Enemy", "Shard Trek", "Dirt Mound",
+                        "Blue Oyster Cult"],
+                       ["Family Values", "Red Heads"]],
+                      tracked="Quest Finder")
+    ok, why, in_book = asyncio.run(
+        questing.select_quest(book, ["Family Values"]))
+    assert ok, why
+    assert "btnRight" in book.clicked, "the page was never turned"
+    assert book.tracked == "Family Values"
+
+
+def test_paging_stops_when_the_page_stops_changing(monkeypatch):
+    """A journal's last page turned again renders the same four. So
+    does a control that is not a pager at all — and both have to end
+    the search rather than click forever."""
+    import asyncio
+
+    questing = _fast_select(monkeypatch)
+    book = _PagedBook([["Know Thine Enemy", "Shard Trek"],
+                       ["Family Values", "Red Heads"]],
+                      tracked="Quest Finder")
+    ok, why, in_book = asyncio.run(
+        questing.select_quest(book, ["Eye of Krok"]))
+    assert not ok
+    assert in_book is False
+    assert "across 2 page(s)" in why, why
+    assert book.clicked.count("btnRight") <= questing.QUEST_BOOK_MAX_PAGES
+    assert "Family Values" in why, "the later page belongs in the report"
+
+
+def test_paging_stops_at_the_cap(monkeypatch):
+    """A control that renders a NEW page every time is still bounded:
+    the book is held open for every one of them, and a wizard that
+    cannot move is the cost."""
+    import asyncio
+
+    questing = _fast_select(monkeypatch)
+    book = _PagedBook([[f"Page {i} Quest"] for i in range(9)],
+                      tracked="Quest Finder")
+    ok, why, _in = asyncio.run(
+        questing.select_quest(book, ["Family Values"]))
+    assert not ok
+    assert f"across {questing.QUEST_BOOK_MAX_PAGES} page(s)" in why, why
+
+
+def test_with_no_pager_the_giveup_names_the_lists_own_children(monkeypatch):
+    """The half that makes the next revision cheap. Nothing in this
+    codebase has a verified path to the journal's paging control —
+    `Deimos/src/paths.py` names the four slots and the All sort and
+    stops — so a run that cannot find one puts the window names it DID
+    see in the export, and the guessing happens once."""
+    import asyncio
+
+    questing = _fast_select(monkeypatch)
+    book = _PagedBook([["Know Thine Enemy", "Shard Trek"],
+                       ["Family Values"]],
+                      tracked="Quest Finder", pager=False)
+    ok, why, in_book = asyncio.run(
+        questing.select_quest(book, ["Family Values"]))
+    assert not ok
+    assert in_book is False
+    assert "QuestLogUpButton" in why, why
+    assert "wndQuestInfo0" in why, "name every child, not the odd one out"
+    assert "across 1 page(s)" in why
+    assert "evidence, not proof" in why
+
+
+def test_the_pager_is_never_an_entry_window(monkeypatch):
+    """Clicking `wndQuestInfo{n}` SELECTS the quest under it. Picking
+    one at random is the exact failure the book work exists to cure, so
+    an entry is refused before a name hint is even considered."""
+    import asyncio
+
+    questing = _fast_select(monkeypatch)
+    book = _PagedBook([["Know Thine Enemy"]], tracked="Quest Finder",
+                      pager=False)
+    kids = book.root_window._children[0]._children[0]._children[0]
+    kids._children.append(_RWin("wndQuestInfoDownArrow"))
+    found = asyncio.run(questing._Book(book).pager())
+    assert found[0] is None, "an entry window was taken for a pager"
+    assert "wndQuestInfoDownArrow" in found[1], "still name it in the report"
+
+
 def test_two_matching_entries_are_never_guessed_between(monkeypatch):
     """Clicking the wrong entry re-tracks the wrong quest, which is the
     disease this is the cure for. An ambiguous match is a refusal."""
@@ -21785,6 +21930,165 @@ def test_a_stall_needs_real_clocks_not_unread_ones(monkeypatch):
     monkeypatch.setattr(questing, "select_quest", select)
     asyncio.run(worker._maybe_recover_questline(lost))
     assert calls == [], "unread clocks were taken as a stall"
+
+
+def test_a_quester_in_another_world_skips_the_alone_wait(monkeypatch):
+    """Rev f27693c2's run 8, entire. The tracker fell onto a Wizard
+    City side quest, the script's own lost-quest routine put the party
+    on Triton Avenue, and the quester spent 24 of the run's 41 minutes
+    there — shuttling zones and winning fights, so every "is the side
+    quest being worked" test answered yes — while `last_main` held an
+    Avalon quest throughout. A quester whose BODY has left the world
+    its own main line is in is not running a side chain."""
+    import asyncio
+    import time
+
+    questing = _no_dialogue(monkeypatch)
+    worker, lost = _off_the_line(orders=("Gather the Troops",))
+    worker.booster_party = True
+    worker.leader = lost.index
+    lost.last_main = ("Krokotopia", 12, "Gather the Troops")
+    now = time.monotonic()
+    lost.off_line_since = now - 400
+    # Every sign of the side quest being worked, as run 8 read them.
+    lost.goal_at = now
+    lost.zone_since = now
+    lost.zone_fresh_at = now
+    lost.zone_seen = "WizardCity/WC_Streets/WC_Triton"
+    calls = []
+
+    async def select(_c, names, on_status=None):
+        calls.append(list(names))
+        return True, names[0], True
+
+    monkeypatch.setattr(questing, "select_quest", select)
+    asyncio.run(worker._maybe_recover_questline(lost))
+    assert len(calls) == 1, "the world it is standing in was not evidence"
+    said = [e for e in lost.tel.questing
+            if e["kind"] == "questline-recovered"]
+    assert said, [e["kind"] for e in lost.tel.questing]
+    assert "WizardCity" in said[0]["detail"], "say WHY the wait was skipped"
+
+
+def test_a_quester_in_its_own_world_still_serves_the_alone_wait(monkeypatch):
+    """The half that keeps the rule honest. A side chain run in the
+    world the main line is already in is exactly what
+    `RECOVER_ALONE_AFTER` exists to leave alone, and a rule that fired
+    on it would be wizAi fighting the script it is driving."""
+    import asyncio
+    import time
+
+    questing = _no_dialogue(monkeypatch)
+    worker, lost = _off_the_line(orders=("Gather the Troops",))
+    worker.booster_party = True
+    worker.leader = lost.index
+    lost.last_main = ("Krokotopia", 12, "Gather the Troops")
+    now = time.monotonic()
+    lost.off_line_since = now - 400
+    lost.goal_at = now
+    lost.zone_since = now
+    lost.zone_fresh_at = now
+    lost.zone_seen = "Krokotopia/KT_Hub"
+    calls = []
+
+    async def select(_c, names, on_status=None):
+        calls.append(list(names))
+        return True, names[0], True
+
+    monkeypatch.setattr(questing, "select_quest", select)
+    asyncio.run(worker._maybe_recover_questline(lost))
+    assert calls == [], "a side chain at home was cut short"
+    assert [e for e in lost.tel.questing
+            if e["kind"] == "questline-recovery-waiting"]
+
+
+def test_a_two_zone_shuttle_is_not_the_side_quest_being_worked(monkeypatch):
+    """`zone_since` is restamped by ANY zone change, so a wizard
+    bouncing between two zones defeated the stall test forever — the
+    failure's own repetition holding shut the escape hatch built for
+    it. Phase J's achievement clock ignores a return to a zone just
+    left, and this rung was the last one still reading the raw one."""
+    import asyncio
+    import time
+
+    questing = _no_dialogue(monkeypatch)
+    worker, lost = _off_the_line(orders=("Gather the Troops",))
+    worker.booster_party = True
+    worker.leader = lost.index
+    lost.last_main = ("Krokotopia", 12, "Gather the Troops")
+    now = time.monotonic()
+    lost.off_line_since = now - 400
+    lost.goal_at = now - 400            # the goal has not moved
+    lost.zone_fresh_at = now - 400      # ...nor has it reached anywhere new
+    lost.zone_since = now               # ...but it changed zone a moment ago
+    lost.zone_seen = "Krokotopia/KT_Hub"      # its own world: that rule stays out
+    calls = []
+
+    async def select(_c, names, on_status=None):
+        calls.append(list(names))
+        return True, names[0], True
+
+    monkeypatch.setattr(questing, "select_quest", select)
+    asyncio.run(worker._maybe_recover_questline(lost))
+    assert len(calls) == 1, "the shuttle still read as progress"
+
+
+def test_a_winning_loop_skips_the_alone_wait(monkeypatch):
+    """Fights 7-10 of run 8 were all `The Harvest Lord@510+Rotted
+    Fodder@150` under one unchanged goal. Phase K already records
+    that; a board beaten over and over while the goal stands still is
+    the opposite of a side quest being worked, and the cure was
+    waiting on the claim that it was."""
+    import asyncio
+    import time
+
+    questing = _no_dialogue(monkeypatch)
+    worker, lost = _off_the_line(orders=("Gather the Troops",))
+    worker.booster_party = True
+    worker.leader = lost.index
+    lost.last_main = ("Krokotopia", 12, "Gather the Troops")
+    now = time.monotonic()
+    lost.off_line_since = now - 400
+    lost.goal = "Talk To Sandor Spitfire in Triton Avenue"
+    lost.goal_at = now                  # every clock fresh...
+    lost.zone_since = now
+    lost.zone_fresh_at = now
+    lost.zone_seen = "Krokotopia/KT_Hub"      # ...and its own world
+    lost.won_to = {"The Harvest Lord@510+Rotted Fodder@150":
+                   [(now - 200, lost.goal), (now - 100, lost.goal),
+                    (now - 20, lost.goal)]}
+    calls = []
+
+    async def select(_c, names, on_status=None):
+        calls.append(list(names))
+        return True, names[0], True
+
+    monkeypatch.setattr(questing, "select_quest", select)
+    asyncio.run(worker._maybe_recover_questline(lost))
+    assert len(calls) == 1, "three wins on one unmoving goal read as work"
+
+
+def test_a_board_won_while_the_goal_advances_is_not_a_loop():
+    """The discriminator `_watch_for_a_winning_loop` is built on, read
+    the same way by the read-only half: a board beaten repeatedly while
+    the goal MOVES is a respawning mob on the route."""
+    import time
+
+    worker, lost = _off_the_line(orders=("Gather the Troops",))
+    now = time.monotonic()
+    lost.goal = "Talk To Sandor Spitfire in Triton Avenue"
+    lost.won_to = {"The Harvest Lord@510": [(now - 200, "an older goal"),
+                                            (now - 100, "another one"),
+                                            (now - 20, lost.goal)]}
+    assert worker._in_a_winning_loop(lost, now) == 0
+    lost.won_to["The Harvest Lord@510"] = [(now - 200, lost.goal),
+                                           (now - 100, lost.goal),
+                                           (now - 20, lost.goal)]
+    assert worker._in_a_winning_loop(lost, now) == 3
+    # ...and a win older than the memory does not count towards one.
+    lost.won_to["The Harvest Lord@510"][0] = (now - worker.WIN_MEMORY - 1,
+                                              lost.goal)
+    assert worker._in_a_winning_loop(lost, now) == 0
 
 
 def test_a_quest_that_is_not_in_the_book_is_not_retried_forever(monkeypatch):
@@ -22422,6 +22726,85 @@ def test_the_same_death_straight_after_a_reload_backs_off():
     asyncio.run(worker._script_step(seat))
     assert runner.restarted == 2
     assert worker._reload_cool == 60.0
+
+
+#: the crash rev f27693c2's run 8 opened on. `_fetch_tracked_quest`
+#: (`Deimos/src/deimoslang/vm.py:365`) raises when `quest_id()` names
+#: nothing in `quest_data()` -- the journal's Quest Finder pseudo-entry,
+#: from the inside.
+_TRACKED_QUEST_CRASH = (
+    "stuck on one instruction — it has raised 25 times without the "
+    "script moving on (VMError: Unable to fetch the currently tracked "
+    "quest for client with title wizAi 2 · w0 · fire)")
+
+
+def test_a_tracked_quest_crash_loop_wakes_the_questline_rung():
+    """The backoff already reaches the conclusion it cannot act on:
+    "Reloading is not fixing this — the state it crashes on is what
+    needs fixing". When that state is the TRACKER, wizAi has the cure
+    two rungs down and it was gated behind a clock nothing had
+    started. Run 8 spent t=222 to t=476 on four reloads and three
+    backoffs of this exact error with `select_quest` sitting unused,
+    and the party was in Wizard City twenty minutes later."""
+    import asyncio
+
+    worker, seat, runner = _stale_party()
+    runner.last_error = _TRACKED_QUEST_CRASH
+    runner.stale_sig = "ip 214: VMError: Unable to fetch the currently"
+    asyncio.run(worker._script_step(seat))            # reload #1
+    runner.stale = True                               # ...died the same way
+    assert seat.off_line_since is None
+    asyncio.run(worker._script_step(seat))            # the backoff
+    assert seat.off_line_since is not None, "the cure was never given a look"
+    assert "questline-suspect" in [e["kind"] for e in seat.tel.questing]
+    assert worker.seats[1].off_line_since is None, \
+        "the error named one client; three other clocks started"
+
+
+def test_an_ordinary_crash_loop_leaves_the_questline_alone():
+    """The rev 7d9b6d6b lang-file crash says nothing about the tracker,
+    and starting an off-the-line clock on it would put every wizard
+    whose script hiccups in front of the quest book."""
+    import asyncio
+
+    worker, seat, runner = _stale_party()
+    asyncio.run(worker._script_step(seat))
+    runner.stale = True
+    asyncio.run(worker._script_step(seat))
+    assert "script-reload-backoff" in [e["kind"] for e in seat.tel.questing]
+    assert seat.off_line_since is None
+    assert "questline-suspect" not in [e["kind"] for e in seat.tel.questing]
+
+
+def test_a_booster_is_never_woken_by_the_scripts_tracked_quest_crash():
+    """A booster's journal is a max-level wizard's, parked wherever it
+    stopped. It has no questline to lose and nothing to put back."""
+    import asyncio
+
+    worker, seat, runner = _stale_party()
+    worker.booster_party = True
+    worker.leader = 0                       # seat 0 quests, seat 1 boosts
+    runner.last_error = _TRACKED_QUEST_CRASH.replace("w0", "somebody")
+    runner.stale_sig = "ip 214: VMError: Unable to fetch the currently"
+    asyncio.run(worker._script_step(seat))
+    runner.stale = True
+    asyncio.run(worker._script_step(seat))
+    assert worker.seats[0].off_line_since is not None
+    assert worker.seats[1].off_line_since is None, "the booster was woken"
+
+
+def test_a_wizard_on_the_main_line_clears_the_suspicion_at_once():
+    """What makes the un-gating safe. `_wake_the_questline` starts a
+    clock and nothing else: the placement pass still has to agree, and
+    a wizard reading on-main has it cleared on the very next poll."""
+    import time
+
+    worker = _party_on_quests(["Gather the Troops", "Gather the Troops"])
+    seat = worker.seats[0]
+    seat.off_line_since = time.monotonic() - 5
+    worker._check_on_questline()
+    assert seat.off_line_since is None
+    assert "back-on-questline" in [e["kind"] for e in seat.tel.questing]
 
 
 def test_a_different_death_reloads_immediately_and_resets_the_backoff():

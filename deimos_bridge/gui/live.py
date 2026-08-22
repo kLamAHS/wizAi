@@ -2149,6 +2149,74 @@ class LiveWorker(QThread):
     #: minutes still retries -- the operator may fix the state live --
     #: without eleven reloads per export saying nothing new.
     RELOAD_COOL_MAX = 600.0
+    #: the VM failure that means the tracked quest is not a real quest.
+    #: `_fetch_tracked_quest` (`Deimos/src/deimoslang/vm.py:365`) raises
+    #: it when `quest_id()` names nothing in `quest_data()` -- which is
+    #: what the journal's Quest Finder pseudo-entry looks like from the
+    #: inside, and what the script's own lost-quest routine leaves
+    #: behind when a cycle fails partway.
+    TRACKED_QUEST_ERROR = "unable to fetch the currently tracked quest"
+
+    def _wake_the_questline(self, seat, why):
+        """Let the questline rung look at a script dying on its tracker.
+
+        The reload backoff has already reached the conclusion it cannot
+        act on -- "Reloading is not fixing this, so the next reload
+        waits 30s: the state it crashes on is what needs fixing". When
+        the state it crashes on is the TRACKER, the fixer is two rungs
+        below and was gated behind a clock nothing had started. Rev
+        f27693c2's run 8 spent t=222 to t=476 on four reloads and three
+        backoffs of exactly this error while `select_quest` sat unused,
+        and never recovered: the script's own lost-quest routine took
+        the party to Wizard City and the run ended there 24 minutes
+        later.
+
+        An UN-GATING, not a diagnosis, and that is what makes it safe.
+        Arming `off_line_since` starts a clock and nothing else;
+        `_maybe_recover_questline` still runs the whole placement pass
+        and still refuses everything it refused before. A wizard
+        genuinely on the main line has this cleared by
+        `_check_on_questline` on its very next poll -- the
+        `off_line_since and place.on_main` branch -- so the worst case
+        is a clock that ticks for half a second and a line in the
+        export saying it did.
+
+        Named by client where the error names one: the VM writes the
+        title it failed on ("wizAi 2 - Konstantin - fire"), and a
+        four-seat party has no reason to start three other clocks over
+        one wizard's journal. Every non-booster seat when it names
+        nobody, because a booster has no questline to lose.
+        """
+        import time
+
+        if self.TRACKED_QUEST_ERROR not in (why or "").lower():
+            return
+        now = time.monotonic()
+        named = [s for s in self.seats
+                 if s.name and s.name in why and not self._is_booster(s)]
+        woke = []
+        for one in (named or [s for s in self.seats
+                              if s.client is not None
+                              and not self._is_booster(s)]):
+            if one.off_line_since is not None:
+                continue
+            one.off_line_since = now
+            woke.append(one.name)
+        if not woke:
+            return
+        said = (f"the script keeps dying on the tracked quest itself, and "
+                f"reloading cannot fix a journal — so the questline "
+                f"recovery is being given a look at "
+                f"{' and '.join(woke)} rather than left waiting for a "
+                f"clock nothing had started. It still has to place the "
+                f"tracker before it selects anything; a wizard that is "
+                f"on the main line clears this on the next poll")
+        for other in self.seats:
+            try:
+                other.tel.note_questing("questline-suspect", said)
+            except Exception:
+                pass
+        self._say(seat, said)
 
     async def _script_step(self, seat=None):
         """One burst of the script, not one instruction.
@@ -2237,6 +2305,9 @@ class LiveWorker(QThread):
                     except Exception:
                         pass
                 self._say(seat, said)
+                # ...and the one failure this backoff can name a cure
+                # for. See `_wake_the_questline`.
+                self._wake_the_questline(seat, why)
                 return
             self._say(seat, why)
             if not runner.restart():
@@ -8676,13 +8747,77 @@ class LiveWorker(QThread):
     #: task lands mid-click turns the click into a misfire.
     RECOVER_CEILING = 60.0
     RECOVER_SETTLE = 3.0
-    #: how long a "not among the visible entries" give-up holds before
-    #: the same candidate list is worth one more look. Half an hour: a
-    #: retry costs ~15 held seconds of paging the book, and the two
-    #: states it recovers from -- the quest sitting on a page the read
-    #: cannot reach, and the party accepting it since -- both persist
-    #: far longer than a cooldown.
+    #: how long a "not among the entries" give-up holds before the same
+    #: candidate list is worth one more look. Half an hour: a retry
+    #: costs ~15 held seconds of paging the book, and the states it
+    #: recovers from persist far longer than a cooldown.
+    #:
+    #: Still half an hour now that `_Book.look_for` turns pages, and the
+    #: reasoning has changed under it. It used to rest mostly on "the
+    #: quest may be sitting on a page the read cannot reach", which was
+    #: true and is now usually not. What is left is thinner and real:
+    #: the paging control is found by NAME rather than by a path
+    #: anybody has verified against the live UI, so a journal that
+    #: could not be paged at all still reads as four entries -- and a
+    #: quest the party accepts in the meantime turns a "never accepted"
+    #: into a fact. The give-up is keyed on the candidate list either
+    #: way, so a party that moves on asks a new question at once.
     RECOVER_GIVEUP_TTL = 1800.0
+
+    def _wrong_world(self, seat):
+        """Where this wizard is standing, when it is not where its own
+        main line is -- and "" when they agree or either is unreadable.
+
+        The discriminator the alone wait never had. `RECOVER_ALONE_AFTER`
+        exists to avoid cutting short a side chain somebody meant to
+        run; a quester whose BODY has left the world its own last
+        main-line quest belongs to is not running a side chain, it is
+        lost. Rev f27693c2's run 8 is the case in full: the tracker fell
+        onto 'Red Heads' at t=907, the script's lost-quest routine put
+        the party in Wizard City at t=1004, and the wizard spent the
+        remaining 24 minutes on Triton Avenue level-10 quests while a
+        max-level Avalon quest sat in `last_main` the whole time.
+
+        Both sides folded through `questlist.world_key`, the pair
+        `_tracker_strayed` already compares, so "WizardCity" and
+        "Wizard City" are one world. "" on either side means the read
+        could not answer, and this must never fire on that: a housing
+        instance, a PvP arena and a bare zone id with the prefix cut
+        off all read as no world at all.
+        """
+        from .. import questlist
+
+        here = questlist.world_of_zone(seat.zone_seen)
+        was = (seat.last_main or (None,))[0]
+        mine = questlist.world_key(was)
+        if not here or not mine or here == mine:
+            return ""
+        return f"{(seat.zone_seen or '').split('/')[0] or here}"
+
+    def _in_a_winning_loop(self, seat, now):
+        """How many times one board has been beaten on this exact goal.
+
+        Zero below `WINNING_LOOP`. The read-only half of
+        `_watch_for_a_winning_loop`, for a caller that wants the FACT
+        rather than the report -- the memory is already recorded, and a
+        second rung reading it costs nothing.
+
+        The questline recovery needs it because its alone wait stands
+        down for "the side quest still shows signs of being worked",
+        and a wizard killing one board over and over on one unmoving
+        goal is the precise opposite of that. Rev f27693c2's run 8:
+        `The Harvest Lord@510+Rotted Fodder@150` won four times under
+        one unchanged Wizard City goal, while the cure waited.
+        """
+        goal = (seat.goal or "").strip()
+        if not goal:
+            return 0
+        best = 0
+        for seen in seat.won_to.values():
+            wins = sum(1 for when, was in seen
+                       if was == goal and now - when <= self.WIN_MEMORY)
+            best = max(best, wins)
+        return best if best >= self.WINNING_LOOP else 0
 
     async def _maybe_recover_questline(self, seat):
         """Put a lost tracker back onto the main questline.
@@ -8760,6 +8895,7 @@ class LiveWorker(QThread):
         # -- and the alone wait below became the cure's ceiling.
         alone = not any(p.on_main for s, p in zip(self.seats, places)
                         if s is not seat and not self._is_booster(s))
+        forced = ""
         if alone and away < self.RECOVER_ALONE_AFTER:
             # A whole party off the line is usually the script running
             # a side chain on purpose -- and a side chain being WORKED
@@ -8770,28 +8906,62 @@ class LiveWorker(QThread):
             # Cult', the script spun ~4,000 instructions a minute at
             # an oyster it has no route for, goal and zone sat frozen
             # for nine straight minutes -- and the twenty-minute alone
-            # wait outlived the run, with the booster party reading as
-            # "alone" by the old rule on top.
-            stalled = (bool(seat.goal_at) and bool(seat.zone_since)
-                       and now - max(seat.goal_at, seat.zone_since)
-                       >= self.RECOVER_QUESTLINE_AFTER)
-            if not stalled:
+            # wait outlived the run.
+            #
+            # Three ways that story dies now, where there was one. The
+            # one there was read `max(goal_at, zone_since)`, and
+            # `zone_since` is restamped by ANY zone change -- so the
+            # failure's own shuttling kept the escape hatch shut. Phase
+            # J wrote `_nothing_achieved_since` to be bounce-proof for
+            # exactly this and this rung was the last place still
+            # reading the raw clock.
+            #
+            # And a note on `alone` itself, because it reads like a
+            # party-shape question and is not one: boosters are
+            # excluded as evidence deliberately -- a booster's journal
+            # is a max-level wizard's, parked wherever it stopped --
+            # which means that in booster-party mode the generator is
+            # EMPTY at every seat count and `alone` is True forever.
+            # The twenty-minute wait has therefore never once been
+            # applied to the case it was written for. Rev f27693c2's
+            # run 8 spent 24 of 41 minutes inside it.
+            since = self._nothing_achieved_since(seat)
+            stalled = bool(since) \
+                and now - since >= self.RECOVER_QUESTLINE_AFTER
+            elsewhere = self._wrong_world(seat)
+            looping = self._in_a_winning_loop(seat, now)
+            if stalled:
+                forced = (f"nothing achieved in "
+                          f"{(now - since) / 60:.0f} min")
+            elif elsewhere:
+                # A quester whose BODY has left the world its own main
+                # line is in is not running a side chain. Categorical,
+                # not a timer -- and safe, because the cure selects a
+                # quest and moves nobody, and a wrong reading clears
+                # itself on the next placement poll.
+                forced = (f"standing in {elsewhere} while its own main "
+                          f"line is in {(seat.last_main or ('', ))[0]}")
+            elif looping:
+                forced = (f"one board beaten {looping} times without "
+                          f"{(seat.goal or '').strip()!r} moving")
+            else:
                 self._say_once(
                     seat, f"recover-wait:{seat.off_line_since:.0f}",
                     f"{seat.name} has been off the main questline for "
-                    f"{away / 60:.0f} min with nobody on the line to "
-                    f"compare against — waiting "
+                    f"{away / 60:.0f} min with no other questing wizard "
+                    f"on the line to compare against — waiting "
                     f"{self.RECOVER_ALONE_AFTER / 60:.0f} min in case "
-                    f"the side quest is deliberate. A stall (no goal or "
-                    f"zone change for "
-                    f"{self.RECOVER_QUESTLINE_AFTER / 60:.0f} min) "
-                    f"skips the wait",
+                    f"the side quest is deliberate. Nothing achieved "
+                    f"for {self.RECOVER_QUESTLINE_AFTER / 60:.0f} min, "
+                    f"a world its own main line does not name, or one "
+                    f"board won {self.WINNING_LOOP} times on this goal "
+                    f"all skip the wait",
                     kind="questline-recovery-waiting",
                     detail=(f"off the line {away / 60:.0f} min on "
-                            f"{place.name!r}, nobody on the main line to "
-                            f"compare against, and the side quest still "
-                            f"shows signs of being worked — holding the "
-                            f"cure back on purpose"))
+                            f"{place.name!r}, no other questing wizard "
+                            f"on the main line to compare against, and "
+                            f"the side quest still shows signs of being "
+                            f"worked — holding the cure back on purpose"))
                 return
         candidates, why = self._lost_quest(seat, places)
         if not candidates:
@@ -8804,9 +8974,10 @@ class LiveWorker(QThread):
         # A give-up holds for the same candidate list -- retrying it
         # every ten minutes would page through the journal forever to
         # learn the same thing -- but it EXPIRES, because "none of them
-        # is among the visible entries" is evidence and not proof. The
-        # book shows four quests per page and `select_quest` cannot
-        # turn pages, so the quest may sit on page two the whole time;
+        # is among the entries" is evidence and not proof. Weaker
+        # evidence than it was -- `_Book.look_for` turns pages now --
+        # but the pager is matched by window NAME, so a journal whose
+        # control does not match still answers on four entries;
         # and a party that turns in the previous step makes the quest
         # accepted where it was not. The 115-min run at rev f2b8101f
         # wrote Phönix off at t=4536 on exactly that reading and never
@@ -8824,8 +8995,11 @@ class LiveWorker(QThread):
         told = self._saved_place(target.name, now, target.area)
         self._say(seat,
                   f"{seat.name} has been off the main questline for "
-                  f"{away / 60:.0f} min on {place.name!r} — putting the "
-                  f"tracker back on {target.describe()} ({source})"
+                  f"{away / 60:.0f} min on {place.name!r}"
+                  + (f" — {forced}, so the alone wait is not being "
+                     f"served" if forced else "")
+                  + f" — putting the tracker back on "
+                    f"{target.describe()} ({source})"
                   + (f"; {told}" if told else ""))
         self._hop_pause_until = now + self.RECOVER_CEILING
         try:
@@ -8844,8 +9018,9 @@ class LiveWorker(QThread):
             seat.tel.note_questing(
                 "questline-recovered",
                 f"{seat.name} had been off the main questline for "
-                f"{away / 60:.0f} min with its tracker on {place.name!r}. "
-                f"Selected {why!r} in the quest book and the tracker now "
+                f"{away / 60:.0f} min with its tracker on {place.name!r}"
+                + (f" ({forced})" if forced else "")
+                + f". Selected {why!r} in the quest book and the tracker now "
                 f"reads it, so every `tp quest` — the script's and "
                 f"wizAi's — aims at the main line again ({source})"
                 + (f". {told[0].upper()}{told[1:]}" if told else ""))
@@ -8886,8 +9061,8 @@ class LiveWorker(QThread):
                 f"not in its book: {why}"
                 + (f" — {told}" if told else "")
                 + f". If it was never accepted, only its NPC can fix "
-                  f"that — but the book shows four quests per page and "
-                  f"the read cannot turn pages, so this is checked "
+                  f"that — but the paging control is matched by name "
+                  f"rather than by a verified path, so this is checked "
                   f"again in {self.RECOVER_GIVEUP_TTL / 60:.0f} min "
                   f"rather than never")
             self._say(seat, f"cannot recover the questline: {why}")
