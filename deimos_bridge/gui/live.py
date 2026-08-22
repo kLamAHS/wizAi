@@ -179,6 +179,17 @@ class _Seat:
         #: until a second read agrees with it. See
         #: `LiveWorker._note_goal`.
         self.goal_pending = ""
+        #: when a near marker last failed its second read. The disbelief
+        #: has to rest: `marker_away` is None afterwards, which is
+        #: exactly the far-to-near transition that re-arms the
+        #: confirmation, so without this a flapping hook pays the
+        #: confirmation on every poll and never leaves None. See
+        #: `LiveWorker._confirmed_marker`.
+        self.marker_flapped_at = 0.0
+        #: the spot a partner's Team-Up-less prompt was already charged
+        #: a dud for, so the charge is once per visit rather than once
+        #: per tick. See `LiveWorker._maybe_count_hold`.
+        self.shopfront_spot = None
         #: every goal this wizard has held, in order. A wizard still on
         #: a step another has already left is the one behind -- see
         #: `LiveWorker._who_is_behind`.
@@ -188,6 +199,14 @@ class _Seat:
         #: was said. See `LiveWorker._check_on_questline`.
         self.off_line_since = None
         self.said_off_line = ""
+        #: since when the tracker has held a quest name the questline
+        #: index has never heard of, and which name. A CLEAN read of a
+        #: real quest that is simply missing from the data is not the
+        #: same thing as a read that failed, and treating them as one
+        #: silently disarmed the whole recovery rung for 152 minutes at
+        #: rev ebc4aff8. See `LiveWorker._tracker_strayed`.
+        self.unplaced_since = None
+        self.unplaced_name = ""
         #: the last main-line quest this wizard's tracker held, as
         #: (world, order, name), and when. The first and best answer to
         #: "which quest was lost": a wizard on a side quest now was on
@@ -242,6 +261,18 @@ class _Seat:
         #: against. See `LiveWorker._maybe_realm_hop`.
         self.collect_moved_at = 0.0
         self.collect_moved_for = ""
+        #: the zone the count went up IN. A count that moved in another
+        #: zone is not evidence this wizard is at the spawns HERE, and
+        #: the latch used to be keyed on the collectible's name alone
+        #: -- so one tick of progress licensed realm hops for the rest
+        #: of the session. See `LiveWorker._maybe_realm_hop`.
+        self.collect_moved_in = ""
+        #: when this seat last landed in a fresh realm. Its own clock,
+        #: deliberately: the realm hop used to restamp `progress_at`
+        #: to give the new shard a clean observation window, and
+        #: `progress_at` is the clock TWELVE other rungs read -- the
+        #: whole stuck ladder among them. See `_realm_hop_party`.
+        self.realm_settled_at = 0.0
         #: when this client's quest hook last DID read a position, and
         #: on which goal. Proof the hook works, which is what separates
         #: "this quest has no marker" from "the arrow is off". See
@@ -413,6 +444,22 @@ class _Seat:
         #: consecutive cross-zone follows have failed for it.
         self.door_walked_at = NEVER
         self.cross_zone_fails = 0
+        #: consecutive cross-zone follows that failed inside wizAi's own
+        #: UI rather than on a game rule (`party.never_asked`). Past
+        #: `FRIENDS_UI_GIVE_UP` the friends list is written off for this
+        #: client and the walk ladder is used directly.
+        self.friends_ui_fails = 0
+        self.friends_ui_dead = False
+        #: set when the policy has given up on the duel this seat is in
+        #: and it should be left. Read by the combat handler at the top
+        #: of its round, because that coroutine owns the mouse. See
+        #: `LiveWorker._maybe_flee`.
+        self.flee_asked = False
+        #: did this wizard hit zero health during the fight it is in?
+        #: Latched by `on_defeated`, which is the only moment it is
+        #: readable -- `_fight_outcome` runs after the game respawns the
+        #: wizard and reads a corpse as a winner.
+        self.died_this_fight = False
         #: consecutive door-walk failures, per (from zone, to zone). The
         #: per-seat counter above says a follow is failing; this says
         #: THIS ROUTE is not working, which is the one an escalation can
@@ -670,6 +717,10 @@ class LiveWorker(QThread):
         #: has already tried. See `_realm_hop_party`.
         self._realm_hopped_at = NEVER
         self._realms_tried = set()
+        #: id(seat) -> (hops spent, the goal they were spent on). The
+        #: budget `REALM_HOP_BUDGET` bounds, cleared when the goal
+        #: changes because a changed goal is the outcome a hop buys.
+        self._hops_for = {}
         #: when a looping script was last forcibly restarted. See
         #: `_maybe_restart_script`.
         self._script_restarted_at = NEVER
@@ -1642,7 +1693,8 @@ class LiveWorker(QThread):
         if wheel:
             coro = self._at_the_wheel(seat, name, coro, started)
         try:
-            await self._still_ticking(seat, asyncio.wait_for(coro, limit))
+            await self._still_ticking(seat, asyncio.wait_for(coro, limit),
+                                      started)
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError:
@@ -1673,7 +1725,7 @@ class LiveWorker(QThread):
     #: does per tick.
     TICK_STAMP = 5.0
 
-    async def _still_ticking(self, seat, awaitable):
+    async def _still_ticking(self, seat, awaitable, started=None):
         """`awaitable`, with this seat's liveness clock kept running.
 
         `seat.ticked_at` is stamped once at the top of the tick and
@@ -1693,20 +1745,42 @@ class LiveWorker(QThread):
         going round at all -- wedged in `_read_in_battle`, or gone. A
         stage that genuinely hangs is still caught, by its own deadline
         in `STAGE_LIMITS`, which is the bound built for it.
+
+        `started` is the distinction `_stage` already goes to the
+        trouble of making, and skipping it here undid it: a stage
+        QUEUED behind a wedge is not running, it is waiting for a drive
+        lock something else has been holding -- the exact state
+        `DRIVER_QUIET` exists to hand the script over for. Stamping
+        through that moved the handover from 90 seconds to whatever the
+        blocked stage's own limit is. A stage that never got the wheel
+        does not get to certify its seat as alive.
         """
         import time
+        from contextlib import suppress
 
         task = asyncio.ensure_future(awaitable)
         try:
             while True:
                 done, _pending = await asyncio.wait({task},
                                                     timeout=self.TICK_STAMP)
-                seat.ticked_at = time.monotonic()
+                if started is None or started[0]:
+                    seat.ticked_at = time.monotonic()
                 if done:
                     return task.result()
         finally:
             if not task.done():
+                # Cancelled AND unwound before returning. `wait_for`'s
+                # contract is that the coroutine is finished when it
+                # raises, and detaching it here broke that: on shutdown
+                # `await servicer` completed with an orphaned stage
+                # still pending, `_unhook` then released the client's
+                # hooks while that stage might still be clicking it,
+                # and `loop.close()` destroyed the task before its
+                # `finally` could give the drive lock back.
                 task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await asyncio.shield(
+                        asyncio.gather(task, return_exceptions=True))
 
     async def _at_the_wheel(self, seat, name, coro, started=None):
         """`coro`, holding this wizard's drive lock.
@@ -2532,11 +2606,28 @@ class LiveWorker(QThread):
         BEFORE the between-fight upkeep runs -- a potion would launder
         a defeat into a win. A fight that recorded no rounds (a
         spurious boundary) stays unknown rather than guessed.
+
+        A health read is the FALLBACK, though, not the first answer.
+        There are two independent outcome paths here and they did not
+        talk to each other: `_down`/`on_defeated` knows the truth in
+        the round it happens, off the board it is reading; this
+        re-derived it from a stat read taken after the between-fight
+        boundary, by which time the game has already respawned the
+        wizard. Rev ebc4aff8's fight 4 is the cost -- Konstantin went
+        from 2,573 to 0 against four Shadow-Web Haunts and the fight
+        is recorded `won: True`. Four things follow from that one
+        wrong bit: `wins` reads 3 of 4, `_note_the_loss` never fires
+        so a repeated wall is never called one, `_health_needed` is
+        fed `damage_taken: 155.4` for a fight that took 2,573, and
+        `_let_it_heal` sees a healthy winner and lets the next duel
+        start.
         """
         seat = self._seat_for(client) if seat is None else seat
         try:
             if not seat.tel.fights or seat.tel.fights[-1].rounds == 0:
                 return None
+            if seat.died_this_fight:
+                return False
             hp = await client.stats.current_hitpoints()
             return bool(hp and int(hp) > 0)
         except Exception:
@@ -3106,12 +3197,35 @@ class LiveWorker(QThread):
             return
         seat.followed_at = now
 
-        # The game may already be naming the leader for us: a follower
-        # whose Quest Helper tracks the leader carries `Quest Helper
-        # Following <full name>` in its own goal line -- the exact
-        # spelling the friends list holds, before any duel has read a
-        # name. Rev 676d6e77's booster spent four hours one zone from
-        # its quester for want of this string, while displaying it.
+        # Ask the leader's own client first. `party.wizard_name` has
+        # existed for exactly this since the module was written and had
+        # NO callers -- the name's one live source was a combat read,
+        # so a booster could not follow its leader until the leader had
+        # fought, and the leader fights badly without its booster. Rev
+        # ebc4aff8: Oz had no name for Konstantin for the first 207
+        # seconds, which is precisely when Konstantin crossed into Drum
+        # Jungle on a sigil and the party split for the rest of the
+        # run. It never recovered by teleport.
+        if not boss.wizard_name:
+            asked = None
+            try:
+                asked = await party.wizard_name(boss.client)
+            except Exception:
+                asked = None
+            if asked:
+                boss.wizard_name = asked
+                seat.tel.note_questing(
+                    "leader-name-learned",
+                    f"the leader's client named itself: {asked!r} — the "
+                    f"friends-list teleport can aim without waiting for "
+                    f"a duel to read it")
+
+        # The game may already be naming the leader for us, and more
+        # precisely: a follower whose Quest Helper tracks the leader
+        # carries `Quest Helper Following <full name>` in its own goal
+        # line -- the exact spelling the friends list holds. Rev
+        # 676d6e77's booster spent four hours one zone from its quester
+        # for want of this string, while displaying it.
         harvested = party.helper_followed_name(seat.goal)
         if harvested:
             known = boss.wizard_name or ""
@@ -3129,8 +3243,13 @@ class LiveWorker(QThread):
                 self._say(seat, f"learned the leader's name from the "
                                 f"Quest Helper: {harvested}")
 
-        moved, why = await party.follow(client, boss.client,
-                                        leader_name=boss.wizard_name)
+        moved, why = await party.follow(
+            client, boss.client, leader_name=boss.wizard_name,
+            # Written off for this client: go straight to the door
+            # ladder rather than spending another 45s per name spelling
+            # on a friends list that has failed on wizAi's side of the
+            # glass `FRIENDS_UI_GIVE_UP` times running.
+            no_friends_list=seat.friends_ui_dead)
         # A teleport the GAME refuses is not a wizAi failure to retry
         # harder: most dungeon instances allow friends-list ports and
         # some do not, and inside one that does not, every retry is
@@ -3139,6 +3258,7 @@ class LiveWorker(QThread):
         if (not moved and why and seat.zone_seen and boss.zone_seen
                 and seat.zone_seen != boss.zone_seen):
             seat.cross_zone_fails += 1
+            self._note_friends_ui(seat, why)
             walked, door_why = await self._walk_the_leaders_door(
                 seat, boss, why)
             if walked:
@@ -3151,6 +3271,7 @@ class LiveWorker(QThread):
             seat.follow_failing_since = None
             seat.follow_fails = 0
             seat.cross_zone_fails = 0
+            seat.friends_ui_fails = 0
             return
         # A follower that cannot reach its leader is the failure that
         # makes the whole party pointless, so it is said -- but
@@ -3542,6 +3663,8 @@ class LiveWorker(QThread):
                 backend.on_failed_cast = self._failed_cast_hook(seat)
                 backend.on_school_mismatch = self._school_hook(seat)
                 backend.on_defeated = self._defeated_hook(seat)
+                backend.should_flee = (
+                    lambda s=seat: bool(s.flee_asked) and not self._stop)
                 backend.on_slow_cast = self._slow_cast_hook(seat)
                 backend.on_round_timing = self._round_timing_hook(seat)
                 # Bound late and read per round: the rate only becomes
@@ -3733,6 +3856,8 @@ class LiveWorker(QThread):
             # A new board is a new verdict. The run of no-surviving-line
             # rounds belongs to the duel that produced it.
             seat.no_line_survives = 0
+            seat.flee_asked = False
+            seat.died_this_fight = False
             try:
                 # blocks until a duel starts, then plays it out -- but
                 # looks up while it waits, so Stop is answered between
@@ -3821,6 +3946,7 @@ class LiveWorker(QThread):
                     seat.in_upkeep = False
             if not self._stop:
                 await self._let_it_heal(seat)
+                await self._wait_for_the_party(seat)
             self._say(seat,
                       f"fight {seat.fought} over — waiting for the next"
                       if not self._stop else "stopping…")
@@ -3918,6 +4044,15 @@ class LiveWorker(QThread):
         except Exception:
             pass
         if (away is not None and away <= self.AT_THE_MARKER
+                and (was_away is None or was_away > self.AT_THE_MARKER)
+                and now - seat.marker_flapped_at <= self.MARKER_FLAP_REST):
+            # Still disbelieved from a moment ago. Suppress the reading
+            # rather than re-confirming it: `marker_away` is None after
+            # a flap, and None IS the far-to-near transition that arms
+            # the confirmation -- so without this a hook that flaps on
+            # every read pays `GOAL_CONFIRM` twice a second forever.
+            away = None
+        elif (away is not None and away <= self.AT_THE_MARKER
                 and (was_away is None or was_away > self.AT_THE_MARKER)):
             # A marker that has just come within arm's reach is the
             # single most consequential read this poll makes -- it is
@@ -3932,7 +4067,16 @@ class LiveWorker(QThread):
             # So arriving is confirmed and leaving is not: a marker
             # going far needs no second opinion, because nothing acts
             # on distance.
-            away = await self._confirmed_marker(seat, at, away)
+            away = await self._confirmed_marker(seat, marker, at, away)
+            if away is None:
+                # Disbelieved, and that has to be sticky for a moment.
+                # `marker_away` is then None, which re-arms this same
+                # confirmation on the very next poll -- so a hook that
+                # flaps on every read pays `GOAL_CONFIRM` per poll per
+                # seat forever, and `marker_away` never leaves None,
+                # which is what `_desperate_hop` and the catch-up read
+                # as "no marker to aim at".
+                seat.marker_flapped_at = now
         seat.marker_away = away
         # The dead-hook clock. One failed read is noise -- a zone change
         # makes several fail in a row -- but a marker that will not read
@@ -4019,9 +4163,19 @@ class LiveWorker(QThread):
                       and now - seat.cells_seen.get(position, -1e9)
                       < self.OSCILLATION_WINDOW)
             if not bounce:
+                was = seat.progress
                 seat.progress = where
                 seat.progress_at = now
-                seat.said_stuck = ""
+                if was is None or was[0] != zone or was[2] != seat.goal:
+                    # Only an ACHIEVEMENT clears the escalation -- a new
+                    # ZONE or a new GOAL. A new position cell is not
+                    # one: it is what the script's own retry loop
+                    # produces while getting nowhere, and clearing on it
+                    # collapsed the 5/10/20/40/80-minute band scheme to
+                    # a single line per stall. Rev ebc4aff8 got one
+                    # `no-progress` line out of 147 minutes and two
+                    # wizards.
+                    seat.said_stuck = ""
         if position is not None:
             seat.cells_seen[position] = now
             if len(seat.cells_seen) > 32:
@@ -4085,6 +4239,12 @@ class LiveWorker(QThread):
     #: drift account for tens; a different quest's marker is hundreds
     #: to six figures away.
     MARKER_AGREE = 150.0
+    #: how long a marker that failed its second read is left alone
+    #: before the confirmation is spent on it again. One `GOAL_POLL`
+    #: worth: long enough that a flapping hook is not re-confirmed twice
+    #: a second, short enough that a marker which settles is believed on
+    #: the next poll.
+    MARKER_FLAP_REST = 8.0
 
     async def _confirmed_goal(self, seat, first):
         """A changed goal, read twice, or the previous one.
@@ -4142,6 +4302,22 @@ class LiveWorker(QThread):
             if got and was and got[0] == was[0] and got[1] > was[1]:
                 seat.collect_moved_at = now
                 seat.collect_moved_for = got[0]
+                # ...and WHERE. A count that went up in another zone is
+                # not evidence this wizard is at the spawns here, and
+                # this latch had no reset of any kind: one init, one
+                # write, one read, so a single tick of progress
+                # authorised realm hops for the rest of the session.
+                seat.collect_moved_in = seat.zone_seen or ""
+            elif got is None:
+                # The step is no longer a counted Collect. Whatever the
+                # latch was remembering belongs to a step that is over.
+                seat.collect_moved_at = 0.0
+                seat.collect_moved_for = ""
+                seat.collect_moved_in = ""
+            # A goal that changed is a goal that advanced, which is the
+            # outcome a realm hop is trying to buy. Its budget starts
+            # again. See `REALM_HOP_BUDGET`.
+            self._hops_for.pop(id(seat), None)
             # In order, and bounded. `_who_is_behind` needs to know that
             # a step was HELD and left, which a single current value
             # cannot say.
@@ -4149,12 +4325,22 @@ class LiveWorker(QThread):
             del seat.goals_seen[:-12]
         seat.goal = goal
 
-    async def _confirmed_marker(self, seat, at, first):
+    async def _confirmed_marker(self, seat, marker, at, first):
         """A marker that has just come near, read twice, or nothing.
 
-        None when the two reads disagree: a marker nobody can measure
-        twice is not a marker to teleport a party onto, and `None`
-        already means "no usable marker" to every rung that reads it.
+        The two MARKERS are compared to each other, not two distances
+        measured from one body position. That is the whole difference
+        between confirming the arrow and confirming the wizard: the
+        first version measured the second marker against a body read
+        `GOAL_CONFIRM` seconds stale, so a wizard that was WALKING --
+        or that the script had just teleported -- failed its own
+        confirmation and had its marker thrown away. The confirmation
+        runs only on the far-to-near transition, which is precisely the
+        moment a wizard is most likely to still be in motion.
+
+        None when the two disagree: a marker nobody can measure twice
+        is not a marker to teleport a party onto, and `None` already
+        means "no usable marker" to every rung that reads it.
         """
         from .. import questing
 
@@ -4163,7 +4349,7 @@ class LiveWorker(QThread):
             again, _why = await questing.read_quest_position(seat.client)
         except Exception:
             again = None
-        if again is None or at is None:
+        if again is None or at is None or marker is None:
             try:
                 seat.tel.note_questing(
                     "marker-unconfirmed",
@@ -4173,17 +4359,27 @@ class LiveWorker(QThread):
             except Exception:
                 pass
             return None
-        dx, dy = at.x - again.x, at.y - again.y
-        second = (dx * dx + dy * dy) ** 0.5
-        if abs(second - first) <= self.MARKER_AGREE:
-            return second
+        mx, my = marker.x - again.x, marker.y - again.y
+        moved = (mx * mx + my * my) ** 0.5
+        if moved <= self.MARKER_AGREE:
+            # Same marker. Re-measure from a FRESH body position: the
+            # answer wanted is how far the wizard is now, and it may
+            # have walked while we were confirming.
+            here = at
+            try:
+                here = await seat.client.body.position()
+            except Exception:
+                here = at
+            dx, dy = here.x - again.x, here.y - again.y
+            return (dx * dx + dy * dy) ** 0.5
         try:
             seat.tel.note_questing(
                 "marker-flapped",
-                f"the quest marker read {first:.0f} units away and then "
-                f"{second:.0f} — the arrow hook is a last-writer-wins "
-                f"pointer with no quest attached to it, so neither read "
-                f"is evidence of where this wizard's objective is")
+                f"the quest marker moved {moved:.0f} units between two "
+                f"reads {self.GOAL_CONFIRM:.2f}s apart — the arrow hook "
+                f"is a last-writer-wins pointer with no quest attached "
+                f"to it, so neither read is evidence of where this "
+                f"wizard's objective is")
         except Exception:
             pass
         return None
@@ -4329,6 +4525,27 @@ class LiveWorker(QThread):
             except Exception:
                 bits.append("combat state unread")
             bits.append(seat.goal or "no quest goal")
+            # ...and the NAME beside it. Every rung in the questline
+            # layer keys on the name and the export published only the
+            # goal, so the one question rev ebc4aff8's 152-minute wedge
+            # turns on -- did the name and the goal agree, and on what
+            # -- could not be answered from the file at all. It had to
+            # be recovered from the SCRIPT's own print stream. Placed
+            # too, when the book can place it: "off the main line" is
+            # the whole diagnosis and it is one lookup away.
+            if seat.quest_name:
+                place = self._place_by_name(seat)
+                where = ""
+                try:
+                    if place is not None and place.on_main:
+                        where = f" (main #{place.order})"
+                    elif place is not None and place.known:
+                        where = " (a side quest)"
+                    elif seat.quest_name:
+                        where = " (not in the book)"
+                except Exception:
+                    where = ""
+                bits.append(f"on {seat.quest_name!r}{where}")
             away = getattr(seat, "marker_away", None)
             if away is not None:
                 # How far from the objective, not merely which one. The
@@ -4361,6 +4578,51 @@ class LiveWorker(QThread):
             raise
         except Exception:
             pass
+
+    #: consecutive friends-list failures on wizAi's own side before the
+    #: list is written off for that client.
+    #:
+    #: Rev ebc4aff8's booster paid for it 19 times over 41 minutes at a
+    #: flat 72-second cadence -- 45s of timeout per name spelling, up to
+    #: three spellings -- with an identical reason every time and no
+    #: widening interval. `route-impassable` fired once per route and
+    #: changed nothing; `cross_zone_fails` counted and nothing read it.
+    #: A client-side defect that is 0-for-19 has to have an exit.
+    FRIENDS_UI_GIVE_UP = 4
+
+    def _note_friends_ui(self, seat, why):
+        """Count a cross-zone follow that failed on OUR side, not the game's.
+
+        `party.never_asked` is the distinction: "your friend is busy"
+        and "this instance is closed" arrive from the game AFTER the
+        teleport is requested; a missing window is wizAi failing to
+        drive its own UI two steps earlier. Only the second is worth
+        giving up on, because only the second cannot come right by
+        itself.
+        """
+        from .. import party
+
+        if not party.never_asked(why):
+            seat.friends_ui_fails = 0
+            return
+        seat.friends_ui_fails += 1
+        if seat.friends_ui_dead \
+                or seat.friends_ui_fails < self.FRIENDS_UI_GIVE_UP:
+            return
+        seat.friends_ui_dead = True
+        said = (f"{seat.name}'s friends list has failed "
+                f"{seat.friends_ui_fails} times running on this client's "
+                f"own UI, never reaching the game — not using it again "
+                f"this run. Following {'the leader'} by the doors it "
+                f"walks instead")
+        for other in self.seats:
+            try:
+                other.tel.note_questing(
+                    "friends-list-written-off",
+                    said + f". Latest reason: {why}. " + party.UI_HINT)
+            except Exception:
+                pass
+        self._say(seat, said)
 
     def _whose_client(self, client):
         """The name of the wizard a hook is talking about, or ""."""
@@ -5606,24 +5868,67 @@ class LiveWorker(QThread):
                 f"{self.WALK_THROUGH_SETTLE:.0f}s")
         return crossed
 
-    async def _zone_crossed(self, client, start_zone):
-        """Did a walk leg actually cross a transition?
+    #: how long a loading screen is given to resolve into a zone NAME
+    #: before the leg is called unproven. A zone load is seconds; this
+    #: is generous against a slow client and finite against a client
+    #: that was never crossing anything.
+    CROSSING_SETTLE = 6.0
+    #: how often the zone is re-read while that load resolves.
+    CROSSING_POLL = 0.4
 
-        A loading screen counts: `zone_name` is unreadable mid-load, and
-        waiting out the load here would hold the script for nothing --
-        the settle window and the script's own `waitforzonechange` both
-        handle the far side.
+    async def _zone_crossed(self, client, start_zone):
+        """Did a walk leg actually cross a transition? Proven by NAME.
+
+        This used to answer True on `is_loading()` alone, before it
+        compared anything -- on the reasoning that `zone_name` is
+        unreadable mid-load and waiting out the load would hold the
+        script for nothing. The reasoning is right about the read and
+        wrong about the conclusion: `is_loading()` is also true during
+        ordinary same-zone asset streaming straight after
+        `client.teleport()`, which is exactly what the caller does one
+        line before asking.
+
+        So a landing that crossed nothing reported a crossing -- and a
+        false crossing is not a harmless optimism here. It clears the
+        route's fail counter and drops its cooldown, so the ladder both
+        loses count of a route that has never worked and starts over on
+        it immediately. Rev ebc4aff8's booster: 19 door-walk attempts,
+        2 reported successes (both "0 leg(s)" -- the load fired before
+        any walking), and **zero** zone changes attributable to any of
+        them. The one mechanism built for a dungeon that refuses
+        friends-list teleports spent 41 minutes reporting wins it did
+        not have.
+
+        A load now means "wait and re-check", which is what it always
+        meant. The far side names itself within `CROSSING_SETTLE` or
+        the leg is unproven, and unproven is the safe answer: the
+        caller sweeps another leg rather than declaring victory.
         """
-        try:
-            if await client.is_loading():
-                return True
-        except Exception:
-            pass
-        try:
-            zone = await client.zone_name()
-        except Exception:
+        import asyncio
+        import time
+
+        if not start_zone:
             return False
-        return bool(zone) and bool(start_zone) and zone != start_zone
+        deadline = time.monotonic() + self.CROSSING_SETTLE
+        while True:
+            try:
+                loading = bool(await client.is_loading())
+            except Exception:
+                loading = False
+            try:
+                zone = await client.zone_name()
+            except Exception:
+                zone = None
+            if zone and zone != start_zone:
+                return True           # the far side named itself
+            if not loading:
+                # Settled. Either the zone read and is the one we
+                # started in, or it would not read at all -- and an
+                # unreadable zone is not evidence of a crossing.
+                return False
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(self.CROSSING_POLL)
 
     #: how long the script is held for a possible sigil countdown. The
     #: countdown is ~10s and RESTARTS on every late join -- and the
@@ -6256,6 +6561,8 @@ class LiveWorker(QThread):
         if (seat.party_pulled_spot
                 and seat.progress != seat.party_pulled_spot):
             seat.party_pulled_spot = None
+        if seat.shopfront_spot and seat.progress != seat.shopfront_spot:
+            seat.shopfront_spot = None
         away = seat.marker_away
         goal = (seat.goal or "").strip().lower()
         fight = any(goal.startswith(w) for w in self.FIGHT_GOALS)
@@ -6416,7 +6723,18 @@ class LiveWorker(QThread):
             # evidenced-sigil privileges: no re-arming on expiry, and
             # the spot starts collecting duds immediately, so a Talk
             # NPC stops being revisited instead of costing 45s a time.
-            self._sigil_dud(seat, +1)
+            #
+            # ONCE PER VISIT. This charged on every qualifying tick, and
+            # the tick runs twice a second: `COUNT_HOLD_DUDS` is 3, so
+            # the counter saturated in about a second and a half, after
+            # which the spot was refused for the rest of the run with
+            # the message "3 visits have held the full 45s for a
+            # countdown and none of them fired" -- a statement about
+            # three 45-second holds that had not happened. Nothing but
+            # the spot firing ever clears that count.
+            if seat.shopfront_spot != seat.progress:
+                seat.shopfront_spot = seat.progress
+                self._sigil_dud(seat, +1)
             self._say_once(
                 seat, f"shopfront:{seat.zone_seen}:{seat.progress}",
                 f"{', '.join(o.name for o in shopfront)} is at a press-X "
@@ -6844,6 +7162,19 @@ class LiveWorker(QThread):
     #: its own copy of the "realm" action, the first one hops the whole
     #: party, and the stamp turns the other two into no-ops.
     REALM_HOP_COOLDOWN = 300.0
+    #: how recently a Collect count must have gone up, in THIS zone, for
+    #: the wizard to be treated as working the spawns. Two hop cycles:
+    #: long enough that a genuinely contested realm still qualifies
+    #: between hops, short enough that a tick of progress an hour ago in
+    #: another world does not.
+    COLLECT_MOVE_FRESH = 960.0
+    #: how many realm changes one unchanged goal may buy before the
+    #: realm is accepted as not being the variable. Rev ebc4aff8 spent
+    #: 26 on one goal over 145 minutes; the loop is designed unbounded
+    #: on the assumption that its entry guards are sound, and this is
+    #: the backstop for when they are not. Cleared whenever the goal
+    #: changes, which is the outcome a hop is trying to buy.
+    REALM_HOP_BUDGET = 4
 
     async def _maybe_realm_hop(self, seat):
         """Change realms when a Collect step is contested, not stuck.
@@ -6876,6 +7207,24 @@ class LiveWorker(QThread):
         if not questing.is_collect_goal(seat.goal):
             return
         if not (self.script or self.auto_quest):
+            return
+        spent, spent_for = self._hops_for.get(id(seat), (0, ""))
+        if spent_for == seat.goal and spent >= self.REALM_HOP_BUDGET:
+            # The realm is not the variable. Twenty-six hops on one
+            # unchanged goal is what rev ebc4aff8 spent before the GAME
+            # -- not wizAi -- stopped it, and every one of them looked
+            # reasonable in the log.
+            self._say_once(
+                seat, f"hop-budget:{seat.name}:{seat.goal}",
+                f"{seat.name} has changed realm {spent} times on this one "
+                f"step and it has not advanced — the realm is not what is "
+                f"wrong. Not changing again for this step",
+                kind="realm-hop-refused",
+                detail=(f"{seat.goal!r} has now cost {spent} realm changes "
+                        f"with no progress. A quieter shard answers a "
+                        f"contested spawn; {spent} of them answering "
+                        f"nothing means the wizard is not at the spawns, "
+                        f"and this rung cannot be the one that fixes that"))
             return
         now = time.monotonic()
         if not seat.progress_at:
@@ -6930,8 +7279,55 @@ class LiveWorker(QThread):
                 # long enough to say it is not.
                 return
             here = questing.collect_count(seat.goal)
-            if here and not (seat.collect_moved_for == here[0]
-                             and seat.collect_moved_at):
+            if here is None:
+                # No counter in the goal line, so there is no progress
+                # signal at all -- and this rung's entire case rests on
+                # one. `is_collect_goal` and `collect_count` are two
+                # different reads of the same string (`questing.py`):
+                # the first matches the VERB, the second needs a
+                # literal `(N of M)`, and rev ebc4aff8's `Collect Dirt
+                # Mound in Cyclops Lane` satisfied the first and not the
+                # second.
+                #
+                # What that used to mean: `here` was None, the `and`
+                # below short-circuited, and the never-started guard --
+                # the one thing standing between this rung and an
+                # unbounded loop -- did not run at all. The party then
+                # hopped 25 times over 145 minutes while the export
+                # said, every time, "its count HAS moved before, so
+                # this wizard does reach the spawns". It never had:
+                # `collect_moved_at` was 0.0 for the entire run. The
+                # sentence was not a judgement, it was a hardcoded
+                # string on the `away is None` branch.
+                #
+                # Refusing is the safe direction and always was. A
+                # refused hop costs one cooldown; an unjustified one
+                # cost this run seventy percent of itself.
+                self._say_once(
+                    seat, f"collect-no-count:{seat.name}:{seat.goal}",
+                    f"{seat.name}'s Collect step publishes no count, so "
+                    f"nothing here can say whether it is working the "
+                    f"spawns or standing in the wrong zone. Not changing "
+                    f"realms",
+                    kind="realm-hop-refused",
+                    detail=(f"{seat.goal!r} carries no '(n of m)' counter, "
+                            f"and the counter is the only evidence this "
+                            f"rung has: a realm change keeps the zone and "
+                            f"swaps the shard, which helps a wizard that "
+                            f"is AT the collectibles and nothing else. "
+                            f"With no count there is no way to tell those "
+                            f"apart, so this is left to the stuck ladder"))
+                return
+            # Both sides have to be a real zone. Comparing "" to ""
+            # would let a latch that never recorded a zone agree with a
+            # seat whose zone did not read -- permission granted by two
+            # absences, which is the shape of the bug this replaces.
+            fresh = bool(seat.collect_moved_at
+                         and seat.collect_moved_in
+                         and seat.collect_moved_in == seat.zone_seen
+                         and now - seat.collect_moved_at
+                         <= self.COLLECT_MOVE_FRESH)
+            if not (seat.collect_moved_for == here[0] and fresh):
                 # ...and it has to have moved AT LEAST ONCE. A crowded
                 # realm is a wizard picking up collectibles slowly; a
                 # count that has never left its starting number is a
@@ -6946,18 +7342,26 @@ class LiveWorker(QThread):
                 # the party across realms, which is strictly worse than
                 # the crowding it was answering. Being WITH the party
                 # is not being AT the spawns; only the count knows.
+                # ...and RECENTLY, and HERE. `collect_moved_at` was a
+                # run-lifetime latch with no reset anywhere -- one init,
+                # one write, one read -- so a count that ticked once at
+                # minute three authorised every hop for the rest of the
+                # session, in any zone the wizard later wandered into.
                 self._say_once(
                     seat, f"collect-never-started:{seat.name}",
-                    f"{seat.name}'s Collect count has never moved off "
-                    f"{here[1]} of {here[2]} — it has not reached the "
-                    f"collectibles at all, so a quieter realm is not the "
+                    f"{seat.name}'s Collect count has not moved off "
+                    f"{here[1]} of {here[2]} here — it is not reaching "
+                    f"the collectibles, so a quieter realm is not the "
                     f"answer. Not changing realms",
                     kind="realm-hop-refused",
-                    detail=(f"{seat.goal!r} has never advanced once. A "
+                    detail=(f"{seat.goal!r} has not advanced in this zone "
+                            f"within the last "
+                            f"{self.COLLECT_MOVE_FRESH / 60:.0f} min. A "
                             f"crowded realm shows a count that moves and "
-                            f"then stalls; a count still on its starting "
-                            f"number is a wizard that never got to the "
-                            f"spawns, and a shard swap keeps the zone"))
+                            f"then stalls; a count that has not moved "
+                            f"where the wizard is standing is a wizard "
+                            f"that never got to the spawns, and a shard "
+                            f"swap keeps the zone"))
                 return
         if away is None and not self._with_the_party(seat):
             # ...and without a marker, the party IS the check. A realm
@@ -6986,17 +7390,62 @@ class LiveWorker(QThread):
                         f"zone and only changes the shard, so it cannot "
                         f"help a wizard that is not at the spawns"))
             return
+        if away is None and self._collect_is_elsewhere(seat):
+            # The goal names where to go, and it is not here. A realm
+            # change keeps the zone, so it cannot be the answer to a
+            # wizard standing in the wrong one -- and this is the read
+            # that was available, in plain text, for every one of rev
+            # ebc4aff8's 152 minutes: the goal said "in Cyclops Lane"
+            # while the wizard stood in `WizardCity/WC_Hub`.
+            self._say_once(
+                seat, f"collect-not-here:{seat.name}:{seat.goal}",
+                f"{seat.name}'s Collect step is in another part of this "
+                f"world, not where it is standing — a quieter realm "
+                f"cannot help with that. Not changing realms",
+                kind="realm-hop-refused",
+                detail=(f"{seat.goal!r} names a destination that is not "
+                        f"{seat.zone_seen or 'this zone'}. A realm change "
+                        f"keeps the zone and swaps the shard, so it can "
+                        f"only help a wizard already at the collectibles "
+                        f"— this one has not got there"))
+            return
         idle = ((now - seat.progress_at) if away is not None
                 else (now - seat.goal_at)) / 60.0
-        where = (f"{away:,.0f} from its marker, with nothing moving"
-                 if away is not None else
-                 f"and its count HAS moved before, so this wizard does "
-                 f"reach the spawns — they are just being taken")
+        # From the evidence, not from which branch we are on. This read
+        # `away is None` and printed "its count HAS moved before, so
+        # this wizard does reach the spawns" -- a sentence the code had
+        # not established and, in rev ebc4aff8, one that was false 25
+        # times running while `collect_moved_at` sat at 0.0. A log line
+        # that reads like a diagnosis has to BE one.
+        if away is not None:
+            where = f"{away:,.0f} from its marker, with nothing moving"
+        else:
+            moved = (now - seat.collect_moved_at) / 60.0
+            where = (f"and its count went up in this zone {moved:.0f} min "
+                     f"ago, so this wizard does reach the spawns — they "
+                     f"are just being taken")
         await self._realm_hop_party(
             seat, f"{seat.goal!r} has not advanced in {idle:.0f} min — "
                   f"{where}. Collectibles are shared ground spawns, so a "
                   f"count that will not move is a crowded realm rather "
                   f"than a wedged wizard, and a quieter shard is the move")
+
+    def _collect_is_elsewhere(self, seat):
+        """Does this Collect goal name somewhere the wizard is not?
+
+        True only when `questlist.area_is_this_zone` says so outright.
+        It answers None -- meaning "cannot tell" -- for an interior and
+        for a world hub under an internal alias, and None is not a
+        veto: refusing to act on a guess is what keeps this from
+        replacing a 145-minute stall with an always-on wrongness.
+        """
+        from .. import questlist
+
+        try:
+            return questlist.area_is_this_zone(
+                questlist.goal_area(seat.goal), seat.zone_seen) is False
+        except Exception:
+            return False
 
     def _with_the_party(self, seat):
         """Is this wizard in a zone at least one other wizard is in?
@@ -7159,13 +7608,37 @@ class LiveWorker(QThread):
                 self._say(stranded[0][0], said)
             else:
                 self._say(seat, f"the whole party is on {target['name']}")
+                spent, spent_for = self._hops_for.get(id(seat), (0, ""))
+                self._hops_for[id(seat)] = (
+                    (spent + 1) if spent_for == seat.goal else 1, seat.goal)
+                if len(self._hops_for) > 8:
+                    self._hops_for.pop(next(iter(self._hops_for)), None)
                 for one in live:
                     # The crowded-judgement clock starts over: the new
-                    # realm earns its own REALM_HOP_AFTER before being
-                    # called contested, not the old realm's leftovers --
-                    # and the zone genuinely did reload, so a fresh
-                    # progress stamp is the truth, not a fudge.
-                    one.progress_at = time.monotonic()
+                    # realm earns its own `REALM_HOP_AFTER` before being
+                    # called contested, not the old realm's leftovers.
+                    #
+                    # On ITS OWN field. This restamped `progress_at`,
+                    # on the reasoning that the zone genuinely reloaded
+                    # -- but a realm change keeps the zone AND the
+                    # position, so nothing about the wizard moved, and
+                    # `progress_at` is read by twelve other rungs: the
+                    # heartbeat's "unchanged for N min",
+                    # `_check_progress` (STUCK_AFTER 300), `_unstick`
+                    # and `_desperate_hop` (STUCK_AFTER + UNSTICK_EVERY
+                    # = 330), the countdown hold's stale bypass, the
+                    # no-progress alarm. `REALM_HOP_COOLDOWN` is 300,
+                    # so a party hopping on schedule reset every one of
+                    # those watchdogs before any of them could fire.
+                    #
+                    # Rev ebc4aff8 is the whole cost: 25 hops over 145
+                    # minutes in `WizardCity/WC_Hub`, and across 142
+                    # heartbeats the idle clock crossed eight minutes
+                    # exactly ONCE -- in the one 566s window opened
+                    # because a hop was REFUSED rather than taken.
+                    # `_check_progress` and `_desperate_hop` each fired
+                    # once in 145 minutes, both inside that window.
+                    one.realm_settled_at = time.monotonic()
                     one.cells_seen.clear()
         except asyncio.CancelledError:
             # The stage deadline cut the maneuver mid-party. Without
@@ -7219,6 +7692,18 @@ class LiveWorker(QThread):
             seat.x_pressed, seat.x_pressed_at = 0, here
         seat.x_pressed += 1
 
+    def _nothing_achieved_since(self, seat):
+        """When this wizard last achieved anything, as a monotonic stamp.
+
+        A changed goal or a changed zone. Deliberately NOT a changed
+        position: a wizard being teleported around one zone by a retry
+        loop is the failure, not the refutation of it.
+        """
+        stamps = [t for t in (seat.goal_at, seat.zone_since,
+                              seat.progress_at if not seat.goal_at
+                              and not seat.zone_since else 0.0) if t]
+        return max(stamps) if stamps else seat.progress_at
+
     def _check_progress(self, seat):
         """Say so when a running script is getting nowhere.
 
@@ -7242,7 +7727,26 @@ class LiveWorker(QThread):
 
         if seat.progress is None or not self._script_drives(seat):
             return
-        idle = time.monotonic() - seat.progress_at
+        # The ACHIEVEMENT clock, not the position clock.
+        #
+        # `progress_at` is restamped by `_note_progress` every time the
+        # wizard lands somewhere it has not been in the last three
+        # minutes -- and the scripts hammer `tp` in exactly that
+        # pattern. Rev ebc4aff8: the script landed 320+ teleports in
+        # `WizardCity/WC_Hub` onto genuinely new cells, so across 143
+        # heartbeats of a 147-minute stall the position clock crossed
+        # three minutes SIX times and this rung fired ONCE, at band 1.
+        # Oz, watching the identical stall from the same zone, produced
+        # zero. Two observers, one sentence.
+        #
+        # The realm-hop rung is the only consumer that noticed, and it
+        # wrote down why (`_maybe_realm_hop`: "`progress_at` resets on
+        # every one of those teleports, so a stillness gate never fires
+        # for the very case this rung exists for") and then used
+        # `goal_at` instead. Its number reached 150 minutes and was
+        # printed 26 times. This is the same clock, for the rung that
+        # exists to say the stall is growing.
+        idle = time.monotonic() - self._nothing_achieved_since(seat)
         if idle < self.STUCK_AFTER:
             return
         zone, _where, goal = seat.progress
@@ -7457,6 +7961,83 @@ class LiveWorker(QThread):
     #: not, because the tracker follows the SELECTED quest and every
     #: `tp quest` goes there until something changes it.
     OFF_QUESTLINE_AFTER = 120.0
+    #: how long a quest name the index cannot place must be held before
+    #: it counts as a side quest rather than a bad read.
+    #:
+    #: Deliberately much longer than `OFF_QUESTLINE_AFTER`, because it
+    #: is weaker evidence: `known` False covers a garbled read, a load
+    #: screen, and a real quest the data is simply missing -- the data
+    #: has `objectives` for Arc 1 only, and rev ebc4aff8's side quest
+    #: ('you can dig it') is absent from all 2,640 entries. Ten minutes
+    #: of ONE unchanging unplaced name is not a load screen.
+    #:
+    #: A tracker that has jumped WORLDS does not wait for this: see
+    #: `_tracker_strayed`.
+    UNPLACED_IS_EVIDENCE = 600.0
+
+    def _tracker_world(self, seat, place):
+        """The world this seat's tracker is pointing at, or "".
+
+        The placed quest's world when the index knows it; otherwise the
+        world of the area the GOAL line names. The second is the half
+        that matters here, because it works for a quest the index has
+        never heard of: `world` and `area` are populated for all 2,640
+        entries, only `objectives` is empty past Arc 1.
+        """
+        from .. import questlist
+
+        if getattr(place, "world", None):
+            return questlist.world_of_area(place.world) or place.world
+        try:
+            return questlist.world_of_area(questlist.goal_area(seat.goal))
+        except Exception:
+            return ""
+
+    def _tracker_strayed(self, seat, place, now):
+        """Is an unplaceable tracker evidence of a lost questline?
+
+        `known` False covers three different states and the code used
+        to treat all of them as "no evidence": a read that failed, a
+        load screen, and a CLEAN read of a real quest the index does
+        not list. Only the first two deserve silence.
+
+        Rev ebc4aff8 is what the third costs. At t=2893 the tracker
+        left Zafaria main #149 ('Heart of Darkness') for a Wizard City
+        side quest -- 'you can dig it', absent from all 2,640 entries
+        -- and because `place.known` was False, `off_line_since` was
+        cleared on every poll, `_maybe_recover_questline` returned at
+        its first gate, and `off-questline` never fired once in 206
+        minutes. The cure was sitting behind that gate the whole time,
+        and `seat.last_main` had already recorded its target.
+
+        Two signals, and neither needs the missing data:
+
+          * the tracker has jumped WORLDS, away from the last main-line
+            quest this wizard held. Immediate -- a quest cannot advance
+            from Zafaria to Wizard City, so this is not a load screen
+            however briefly it reads;
+          * or ONE unplaceable name has been held for
+            `UNPLACED_IS_EVIDENCE` without changing.
+
+        Never true on a blank name: that IS a read that failed, and
+        saying "off the questline" on one would fire on every load.
+        """
+        from .. import questlist
+
+        name = (seat.quest_name or "").strip()
+        if not name:
+            seat.unplaced_since = None
+            seat.unplaced_name = ""
+            return False
+        if seat.unplaced_name != name:
+            seat.unplaced_name = name
+            seat.unplaced_since = now
+        theirs = questlist.world_key(self._tracker_world(seat, place))
+        was = questlist.world_key((seat.last_main or (None,))[0])
+        if theirs and was and theirs != was:
+            return True
+        return bool(seat.unplaced_since
+                    and now - seat.unplaced_since >= self.UNPLACED_IS_EVIDENCE)
 
     def _check_on_questline(self):
         """Notice a wizard whose tracker has wandered off the storyline.
@@ -7525,11 +8106,18 @@ class LiveWorker(QThread):
             # below. It gets the off-line clock, and the recovery rung
             # takes it from there.
             none_selected = questlist.no_quest_selected(seat.quest_name)
-            if place.on_main or (not place.known and not none_selected):
-                # `known` False is a read that failed or a quest the
-                # list has never heard of -- not evidence of anything.
-                # Saying "off the questline" on an unreadable tracker
-                # would fire on every load screen.
+            strayed = (not place.on_main and not place.known
+                       and not none_selected
+                       and self._tracker_strayed(seat, place, now))
+            if place.on_main or (not place.known and not none_selected
+                                 and not strayed):
+                # `known` False is a read that failed, a load screen, or
+                # a real quest the list has never heard of -- and only
+                # the first two are "not evidence of anything". Saying
+                # "off the questline" on an unreadable tracker would
+                # fire on every load; saying nothing about a clean read
+                # of an unlisted quest cost rev ebc4aff8 152 minutes.
+                # `_tracker_strayed` is what tells them apart.
                 if seat.off_line_since and place.on_main:
                     seat.tel.note_questing(
                         "back-on-questline",
@@ -7539,6 +8127,14 @@ class LiveWorker(QThread):
                     self._say(seat, f"{seat.name} is back on the main line")
                 seat.off_line_since = None
                 seat.said_off_line = ""
+                if place.on_main:
+                    # Only a wizard genuinely back on the line forgets
+                    # how long its tracker was unplaceable. Clearing it
+                    # on the waiting branch too would reset the clock on
+                    # every poll, so `UNPLACED_IS_EVIDENCE` could never
+                    # be reached and the wait would be a silence.
+                    seat.unplaced_since = None
+                    seat.unplaced_name = ""
                 # A wizard back on the line has no give-up to honour.
                 # The next loss is a fresh one, and it may be a quest
                 # the book DOES list.
@@ -7550,9 +8146,14 @@ class LiveWorker(QThread):
             away = now - seat.off_line_since
             if away < self.OFF_QUESTLINE_AFTER:
                 continue
-            if seat.said_off_line == place.name:
+            # Keyed on the name that was actually read: a strayed
+            # tracker has no `place.name` at all, and deduping every one
+            # of those against "" would say it once per run instead of
+            # once per quest.
+            saying = place.name or (seat.quest_name or "").strip()
+            if seat.said_off_line == saying:
                 continue
-            seat.said_off_line = place.name
+            seat.said_off_line = saying
             if none_selected:
                 said = (f"{seat.name} has had NO quest selected for "
                         f"{away / 60:.0f} min — its journal is on the "
@@ -7563,6 +8164,19 @@ class LiveWorker(QThread):
                            else "")
                         + ". Every `tp quest` has nothing to aim at until "
                           "a real quest is selected again")
+            elif not place.known:
+                said = (f"{seat.name} has been off the main questline for "
+                        f"{away / 60:.0f} min — its tracker is on "
+                        f"{saying!r}, which the questline data does not "
+                        f"list at all"
+                        + (f" and which is in "
+                           f"{self._tracker_world(seat, place)}"
+                           if self._tracker_world(seat, place) else "")
+                        + (f", while the party is on {theirs}" if theirs
+                           else "")
+                        + ". A quest the book cannot place is still a "
+                          "quest the script has no route for, and every "
+                          "`tp quest` goes to it")
             else:
                 said = (f"{seat.name} has been off the main questline for "
                         f"{away / 60:.0f} min — its tracker is on "
@@ -7853,10 +8467,16 @@ class LiveWorker(QThread):
         place = dict(zip((id(s) for s in self.seats), places)).get(id(seat))
         if place is None or place.on_main:
             return
-        if not place.known and not questlist.no_quest_selected(seat.quest_name):
+        if not place.known \
+                and not questlist.no_quest_selected(seat.quest_name) \
+                and not self._tracker_strayed(seat, place, now):
             # Unknown is a read that failed, and selecting a quest on
-            # that evidence would fire on every loading screen. The one
-            # exception is the journal's Quest Finder pseudo-entry,
+            # that evidence would fire on every loading screen. Two
+            # exceptions, and both are affirmative reads rather than
+            # absent ones: a tracker that has strayed (see
+            # `_tracker_strayed` -- a world jump, or one unplaceable
+            # name held for `UNPLACED_IS_EVIDENCE`), and the journal's
+            # Quest Finder pseudo-entry,
             # which is not a failed read -- it is the journal saying
             # nothing is selected, and putting a real quest back is
             # exactly what this rung is for. Rev f2b8101f: Sebastian
@@ -9357,6 +9977,97 @@ class LiveWorker(QThread):
             self._say_once(seat, "catch-up",
                            f"trying to get back to {behind.name} — {why}")
 
+    #: how long the quester waits between fights for a party-mate that
+    #: cannot reach it, before going in anyway.
+    #:
+    #: The whole point of a booster party is that the quester does not
+    #: fight alone, and the only pre-fight veto wizAi had was about this
+    #: wizard's own hit points. Rev ebc4aff8: Oz could not teleport to
+    #: Konstantin from t=1, so Konstantin walked into
+    #: `Shadow-Web Wraith@2555 + Shadow-Web Wraith@2555` -- 5,110 HP of
+    #: drain mobs against a 2,573 HP solo fire wizard -- lost in nine
+    #: rounds, was sent to the Commons, and the script never recovered
+    #: its place. Everything the rest of that 206-minute run did wrong
+    #: started there.
+    #:
+    #: Finite, and for the same reason `LOW_HEALTH_WAIT` is: a run that
+    #: blocks forever on a stranded booster is as broken as one that
+    #: suicides, and unlike the suicide it produces nothing to diagnose
+    #: from.
+    PARTY_WAIT = 120.0
+    #: how often the wait re-checks. The follow ladder runs on the
+    #: service tick meanwhile, so this only has to notice.
+    PARTY_WAIT_POLL = 3.0
+
+    async def _wait_for_the_party(self, seat):
+        """Do not walk into the next duel while a booster cannot reach us.
+
+        Only for the seat the party exists to protect -- the leader of a
+        booster party or a solo-pilot run -- and only while some other
+        hooked seat is BOTH in another zone and actively failing to
+        follow. A follower that is simply walking is not stranded, and a
+        party questing independently is not a party this applies to.
+
+        Nothing here can teleport anybody: the follow ladder is running
+        on the service tick throughout, and this is the pause that gives
+        it time to work.
+        """
+        import time
+
+        if self._stop or not (self.booster_party or self._solo_pilot()):
+            return
+        if seat.index != self.leader:
+            return
+
+        def stranded():
+            out = []
+            for other in self.seats:
+                if other is seat or other.client is None:
+                    continue
+                if other.follow_failing_since is None:
+                    continue
+                if (other.zone_seen and seat.zone_seen
+                        and other.zone_seen == seat.zone_seen):
+                    continue
+                out.append(other)
+            return out
+
+        waiting = stranded()
+        if not waiting:
+            return
+        began = time.monotonic()
+        names = ", ".join(o.name for o in waiting)
+        self._say(seat, f"holding before the next fight — {names} cannot "
+                        f"reach {seat.name}")
+        while not self._stop:
+            left = self.PARTY_WAIT - (time.monotonic() - began)
+            if left <= 0:
+                break
+            if not stranded():
+                seat.tel.note_questing(
+                    "waited-for-the-party",
+                    f"held {time.monotonic() - began:.0f}s before the next "
+                    f"fight until {names} could reach {seat.name} — a "
+                    f"booster party's whole point is that the quester "
+                    f"does not fight alone")
+                self._say(seat, f"{names} is back — going in")
+                return
+            await asyncio.sleep(min(self.PARTY_WAIT_POLL, left))
+        if self._stop:
+            return
+        said = (f"{seat.name} is going into the next fight without "
+                f"{names}, which has been unable to reach it for "
+                f"{(time.monotonic() - began) / 60:.0f} min. A booster "
+                f"party's quester fighting alone is how rev ebc4aff8 lost "
+                f"a 5,110 HP board in nine rounds and its place in the "
+                f"script with it")
+        for other in self.seats:
+            try:
+                other.tel.note_questing("fighting-without-the-party", said)
+            except Exception:
+                pass
+        self._say(seat, said)
+
     async def _let_it_heal(self, seat):
         """Do not walk into the next duel on almost no health.
 
@@ -9547,6 +10258,11 @@ class LiveWorker(QThread):
         recorded fights at rev 85a68184 were losses.
         """
         def defeated():
+            # Latched for the fight, because this is the only moment the
+            # truth is readable: `_fight_outcome` runs after the game has
+            # respawned the wizard and reads it as a win. Cleared by
+            # `start_fight`.
+            seat.died_this_fight = True
             where = seat.zone_seen or "an unreadable zone"
             try:
                 seat.tel.note_questing(
@@ -9772,6 +10488,57 @@ class LiveWorker(QThread):
         self._say(seat,
                   f"{seat.name} has no surviving line against {opening} — "
                   f"{seat.no_line_survives} rounds running")
+        self._maybe_flee(seat, rec, opening)
+
+    #: whether a duel the policy has given up on is fled rather than
+    #: played out to the death.
+    #:
+    #: The verdict has always been available and was always only
+    #: reported: "Reported, not acted on. What to DO about it depends on
+    #: why the line is missing". That is true of the CAUSE and not of
+    #: the round in front of us -- once every line including passing
+    #: ends in this wizard's death, playing on chooses the death. Rev
+    #: ebc4aff8's Konstantin fought four more rounds after the verdict,
+    #: died, and was sent to the Commons; the script lost its place
+    #: there and the run never got it back.
+    FLEE_WHEN_LOST = True
+
+    def _maybe_flee(self, seat, rec, opening):
+        """Ask the duel to be left, on the coroutine that owns the mouse.
+
+        A flag rather than a click: the combat handler holds the mouse
+        for the whole round, and a second coroutine clicking into it is
+        the misclick this program has been bitten by before. The handler
+        reads this at the top of its next round.
+
+        Not for a wizard already at zero -- `_down` has that case and
+        the game offers its own flee button there -- and not while a
+        party-mate is still swinging, because the verdict is about THIS
+        wizard's lines and a partner's cast can change the board.
+        """
+        if not self.FLEE_WHEN_LOST or seat.client is None:
+            return
+        if (rec.player_hp or 0) <= 0:
+            return
+        if (rec.seats_in_plan or 1) > 1:
+            return
+        others = [s for s in self.seats
+                  if s is not seat and s.client is not None and s.in_duel]
+        if others:
+            return
+        seat.flee_asked = True
+        for other in self.seats:
+            try:
+                other.tel.note_questing(
+                    "fleeing",
+                    f"leaving the duel against {opening}: every line the "
+                    f"rollout tried, including passing, ends with "
+                    f"{seat.name} dead, and it is fighting alone. Playing "
+                    f"on from here chooses the death — and a wizard sent "
+                    f"to the Commons loses the script its place, which "
+                    f"costs far more than the fight did")
+            except Exception:
+                pass
 
     def _learn_name(self, seat, read):
         """Take the wizard's own name off the duel it is standing in.

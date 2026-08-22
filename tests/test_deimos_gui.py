@@ -8505,7 +8505,7 @@ def test_a_follower_does_not_chase_twice_a_second(qapp):
 
     tried = []
 
-    async def _follow(f, leader, leader_name=None, radius=0.0):
+    async def _follow(f, leader, leader_name=None, radius=0.0, **kw):
         tried.append(f)
         return False, ""
 
@@ -9421,13 +9421,21 @@ def test_a_teleport_the_game_never_saw_does_not_report_a_refusal(qapp,
     lives on the character panel that never opened, so the game was
     never asked. One of those is a game rule to route around and the
     other is a bug the operator can fix, and the export called the
-    second one the first."""
+    second one the first.
+
+    The wording splits the two wizAi-side failures, which used to share
+    one sentence: `wndCharacter` is only reachable AFTER a matched row
+    is clicked (`_cycle_friends_list` raises "Could not find friend"
+    before any click), so saying "the UI never came up — nothing was
+    clicked" for it stated three things that did not happen."""
     from deimos_bridge import party
 
     ok, why, _tried = _tp_reason(
         monkeypatch, ValueError("No child window named wndCharacter"))
     assert ok is False
-    assert "never attempted" in why, why
+    assert "the game was never asked" in why, why
+    assert "row was clicked" in why, \
+        "a click that landed is still being reported as no click at all"
     assert party.never_asked(why), \
         "the door walk cannot tell this from the game refusing"
     assert "not on the list" not in why and "friends list — they have" \
@@ -13046,6 +13054,110 @@ def test_an_unreadable_tracker_is_not_called_a_side_quest():
                 if e["kind"] == "off-questline"]
 
 
+def test_a_tracker_that_jumped_worlds_is_lost_however_unlistable_it_is():
+    """Rev ebc4aff8's 152-minute wedge, in one call.
+
+    At t=2893 the quester's tracker left Zafaria main #149 ('Heart of
+    Darkness') for a Wizard City side quest — 'you can dig it', which is
+    absent from all 2,640 entries in the questline data. `place.known`
+    was therefore False, `off_line_since` was cleared on every poll,
+    `_maybe_recover_questline` returned at its first gate, and
+    `off-questline` never fired once in a 206-minute run. The party
+    stood in `WizardCity/WC_Hub` for the rest of it.
+
+    A quest cannot advance from Zafaria to Wizard City, so a world jump
+    is evidence immediately — no data about the new quest required."""
+    import time
+
+    from deimos_bridge import questlist
+
+    worker = _party_on_quests(["Heart of Darkness", "you can dig it"],
+                              ["Talk To Someone in Baobab Crown",
+                               "Collect Dirt Mound in Cyclops Lane"])
+    assert not questlist.position_of("you can dig it").known, \
+        "the premise: the data has never heard of this quest"
+    worker._places = lambda: [questlist.position_of("Heart of Darkness"),
+                              questlist.position_of("you can dig it")]
+    lost = worker.seats[1]
+    lost.last_main = ("Zafaria", 149, "Heart of Darkness")
+
+    worker._check_on_questline()
+    assert lost.off_line_since is not None, \
+        "an unlisted quest in another world was read as 'no evidence'"
+
+    lost.off_line_since = time.monotonic() - 300
+    worker._check_on_questline()
+    said = [e for e in lost.tel.questing if e["kind"] == "off-questline"]
+    assert said, "it noticed and never said so"
+    assert "you can dig it" in said[0]["detail"]
+    assert "does not list" in said[0]["detail"]
+    assert "Wizard City" in said[0]["detail"], \
+        "the world it strayed to is the actionable half"
+
+
+def test_one_unlistable_name_held_long_enough_is_evidence_on_its_own():
+    """Without a world jump the same read is weaker, so it waits — but
+    ten minutes of ONE unchanging unplaceable name is not a load
+    screen, and used to be silence forever."""
+    import time
+
+    from deimos_bridge import questlist
+
+    worker = _party_on_quests(["Gather the Troops", "you can dig it"])
+    worker._places = lambda: [questlist.position_of("Gather the Troops"),
+                              questlist.position_of("you can dig it")]
+    lost = worker.seats[1]
+    lost.last_main = None                     # nothing to compare worlds
+
+    worker._check_on_questline()
+    assert lost.off_line_since is None, "it did not wait"
+    assert lost.unplaced_since is not None, "it did not start the clock"
+
+    lost.unplaced_since = time.monotonic() - worker.UNPLACED_IS_EVIDENCE - 1
+    worker._check_on_questline()
+    assert lost.off_line_since is not None, \
+        "ten minutes of one unplaceable name is still being called a bad read"
+
+
+def test_a_name_that_keeps_changing_never_becomes_evidence():
+    """The clock is per NAME. A tracker cycling through unreadable
+    values is a client with a problem, not a wizard on a side quest,
+    and it must never accumulate its way into a journal edit."""
+    import time
+
+    from deimos_bridge import questlist
+
+    worker = _party_on_quests(["Gather the Troops", "one"])
+    worker._places = lambda: [questlist.position_of("Gather the Troops"),
+                              questlist.Position(name="", how="")]
+    lost = worker.seats[1]
+    lost.last_main = None
+    for name in ("one", "two", "three", "four"):
+        lost.quest_name = name
+        lost.unplaced_since = (time.monotonic()
+                               - worker.UNPLACED_IS_EVIDENCE - 1)
+        worker._check_on_questline()
+        assert lost.off_line_since is None, \
+            f"a name that had just changed ({name}) counted as ten minutes"
+
+
+def test_an_unreadable_tracker_is_still_not_a_side_quest():
+    """The half that must not change. A blank name IS a read that
+    failed, and no clock may accumulate on one."""
+    from deimos_bridge import questlist
+
+    worker = _party_on_quests(["Gather the Troops", ""])
+    worker._places = lambda: [questlist.position_of("Gather the Troops"),
+                              questlist.Position()]
+    lost = worker.seats[1]
+    lost.last_main = ("Zafaria", 149, "Heart of Darkness")
+    worker._check_on_questline()
+    worker._check_on_questline()
+    assert lost.off_line_since is None
+    assert lost.unplaced_since is None
+    assert not [e for e in lost.tel.questing if e["kind"] == "off-questline"]
+
+
 # ---------------------------------------------------- finishing a missed step
 def _desynced(orders):
     """A scripted party whose wizards are on the given Krokotopia steps."""
@@ -15479,11 +15591,18 @@ class _DoorClient:
     the zone flips (or a loading screen starts) when the configured leg
     crosses the trigger."""
 
-    def __init__(self, crosses_on_leg=None, loads_on_leg=None):
+    def __init__(self, crosses_on_leg=None, loads_on_leg=None,
+                 load_settles_into=None):
         self.zone = "Marleybone/MB_ScotlandYard/MB_KnightsCourt"
         self.legs = []
         self.crosses_on_leg = crosses_on_leg
         self.loads_on_leg = loads_on_leg
+        #: what the zone reads once the loading screen clears. None
+        #: leaves it loading forever, which is what an ordinary
+        #: same-zone asset stream looks like to a poll that never
+        #: waits for it.
+        self.load_settles_into = load_settles_into
+        self.loads_left = 0
         self.loading = False
 
         class _Body:
@@ -15497,6 +15616,11 @@ class _DoorClient:
         self.body = _Body()
 
     async def is_loading(self):
+        if self.loading and self.load_settles_into is not None:
+            self.loads_left -= 1
+            if self.loads_left <= 0:
+                self.loading = False
+                self.zone = self.load_settles_into
         return self.loading
 
     async def zone_name(self):
@@ -15508,10 +15632,12 @@ class _DoorClient:
             self.zone = "Marleybone/Interiors/MB_AmyBrooks"
         if self.loads_on_leg and len(self.legs) >= self.loads_on_leg:
             self.loading = True
+            self.loads_left = 2
 
 
 def _parked_at_the_door(monkeypatch, away=8.0, marker_y=208.0,
                         crosses_on_leg=1, loads_on_leg=None,
+                        load_settles_into=None,
                         dialogue=False, prompt=False, aggro=False):
     """A quester standing basically ON its Go-To marker, stall aged."""
     import time
@@ -15522,7 +15648,8 @@ def _parked_at_the_door(monkeypatch, away=8.0, marker_y=208.0,
     worker, _read = _zoned_party(["Marleybone/MB_ScotlandYard/MB_KnightsCourt"])
     seat = worker.seats[0]
     client = _DoorClient(crosses_on_leg=crosses_on_leg,
-                         loads_on_leg=loads_on_leg)
+                         loads_on_leg=loads_on_leg,
+                         load_settles_into=load_settles_into)
     seat.client = client
     seat.goal = "Go To Amy Brooks' Place in Knight's Court"
     seat.marker_away = away
@@ -15583,14 +15710,169 @@ def test_standing_on_the_marker_walks_out_along_the_wizards_facing(
     assert "walked-through" in [e["kind"] for e in seat.tel.questing]
 
 
-def test_a_loading_screen_counts_as_having_crossed(monkeypatch):
+def _followers(monkeypatch, reason):
+    """A booster one zone from its leader, whose follow always fails."""
+    from deimos_bridge import party as party_mod
+
+    worker, _read = _zoned_party(["Zafaria/ZF_Z09_Drum_Jungle",
+                                  "Zafaria/ZF_Z08_Waterfront"])
+    boss, seat = worker.seats
+    worker.leader, worker.follow_leader = 0, True
+    for s, z in zip(worker.seats, ("Zafaria/ZF_Z09_Drum_Jungle",
+                                   "Zafaria/ZF_Z08_Waterfront")):
+        s.client = object()
+        s.zone_seen = z
+    boss.wizard_name = "Konstantin V"
+    asked = []
+
+    async def _follow(f, leader, leader_name=None, radius=0.0,
+                      no_friends_list=False):
+        asked.append(no_friends_list)
+        return False, reason
+
+    monkeypatch.setattr(party_mod, "follow", _follow)
+
+    async def _no_door(_seat, _boss, _why):
+        return False, ""
+
+    worker._walk_the_leaders_door = _no_door
+    return worker, seat, boss, asked
+
+
+def test_a_friends_list_that_never_reaches_the_game_is_written_off(
+        monkeypatch):
+    """A client-side defect that is 0-for-N has to have an exit.
+
+    Rev ebc4aff8's booster paid for it 19 times over 41 minutes at a
+    flat 72-second cadence — 45s of timeout per name spelling, up to
+    three spellings — with an identical reason every time and no
+    widening interval. `route-impassable` fired once per route and
+    changed nothing; `cross_zone_fails` counted and nothing read it."""
+    import asyncio
+    import time
+
+    worker, seat, boss, asked = _followers(
+        monkeypatch,
+        "the friends-list UI never came up on this client, so the "
+        "teleport was never attempted (No child window named "
+        "NewFriendsListWindow; hardened copy)")
+
+    for _ in range(worker.FRIENDS_UI_GIVE_UP + 2):
+        seat.followed_at = 0.0
+        asyncio.run(worker._follow_step(seat.client, seat))
+
+    assert seat.friends_ui_dead, "it never stopped paying for the list"
+    assert asked[-1] is True, "the last attempt still went to the list"
+    said = [e for e in seat.tel.questing
+            if e["kind"] == "friends-list-written-off"]
+    assert len(said) == 1, "said it once per attempt, or never"
+
+
+def test_a_game_rule_never_writes_the_friends_list_off(monkeypatch):
+    """"Your friend is busy" and "this instance is closed" arrive from
+    the GAME after the teleport is requested. They are rules to route
+    around, not a broken client, and they come right by themselves the
+    moment the leader leaves the instance."""
+    import asyncio
+
+    worker, seat, boss, asked = _followers(
+        monkeypatch, "your friend is busy and cannot be teleported to")
+
+    for _ in range(worker.FRIENDS_UI_GIVE_UP + 4):
+        seat.followed_at = 0.0
+        asyncio.run(worker._follow_step(seat.client, seat))
+
+    assert not seat.friends_ui_dead, \
+        "a game rule was mistaken for a broken client"
+    assert all(a is False for a in asked)
+
+
+def test_the_leader_is_named_without_waiting_for_a_duel(monkeypatch):
+    """`party.wizard_name` has existed for exactly this since the module
+    was written and had NO callers, so the name's one live source was a
+    combat read: a booster could not follow its leader until the leader
+    had fought, and the leader fights badly without its booster.
+
+    Rev ebc4aff8: Oz had no name for Konstantin for the first 207
+    seconds, which is precisely when Konstantin crossed into Drum
+    Jungle on a sigil and the party split for the rest of the run."""
+    import asyncio
+
+    from deimos_bridge import party as party_mod
+
+    worker, seat, boss, asked = _followers(monkeypatch, "")
+    boss.wizard_name = None                  # no duel has happened yet
+
+    async def _named(client):
+        return "Konstantin" if client is boss.client else None
+
+    monkeypatch.setattr(party_mod, "wizard_name", _named)
+    seat.followed_at = 0.0
+    asyncio.run(worker._follow_step(seat.client, seat))
+
+    assert boss.wizard_name == "Konstantin", \
+        "the follow still cannot aim until the leader has fought"
+    said = [e for e in seat.tel.questing
+            if e["kind"] == "leader-name-learned"]
+    assert said and "named itself" in said[0]["detail"]
+
+
+def test_a_clicked_row_is_not_reported_as_an_unopened_list():
+    """`_cycle_friends_list` raises "Could not find friend" BEFORE any
+    click, so reaching `wndCharacter` proves the list opened, paged,
+    matched the row character-for-character and clicked it. Reporting
+    that as "the UI never came up — nothing was clicked and the game
+    was never asked" states three things that did not happen, and sends
+    the operator to check a window that was fine."""
+    from deimos_bridge import party
+
+    assert party.never_asked(
+        ValueError("No child window named wndCharacter")), \
+        "it is still a wizAi-side failure, whichever half it is"
+    assert party.never_asked(
+        ValueError("No child window named NewFriendsListWindow"))
+    assert not party.never_asked(
+        ValueError("No child window named MessageBoxModalWindow")), \
+        "the game's own confirmation box is the game answering"
+
+
+def test_a_loading_screen_that_lands_somewhere_else_has_crossed(monkeypatch):
+    """A load is a promise, not a crossing. It is honoured when the far
+    side names itself and not before."""
     import asyncio
 
     worker, seat, client = _parked_at_the_door(
-        monkeypatch, crosses_on_leg=None, loads_on_leg=1)
+        monkeypatch, crosses_on_leg=None, loads_on_leg=1,
+        load_settles_into="Marleybone/Interiors/MB_AmyBrooks")
     asyncio.run(worker._maybe_walk_through(seat))
-    assert len(client.legs) == 1
+    assert len(client.legs) == 1, "it kept sweeping past a real crossing"
     assert "walked-through" in [e["kind"] for e in seat.tel.questing]
+
+
+def test_a_loading_screen_that_lands_back_here_has_crossed_nothing(
+        monkeypatch):
+    """`is_loading()` is true during ordinary same-zone asset streaming
+    straight after `client.teleport()` — which is what the caller does
+    one line before asking. Answering True on it alone meant a landing
+    that crossed nothing reported a crossing, which cleared the route's
+    fail counter and dropped its cooldown: the ladder lost count of a
+    route that had never worked and started over on it at once.
+
+    Rev ebc4aff8's booster: 19 door-walk attempts, 2 reported successes
+    (both "0 leg(s)" — the load fired before any walking), and ZERO
+    zone changes attributable to any of them. The one mechanism built
+    for a dungeon that refuses friends-list teleports spent 41 minutes
+    reporting wins it did not have."""
+    import asyncio
+
+    worker, seat, client = _parked_at_the_door(
+        monkeypatch, crosses_on_leg=None, loads_on_leg=1,
+        load_settles_into="Marleybone/MB_ScotlandYard/MB_KnightsCourt")
+    asyncio.run(worker._maybe_walk_through(seat))
+    assert len(client.legs) == 4, \
+        "a same-zone load was taken as a crossing and stopped the sweep"
+    assert "walked-through" not in [e["kind"] for e in seat.tel.questing], \
+        "it claimed to have walked through a door it never crossed"
 
 
 def test_a_miss_sweeps_all_four_directions_and_says_so(monkeypatch):
@@ -16863,6 +17145,12 @@ def test_a_talk_npc_prompt_is_not_a_sigil_and_holds_nothing(monkeypatch):
     from deimos_bridge import questing
 
     worker, seat, other = _at_the_sigil(monkeypatch)
+    # Beside this wizard, INSIDE `COUNT_HOLD_SENSE`. The fixture parks
+    # the partner 800 units off, which is outside it — so this test
+    # used to pass whatever the Team Up read said, because the partner
+    # was never looked at. A guard test that cannot fail is not a
+    # guard test.
+    other.client = _SigilClient(pos=(150.0, 200.0, 0.0))
 
     async def prompt(c):
         return c is other.client       # the partner is at SOMETHING
@@ -16875,6 +17163,10 @@ def test_a_talk_npc_prompt_is_not_a_sigil_and_holds_nothing(monkeypatch):
     asyncio.run(worker._maybe_count_hold(seat))
     assert not worker._count_hold_sigil, \
         "a conversation was recorded as an evidenced sigil"
+    assert [e for e in seat.tel.questing
+            if e["kind"] == "countdown-hold-refused"
+            and "no Team Up button" in e["detail"]], \
+        "the discriminator was never actually consulted"
     said = " ".join(e["detail"] for e in seat.tel.questing
                     if e["kind"] == "countdown-hold")
     assert "mid-entry" not in said, \
@@ -16889,6 +17181,7 @@ def test_a_partner_that_walked_here_itself_is_still_evidence(monkeypatch):
     from deimos_bridge import questing
 
     worker, seat, other = _at_the_sigil(monkeypatch)
+    other.client = _SigilClient(pos=(150.0, 200.0, 0.0))
 
     async def at_sigil(c):
         return c is other.client
@@ -18332,9 +18625,14 @@ def test_a_collect_step_with_no_marker_at_all_still_hops(monkeypatch):
     # the crowding question is the live one.
     seat.collect_moved_for = "collect gemstones in hall of champions"
     seat.collect_moved_at = time.monotonic() - 600.0
+    # ...HERE, and recently. The latch used to be a run-lifetime fact
+    # with no zone on it, so one tick of progress at minute three
+    # authorised hops for the rest of the session in any zone.
+    seat.zone_seen = seat.zone_seen or "Krokotopia/KT_ChampHall"
+    seat.collect_moved_in = seat.zone_seen
     asyncio.run(worker._maybe_realm_hop(seat))
     assert fired, "the crowded-realm rung refused a markerless Collect"
-    assert "count HAS moved before" in fired[0]
+    assert "count went up in this zone" in fired[0]
     assert "crowded realm" in fired[0]
 
 
@@ -18411,7 +18709,264 @@ def test_everyone_failing_is_not_reported_as_a_split(monkeypatch):
     assert failed and "still together" in failed[0]["detail"]
 
 
-def test_a_landed_hop_restarts_the_crowded_judgement_clock(monkeypatch):
+def _collect_seat(worker, goal, zone="WizardCity/WC_Hub"):
+    """A seat parked on a Collect goal, watched long enough to judge."""
+    import time
+
+    seat = worker.seats[0]
+    seat.goal = goal
+    seat.zone_seen = zone
+    seat.marker_away = None              # a Collect step publishes none
+    # Working, as far as the position clock can tell: the script
+    # teleports it around every few seconds, so `progress_at` is fresh.
+    seat.progress_at = time.monotonic() - 5.0
+    seat.goal_at = time.monotonic() - worker.REALM_HOP_AFTER - 1
+    return seat
+
+
+def test_a_collect_goal_with_no_counter_is_no_evidence_at_all(monkeypatch):
+    """Rev ebc4aff8's 145-minute wedge, in one call.
+
+    `is_collect_goal` and `collect_count` are two different reads of the
+    same string: the first matches the VERB, the second needs a literal
+    `(n of m)`. "Collect Dirt Mound in Cyclops Lane" satisfies the first
+    and not the second — so `here` came back None, the `and` in the
+    never-started guard short-circuited, and the one check standing
+    between this rung and an unbounded loop did not run at all.
+
+    The party then hopped 25 times over 145 minutes, standing in
+    `WizardCity/WC_Hub` on a step whose collectibles are in Cyclops
+    Lane, while the export said every single time: "its count HAS moved
+    before, so this wizard does reach the spawns". It never had —
+    `collect_moved_at` was 0.0 for the entire run."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    goal = "Collect Dirt Mound in Cyclops Lane"
+    assert questing.is_collect_goal(goal), "the rung must enable itself"
+    assert questing.collect_count(goal) is None, "and have nothing to read"
+
+    worker, _read = _zoned_party(["WC_Hub"] * 2)
+    worker.script = "###deimos_expertmode"
+    fired = []
+
+    async def record(seat, why):
+        fired.append(why)
+
+    worker._realm_hop_party = record
+    seat = _collect_seat(worker, goal)
+    asyncio.run(worker._maybe_realm_hop(seat))
+
+    assert fired == [], "it hopped on a step that publishes no evidence"
+    note = [e for e in seat.tel.questing if e["kind"] == "realm-hop-refused"]
+    assert note and "no '(n of m)' counter" in note[0]["detail"]
+
+
+def test_no_message_ever_claims_a_count_moved_when_it_did_not(monkeypatch):
+    """The reason string picked its wording from `away is None` rather
+    than from the evidence, so a branch printed a fact the code had not
+    established. A log line that reads like a diagnosis has to be one."""
+    import asyncio
+    import time
+
+    worker, _read = _zoned_party(["KT_ChampHall"] * 2)
+    worker.script = "###deimos_expertmode"
+    fired = []
+
+    async def record(seat, why):
+        fired.append(why)
+
+    worker._realm_hop_party = record
+    seat = _collect_seat(worker, "Collect Gemstones in Hall of Champions (0 of 4)",
+                         zone="Krokotopia/KT_ChampHall")
+    seat.collect_moved_for = "collect gemstones in hall of champions"
+    seat.collect_moved_at = time.monotonic() - 120.0
+    seat.collect_moved_in = seat.zone_seen
+    asyncio.run(worker._maybe_realm_hop(seat))
+
+    assert fired, "a wizard proven to be at the spawns was refused"
+    assert "count went up in this zone 2 min ago" in fired[0], \
+        "the reason has to name the evidence it is standing on"
+
+
+def test_a_count_that_moved_in_another_zone_is_not_evidence_here(monkeypatch):
+    """The latch was a run-lifetime fact with no reset anywhere — one
+    init, one write, one read — so a tick of progress at minute three
+    authorised realm hops for the rest of the session, in whatever zone
+    the wizard later wandered into."""
+    import asyncio
+    import time
+
+    worker, _read = _zoned_party(["WC_Hub"] * 2)
+    worker.script = "###deimos_expertmode"
+    fired = []
+
+    async def record(seat, why):
+        fired.append(why)
+
+    worker._realm_hop_party = record
+    seat = _collect_seat(worker, "Collect Dirt Mound in Cyclops Lane (0 of 3)")
+    seat.collect_moved_for = "collect dirt mound in cyclops lane"
+    seat.collect_moved_at = time.monotonic() - 120.0
+    seat.collect_moved_in = "WizardCity/WC_Streets/WC_CyclopsLane"  # elsewhere
+    asyncio.run(worker._maybe_realm_hop(seat))
+    assert fired == [], "a count that moved in another zone licensed a hop"
+
+    # ...and stale, in the right zone, is refused for the other reason.
+    seat.collect_moved_in = seat.zone_seen
+    seat.collect_moved_at = time.monotonic() - worker.COLLECT_MOVE_FRESH - 1
+    asyncio.run(worker._maybe_realm_hop(seat))
+    assert fired == [], "an hour-old count still licensed a hop"
+
+
+def test_one_goal_cannot_buy_an_unbounded_number_of_realms(monkeypatch):
+    """Three limiters existed and none was a budget: the cooldown is a
+    rate limit, `_realms_tried` explicitly clears and starts over when
+    exhausted, and `REALM_HOP_AFTER` only delays the first hop. What
+    ended rev ebc4aff8's loop after 26 hops was the game — "the realm
+    list's page number would not read" — not wizAi."""
+    import asyncio
+    import time
+
+    worker, calls = _hoppable_party(monkeypatch)
+    # In the zone its step names, so only the budget can end this.
+    seat = _collect_seat(worker, "Collect Gemstones in Hall of Champions (0 of 4)",
+                         zone="Krokotopia/KT_ChampHall")
+    seat.collect_moved_for = "collect gemstones in hall of champions"
+    seat.collect_moved_in = seat.zone_seen
+
+    hops = 0
+    for _ in range(12):
+        # Everything the rung asks for, every cycle: the count moved
+        # here a moment ago, the goal has not advanced, the cooldown is
+        # clear. Only the budget can end this.
+        seat.collect_moved_at = time.monotonic() - 60.0
+        seat.goal_at = time.monotonic() - worker.REALM_HOP_AFTER - 1
+        worker._realm_hopped_at = -1e9
+        before = len(calls["hops"])
+        asyncio.run(worker._maybe_realm_hop(seat))
+        if len(calls["hops"]) > before:
+            hops += 1
+
+    assert hops == worker.REALM_HOP_BUDGET, \
+        f"one unchanged goal bought {hops} realms"
+    note = [e for e in seat.tel.questing
+            if e["kind"] == "realm-hop-refused"
+            and "the realm is not what is wrong" in e["detail"]
+            or "realm changes with no progress" in (e.get("detail") or "")]
+    assert note, "it stopped and never said why"
+
+
+def test_a_goal_that_advances_gets_a_fresh_realm_budget(monkeypatch):
+    """A changed goal is the outcome a hop is trying to buy. The budget
+    is a backstop against a loop, not a per-run allowance."""
+    import asyncio
+    import time
+
+    worker, calls = _hoppable_party(monkeypatch)
+    # In the zone its step names, so only the budget can end this.
+    seat = _collect_seat(worker, "Collect Gemstones in Hall of Champions (0 of 4)",
+                         zone="Krokotopia/KT_ChampHall")
+    worker._hops_for[id(seat)] = (worker.REALM_HOP_BUDGET, seat.goal)
+    seat.collect_moved_for = "collect gemstones in hall of champions"
+    seat.collect_moved_in = seat.zone_seen
+    seat.collect_moved_at = time.monotonic() - 60.0
+    worker._realm_hopped_at = -1e9
+
+    asyncio.run(worker._maybe_realm_hop(seat))
+    assert calls["hops"] == [], "the budget was not spent"
+
+    # The step advances. `_note_goal` clears the budget with it.
+    worker._note_goal(seat, "Collect Gemstones in Hall of Champions (1 of 4)",
+                      time.monotonic())
+    seat.goal_at = time.monotonic() - worker.REALM_HOP_AFTER - 1
+    seat.collect_moved_at = time.monotonic() - 60.0
+    seat.collect_moved_in = seat.zone_seen
+    worker._realm_hopped_at = -1e9
+    asyncio.run(worker._maybe_realm_hop(seat))
+    assert calls["hops"], "a step that advanced did not get a fresh budget"
+
+
+def test_a_collect_step_in_another_part_of_this_world_is_not_a_crowd(
+        monkeypatch):
+    """The read that was available in plain text for every one of rev
+    ebc4aff8's 152 minutes: the goal said "in Cyclops Lane" while the
+    wizard stood in `WizardCity/WC_Hub`. A realm change keeps the zone
+    and swaps the shard, so it can only ever help a wizard already at
+    the collectibles."""
+    import asyncio
+    import time
+
+    worker, _read = _zoned_party(["WC_Hub"] * 2)
+    worker.script = "###deimos_expertmode"
+    fired = []
+
+    async def record(seat, why):
+        fired.append(why)
+
+    worker._realm_hop_party = record
+    seat = _collect_seat(worker, "Collect Dirt Mound in Cyclops Lane (0 of 3)")
+    seat.collect_moved_for = "collect dirt mound in cyclops lane"
+    seat.collect_moved_at = time.monotonic() - 60.0
+    seat.collect_moved_in = seat.zone_seen
+    seat.progress = (seat.zone_seen, (1, 2, 3), seat.goal)
+    worker.seats[1].progress = (seat.zone_seen, (4, 5, 6), "")
+
+    asyncio.run(worker._maybe_realm_hop(seat))
+    assert fired == [], "it changed shard for a wizard in the wrong street"
+    note = [e for e in seat.tel.questing if e["kind"] == "realm-hop-refused"]
+    assert note and "names a destination that is not" in note[-1]["detail"]
+
+
+def test_the_place_check_never_vetoes_on_a_guess():
+    """It would be a bad trade to swap a 145-minute stall for a subtler
+    always-on wrongness. A zone id ABBREVIATES and REORDERS its area
+    (`KT_ChampHall` is the Hall of Champions), a world hub hides under
+    an internal alias (`ZF_Z00_Hub` IS the Baobab Crossroads), and an
+    interior is not named after the street it opens off. All three have
+    to answer "cannot tell", and only an outright mismatch may veto."""
+    from deimos_bridge import questlist
+
+    # abbreviated and reordered — the wizard IS there
+    assert questlist.area_is_this_zone(
+        "Hall of Champions", "Krokotopia/KT_ChampHall") is None
+    # a hub under its alias
+    assert questlist.area_is_this_zone(
+        "Baobab Crossroads", "Zafaria/ZF_Z00_Hub") is None
+    # inside something
+    assert questlist.area_is_this_zone(
+        "Elephant Graveyard",
+        "Zafaria/Interiors/ZF_Z10_I02_Didos_Mausoleum") is None
+    # nothing to compare
+    assert questlist.area_is_this_zone("", "Zafaria/ZF_Z00_Hub") is None
+    assert questlist.area_is_this_zone("Cyclops Lane", "") is None
+
+    # ...and the answers it IS allowed to give
+    assert questlist.area_is_this_zone(
+        "Drum Jungle", "Zafaria/ZF_Z09_Drum_Jungle") is True
+    assert questlist.area_is_this_zone(
+        "Cyclops Lane", "WizardCity/WC_Hub") is False
+    assert questlist.area_is_this_zone(
+        "Cyclops Lane", "Zafaria/ZF_Z00_Hub") is False
+
+
+def test_a_landed_hop_restarts_only_its_own_clock(monkeypatch):
+    """The new realm earns its own `REALM_HOP_AFTER` — on its own field.
+
+    This used to restamp `progress_at`, on the reasoning that the zone
+    genuinely reloaded. A realm change keeps the zone AND the position,
+    so nothing about the wizard moved, and `progress_at` is the clock
+    TWELVE other rungs read: the heartbeat's "unchanged for N min",
+    `_check_progress` (STUCK_AFTER 300), `_unstick` and `_desperate_hop`
+    (330), the countdown hold's stale bypass, the no-progress alarm.
+    `REALM_HOP_COOLDOWN` is 300, so a party hopping on schedule reset
+    every one of those watchdogs before any could fire.
+
+    Rev ebc4aff8 is the cost: 25 hops over 145 minutes in
+    `WizardCity/WC_Hub`, and across 142 heartbeats the idle clock
+    crossed eight minutes exactly ONCE — in the single 566s window
+    opened because a hop was REFUSED rather than taken."""
     import asyncio
     import time
 
@@ -18422,9 +18977,155 @@ def test_a_landed_hop_restarts_the_crowded_judgement_clock(monkeypatch):
         seat.cells_seen[(1, 2, 3)] = stale
     asyncio.run(worker._realm_hop_party(worker.seats[0], "testing"))
     for seat in worker.seats:
-        assert seat.progress_at > stale + 900, \
-            "the new realm inherited the old realm's stuck clock"
+        assert seat.realm_settled_at > stale + 900, \
+            "the new realm inherited the old realm's crowding clock"
+        assert seat.progress_at == stale, \
+            "the hop reset the stuck ladder's clock and starved every "\
+            "watchdog that reads it"
         assert seat.cells_seen == {}
+
+
+# --------------------------------- not fighting what cannot be won
+def test_a_lost_duel_is_left_rather_than_played_out(qapp):
+    """The verdict has always been available and was always only
+    reported: "Reported, not acted on. What to DO about it depends on
+    why the line is missing". True of the CAUSE, and not of the round in
+    front of us — once every line INCLUDING passing ends in this
+    wizard's death, playing on chooses the death.
+
+    Rev ebc4aff8: `unwinnable` fired at t=401 on round 5 of 9 against
+    `Shadow-Web Wraith@2555 + Shadow-Web Wraith@2555`. Konstantin
+    fought four more rounds, died at 121 of 2,573, and was sent to the
+    Commons — where the script lost its place and a 206-minute run
+    never got it back. The fight cost fifteen minutes; losing the
+    script's place cost the rest."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.tel.start_fight()
+    seat.tel.fights[-1].opening = "Shadow-Web Wraith@2555+Shadow-Web Wraith@2555"
+    for _ in range(worker.UNWINNABLE_ROUNDS):
+        _no_line_round(worker, seat, hp=121.0)
+
+    assert seat.flee_asked, "it watched the wizard die and said so"
+    said = [e for e in seat.tel.questing if e["kind"] == "fleeing"]
+    assert said and "chooses the death" in said[0]["detail"]
+
+
+def test_a_duel_the_party_is_still_swinging_in_is_not_fled(qapp):
+    """The verdict is about THIS wizard's lines. A party-mate's cast can
+    change the board, and leaving would take the quester out of a fight
+    its booster is winning."""
+    worker = _party_worker()
+    seat, other = worker.seats[0], worker.seats[1]
+    other.client, other.in_duel = object(), True
+    seat.tel.start_fight()
+    for _ in range(worker.UNWINNABLE_ROUNDS):
+        _no_line_round(worker, seat, hp=121.0, seats_in_plan=1)
+
+    assert not seat.flee_asked, "it left a duel its partner was still in"
+    assert [e for e in seat.tel.questing if e["kind"] == "unwinnable"], \
+        "and it should still SAY the line is hopeless"
+
+
+def test_a_wizard_already_at_zero_is_not_asked_to_flee(qapp):
+    """`_down` has that case, and the game puts its own flee button on
+    the defeated window."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.tel.start_fight()
+    for _ in range(worker.UNWINNABLE_ROUNDS):
+        _no_line_round(worker, seat, hp=0.0)
+    assert not seat.flee_asked
+
+
+def test_the_quester_waits_for_a_booster_that_cannot_reach_it(qapp):
+    """The whole point of a booster party is that the quester does not
+    fight alone, and the only pre-fight veto wizAi had was about this
+    wizard's own hit points.
+
+    Rev ebc4aff8: Oz could not teleport to Konstantin from t=1, so
+    Konstantin walked into 5,110 HP of drain mobs as a 2,573 HP solo
+    fire wizard, lost in nine rounds, and the whole rest of the run
+    followed from it."""
+    import asyncio
+    import time
+
+    worker = _party_worker()
+    worker.booster_party, worker.leader = True, 0
+    boss, booster = worker.seats
+    worker.PARTY_WAIT, worker.PARTY_WAIT_POLL = 0.3, 0.02
+    boss.zone_seen = "Zafaria/Interiors/ZF_Z10_I02_Didos_Mausoleum"
+    booster.zone_seen = "Zafaria/ZF_Z08_Waterfront"
+    booster.follow_failing_since = time.monotonic() - 300
+
+    began = time.monotonic()
+    asyncio.run(worker._wait_for_the_party(boss))
+    assert time.monotonic() - began >= 0.25, "it walked straight in"
+    said = [e for e in boss.tel.questing
+            if e["kind"] == "fighting-without-the-party"]
+    assert said, "it went in anyway and never said so"
+
+
+def test_the_party_wait_is_wired_into_the_fight_loop():
+    """The pause is worth nothing unless it runs BETWEEN fights, on the
+    loop that walks into the next one — beside `_let_it_heal`, which is
+    the only other pre-fight veto and was, until now, the only one."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._fight_loop)
+    assert "_wait_for_the_party" in src, \
+        "the wait exists and nothing calls it"
+    assert src.index("_let_it_heal") < src.index("_wait_for_the_party"), \
+        "health first: a wizard that cannot survive the fight should not "\
+        "spend the party wait before finding that out"
+
+
+def test_the_wait_ends_the_moment_the_booster_arrives(qapp):
+    """A finite wait that ends early. The follow ladder runs on the
+    service tick throughout — this is the pause that gives it time to
+    work, not a replacement for it."""
+    import asyncio
+    import time
+
+    worker = _party_worker()
+    worker.booster_party, worker.leader = True, 0
+    boss, booster = worker.seats
+    worker.PARTY_WAIT, worker.PARTY_WAIT_POLL = 30.0, 0.02
+    boss.zone_seen = "Zafaria/ZF_Z09_Drum_Jungle"
+    booster.zone_seen = "Zafaria/ZF_Z08_Waterfront"
+    booster.follow_failing_since = time.monotonic() - 300
+
+    async def drive():
+        task = asyncio.ensure_future(worker._wait_for_the_party(boss))
+        await asyncio.sleep(0.05)
+        booster.follow_failing_since = None       # it got there
+        await asyncio.wait_for(task, 5)
+
+    asyncio.run(drive())
+    said = [e for e in boss.tel.questing
+            if e["kind"] == "waited-for-the-party"]
+    assert said, "it never recorded the wait it just paid"
+
+
+def test_an_independent_party_is_never_held_before_a_fight(qapp):
+    """Only the wizard a booster party exists to protect. Two wizards
+    questing independently are not waiting on each other, and a
+    follower simply walking is not stranded."""
+    import asyncio
+    import time
+
+    worker = _party_worker()
+    worker.booster_party = False
+    boss, other = worker.seats
+    worker.PARTY_WAIT, worker.PARTY_WAIT_POLL = 30.0, 0.02
+    boss.zone_seen, other.zone_seen = "A", "B"
+    other.follow_failing_since = time.monotonic() - 300
+
+    began = time.monotonic()
+    asyncio.run(worker._wait_for_the_party(boss))
+    assert time.monotonic() - began < 1.0, "an independent party was held"
 
 
 # ------------------ the operator's manual reset, as the last rung
@@ -19319,6 +20020,215 @@ def test_a_marker_that_agrees_with_itself_is_believed(monkeypatch):
     assert not [e for e in seat.tel.questing if e["kind"] == "marker-flapped"]
 
 
+def test_two_different_markers_the_same_distance_away_are_not_the_same(
+        monkeypatch):
+    """The confirmation compares the two MARKERS, not two distances.
+
+    Comparing distances asks a weaker question than it looks: the arrow
+    hook is a last-writer-wins pointer with no quest attached to it, and
+    two entirely different objectives that happen to sit the same
+    distance from the wizard compare equal. Here they are 400 units
+    apart, in opposite directions, and both exactly 200 from the body —
+    the distance test calls that "the same marker, confirmed"."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Sivella in Baobab Crown"],
+        position=_XYZ(0.0, 0.0, 0.0),
+        positions=[_XYZ(200.0, 0.0, 0.0),      # near, to the east...
+                   _XYZ(-200.0, 0.0, 0.0)])    # ...and now to the west
+    asyncio.run(worker._read_goal(seat))
+
+    assert seat.marker_away is None, \
+        "two different objectives were confirmed as one because they "\
+        "were equidistant"
+    assert [e for e in seat.tel.questing if e["kind"] == "marker-flapped"]
+
+
+def test_a_marker_that_stays_put_is_confirmed_from_a_fresh_position(
+        monkeypatch):
+    """The other half. A marker that agrees with itself is believed —
+    and the distance reported is measured from where the wizard is NOW,
+    not from the body read taken before the confirmation slept."""
+    import asyncio
+
+    # Read once for `at`, then again inside the confirmation — by which
+    # time the wizard has walked 100 units toward its objective.
+    walked = [_XYZ(0.0, 0.0, 0.0), _XYZ(100.0, 0.0, 0.0)]
+    body = {"n": 0}
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Sivella in Baobab Crown"],
+        positions=[_XYZ(300.0, 0.0, 0.0)])     # one marker, unmoving
+
+    class _Body:
+        async def position(self):
+            got = walked[min(body["n"], len(walked) - 1)]
+            body["n"] += 1
+            return got
+
+    seat.client.body = _Body()
+    asyncio.run(worker._read_goal(seat))
+
+    assert seat.marker_away is not None, "a still marker was disbelieved"
+    assert abs(seat.marker_away - 200.0) < 1.0, \
+        f"reported {seat.marker_away:.0f} — measured from a stale body"
+
+
+def test_a_marker_that_flapped_is_left_alone_for_a_moment(monkeypatch):
+    """Disbelief has to be sticky. `marker_away` is None afterwards,
+    which IS the far-to-near transition that re-arms the confirmation —
+    so without a rest a hook that flaps on every read pays the
+    confirmation twice a second forever and `marker_away` never leaves
+    None, which is what `_desperate_hop` and the catch-up read as "no
+    marker to aim at"."""
+    import asyncio
+    import time
+
+    reads = [_XYZ(20.0, 0.0, 0.0), _XYZ(9000.0, 0.0, 0.0)] * 8
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Sivella in Baobab Crown"],
+        position=_XYZ(0.0, 0.0, 0.0), positions=reads)
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away is None, "the flap was believed"
+    assert seat.marker_flapped_at > 0, "the disbelief did not rest"
+
+    left = len(reads)
+    flapped = len([e for e in seat.tel.questing
+                   if e["kind"] == "marker-flapped"])
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away is None, \
+        "a marker disbelieved a moment ago was published unconfirmed"
+    assert len([e for e in seat.tel.questing
+                if e["kind"] == "marker-flapped"]) == flapped, \
+        "it spent the confirmation again on the very next poll"
+
+    # ...and the rest expires, so a hook that settles is believed again.
+    seat.marker_flapped_at = time.monotonic() - worker.MARKER_FLAP_REST - 1
+    asyncio.run(worker._read_goal(seat))
+    assert [e for e in seat.tel.questing
+            if e["kind"] == "marker-flapped"], "the rest never expired"
+
+
+def test_a_wizard_that_died_is_not_recorded_as_the_winner(qapp):
+    """Two independent outcome paths that did not talk to each other.
+    `on_defeated` knows the truth in the round it happens, off the board
+    it is reading; `_fight_outcome` re-derived it from a stat read taken
+    after the between-fight boundary, by which time the game has already
+    respawned the wizard.
+
+    Rev ebc4aff8's fight 4: Konstantin went 2,573 to 0 against four
+    Shadow-Web Haunts and it is recorded `won: True`. Four things follow
+    from that one wrong bit — `wins` reads 3 of 4, `_note_the_loss`
+    never fires so a repeated wall is never called one, `_health_needed`
+    is fed 155.4 of damage for a fight that took 2,573, and
+    `_let_it_heal` sees a healthy winner and lets the next duel start."""
+    import asyncio
+
+    from deimos_bridge.telemetry import RoundRecord
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.tel.start_fight()
+    seat.tel.rounds.append(RoundRecord(fight=seat.tel.fights[-1].index,
+                                       round=1, passing=False))
+    seat.tel.fights[-1].rounds = 1
+
+    class _Respawned:
+        class stats:
+            @staticmethod
+            async def current_hitpoints():
+                return 2573          # the game has already put it back
+
+    assert asyncio.run(worker._fight_outcome(_Respawned(), seat)) is True
+
+    worker._defeated_hook(seat)()    # ...but it died during the fight
+    assert seat.died_this_fight
+    assert asyncio.run(worker._fight_outcome(_Respawned(), seat)) is False, \
+        "a corpse the game had already respawned was recorded as a win"
+
+
+def test_the_stall_escalation_runs_on_a_clock_the_script_cannot_reset(qapp):
+    """`progress_at` is restamped every time the wizard lands somewhere
+    it has not been in three minutes — and the scripts hammer `tp` in
+    exactly that pattern. Rev ebc4aff8's script landed 320+ teleports in
+    `WizardCity/WC_Hub` onto genuinely new cells, so across 143
+    heartbeats of a 147-minute stall the position clock crossed three
+    minutes six times, this rung fired ONCE, and Oz — watching the same
+    stall from the same zone — produced nothing at all.
+
+    The realm-hop rung is the only consumer that noticed, wrote down
+    why, and used `goal_at` instead. Its number reached 150 minutes."""
+    import time
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    now = time.monotonic()
+    seat.zone_since = now - 3000.0
+    seat.goal_at = now - 3000.0
+    # ...and the script has just teleported it somewhere new, as it has
+    # been doing every few seconds for the last fifty minutes.
+    seat.progress_at = now - 1.0
+    seat.progress = ("WizardCity/WC_Hub", (1, 2, 3), seat.goal)
+
+    stalled = time.monotonic() - worker._nothing_achieved_since(seat)
+    assert stalled > 2000.0, \
+        f"the stall clock reads {stalled:.0f}s — the retry loop reset it"
+
+    # A real achievement is what clears it.
+    seat.goal_at = time.monotonic()
+    assert time.monotonic() - worker._nothing_achieved_since(seat) < 5.0
+
+
+def test_a_new_cell_does_not_clear_the_stall_escalation(qapp):
+    """The 5/10/20/40/80-minute band scheme exists so the export shows a
+    stall GROWING. Clearing it on a new position cell collapsed it to
+    one line per stall, and one line is what rev ebc4aff8 got out of 147
+    minutes and two wizards."""
+    import time
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    now = time.monotonic()
+    seat.progress = ("WizardCity/WC_Hub", (1, 2, 3), seat.goal)
+    seat.said_stuck = "WizardCity/WC_Hub · a goal @4"
+
+    worker._note_progress(seat, "WizardCity/WC_Hub", (9, 9, 9), now)
+    assert seat.said_stuck == "WizardCity/WC_Hub · a goal @4", \
+        "a teleport inside one zone wiped the escalation"
+
+    worker._note_progress(seat, "WizardCity/WC_Ravenwood", (9, 9, 9), now)
+    assert seat.said_stuck == "", "a real zone change did not clear it"
+
+
+def test_the_heartbeat_names_the_quest_not_only_its_goal(qapp):
+    """Every rung in the questline layer keys on the quest NAME and the
+    export published only the goal, so the one question rev ebc4aff8's
+    152-minute wedge turns on — did the name and the goal agree, and on
+    what — could not be answered from the file. It had to be recovered
+    from the script's own print stream."""
+    import asyncio
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.quest_name = "Heart of Darkness"
+    seat.zone_seen = "Zafaria/ZF_Z00_Hub"
+    seat.goal = "Talk To Someone in Baobab Crown"
+    seat.beat_at = 0.0
+
+    async def _no_health(_s):
+        return None
+
+    worker._health_left = _no_health
+    asyncio.run(worker._heartbeat(seat, False, fighting=False))
+    beat = [e for e in seat.tel.questing if e["kind"] == "heartbeat"]
+    assert beat, "no heartbeat was written"
+    assert "Heart of Darkness" in beat[-1]["detail"], \
+        "the heartbeat still cannot say which quest is tracked"
+    assert "main #" in beat[-1]["detail"], \
+        "and where that quest sits, which is the whole diagnosis"
+
+
 def test_a_goal_in_another_world_is_not_this_spot(monkeypatch):
     """The exact read that fired rev 09a0af80's hold: a WYSTERIA quest
     whose marker read 81 units away, then 0, while the wizard stood in
@@ -19419,6 +20329,43 @@ def test_a_sigil_that_finally_fires_owes_nothing(monkeypatch):
     worker._sigil_fired(seat)
     assert worker._sigil_spent(seat) == 0, \
         "a spot that fired kept paying for the tries it took"
+
+
+def test_a_partners_prompt_charges_one_dud_per_visit_not_per_tick(
+        monkeypatch):
+    """The service tick runs twice a second and `COUNT_HOLD_DUDS` is 3,
+    so charging per tick saturated the counter in about a second and a
+    half — after which the spot was refused for the rest of the run
+    with the message "3 visits have held the full 45s for a countdown
+    and none of them fired", a statement about three 45-second holds
+    that had not happened. Nothing but the spot firing ever clears it."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+    # Beside this wizard, inside COUNT_HOLD_SENSE, which is where a
+    # partner's prompt is evidence about this spot at all.
+    other.client = _SigilClient(pos=(150.0, 200.0, 0.0))
+
+    async def prompt(c):
+        return c is other.client       # the partner is at SOMETHING
+
+    async def not_a_sigil(_c):
+        return False                   # ...with no Team Up button
+
+    monkeypatch.setattr(questing, "near_interactable", prompt)
+    monkeypatch.setattr(questing, "at_a_sigil", not_a_sigil)
+    worker.COUNT_HOLD_EVERY = 0.0
+
+    for _ in range(6):
+        worker._count_hold_until = 0.0
+        worker._count_hold_last = -1e9
+        seat.count_hold_seen = 1.0
+        asyncio.run(worker._maybe_count_hold(seat))
+
+    assert worker._sigil_dud(seat) == 1, \
+        f"one visit charged {worker._sigil_dud(seat)} duds"
 
 
 def test_the_hold_refuses_a_marker_that_belongs_to_another_world(monkeypatch):
@@ -21160,6 +22107,11 @@ def test_a_lone_wizard_on_a_collect_step_is_a_regroup_not_a_realm(monkeypatch):
     seat.goal_at = time.monotonic() - worker.REALM_HOP_AFTER - 1
     seat.collect_moved_for = "collect gemstones in hall of champions"
     seat.collect_moved_at = time.monotonic() - 600.0
+    # ...HERE, and recently. The latch used to be a run-lifetime fact
+    # with no zone on it, so one tick of progress at minute three
+    # authorised hops for the rest of the session in any zone.
+    seat.zone_seen = seat.zone_seen or "Krokotopia/KT_ChampHall"
+    seat.collect_moved_in = seat.zone_seen
     seat.progress = ("Krokotopia/KT_Hub", (1, 2, 3), goal)
     other.progress = ("Krokotopia/KT_Krokosphinx/KT_ChampHall", (4, 5, 6),
                       "Talk To General Khaba in Hall of Champions")
@@ -21436,14 +22388,19 @@ def test_a_collect_count_that_never_moved_blocks_the_realm_hop(monkeypatch):
     asyncio.run(worker._maybe_realm_hop(seat))
     assert fired == [], "it hopped for a wizard that never reached the spawns"
     note = [e for e in seat.tel.questing if e["kind"] == "realm-hop-refused"]
-    assert note and "never advanced once" in note[0]["detail"]
+    assert note and "has not advanced in this zone" in note[0]["detail"]
 
     # ...and once the count HAS moved, the same stall is the crowd.
     seat.collect_moved_for = "collect gemstones in hall of champions"
     seat.collect_moved_at = time.monotonic() - 600.0
+    # ...HERE, and recently. The latch used to be a run-lifetime fact
+    # with no zone on it, so one tick of progress at minute three
+    # authorised hops for the rest of the session in any zone.
+    seat.zone_seen = seat.zone_seen or "Krokotopia/KT_ChampHall"
+    seat.collect_moved_in = seat.zone_seen
     asyncio.run(worker._maybe_realm_hop(seat))
     assert fired, "a proven-reachable wizard was refused"
-    assert "count HAS moved before" in fired[0]
+    assert "count went up in this zone" in fired[0]
 
 
 def test_the_goal_poll_notices_a_collect_count_going_up():
@@ -22344,6 +23301,47 @@ def test_the_recovery_selects_a_real_quest_for_a_quest_finder_journal(
     said = [e for e in lost.tel.questing
             if e["kind"] == "questline-recovered"]
     assert said and "'Quest Finder'" in said[0]["detail"]
+
+
+def test_the_recovery_reaches_a_quest_the_book_has_never_heard_of(
+        monkeypatch):
+    """The cure that was sitting behind the gate for 152 minutes.
+
+    `_maybe_recover_questline`'s own docstring says selection is the
+    whole cure — "the moment the right quest is tracked, the marker
+    points at the main line again and every mover already in the ladder
+    aims correctly without being told". Rev ebc4aff8 never reached it:
+    the side quest was missing from the data, so `place.known` was
+    False, and both this rung's gate and `_check_on_questline` read
+    that as "no evidence".
+
+    `seat.last_main` had already recorded the answer at t=1995 —
+    Zafaria main #149, 'Heart of Darkness' — and nothing used it."""
+    import asyncio
+    import time
+
+    from deimos_bridge import questlist
+
+    questing = _no_dialogue(monkeypatch)
+    worker = _party_on_quests(["Heart of Darkness", "you can dig it"],
+                              ["Talk To Someone in Baobab Crown",
+                               "Collect Dirt Mound in Cyclops Lane"])
+    lost = worker.seats[1]
+    worker._places = lambda: [questlist.position_of("Heart of Darkness"),
+                              questlist.position_of("you can dig it")]
+    lost.last_main = ("Zafaria", 149, "Heart of Darkness")
+    lost.off_line_since = time.monotonic() - 400
+    calls = []
+
+    async def select(_c, names, on_status=None):
+        calls.append(list(names))
+        return True, names[0], True
+
+    monkeypatch.setattr(questing, "select_quest", select)
+    asyncio.run(worker._maybe_recover_questline(lost))
+    assert calls, "an unlistable quest still cannot reach the recovery"
+    assert "Heart of Darkness" in calls[0], \
+        f"it selected {calls[0]} rather than the line the party is on"
 
 
 # ---------------------------------------------------- archmastery school pips

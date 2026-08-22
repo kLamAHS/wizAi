@@ -352,8 +352,19 @@ async def _put_the_friends_list_away(client):
 #: click is supposed to open. `btnGoToFriend` -- the click that
 #: actually requests a teleport -- lives on that panel, so none of
 #: these can be the game refusing.
-_UI_WINDOWS = ("wndCharacter", "NewFriendsListWindow", "btnFriends",
-               "listFriends", "the friends list would not come up")
+#: the list itself never opened -- nothing was clicked, and no row was
+#: ever read.
+_LIST_WINDOWS = ("NewFriendsListWindow", "btnFriends", "listFriends",
+                 "the friends list would not come up")
+#: the list opened, paged, matched the row and CLICKED it -- and the
+#: character panel the Go-to-Friend button lives on never appeared.
+#: A different failure with a different fix, and lumping it in with the
+#: above told the operator three things that did not happen. Rev
+#: ebc4aff8 reported "the friends-list UI never came up ... nothing was
+#: clicked" for 40 minutes of failures that can only be reached AFTER a
+#: matched row is clicked (`scripting/utils.py`).
+_PANEL_WINDOWS = ("wndCharacter",)
+_UI_WINDOWS = _PANEL_WINDOWS + _LIST_WINDOWS
 
 #: what the operator can do about it, said in the reason rather than
 #: left to be inferred. The wedge this names is `_hide_window`'s: a
@@ -464,11 +475,27 @@ async def teleport_to_leader_across_zones(follower, leader_name):
                 # other spellings still get their turn; a UI that would
                 # not open says nothing at all about the name.
                 nonlocal never_opened
-                never_opened = (
-                    f"the friends-list UI never came up on this client, "
-                    f"so the teleport to {name} was never attempted — "
-                    f"nothing was clicked and the game was never asked "
-                    f"({exc}; {copy}). {UI_HINT}")
+                if any(w in str(exc) for w in _PANEL_WINDOWS):
+                    # The list DID open, paged to Online Friends,
+                    # matched this exact spelling and clicked its row --
+                    # `_cycle_friends_list` raises "Could not find
+                    # friend" before any click, so reaching here proves
+                    # the row matched. What did not appear is the
+                    # character panel the Go-to-Friend button lives on.
+                    never_opened = (
+                        f"the friends list opened and {name}'s row was "
+                        f"clicked, but the character panel it opens "
+                        f"never appeared, so the Go-to-Friend button was "
+                        f"never there to press and the game was never "
+                        f"asked ({exc}; {copy}). The row matched, so the "
+                        f"name is right; this is the click landing "
+                        f"somewhere the panel does not open from")
+                else:
+                    never_opened = (
+                        f"the friends-list UI never came up on this "
+                        f"client, so the teleport to {name} was never "
+                        f"attempted — nothing was clicked and the game "
+                        f"was never asked ({exc}; {copy}). {UI_HINT}")
                 return False, ""
             return False, (f"could not teleport to {name} through the "
                            f"friends list (ValueError: {exc}; {copy})")
@@ -540,7 +567,7 @@ async def join_the_fight(follower):
 
 
 async def follow(follower, leader, leader_name=None,
-                 radius: float = FOLLOW_RADIUS):
+                 radius: float = FOLLOW_RADIUS, no_friends_list=False):
     """Put one wizard where its leader is. Returns (moved, reason).
 
     `moved` is False for "nothing to do" as well as for "could not",
@@ -561,6 +588,15 @@ async def follow(follower, leader, leader_name=None,
     here, there = await zone(follower), await zone(leader)
     known = here is not None and there is not None
     if known and here != there:
+        if no_friends_list:
+            # Written off by the caller after repeated failures inside
+            # wizAi's own UI. Saying so costs nothing; spending three
+            # 45-second timeouts to be told the same thing again costs
+            # the party a fight.
+            return False, ("the friends-list teleport has been written "
+                           "off for this client after repeated failures "
+                           "on wizAi's side of the glass — the way in is "
+                           "the door the leader walked")
         ok, why = await teleport_to_leader_across_zones(follower, leader_name)
         if not ok:
             # ...but ask the wizard where it is before believing that.
