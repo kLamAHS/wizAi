@@ -13366,12 +13366,15 @@ def test_a_catch_up_that_is_getting_nowhere_gives_the_script_its_wizards_back():
     worker = _desynced([11, 4])
     worker._start_catching_up(worker.seats[1], 7, "the questline says so")
     state = worker._catch_up_state
-    state["started"] = time.monotonic() - worker.CATCH_UP_LIMIT - 1
+    # Seven quests to close buys seven times the budget -- see
+    # CATCH_UP_LIMIT. The limit still exists; it is just proportionate.
+    state["started"] = time.monotonic() - worker.CATCH_UP_LIMIT * 7 - 1
     worker._check_caught_up()
     assert worker._catching_up() == []
     gave = [e for e in worker.seats[0].tel.questing
             if e["kind"] == "catch-up-gave-up"]
     assert gave and "still 7 quest(s) behind" in gave[0]["detail"]
+    assert "105 min budget" in gave[0]["detail"]
 
 
 def test_a_catch_up_that_stops_advancing_is_written_off_sooner():
@@ -25322,7 +25325,12 @@ def test_a_booster_partys_journals_are_not_compared():
     """A booster's journal points wherever it was left — diverging from
     the quester is the design — and at rev dbced750 the desync watchdog
     spent a run reporting the booster "behind" on a quest nobody was
-    questing."""
+    questing.
+
+    Still true with ONE quester, which is what this party has:
+    `boosters` unset means every non-leader is muscle, so there is
+    nothing to compare. Phase V masks the muscle out rather than
+    switching the mechanism off — see the two-quester case below."""
     import time
 
     worker = _party_on_quests(
@@ -25387,3 +25395,362 @@ def test_the_heartbeat_says_how_far_the_marker_is():
     beat = [e for e in seat.tel.questing if e["kind"] == "heartbeat"]
     assert beat and "marker 1,234 away" in beat[0]["detail"], \
         beat[0]["detail"]
+
+
+# ---------------------------------------------------------------------
+# Run 11 (rev f6e07e6d): Phase Q gave a booster party two questers, and
+# four gates still assumed it had one.
+# ---------------------------------------------------------------------
+
+
+def _two_quester_party(orders=(18, 23), booster_order=1):
+    """A booster party whose two QUESTERS are on different quests.
+
+    Seat 0 leads and seat 1 quests with it; seat 2 is the muscle, its
+    journal parked on the tutorial exactly as Oz's was at rev f6e07e6d.
+    """
+    names = {1: "Magic: The Archmastering",       # Celestia #1
+             0: "Unicorn Way",                     # Wizard City #1
+             18: "Putting Out the Fire!", 23: "The Cure"}
+    worker, _read = _zoned_party(["WizardCity/WC_Streets/WC_Firecat"] * 3)
+    worker.script = "###deimos_expertmode"
+    worker.booster_party = True
+    worker.solo_script = True
+    worker.leader = 0
+    worker.boosters = {2}
+    for seat, order in zip(worker.seats, list(orders) + [booster_order]):
+        seat.quest_name = names[order]
+        seat.goal = f"step {order}"
+        seat.goals_seen = [seat.goal]
+    return worker
+
+
+def test_a_boosters_place_is_masked_out_of_the_partys(qapp):
+    """`_quester_places` is a mask over the one placement function, not
+    a second way of placing a party — and outside booster mode it is
+    the identity, because `_questers()` is every seat there.
+
+    Phase P broke seventeen tests by getting that backwards, so the
+    invariant gets a test rather than a comment."""
+    def where(places):
+        return [None if p is None else (p.world, p.order) for p in places]
+
+    worker = _two_quester_party()
+    places = worker._places()
+    masked = worker._quester_places()
+    assert len(masked) == len(places) == 3
+    assert masked[2] is None, "the muscle was compared with the questers"
+    assert where(masked)[:2] == where(places)[:2], \
+        "the questers were not left alone"
+    # And the reason it has to be a mask rather than a filter: the
+    # booster's tutorial quest is not merely behind, it is in ANOTHER
+    # WORLD (Celestia #1 against Wizard City #18/#23), which is
+    # `furthest_behind`'s hardest refusal. Rev f6e07e6d's party could
+    # not be measured at all.
+    assert worker._places()[2].world != worker._places()[0].world
+
+    worker.booster_party = False
+    assert where(worker._quester_places()) == where(places), \
+        "the mask is not the identity outside booster mode"
+
+
+def test_two_questers_five_quests_apart_are_a_desync(qapp):
+    """The operator, watching it: "it just neglected to catch up the one
+    wizard who's now 3 levels behind the other quester".
+
+    Thomas on Wizard City main #18 and Críspulo on #23 for the whole of
+    rev f6e07e6d, and `_check_in_step` returned on `self.booster_party`
+    before it looked at either of them."""
+    import time
+
+    worker = _two_quester_party()
+    worker._check_in_step(worker.seats[0])
+    worker._in_step_since = time.monotonic() - 600
+    worker._check_in_step(worker.seats[0])
+
+    said = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "quest-desync"]
+    assert said, "the crew's divergence is invisible again"
+    assert "w0: step 18" in said[0]["detail"]
+    assert "w1: step 23" in said[0]["detail"]
+    assert "w2: " not in said[0]["detail"], \
+        "the booster's frozen journal was reported as a party desync"
+    # It is still PLACED in the line, and named as what it is — the
+    # reader of an export sees three numbers and needs to know which
+    # two the gap is between.
+    assert "w2 #1 (by quest name, muscle — not compared)" \
+        in said[0]["detail"]
+    assert worker._behind is worker.seats[0], \
+        "the laggard is the quester five quests back, not the muscle"
+    assert worker._behind_gap == 5
+
+
+def test_a_boosters_frozen_journal_cannot_end_a_catch_up_wrongly(qapp):
+    """The start rule and the stop rule have to measure the same thing.
+    Unmasked, a booster parked at the start of the line answers
+    "behind" on every tick forever, so the questers agreeing is read as
+    "a DIFFERENT wizard is behind now" — the catch-up ends on the churn
+    branch, the churn counter climbs, and three of those in a minute
+    stop wizAi starting catch-ups at all for five minutes.
+
+    The booster is on Wizard City #1 here rather than the tutorial
+    quest the run actually showed: `Magic: The Archmastering` places in
+    CELESTIA, and a party split across worlds is refused by
+    `furthest_behind` for its own separate reason, which would end the
+    catch-up correctly by accident and prove nothing."""
+    worker = _two_quester_party(orders=(18, 23), booster_order=0)
+    worker._start_catching_up(worker.seats[0], 5, "the questline says so")
+    assert worker._catching_up() == [worker.seats[0]]
+
+    # The laggard finishes the five quests; the booster does not move.
+    worker.seats[0].quest_name = "The Cure"
+    worker.seats[0].goal = "step 23"
+    worker._check_caught_up()
+    assert worker._catching_up() == []
+    done = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "catch-up-done"]
+    assert done and "back with the party" in done[0]["detail"], \
+        "the catch-up ended, but as a churn rather than a success"
+    assert worker._churn == 0, \
+        "a catch-up that finished still counted against the churn rest"
+
+
+def test_the_catch_up_budget_is_per_quest_of_the_gap(qapp):
+    """The operator's decision: close it however long it takes. Five
+    quests to play is not one missed dialogue, and 15 minutes for it is
+    a limit that guarantees giving up."""
+    import time
+
+    worker = _two_quester_party()
+    worker._start_catching_up(worker.seats[0], 5, "the questline says so")
+    state = worker._catch_up_state
+    # Well past the OLD limit, and still going.
+    state["started"] = time.monotonic() - worker.CATCH_UP_LIMIT * 4
+    state["moved"] = time.monotonic()
+    worker.seats[0].progress_at = time.monotonic()
+    worker.seats[0].progress = ("WC_Firecat", (1, 1, 0), "step 18")
+    worker._check_caught_up()
+    assert worker._catching_up() == [worker.seats[0]], \
+        "a five-quest catch-up gave up on the one-quest budget"
+
+    # ...but a wizard that is not moving is still killed in 90s, which
+    # is the clock that was always doing the real work.
+    worker.seats[0].progress_at = time.monotonic() - worker.CATCH_UP_IDLE - 1
+    worker._check_caught_up()
+    assert worker._catching_up() == [], \
+        "CATCH_UP_IDLE stopped biting once the budget grew"
+
+
+def test_a_booster_stands_with_the_wizard_being_caught_up(qapp):
+    """Rev f6e07e6d: Oz beside a leader the script was not questing,
+    `unchanged for 2 min` twice, while the other quester walked six
+    zones and fought The Harvest Lord alone."""
+    w = _boostee_worker(boosters={2})
+    for seat in w.seats:
+        seat.client = object()
+    lead, boostee, muscle = w.seats
+
+    # Control: nobody caught up, nobody fighting — the leader, exactly
+    # as every one-quester party has always done.
+    assert w._boost_target(muscle) is lead
+
+    w._catch_up_state = {"seats": [boostee]}
+    assert w._boost_target(muscle) is boostee, \
+        "the booster stayed with a leader that is not doing anything"
+
+    # A live duel still outranks it: that is the fight help shortens.
+    lead.in_duel = True
+    lead.duel_since = 1.0
+    assert w._boost_target(muscle) is lead
+
+
+def test_a_boostee_records_where_it_was_on_the_line(qapp, monkeypatch):
+    """`seat.last_main` is the only input to `_wrong_world`, and
+    `_check_on_questline` skipped every non-leader in a booster party —
+    so the rung built to notice a quester in the wrong world could
+    never fire for the one wizard in rev f6e07e6d that went there."""
+    worker = _two_quester_party()
+    for seat in worker.seats:
+        seat.client = object()
+    worker._check_on_questline()
+
+    lead, boostee, muscle = worker.seats
+    assert lead.last_main, "the leader stopped being placed"
+    assert boostee.last_main, \
+        "a boostee is a quester; its lost questline stalls the run too"
+    assert boostee.last_main[1] == 23
+    assert not muscle.last_main, \
+        "the muscle's journal is still nobody's business"
+
+
+def test_questing_crew_tells_the_script_every_client_in_it_quests():
+    """`All_Accounts_Are_Questing` decides who p1 IS. Left False with
+    two clients, TTS calls `Player_One_Handler` nowhere and
+    `TP_All_Quest` ends `p1 tp p2` — p1 is the muscle. wizAi's crew VM
+    holds no muscle at all, so the shipped default is a lie about the
+    party, and rev f6e07e6d's script log has no `for P1` line in it
+    from the moment the crew build came up."""
+    from deimos_bridge import scripts
+
+    src = ('var All_Accounts_Are_Questing = False     # a comment\n'
+           'if All_Accounts_Are_Questing = True { }\n'
+           'if All_Accounts_Are_Questing = False { }\n')
+    out, changed = scripts.questing_crew(src, 2)
+    assert changed
+    assert 'var All_Accounts_Are_Questing = True     # a comment' in out
+    # The comparisons are how the script tests its own settings and
+    # must keep reading what they read — exactly `configure`'s rule.
+    assert 'if All_Accounts_Are_Questing = True { }' in out
+    assert 'if All_Accounts_Are_Questing = False { }' in out
+
+
+def test_questing_crew_leaves_a_solo_vm_and_a_configured_file_alone():
+    """A solo VM runs `playercount 1`, where `Player_One_Handler` is
+    called unconditionally and the setting changes nothing — so there
+    is no reason to touch an operator's file for it. Neither is there
+    when they already set it, or when the preset is not TTS-shaped."""
+    from deimos_bridge import scripts
+
+    src = 'var All_Accounts_Are_Questing = False\n'
+    assert scripts.questing_crew(src, 1) == (src, False)
+    assert scripts.questing_crew(src, 0) == (src, False)
+    already = 'var All_Accounts_Are_Questing = True\n'
+    assert scripts.questing_crew(already, 3) == (already, False)
+    assert scripts.questing_crew('var Other = False\n', 2)[1] is False
+    # Idempotent: a rebuild must not thrash the file.
+    once = scripts.questing_crew(src, 2)[0]
+    assert scripts.questing_crew(once, 2) == (once, False)
+
+
+def test_the_real_preset_keeps_every_guard_when_the_crew_is_flipped():
+    """Against the shipped file rather than a fixture, because the
+    thing that could go wrong is a regex reaching a comparison."""
+    from deimos_bridge import scripts
+
+    path = next(path for title, path in scripts.presets()
+                if "Arc 1" in title)
+    src = scripts.read_preset(path)
+    before = src.count("if All_Accounts_Are_Questing")
+    out, changed = scripts.questing_crew(src, 2)
+    assert changed and before >= 5
+    assert out.count("if All_Accounts_Are_Questing") == before
+    assert "var All_Accounts_Are_Questing = True" in out
+    assert "var All_Accounts_Are_Questing = False" not in out
+
+
+def test_a_crew_build_says_it_switched_the_setting_on(monkeypatch):
+    """The export is what gets read after the run. wizAi changing a
+    preset setting has to be in it, in the same sentence that names
+    the crew."""
+    from deimos_bridge import scripts
+
+    worker, built = _crewed_party(monkeypatch, boosters=(0,), leader=2)
+    worker.script = (_MULTI_ACCOUNT
+                     + 'var All_Accounts_Are_Questing = False\n')
+    _build_the_script(worker)
+
+    assert "var All_Accounts_Are_Questing = True" in built["source"]
+    said = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "script-party"]
+    assert said and "All_Accounts_Are_Questing was switched on" \
+        in said[0]["detail"]
+    assert "treats p1 as the booster" in said[0]["detail"]
+
+
+def test_one_quester_leaves_the_setting_as_the_script_has_it(monkeypatch):
+    """The solo VM is `playercount 1` and the flag changes nothing
+    there."""
+    from deimos_bridge import scripts
+
+    worker, built = _crewed_party(monkeypatch, boosters=(0, 1), leader=2)
+    worker.script = (_MULTI_ACCOUNT
+                     + 'var All_Accounts_Are_Questing = False\n')
+    _build_the_script(worker)
+
+    assert built["solo"] is True
+    assert "var All_Accounts_Are_Questing = False" in built["source"]
+
+
+def _sigil_with_questers(monkeypatch, apart=True):
+    """`_at_the_sigil`, with the two seats placed on the questline.
+
+    Wizard City #18 against #23 when `apart` — Thomas's `Putting Out
+    the Fire!` against Críspulo's `The Cure`, which is what run 11's
+    Fireglobe Theatre sigil could not admit together.
+    """
+    worker, seat, other = _at_the_sigil(monkeypatch)
+    seat.quest_name = "Putting Out the Fire!"
+    other.quest_name = "The Cure" if apart else "Putting Out the Fire!"
+    other.goal = "a goal"
+    return worker, seat, other
+
+
+def test_a_sigil_the_party_cannot_enter_together_is_not_held_for(
+        monkeypatch):
+    """The operator watched this: "it tried to have all 3 join a dungeon
+    but because the lowest quester hadnt dont the quest yet it couldnt
+    enter". A sigil admits the wizards standing on it that HOLD the
+    quest, so there is no countdown here to be late for — and rev
+    f6e07e6d paid 35s for it twenty-four times."""
+    import asyncio
+
+    worker, seat, _other = _sigil_with_questers(monkeypatch, apart=True)
+    assert worker._questers_apart(), "the fixture is not measuring a gap"
+    asyncio.run(worker._maybe_count_hold(seat))
+
+    assert not worker._countdown_held(), \
+        "the script was held at a sigil that cannot admit this party"
+    said = [e for e in seat.tel.questing
+            if e["kind"] == "countdown-hold-refused"]
+    assert said and "5 quests apart" in said[0]["detail"], said
+    assert "catch-up is what closes this" in said[0]["detail"]
+
+
+def test_a_party_on_one_quest_still_holds_for_its_sigil(monkeypatch):
+    """The control that matters. Every run before a booster party had
+    two questers is untouched, and so is every party the quest list
+    cannot place: `_questers_apart` answers only on a MEASURED gap."""
+    import asyncio
+
+    worker, seat, _other = _sigil_with_questers(monkeypatch, apart=False)
+    assert worker._questers_apart() == ""
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held(), "the hold stopped working"
+
+    # ...and a party nothing can place is not a party that is apart.
+    worker2, seat2, other2 = _at_the_sigil(monkeypatch)
+    seat2.quest_name = other2.quest_name = ""
+    seat2.goal = "Go To Amy Brooks' Place in Knight's Court"
+    other2.goal = ""
+    assert worker2._questers_apart() == ""
+
+
+def test_one_quester_is_never_apart_from_itself(qapp):
+    """A booster party with one quester has nobody to be apart from,
+    whatever its booster's journal says — and rev f6e07e6d's booster
+    reads a quest in a different WORLD."""
+    worker = _two_quester_party()
+    assert worker._questers_apart(), "two questers five apart is not a gap"
+    worker.boosters = {1, 2}
+    assert [s.index for s in worker._questers()] == [0]
+    assert worker._questers_apart() == "", \
+        "a one-quester booster party was measured against its muscle"
+
+
+def test_a_solo_pilots_followers_do_not_stop_it_holding_for_a_sigil(
+        monkeypatch):
+    """`_questers()` is every seat outside booster mode, and in
+    solo-pilot mode the followers are behind BY DESIGN — combat support
+    kept together by the follow, not by the questline. Reading their
+    journals here would stop a solo-pilot run holding for any sigil at
+    all, which is the trap `_check_in_step` is already gated against."""
+    import asyncio
+
+    worker, seat, _other = _sigil_with_questers(monkeypatch, apart=True)
+    worker.solo_script = True
+    worker.script = "###deimos_expertmode"
+    assert worker._solo_pilot()
+    assert worker._questers_apart() == "", \
+        "a solo pilot's follower was read as a quester on another quest"
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held()
