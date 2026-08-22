@@ -17145,6 +17145,12 @@ def test_a_talk_npc_prompt_is_not_a_sigil_and_holds_nothing(monkeypatch):
     from deimos_bridge import questing
 
     worker, seat, other = _at_the_sigil(monkeypatch)
+    # Beside this wizard, INSIDE `COUNT_HOLD_SENSE`. The fixture parks
+    # the partner 800 units off, which is outside it — so this test
+    # used to pass whatever the Team Up read said, because the partner
+    # was never looked at. A guard test that cannot fail is not a
+    # guard test.
+    other.client = _SigilClient(pos=(150.0, 200.0, 0.0))
 
     async def prompt(c):
         return c is other.client       # the partner is at SOMETHING
@@ -17157,6 +17163,10 @@ def test_a_talk_npc_prompt_is_not_a_sigil_and_holds_nothing(monkeypatch):
     asyncio.run(worker._maybe_count_hold(seat))
     assert not worker._count_hold_sigil, \
         "a conversation was recorded as an evidenced sigil"
+    assert [e for e in seat.tel.questing
+            if e["kind"] == "countdown-hold-refused"
+            and "no Team Up button" in e["detail"]], \
+        "the discriminator was never actually consulted"
     said = " ".join(e["detail"] for e in seat.tel.questing
                     if e["kind"] == "countdown-hold")
     assert "mid-entry" not in said, \
@@ -17171,6 +17181,7 @@ def test_a_partner_that_walked_here_itself_is_still_evidence(monkeypatch):
     from deimos_bridge import questing
 
     worker, seat, other = _at_the_sigil(monkeypatch)
+    other.client = _SigilClient(pos=(150.0, 200.0, 0.0))
 
     async def at_sigil(c):
         return c is other.client
@@ -20009,6 +20020,124 @@ def test_a_marker_that_agrees_with_itself_is_believed(monkeypatch):
     assert not [e for e in seat.tel.questing if e["kind"] == "marker-flapped"]
 
 
+def test_two_different_markers_the_same_distance_away_are_not_the_same(
+        monkeypatch):
+    """The confirmation compares the two MARKERS, not two distances.
+
+    Comparing distances asks a weaker question than it looks: the arrow
+    hook is a last-writer-wins pointer with no quest attached to it, and
+    two entirely different objectives that happen to sit the same
+    distance from the wizard compare equal. Here they are 400 units
+    apart, in opposite directions, and both exactly 200 from the body —
+    the distance test calls that "the same marker, confirmed"."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Sivella in Baobab Crown"],
+        position=_XYZ(0.0, 0.0, 0.0),
+        positions=[_XYZ(200.0, 0.0, 0.0),      # near, to the east...
+                   _XYZ(-200.0, 0.0, 0.0)])    # ...and now to the west
+    asyncio.run(worker._read_goal(seat))
+
+    assert seat.marker_away is None, \
+        "two different objectives were confirmed as one because they "\
+        "were equidistant"
+    assert [e for e in seat.tel.questing if e["kind"] == "marker-flapped"]
+
+
+def test_a_marker_that_stays_put_is_confirmed_from_a_fresh_position(
+        monkeypatch):
+    """The other half. A marker that agrees with itself is believed —
+    and the distance reported is measured from where the wizard is NOW,
+    not from the body read taken before the confirmation slept."""
+    import asyncio
+
+    # Read once for `at`, then again inside the confirmation — by which
+    # time the wizard has walked 100 units toward its objective.
+    walked = [_XYZ(0.0, 0.0, 0.0), _XYZ(100.0, 0.0, 0.0)]
+    body = {"n": 0}
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Sivella in Baobab Crown"],
+        positions=[_XYZ(300.0, 0.0, 0.0)])     # one marker, unmoving
+
+    class _Body:
+        async def position(self):
+            got = walked[min(body["n"], len(walked) - 1)]
+            body["n"] += 1
+            return got
+
+    seat.client.body = _Body()
+    asyncio.run(worker._read_goal(seat))
+
+    assert seat.marker_away is not None, "a still marker was disbelieved"
+    assert abs(seat.marker_away - 200.0) < 1.0, \
+        f"reported {seat.marker_away:.0f} — measured from a stale body"
+
+
+def test_a_marker_that_flapped_is_left_alone_for_a_moment(monkeypatch):
+    """Disbelief has to be sticky. `marker_away` is None afterwards,
+    which IS the far-to-near transition that re-arms the confirmation —
+    so without a rest a hook that flaps on every read pays the
+    confirmation twice a second forever and `marker_away` never leaves
+    None, which is what `_desperate_hop` and the catch-up read as "no
+    marker to aim at"."""
+    import asyncio
+    import time
+
+    reads = [_XYZ(20.0, 0.0, 0.0), _XYZ(9000.0, 0.0, 0.0)] * 8
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Sivella in Baobab Crown"],
+        position=_XYZ(0.0, 0.0, 0.0), positions=reads)
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away is None, "the flap was believed"
+    assert seat.marker_flapped_at > 0, "the disbelief did not rest"
+
+    left = len(reads)
+    flapped = len([e for e in seat.tel.questing
+                   if e["kind"] == "marker-flapped"])
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away is None, \
+        "a marker disbelieved a moment ago was published unconfirmed"
+    assert len([e for e in seat.tel.questing
+                if e["kind"] == "marker-flapped"]) == flapped, \
+        "it spent the confirmation again on the very next poll"
+
+    # ...and the rest expires, so a hook that settles is believed again.
+    seat.marker_flapped_at = time.monotonic() - worker.MARKER_FLAP_REST - 1
+    asyncio.run(worker._read_goal(seat))
+    assert [e for e in seat.tel.questing
+            if e["kind"] == "marker-flapped"], "the rest never expired"
+
+
+def test_the_heartbeat_names_the_quest_not_only_its_goal(qapp):
+    """Every rung in the questline layer keys on the quest NAME and the
+    export published only the goal, so the one question rev ebc4aff8's
+    152-minute wedge turns on — did the name and the goal agree, and on
+    what — could not be answered from the file. It had to be recovered
+    from the script's own print stream."""
+    import asyncio
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.quest_name = "Heart of Darkness"
+    seat.zone_seen = "Zafaria/ZF_Z00_Hub"
+    seat.goal = "Talk To Someone in Baobab Crown"
+    seat.beat_at = 0.0
+
+    async def _no_health(_s):
+        return None
+
+    worker._health_left = _no_health
+    asyncio.run(worker._heartbeat(seat, False, fighting=False))
+    beat = [e for e in seat.tel.questing if e["kind"] == "heartbeat"]
+    assert beat, "no heartbeat was written"
+    assert "Heart of Darkness" in beat[-1]["detail"], \
+        "the heartbeat still cannot say which quest is tracked"
+    assert "main #" in beat[-1]["detail"], \
+        "and where that quest sits, which is the whole diagnosis"
+
+
 def test_a_goal_in_another_world_is_not_this_spot(monkeypatch):
     """The exact read that fired rev 09a0af80's hold: a WYSTERIA quest
     whose marker read 81 units away, then 0, while the wizard stood in
@@ -20109,6 +20238,43 @@ def test_a_sigil_that_finally_fires_owes_nothing(monkeypatch):
     worker._sigil_fired(seat)
     assert worker._sigil_spent(seat) == 0, \
         "a spot that fired kept paying for the tries it took"
+
+
+def test_a_partners_prompt_charges_one_dud_per_visit_not_per_tick(
+        monkeypatch):
+    """The service tick runs twice a second and `COUNT_HOLD_DUDS` is 3,
+    so charging per tick saturated the counter in about a second and a
+    half — after which the spot was refused for the rest of the run
+    with the message "3 visits have held the full 45s for a countdown
+    and none of them fired", a statement about three 45-second holds
+    that had not happened. Nothing but the spot firing ever clears it."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+    # Beside this wizard, inside COUNT_HOLD_SENSE, which is where a
+    # partner's prompt is evidence about this spot at all.
+    other.client = _SigilClient(pos=(150.0, 200.0, 0.0))
+
+    async def prompt(c):
+        return c is other.client       # the partner is at SOMETHING
+
+    async def not_a_sigil(_c):
+        return False                   # ...with no Team Up button
+
+    monkeypatch.setattr(questing, "near_interactable", prompt)
+    monkeypatch.setattr(questing, "at_a_sigil", not_a_sigil)
+    worker.COUNT_HOLD_EVERY = 0.0
+
+    for _ in range(6):
+        worker._count_hold_until = 0.0
+        worker._count_hold_last = -1e9
+        seat.count_hold_seen = 1.0
+        asyncio.run(worker._maybe_count_hold(seat))
+
+    assert worker._sigil_dud(seat) == 1, \
+        f"one visit charged {worker._sigil_dud(seat)} duds"
 
 
 def test_the_hold_refuses_a_marker_that_belongs_to_another_world(monkeypatch):
