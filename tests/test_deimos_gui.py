@@ -19041,6 +19041,7 @@ def test_a_collect_goal_with_no_counter_is_no_evidence_at_all(monkeypatch):
     goal = "Collect Dirt Mound in Cyclops Lane"
     assert questing.is_collect_goal(goal), "the rung must enable itself"
     assert questing.collect_count(goal) is None, "and have nothing to read"
+    assert questing.goal_counter(goal) is None, "no counter, no shape"
 
     worker, _read = _zoned_party(["WC_Hub"] * 2)
     worker.script = "###deimos_expertmode"
@@ -21027,6 +21028,176 @@ def test_a_plain_marker_hold_that_fires_nothing_charges_a_dud(monkeypatch):
             if e["kind"] == "countdown-hold-over"
             and "not a counting sigil" in e["detail"]]
     assert said, "it expired down some other branch than the one under test"
+
+
+# ---- the hold belongs to the wizard that took it
+#
+# Rev d91c3e24. Phase Q put a second questing wizard in the VM, and this
+# rung is gated `driven and not _is_booster` — which in booster mode had
+# been exactly one seat, so the holder was always the seat that ticked
+# its own expiry. With two, whichever ticked first cleared the hold, and
+# a non-holder threw the whole expiry away: Críspulo armed three holds
+# and logged NOT ONE `countdown-hold-over`, so the dud counter that
+# stops a spot holding again never reached one.
+
+def test_a_non_holder_does_not_retire_another_seats_hold(monkeypatch):
+    """The dud charge, the sweep and the evidenced-sigil replay all live
+    past the expiry branch, and all of them belong to the seat that
+    took the hold."""
+    import asyncio
+    import time
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+    worker.COUNT_HOLD_EVERY = 0.0
+    seat.count_hold_seen = time.monotonic() - 1.0
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held(), "the hold never armed"
+
+    ran_out = time.monotonic() - 1.0
+    worker._count_hold_until = ran_out
+    asyncio.run(worker._maybe_count_hold(other))       # the wrong seat ticks
+    assert worker._count_hold_until == ran_out, \
+        "a seat that was not holding retired somebody else's hold"
+    assert worker._sigil_dud(seat) == 0, "the dud went missing with it"
+    assert not [e for e in other.tel.questing
+                if e["kind"] == "countdown-hold-over"]
+
+    asyncio.run(worker._maybe_count_hold(seat))        # the holder comes round
+    assert worker._sigil_dud(seat) == 1
+    assert [e for e in seat.tel.questing
+            if e["kind"] == "countdown-hold-over"]
+
+
+def test_a_hold_whose_holder_never_comes_back_is_retired(monkeypatch):
+    """The other half. A seat whose loop has stopped would otherwise
+    freeze this guard for the whole party, so a hold left un-retired for
+    a whole extra `COUNT_HOLD` is retired by whoever notices — and says
+    whose it was."""
+    import asyncio
+    import time
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+    worker.COUNT_HOLD_EVERY = 0.0
+    seat.count_hold_seen = time.monotonic() - 1.0
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held()
+
+    worker._count_hold_until = time.monotonic() - worker.COUNT_HOLD - 1.0
+    asyncio.run(worker._maybe_count_hold(other))
+    assert not worker._countdown_held(), \
+        "one stopped loop froze the guard for the whole party"
+    said = [e for e in other.tel.questing
+            if e["kind"] == "countdown-hold-abandoned"]
+    assert said, [e["kind"] for e in other.tel.questing]
+    assert seat.name in said[0]["detail"], "it must name whose hold it was"
+
+
+# ---- a kill-count that has already held once is a grind
+#
+# Fight goals are in the marker case on purpose: "Defeat Maito in
+# Tatakai Outpost" is a boss INSIDE a dungeon and its marker sits at the
+# sigil. The reasoning was that "a street-pack defeat pays one hold per
+# visit, and usually not even that: the pack pulls the wizard into a
+# duel long before the hold expires". Rev d91c3e24 is that failing — the
+# pack was dead and respawning, and `Defeat Haunted Minion in Triton
+# Avenue (2 of 3)` held twelve times across two questers in two minutes.
+
+_KILL_COUNT = "Defeat Haunted Minion in Triton Avenue (2 of 3)"
+
+
+def test_a_counter_is_read_off_any_goal_not_just_a_collect():
+    """`collect_count` answers only for Collect steps, and the shape
+    wanted here is the counter itself: a tally of several of something,
+    whatever verb opens it."""
+    from deimos_bridge import questing
+
+    assert questing.goal_counter(_KILL_COUNT) == \
+        ("defeat haunted minion in triton avenue", 2, 3)
+    assert questing.collect_count(_KILL_COUNT) is None, \
+        "a Defeat step is not a Collect step and must not read as one"
+    assert questing.goal_counter("Defeat Maito in Tatakai Outpost") is None
+    assert questing.goal_counter(
+        "Collect Gemstones in Hall of Champions (0 of 4)") == \
+        ("collect gemstones in hall of champions", 0, 4)
+
+
+def test_a_kill_count_that_has_already_held_once_is_not_held_again(
+        monkeypatch):
+    import asyncio
+    import time
+
+    worker, seat, other = _at_the_sigil(monkeypatch, goal=_KILL_COUNT)
+    worker.COUNT_HOLD_EVERY = 0.0
+    worker._sigil_dud(seat, +1)              # one visit already proved it
+    seat.count_hold_seen = time.monotonic() - 1.0
+    asyncio.run(worker._maybe_count_hold(seat))
+
+    assert not worker._countdown_held(), \
+        "held the script again at a street kill-count"
+    said = [e for e in seat.tel.questing
+            if e["kind"] == "countdown-hold-refused"
+            and "(n of m) counter" in e["detail"]]
+    assert said, [e["kind"] for e in seat.tel.questing]
+
+
+def test_a_kill_counts_first_visit_still_holds(monkeypatch):
+    """Asked whether a goal that sends you INTO a dungeon ever carries
+    an (n of m) counter, the operator said SOMETIMES — so the first
+    visit still gets its hold and a counted dungeon entry keeps its
+    protection. Only a repeat is written off."""
+    import asyncio
+    import time
+
+    worker, seat, other = _at_the_sigil(monkeypatch, goal=_KILL_COUNT)
+    worker.COUNT_HOLD_EVERY = 0.0
+    assert worker._sigil_dud(seat) == 0
+    seat.count_hold_seen = time.monotonic() - 1.0
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held(), \
+        "a counted goal can name a boss inside a dungeon"
+
+
+def test_an_uncounted_defeat_still_holds(monkeypatch):
+    """The case the fight goals were let in for, untouched: a boss
+    marker sits at the sigil and carries no counter."""
+    import asyncio
+    import time
+
+    worker, seat, other = _at_the_sigil(
+        monkeypatch, goal="Defeat Maito in Tatakai Outpost")
+    worker.COUNT_HOLD_EVERY = 0.0
+    worker._sigil_dud(seat, +1)
+    seat.count_hold_seen = time.monotonic() - 1.0
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held(), "a dungeon boss lost its hold"
+
+
+def test_a_sensed_prompt_holds_even_on_a_kill_count(monkeypatch):
+    """A helper's press-X prompt beside the wizard is positive evidence
+    of a sigil whatever shape the goal is, and it is the path that
+    catches a dungeon the counter test would not."""
+    import asyncio
+    import time
+
+    from deimos_bridge import questing
+
+    worker, seat, other = _at_the_sigil(monkeypatch, goal=_KILL_COUNT)
+    worker.COUNT_HOLD_EVERY = 0.0
+    worker._sigil_dud(seat, +1)
+    # Inside `COUNT_HOLD_SENSE` of the holder: the fixture parks the
+    # partner 800 up the street, which is out of the sensor's range, and
+    # a test that leaves it there proves nothing about the sensor.
+    other.client = _SigilClient(pos=(150.0, 200.0, 0.0))
+
+    async def near(c):
+        return c is other.client         # the helper's prompt, not the leader's
+
+    monkeypatch.setattr(questing, "near_interactable", near)
+    monkeypatch.setattr(questing, "at_a_sigil", near)
+    seat.count_hold_seen = time.monotonic() - 1.0
+    asyncio.run(worker._maybe_count_hold(seat))
+    assert worker._countdown_held(), \
+        "the counter test overrode a sigil the party could see"
 
 
 def test_the_hold_fits_the_measured_shape_of_a_real_countdown(qapp):
@@ -24814,6 +24985,27 @@ def test_the_export_names_a_boostee_and_counts_the_questlines(qapp):
     assert [plain._party_shape(s)["role"] for s in plain.seats] == \
         ["leader", "booster", "booster"]
     assert plain._party_shape(plain.seats[0])["questers"] == 1
+
+
+def test_the_export_names_the_wizards_the_script_actually_drives(
+        monkeypatch):
+    """Rev d91c3e24's export said `script_drives: "the leader only"` for
+    a run whose VM held two clients and whose preset had answered
+    "playercount 2 mode active". That field is what every other line in
+    the file is read against, so it has to name what was BUILT."""
+    worker, _built = _crewed_party(monkeypatch, boosters=(0,), leader=2)
+    assert worker._party_shape(worker.seats[0])["script_drives"] == \
+        "the leader only", "nothing is built yet"
+
+    _build_the_script(worker)
+    assert worker._party_shape(worker.seats[0])["script_drives"] == \
+        "w1 and w2"
+
+    # ...and a downgrade tells the truth about the one client it got.
+    solo, _b = _crewed_party(monkeypatch, boosters=(0,), leader=2)
+    solo.seats[1].wizard_name = ""
+    _build_the_script(solo)
+    assert solo._party_shape(solo.seats[0])["script_drives"] == "w2"
 
 
 def test_the_questers_row_spells_todays_behaviour_when_untouched(qapp):
