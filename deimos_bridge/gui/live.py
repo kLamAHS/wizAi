@@ -433,6 +433,12 @@ class _Seat:
         #: consecutive cross-zone follows have failed for it.
         self.door_walked_at = NEVER
         self.cross_zone_fails = 0
+        #: consecutive cross-zone follows that failed inside wizAi's own
+        #: UI rather than on a game rule (`party.never_asked`). Past
+        #: `FRIENDS_UI_GIVE_UP` the friends list is written off for this
+        #: client and the walk ladder is used directly.
+        self.friends_ui_fails = 0
+        self.friends_ui_dead = False
         #: consecutive door-walk failures, per (from zone, to zone). The
         #: per-seat counter above says a follow is failing; this says
         #: THIS ROUTE is not working, which is the one an escalation can
@@ -3130,12 +3136,35 @@ class LiveWorker(QThread):
             return
         seat.followed_at = now
 
-        # The game may already be naming the leader for us: a follower
-        # whose Quest Helper tracks the leader carries `Quest Helper
-        # Following <full name>` in its own goal line -- the exact
-        # spelling the friends list holds, before any duel has read a
-        # name. Rev 676d6e77's booster spent four hours one zone from
-        # its quester for want of this string, while displaying it.
+        # Ask the leader's own client first. `party.wizard_name` has
+        # existed for exactly this since the module was written and had
+        # NO callers -- the name's one live source was a combat read,
+        # so a booster could not follow its leader until the leader had
+        # fought, and the leader fights badly without its booster. Rev
+        # ebc4aff8: Oz had no name for Konstantin for the first 207
+        # seconds, which is precisely when Konstantin crossed into Drum
+        # Jungle on a sigil and the party split for the rest of the
+        # run. It never recovered by teleport.
+        if not boss.wizard_name:
+            asked = None
+            try:
+                asked = await party.wizard_name(boss.client)
+            except Exception:
+                asked = None
+            if asked:
+                boss.wizard_name = asked
+                seat.tel.note_questing(
+                    "leader-name-learned",
+                    f"the leader's client named itself: {asked!r} — the "
+                    f"friends-list teleport can aim without waiting for "
+                    f"a duel to read it")
+
+        # The game may already be naming the leader for us, and more
+        # precisely: a follower whose Quest Helper tracks the leader
+        # carries `Quest Helper Following <full name>` in its own goal
+        # line -- the exact spelling the friends list holds. Rev
+        # 676d6e77's booster spent four hours one zone from its quester
+        # for want of this string, while displaying it.
         harvested = party.helper_followed_name(seat.goal)
         if harvested:
             known = boss.wizard_name or ""
@@ -3153,8 +3182,13 @@ class LiveWorker(QThread):
                 self._say(seat, f"learned the leader's name from the "
                                 f"Quest Helper: {harvested}")
 
-        moved, why = await party.follow(client, boss.client,
-                                        leader_name=boss.wizard_name)
+        moved, why = await party.follow(
+            client, boss.client, leader_name=boss.wizard_name,
+            # Written off for this client: go straight to the door
+            # ladder rather than spending another 45s per name spelling
+            # on a friends list that has failed on wizAi's side of the
+            # glass `FRIENDS_UI_GIVE_UP` times running.
+            no_friends_list=seat.friends_ui_dead)
         # A teleport the GAME refuses is not a wizAi failure to retry
         # harder: most dungeon instances allow friends-list ports and
         # some do not, and inside one that does not, every retry is
@@ -3163,6 +3197,7 @@ class LiveWorker(QThread):
         if (not moved and why and seat.zone_seen and boss.zone_seen
                 and seat.zone_seen != boss.zone_seen):
             seat.cross_zone_fails += 1
+            self._note_friends_ui(seat, why)
             walked, door_why = await self._walk_the_leaders_door(
                 seat, boss, why)
             if walked:
@@ -3175,6 +3210,7 @@ class LiveWorker(QThread):
             seat.follow_failing_since = None
             seat.follow_fails = 0
             seat.cross_zone_fails = 0
+            seat.friends_ui_fails = 0
             return
         # A follower that cannot reach its leader is the failure that
         # makes the whole party pointless, so it is said -- but
@@ -4401,6 +4437,51 @@ class LiveWorker(QThread):
             raise
         except Exception:
             pass
+
+    #: consecutive friends-list failures on wizAi's own side before the
+    #: list is written off for that client.
+    #:
+    #: Rev ebc4aff8's booster paid for it 19 times over 41 minutes at a
+    #: flat 72-second cadence -- 45s of timeout per name spelling, up to
+    #: three spellings -- with an identical reason every time and no
+    #: widening interval. `route-impassable` fired once per route and
+    #: changed nothing; `cross_zone_fails` counted and nothing read it.
+    #: A client-side defect that is 0-for-19 has to have an exit.
+    FRIENDS_UI_GIVE_UP = 4
+
+    def _note_friends_ui(self, seat, why):
+        """Count a cross-zone follow that failed on OUR side, not the game's.
+
+        `party.never_asked` is the distinction: "your friend is busy"
+        and "this instance is closed" arrive from the game AFTER the
+        teleport is requested; a missing window is wizAi failing to
+        drive its own UI two steps earlier. Only the second is worth
+        giving up on, because only the second cannot come right by
+        itself.
+        """
+        from .. import party
+
+        if not party.never_asked(why):
+            seat.friends_ui_fails = 0
+            return
+        seat.friends_ui_fails += 1
+        if seat.friends_ui_dead \
+                or seat.friends_ui_fails < self.FRIENDS_UI_GIVE_UP:
+            return
+        seat.friends_ui_dead = True
+        said = (f"{seat.name}'s friends list has failed "
+                f"{seat.friends_ui_fails} times running on this client's "
+                f"own UI, never reaching the game — not using it again "
+                f"this run. Following {'the leader'} by the doors it "
+                f"walks instead")
+        for other in self.seats:
+            try:
+                other.tel.note_questing(
+                    "friends-list-written-off",
+                    said + f". Latest reason: {why}. " + party.UI_HINT)
+            except Exception:
+                pass
+        self._say(seat, said)
 
     def _whose_client(self, client):
         """The name of the wizard a hook is talking about, or ""."""
@@ -5646,24 +5727,67 @@ class LiveWorker(QThread):
                 f"{self.WALK_THROUGH_SETTLE:.0f}s")
         return crossed
 
-    async def _zone_crossed(self, client, start_zone):
-        """Did a walk leg actually cross a transition?
+    #: how long a loading screen is given to resolve into a zone NAME
+    #: before the leg is called unproven. A zone load is seconds; this
+    #: is generous against a slow client and finite against a client
+    #: that was never crossing anything.
+    CROSSING_SETTLE = 6.0
+    #: how often the zone is re-read while that load resolves.
+    CROSSING_POLL = 0.4
 
-        A loading screen counts: `zone_name` is unreadable mid-load, and
-        waiting out the load here would hold the script for nothing --
-        the settle window and the script's own `waitforzonechange` both
-        handle the far side.
+    async def _zone_crossed(self, client, start_zone):
+        """Did a walk leg actually cross a transition? Proven by NAME.
+
+        This used to answer True on `is_loading()` alone, before it
+        compared anything -- on the reasoning that `zone_name` is
+        unreadable mid-load and waiting out the load would hold the
+        script for nothing. The reasoning is right about the read and
+        wrong about the conclusion: `is_loading()` is also true during
+        ordinary same-zone asset streaming straight after
+        `client.teleport()`, which is exactly what the caller does one
+        line before asking.
+
+        So a landing that crossed nothing reported a crossing -- and a
+        false crossing is not a harmless optimism here. It clears the
+        route's fail counter and drops its cooldown, so the ladder both
+        loses count of a route that has never worked and starts over on
+        it immediately. Rev ebc4aff8's booster: 19 door-walk attempts,
+        2 reported successes (both "0 leg(s)" -- the load fired before
+        any walking), and **zero** zone changes attributable to any of
+        them. The one mechanism built for a dungeon that refuses
+        friends-list teleports spent 41 minutes reporting wins it did
+        not have.
+
+        A load now means "wait and re-check", which is what it always
+        meant. The far side names itself within `CROSSING_SETTLE` or
+        the leg is unproven, and unproven is the safe answer: the
+        caller sweeps another leg rather than declaring victory.
         """
-        try:
-            if await client.is_loading():
-                return True
-        except Exception:
-            pass
-        try:
-            zone = await client.zone_name()
-        except Exception:
+        import asyncio
+        import time
+
+        if not start_zone:
             return False
-        return bool(zone) and bool(start_zone) and zone != start_zone
+        deadline = time.monotonic() + self.CROSSING_SETTLE
+        while True:
+            try:
+                loading = bool(await client.is_loading())
+            except Exception:
+                loading = False
+            try:
+                zone = await client.zone_name()
+            except Exception:
+                zone = None
+            if zone and zone != start_zone:
+                return True           # the far side named itself
+            if not loading:
+                # Settled. Either the zone read and is the one we
+                # started in, or it would not read at all -- and an
+                # unreadable zone is not evidence of a crossing.
+                return False
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(self.CROSSING_POLL)
 
     #: how long the script is held for a possible sigil countdown. The
     #: countdown is ~10s and RESTARTS on every late join -- and the

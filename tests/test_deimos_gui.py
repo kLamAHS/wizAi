@@ -8505,7 +8505,7 @@ def test_a_follower_does_not_chase_twice_a_second(qapp):
 
     tried = []
 
-    async def _follow(f, leader, leader_name=None, radius=0.0):
+    async def _follow(f, leader, leader_name=None, radius=0.0, **kw):
         tried.append(f)
         return False, ""
 
@@ -9421,13 +9421,21 @@ def test_a_teleport_the_game_never_saw_does_not_report_a_refusal(qapp,
     lives on the character panel that never opened, so the game was
     never asked. One of those is a game rule to route around and the
     other is a bug the operator can fix, and the export called the
-    second one the first."""
+    second one the first.
+
+    The wording splits the two wizAi-side failures, which used to share
+    one sentence: `wndCharacter` is only reachable AFTER a matched row
+    is clicked (`_cycle_friends_list` raises "Could not find friend"
+    before any click), so saying "the UI never came up — nothing was
+    clicked" for it stated three things that did not happen."""
     from deimos_bridge import party
 
     ok, why, _tried = _tp_reason(
         monkeypatch, ValueError("No child window named wndCharacter"))
     assert ok is False
-    assert "never attempted" in why, why
+    assert "the game was never asked" in why, why
+    assert "row was clicked" in why, \
+        "a click that landed is still being reported as no click at all"
     assert party.never_asked(why), \
         "the door walk cannot tell this from the game refusing"
     assert "not on the list" not in why and "friends list — they have" \
@@ -15583,11 +15591,18 @@ class _DoorClient:
     the zone flips (or a loading screen starts) when the configured leg
     crosses the trigger."""
 
-    def __init__(self, crosses_on_leg=None, loads_on_leg=None):
+    def __init__(self, crosses_on_leg=None, loads_on_leg=None,
+                 load_settles_into=None):
         self.zone = "Marleybone/MB_ScotlandYard/MB_KnightsCourt"
         self.legs = []
         self.crosses_on_leg = crosses_on_leg
         self.loads_on_leg = loads_on_leg
+        #: what the zone reads once the loading screen clears. None
+        #: leaves it loading forever, which is what an ordinary
+        #: same-zone asset stream looks like to a poll that never
+        #: waits for it.
+        self.load_settles_into = load_settles_into
+        self.loads_left = 0
         self.loading = False
 
         class _Body:
@@ -15601,6 +15616,11 @@ class _DoorClient:
         self.body = _Body()
 
     async def is_loading(self):
+        if self.loading and self.load_settles_into is not None:
+            self.loads_left -= 1
+            if self.loads_left <= 0:
+                self.loading = False
+                self.zone = self.load_settles_into
         return self.loading
 
     async def zone_name(self):
@@ -15612,10 +15632,12 @@ class _DoorClient:
             self.zone = "Marleybone/Interiors/MB_AmyBrooks"
         if self.loads_on_leg and len(self.legs) >= self.loads_on_leg:
             self.loading = True
+            self.loads_left = 2
 
 
 def _parked_at_the_door(monkeypatch, away=8.0, marker_y=208.0,
                         crosses_on_leg=1, loads_on_leg=None,
+                        load_settles_into=None,
                         dialogue=False, prompt=False, aggro=False):
     """A quester standing basically ON its Go-To marker, stall aged."""
     import time
@@ -15626,7 +15648,8 @@ def _parked_at_the_door(monkeypatch, away=8.0, marker_y=208.0,
     worker, _read = _zoned_party(["Marleybone/MB_ScotlandYard/MB_KnightsCourt"])
     seat = worker.seats[0]
     client = _DoorClient(crosses_on_leg=crosses_on_leg,
-                         loads_on_leg=loads_on_leg)
+                         loads_on_leg=loads_on_leg,
+                         load_settles_into=load_settles_into)
     seat.client = client
     seat.goal = "Go To Amy Brooks' Place in Knight's Court"
     seat.marker_away = away
@@ -15687,14 +15710,169 @@ def test_standing_on_the_marker_walks_out_along_the_wizards_facing(
     assert "walked-through" in [e["kind"] for e in seat.tel.questing]
 
 
-def test_a_loading_screen_counts_as_having_crossed(monkeypatch):
+def _followers(monkeypatch, reason):
+    """A booster one zone from its leader, whose follow always fails."""
+    from deimos_bridge import party as party_mod
+
+    worker, _read = _zoned_party(["Zafaria/ZF_Z09_Drum_Jungle",
+                                  "Zafaria/ZF_Z08_Waterfront"])
+    boss, seat = worker.seats
+    worker.leader, worker.follow_leader = 0, True
+    for s, z in zip(worker.seats, ("Zafaria/ZF_Z09_Drum_Jungle",
+                                   "Zafaria/ZF_Z08_Waterfront")):
+        s.client = object()
+        s.zone_seen = z
+    boss.wizard_name = "Konstantin V"
+    asked = []
+
+    async def _follow(f, leader, leader_name=None, radius=0.0,
+                      no_friends_list=False):
+        asked.append(no_friends_list)
+        return False, reason
+
+    monkeypatch.setattr(party_mod, "follow", _follow)
+
+    async def _no_door(_seat, _boss, _why):
+        return False, ""
+
+    worker._walk_the_leaders_door = _no_door
+    return worker, seat, boss, asked
+
+
+def test_a_friends_list_that_never_reaches_the_game_is_written_off(
+        monkeypatch):
+    """A client-side defect that is 0-for-N has to have an exit.
+
+    Rev ebc4aff8's booster paid for it 19 times over 41 minutes at a
+    flat 72-second cadence — 45s of timeout per name spelling, up to
+    three spellings — with an identical reason every time and no
+    widening interval. `route-impassable` fired once per route and
+    changed nothing; `cross_zone_fails` counted and nothing read it."""
+    import asyncio
+    import time
+
+    worker, seat, boss, asked = _followers(
+        monkeypatch,
+        "the friends-list UI never came up on this client, so the "
+        "teleport was never attempted (No child window named "
+        "NewFriendsListWindow; hardened copy)")
+
+    for _ in range(worker.FRIENDS_UI_GIVE_UP + 2):
+        seat.followed_at = 0.0
+        asyncio.run(worker._follow_step(seat.client, seat))
+
+    assert seat.friends_ui_dead, "it never stopped paying for the list"
+    assert asked[-1] is True, "the last attempt still went to the list"
+    said = [e for e in seat.tel.questing
+            if e["kind"] == "friends-list-written-off"]
+    assert len(said) == 1, "said it once per attempt, or never"
+
+
+def test_a_game_rule_never_writes_the_friends_list_off(monkeypatch):
+    """"Your friend is busy" and "this instance is closed" arrive from
+    the GAME after the teleport is requested. They are rules to route
+    around, not a broken client, and they come right by themselves the
+    moment the leader leaves the instance."""
+    import asyncio
+
+    worker, seat, boss, asked = _followers(
+        monkeypatch, "your friend is busy and cannot be teleported to")
+
+    for _ in range(worker.FRIENDS_UI_GIVE_UP + 4):
+        seat.followed_at = 0.0
+        asyncio.run(worker._follow_step(seat.client, seat))
+
+    assert not seat.friends_ui_dead, \
+        "a game rule was mistaken for a broken client"
+    assert all(a is False for a in asked)
+
+
+def test_the_leader_is_named_without_waiting_for_a_duel(monkeypatch):
+    """`party.wizard_name` has existed for exactly this since the module
+    was written and had NO callers, so the name's one live source was a
+    combat read: a booster could not follow its leader until the leader
+    had fought, and the leader fights badly without its booster.
+
+    Rev ebc4aff8: Oz had no name for Konstantin for the first 207
+    seconds, which is precisely when Konstantin crossed into Drum
+    Jungle on a sigil and the party split for the rest of the run."""
+    import asyncio
+
+    from deimos_bridge import party as party_mod
+
+    worker, seat, boss, asked = _followers(monkeypatch, "")
+    boss.wizard_name = None                  # no duel has happened yet
+
+    async def _named(client):
+        return "Konstantin" if client is boss.client else None
+
+    monkeypatch.setattr(party_mod, "wizard_name", _named)
+    seat.followed_at = 0.0
+    asyncio.run(worker._follow_step(seat.client, seat))
+
+    assert boss.wizard_name == "Konstantin", \
+        "the follow still cannot aim until the leader has fought"
+    said = [e for e in seat.tel.questing
+            if e["kind"] == "leader-name-learned"]
+    assert said and "named itself" in said[0]["detail"]
+
+
+def test_a_clicked_row_is_not_reported_as_an_unopened_list():
+    """`_cycle_friends_list` raises "Could not find friend" BEFORE any
+    click, so reaching `wndCharacter` proves the list opened, paged,
+    matched the row character-for-character and clicked it. Reporting
+    that as "the UI never came up — nothing was clicked and the game
+    was never asked" states three things that did not happen, and sends
+    the operator to check a window that was fine."""
+    from deimos_bridge import party
+
+    assert party.never_asked(
+        ValueError("No child window named wndCharacter")), \
+        "it is still a wizAi-side failure, whichever half it is"
+    assert party.never_asked(
+        ValueError("No child window named NewFriendsListWindow"))
+    assert not party.never_asked(
+        ValueError("No child window named MessageBoxModalWindow")), \
+        "the game's own confirmation box is the game answering"
+
+
+def test_a_loading_screen_that_lands_somewhere_else_has_crossed(monkeypatch):
+    """A load is a promise, not a crossing. It is honoured when the far
+    side names itself and not before."""
     import asyncio
 
     worker, seat, client = _parked_at_the_door(
-        monkeypatch, crosses_on_leg=None, loads_on_leg=1)
+        monkeypatch, crosses_on_leg=None, loads_on_leg=1,
+        load_settles_into="Marleybone/Interiors/MB_AmyBrooks")
     asyncio.run(worker._maybe_walk_through(seat))
-    assert len(client.legs) == 1
+    assert len(client.legs) == 1, "it kept sweeping past a real crossing"
     assert "walked-through" in [e["kind"] for e in seat.tel.questing]
+
+
+def test_a_loading_screen_that_lands_back_here_has_crossed_nothing(
+        monkeypatch):
+    """`is_loading()` is true during ordinary same-zone asset streaming
+    straight after `client.teleport()` — which is what the caller does
+    one line before asking. Answering True on it alone meant a landing
+    that crossed nothing reported a crossing, which cleared the route's
+    fail counter and dropped its cooldown: the ladder lost count of a
+    route that had never worked and started over on it at once.
+
+    Rev ebc4aff8's booster: 19 door-walk attempts, 2 reported successes
+    (both "0 leg(s)" — the load fired before any walking), and ZERO
+    zone changes attributable to any of them. The one mechanism built
+    for a dungeon that refuses friends-list teleports spent 41 minutes
+    reporting wins it did not have."""
+    import asyncio
+
+    worker, seat, client = _parked_at_the_door(
+        monkeypatch, crosses_on_leg=None, loads_on_leg=1,
+        load_settles_into="Marleybone/MB_ScotlandYard/MB_KnightsCourt")
+    asyncio.run(worker._maybe_walk_through(seat))
+    assert len(client.legs) == 4, \
+        "a same-zone load was taken as a crossing and stopped the sweep"
+    assert "walked-through" not in [e["kind"] for e in seat.tel.questing], \
+        "it claimed to have walked through a door it never crossed"
 
 
 def test_a_miss_sweeps_all_four_directions_and_says_so(monkeypatch):
