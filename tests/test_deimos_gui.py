@@ -1599,6 +1599,7 @@ def test_the_export_says_how_the_run_was_wired(qapp):
         "leader_seat": 2,
         "leader": "Konstantin V",
         "role": "booster",
+        "questers": 1,
         "scripted": False,
         "script_drives": "nobody",
     }
@@ -24413,6 +24414,220 @@ def test_the_service_tick_gates_the_tracker_cures_off_boosters():
     assert booster_rung, "no booster rung in the tick"
     assert all("_sync_follower" not in b for b in booster_rung)
     assert all("_follow_step" in b for b in booster_rung)
+
+
+# ---- more than one boostee
+#
+# The operator's own question, in their words: "do we even have a mode
+# for multiple boostees with a booster? I thought it was just the
+# booster boostee at the moment". It was: `_is_booster` was "not the
+# leader", so N seats gave one quester and N-1 boosters and nothing
+# could spell anything else. Many boosters always worked; many QUESTERS
+# did not exist.
+
+def _boostee_worker(boosters=None, leader=0, seats=3):
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    return LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1,
+                      seats=[SeatConfig(school="fire")
+                             for _ in range(seats - 1)],
+                      booster_party=True, boosters=boosters, leader=leader)
+
+
+def test_boosters_unset_still_means_every_non_leader(qapp):
+    """The default has to be byte for byte what the mode always meant,
+    because every run that exists was configured before roles did."""
+    w = _boostee_worker(boosters=None, leader=1)
+    assert w.boosters is None
+    assert [w._is_booster(s) for s in w.seats] == [True, False, True]
+    assert [w._is_boostee(s) for s in w.seats] == [False, False, False]
+    assert [s.index for s in w._questers()] == [1]
+
+
+def test_a_seat_left_out_of_the_boosters_is_a_second_quester(qapp):
+    """Muscle is named now rather than inferred from "not the leader"."""
+    w = _boostee_worker(boosters={2})
+    assert [w._is_booster(s) for s in w.seats] == [False, False, True]
+    assert [w._is_boostee(s) for s in w.seats] == [False, True, False]
+    assert [s.index for s in w._questers()] == [0, 1]
+
+
+def test_a_boostee_follows_nobody(qapp):
+    """It is levelling its own questline, and a wizard walking to
+    somebody else's marker cannot walk to its own."""
+    w = _boostee_worker(boosters={2})
+    assert [w._follows(s) for s in w.seats] == [False, False, True]
+
+
+def test_a_booster_shadows_whichever_quester_is_fighting(qapp):
+    """The operator's framing is the whole rule: "the booster needs to
+    join combats to beat them as quick as possible"."""
+    w = _boostee_worker(boosters={2})
+    for seat in w.seats:
+        seat.client = object()
+    lead, boostee, muscle = w.seats
+    # Nobody fighting: the leader, exactly as a one-quester party.
+    assert w._boost_target(muscle) is lead
+    boostee.in_duel, boostee.duel_since = True, 100.0
+    assert w._boost_target(muscle) is boostee
+    # ...and the longest-running fight first — that is the one help
+    # shortens most, and ending it frees the booster for the other.
+    lead.in_duel, lead.duel_since = True, 50.0
+    assert w._boost_target(muscle) is lead
+    lead.in_duel = False
+    assert w._boost_target(muscle) is boostee
+
+
+def test_a_quester_is_never_given_a_boost_target(qapp):
+    w = _boostee_worker(boosters={2})
+    for seat in w.seats:
+        seat.client = object()
+    w.seats[1].in_duel, w.seats[1].duel_since = True, 100.0
+    assert w._boost_target(w.seats[0]) is w.seats[0]
+    assert w._boost_target(w.seats[1]) is w.seats[0]
+
+
+def test_the_duel_clock_stamps_the_transition_not_every_tick(qapp):
+    """`_boost_target` asks which fight has been going longest, so the
+    stamp has to be when the duel STARTED."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._service_loop)
+    assert "seat.in_duel != was_fighting" in src, \
+        "the duel clock is restamped every tick, so every fight is new"
+
+
+def test_the_hive_is_not_told_a_boostee_is_muscle(qapp):
+    """The overkill guard never holds a booster. A boostee is not one —
+    it has a next fight of its own, which is the whole reason the guard
+    exists."""
+    w = _boostee_worker(boosters={2})
+    assert w._make_hive().boosters == {2}
+
+
+def test_the_tick_gives_a_boostee_its_own_quest_step():
+    """A boostee gets the cure rungs a booster is gated off — it has a
+    questline to lose — and its own quest step rather than a follow.
+    It cannot reach the `auto_quest` arm below: that flag is
+    worker-wide and "Booster party + script" leaves it off."""
+    import ast
+    import inspect
+    import textwrap
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = textwrap.dedent(inspect.getsource(LiveWorker._service_loop))
+    tree = ast.parse(src)
+    guards = {}
+
+    class Walk(ast.NodeVisitor):
+        def visit_If(self, node):
+            test = ast.unparse(node.test)
+            for sub in node.body:
+                for call in ast.walk(sub):
+                    if (isinstance(call, ast.Call)
+                            and getattr(call.func, "attr", "") == "_stage"
+                            and len(call.args) >= 2
+                            and isinstance(call.args[1], ast.Constant)):
+                        guards.setdefault(call.args[1].value, []).append(
+                            (test, ast.unparse(sub)))
+            self.generic_visit(node)
+
+    Walk().visit(tree)
+    for label in ("re-arming the quest arrow",
+                  "recovering the main questline", "changing realms",
+                  "walking through the door"):
+        assert any("_is_boostee" in test for test, _b in guards[label]), \
+            f"{label!r} is shut to a second quester"
+    arms = [body for test, body in guards["questing on its own line"]
+            if "_is_boostee" in test]
+    assert arms, "no boostee rung in the tick"
+    assert all("_quest_step" in body for body in arms)
+    assert all("_follow_step" not in body for body in arms)
+
+
+def test_only_the_boostee_shape_levels_more_than_one_questline(qapp):
+    """The predicate the party rules stand down on, and it has to be
+    narrow. `_questers()` is every seat outside booster mode, so a
+    plain three-wizard party reads as three questers — guarding on THAT
+    would take the majority-zone rule, the split-sigil drag and the
+    regroup away from every party that has ever run."""
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    def party(**kw):
+        return LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1,
+                          seats=[SeatConfig(school="fire"),
+                                 SeatConfig(school="storm")], **kw)
+
+    assert not party()._many_questlines()
+    assert not party(follow_leader=True)._many_questlines()
+    assert not party(booster_party=True)._many_questlines()
+    assert party(booster_party=True, boosters={2})._many_questlines()
+
+
+def test_a_second_quester_in_another_zone_is_not_a_straggler(monkeypatch):
+    """There is no single "where the party is" when the party levels
+    two questlines. The majority is only ever one of them — so with a
+    quester, a booster and a second quester, the majority is whichever
+    quester the booster is standing with, and the other would be
+    dragged off its own step every poll."""
+    worker, read_zone = _zoned_party(
+        ["Olde Town", "Unicorn Way", "Olde Town"])
+    worker.booster_party = True
+    worker.leader = 0
+    worker.boosters = {2}
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+    said = [e for e in worker.seats[1].tel.questing
+            if e["kind"] == "rejoin-refused"]
+    assert said, [e["kind"] for e in worker.seats[1].tel.questing]
+    assert "questlines" in said[0]["detail"] \
+        or "quester" in said[0]["detail"], said[0]["detail"]
+
+
+def test_muscle_in_the_wrong_zone_is_still_a_straggler(monkeypatch):
+    """A booster has no line of its own and its whole job is to be
+    where a quester is. The refusal above is about questers only."""
+    worker, read_zone = _zoned_party(
+        ["Olde Town", "Olde Town", "Unicorn Way"])
+    worker.booster_party = True
+    worker.leader = 0
+    worker.boosters = {2}
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+    worker.seats[2].stranded_since -= worker.STRANDED_AFTER + 1
+    seat, _target = _look(worker, read_zone, monkeypatch)
+    assert seat is worker.seats[2], "the booster was excused as a quester"
+
+
+def test_the_export_names_a_boostee_and_counts_the_questlines(qapp):
+    """Every party rule reads differently at two questlines, so an
+    export that cannot say how many ran cannot be read at all."""
+    w = _boostee_worker(boosters={2})
+    assert [w._party_shape(s)["role"] for s in w.seats] == \
+        ["leader", "boostee", "booster"]
+    assert w._party_shape(w.seats[0])["questers"] == 2
+
+    plain = _boostee_worker(boosters=None)
+    assert [plain._party_shape(s)["role"] for s in plain.seats] == \
+        ["leader", "booster", "booster"]
+    assert plain._party_shape(plain.seats[0])["questers"] == 1
+
+
+def test_the_boosters_row_spells_todays_behaviour_when_untouched(qapp):
+    """An untouched row hands the worker the same None the attribute
+    already defaults to, so a party nobody configured is unchanged."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.booster_party = True
+    win.leader_pick.setCurrentIndex(0)
+    assert win.booster_seats(3) is None, "an untouched row invented a role"
+    win.booster_picks[1].setChecked(False)
+    assert win.booster_seats(3) == {2}
+    # ...and outside booster mode the row means nothing at all.
+    win.booster_party = False
+    assert win.booster_seats(3) is None
 
 
 def test_a_booster_row_reads_boosting(qapp):

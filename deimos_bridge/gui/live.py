@@ -289,6 +289,12 @@ class _Seat:
         #: whether this wizard was in a duel on its last service tick.
         #: Read from the OTHER seats' ticks -- see `CATCH_UP_IDLE`.
         self.in_duel = False
+        #: when the duel it is in now started, or None. Stamped on the
+        #: transition rather than every tick, because the question it
+        #: answers is "which of these fights has been going longest" --
+        #: a booster with two questers to choose between helps the one
+        #: whose fight it shortens most. See `_boost_target`.
+        self.duel_since = None
         #: when this seat's service loop last came round, stamped before
         #: the one read that can hang. A loop that has stopped ticking
         #: is invisible from inside itself -- and if it is seat 0's, it
@@ -582,7 +588,7 @@ class LiveWorker(QThread):
                  follow_leader=True, leader=0, label_windows=True,
                  solo_script=False, script_step_delay=None,
                  script_dialog_delay=None, script_debug=False,
-                 booster_party=False):
+                 booster_party=False, boosters=None):
         super().__init__()
         # Seat 0 is always the arguments this was called with, so the
         # single-wizard signature is untouched; `seats` adds the rest.
@@ -655,6 +661,20 @@ class LiveWorker(QThread):
         #: combats to beat them as quick as possible (but the booster
         #: doesnt need to quest)".
         self.booster_party = bool(booster_party)
+        #: which seats BOOST, by index, when `booster_party` is on.
+        #:
+        #: None -- the default, and every run before this existed --
+        #: means "every seat but the leader", so a party nobody has
+        #: configured behaves byte for byte as it always did. A
+        #: non-leader seat left OUT of the set is a BOOSTEE: a second
+        #: wizard whose own questline the run levels, sharing the
+        #: party's muscle. The operator asked for it in those words --
+        #: "do we even have a mode for multiple boostees with a
+        #: booster" -- and the answer was no, because `_is_booster` was
+        #: "not the leader" and nothing could spell anything else.
+        #: See `_is_boostee`.
+        self.boosters = (None if boosters is None
+                         else {int(i) for i in boosters})
         #: solo-pilot mode: the script drives ONLY the leader, and the
         #: rest of the party follows it and joins its fights. The whole
         #: class of failure this run has been fighting -- friend
@@ -993,7 +1013,10 @@ class LiveWorker(QThread):
                 # this catch-up actually fighting" is asked from ANOTHER
                 # seat's tick -- a wizard in a duel never reaches
                 # `_check_caught_up` on its own loop. See `CATCH_UP_IDLE`.
+                was_fighting = seat.in_duel
                 seat.in_duel = bool(fighting)
+                if seat.in_duel != was_fighting:
+                    seat.duel_since = seat.ticked_at if seat.in_duel else None
                 # BEFORE the guard below. Konstantin's log has one
                 # heartbeat at t=0 and the next at t=531.7 -- nine
                 # missed beats, because he spent them in a fourteen-round
@@ -1190,7 +1213,8 @@ class LiveWorker(QThread):
                                       self._resolve_party_names(seat),
                                       wheel=True, limit=90)
 
-                if (driven or self.auto_quest) and not self._is_booster(seat):
+                if (driven or self.auto_quest or self._is_boostee(seat)) \
+                        and not self._is_booster(seat):
                     # The one rung that does not need the marker,
                     # because it exists for the state where the marker
                     # is DEAD: quest position unreadable for minutes
@@ -1208,7 +1232,8 @@ class LiveWorker(QThread):
                                       self._maybe_rearm_quest_arrow(seat),
                                       wheel=True, limit=90)
 
-                if (driven or self.auto_quest) and not self._is_booster(seat):
+                if (driven or self.auto_quest or self._is_boostee(seat)) \
+                        and not self._is_booster(seat):
                     # The other lost-tracker state, and the opposite
                     # one: the hook is written perfectly and pointed at
                     # a side quest, so every teleport below aims
@@ -1219,7 +1244,8 @@ class LiveWorker(QThread):
                                       self._maybe_recover_questline(seat),
                                       wheel=True, limit=90)
 
-                if (driven or self.auto_quest) and not self._is_booster(seat):
+                if (driven or self.auto_quest or self._is_boostee(seat)) \
+                        and not self._is_booster(seat):
                     # The rung above the desperate teleport: a Collect
                     # goal parked at its own marker for eight minutes is
                     # a crowded realm, not a wedged wizard. Cheap gates
@@ -1229,7 +1255,8 @@ class LiveWorker(QThread):
                                       self._maybe_realm_hop(seat),
                                       wheel=True, limit=360)
 
-                if (driven or self.auto_quest) and not self._is_booster(seat):
+                if (driven or self.auto_quest or self._is_boostee(seat)) \
+                        and not self._is_booster(seat):
                     # The walk-in door: a wizard parked ON its marker
                     # with no transition, because the collision-solved
                     # teleport stops exactly at the marker and the
@@ -1273,6 +1300,17 @@ class LiveWorker(QThread):
                     # questline and has no step of its own to turn in.
                     await self._stage(seat, "boosting the quester",
                                       self._follow_step(client, seat),
+                                      wheel=True)
+                elif self._is_boostee(seat):
+                    # A second quester, walking its own line. The
+                    # script drives the leader and there is one VM, so
+                    # this seat gets wizAi's own navigator -- see
+                    # `_is_boostee` for what that costs. It reaches
+                    # here rather than the `auto_quest` arm below
+                    # because `auto_quest` is a worker-wide flag and
+                    # "Booster party + script" leaves it off.
+                    await self._stage(seat, "questing on its own line",
+                                      self._quest_step(client, seat),
                                       wheel=True)
                 elif self._follows(seat) and self._solo_pilot():
                     # A solo-pilot follower is not merely an escort: it
@@ -2757,7 +2795,15 @@ class LiveWorker(QThread):
             "leader_seat": self.leader + 1,
             "leader": (boss.wizard_name or boss.name) if boss else "",
             "role": ("leader" if seat.index == self.leader else
-                     "booster" if self._is_booster(seat) else "follower"),
+                     "booster" if self._is_booster(seat) else
+                     "boostee" if self._is_boostee(seat) else "follower"),
+            # How many questlines this run is levelling, named because
+            # every party rule below reads differently at two: the
+            # majority's zone stops being the party's zone, one booster
+            # cannot be in both fights, and two questers on two steps
+            # is the shape rather than a desync. Without it an export
+            # cannot say which shape ran.
+            "questers": len(self._questers()),
             "scripted": bool(self.script),
             "script_drives": ("nobody" if not self.script else
                               "the leader only"
@@ -3319,13 +3365,87 @@ class LiveWorker(QThread):
             self._say(seat, f"script not loaded: {exc}")
 
     def _is_booster(self, seat):
-        """Is this seat a booster -- muscle for the quester's fights?
+        """Is this seat a booster -- muscle for a quester's fights?
 
         Only ever true in booster-party mode, and never of the leader:
-        the leader IS the quester the boosters exist for.
+        the leader IS a quester, and the first one.
+
+        `self.boosters` names the boosting seats by index; None means
+        "every seat but the leader", which is what the mode has always
+        meant. A non-leader seat left out of the set is a boostee --
+        see `_is_boostee`.
+        """
+        if not (self.booster_party and len(self.seats) > 1):
+            return False
+        if seat.index == self.leader:
+            return False
+        if self.boosters is None:
+            return True
+        return seat.index in self.boosters
+
+    def _is_boostee(self, seat):
+        """Is this seat a second QUESTER sharing the party's muscle?
+
+        A boostee quests with wizAi's own navigator rather than with
+        the script. `self.seats[0].runner` is one VM for the whole
+        worker and `_script_seat`, `_countdown_held`, `_unstick` and
+        `_maybe_restart_script` all assume that, so a second script is
+        a different piece of work; `_quest_step` is already per-seat.
+
+        The trade is real and worth saying out loud: a boostee is
+        NAVIGATED, not routed. It teleports to its own marker and turns
+        its own steps in, and it will not run a dungeon path the way a
+        Deimos script does.
         """
         return (self.booster_party and len(self.seats) > 1
-                and seat.index != self.leader)
+                and seat.index != self.leader
+                and self.boosters is not None
+                and seat.index not in self.boosters)
+
+    def _questers(self):
+        """Every seat this run is levelling, leader first.
+
+        The whole party outside booster mode -- a solo-pilot party
+        levels every wizard in it. In booster mode, whoever is not
+        muscle.
+        """
+        if not self.booster_party:
+            return list(self.seats)
+        return [s for s in self.seats if not self._is_booster(s)]
+
+    def _many_questlines(self):
+        """Is this run levelling more than one questline at once?
+
+        Only ever the multi-boostee shape. Every other party has ONE
+        line between them however many wizards it holds: a solo
+        pilot's followers turn in the pilot's own steps, a booster
+        party has one quester by definition, and a plain follow party
+        walks the leader's route. So "where the party is" has a single
+        answer everywhere else, and every rule built on that keeps it.
+        """
+        return self.booster_party and len(self._questers()) > 1
+
+    def _boost_target(self, seat):
+        """The quester this booster is here for, right now.
+
+        The operator's framing is the whole rule: "the booster needs to
+        join combats to beat them as quick as possible (but the booster
+        doesnt need to quest)". So: whichever quester is IN a fight,
+        the longest-running one first -- that is the fight help
+        shortens most, and ending it frees the booster for the other.
+        Nobody fighting, and it is the leader, which is what every
+        one-quester party has always done and still does.
+        """
+        boss = self.seats[self.leader]
+        if not self._is_booster(seat):
+            return boss
+        fighting = [s for s in self._questers()
+                    if s.client is not None and s.in_duel]
+        if not fighting:
+            return boss
+        return min(fighting,
+                   key=lambda s: (s.duel_since if s.duel_since is not None
+                                  else float("inf"), s.index))
 
     def _follows(self, seat):
         """Is this seat a follower rather than the one setting the pace?
@@ -3336,7 +3456,13 @@ class LiveWorker(QThread):
         took its own quest would coordinate beautifully with nobody.
         A booster follows for the same reason with the same force: a
         booster that does not chase the quester boosts nothing.
+
+        A BOOSTEE does not follow anybody. It is levelling its own
+        questline, and a wizard walking to somebody else's marker
+        cannot walk to its own.
         """
+        if self._is_boostee(seat):
+            return False
         if self._is_booster(seat):
             return True
         if self._solo_pilot():
@@ -3364,7 +3490,10 @@ class LiveWorker(QThread):
         from .. import party
 
         seat = self._seat_for(client) if seat is None else seat
-        boss = self.seats[self.leader]
+        # Which quester, when there is more than one. See
+        # `_boost_target`; a party with a single quester gets the
+        # leader here exactly as it always did.
+        boss = self._boost_target(seat)
         if boss is seat or boss.client is None:
             return
         now = time.monotonic()
@@ -9555,6 +9684,31 @@ class LiveWorker(QThread):
                                          # of them could be the wrong way
         seat = odd[0]
 
+        if self._many_questlines() and not self._is_booster(seat):
+            # There is no single "where the party is" when the party
+            # levels more than one questline. Two questers in two zones
+            # is the SHAPE of the run, and the majority's zone is only
+            # ever one of them -- so with a quester, a booster and a
+            # second quester, the majority is whichever quester the
+            # booster happens to be standing with, and the other gets
+            # dragged off its own step every poll.
+            #
+            # Muscle in the wrong place IS still a straggler: a booster
+            # has no line of its own and its whole job is to be where a
+            # quester is. A quester never is.
+            self._say_once(
+                seat, f"own-line:{seat.name}",
+                f"{seat.name} is in {zones[seat]} and the majority is in "
+                f"{best}, but this party levels "
+                f"{len(self._questers())} questlines — two questers in "
+                f"two zones is the shape of the run, not a wizard left "
+                f"behind",
+                kind="rejoin-refused",
+                detail=(f"{seat.name} quests on its own line; the "
+                        f"majority's zone is not the party's zone when "
+                        f"the party has more than one quester"))
+            return None, None
+
         # Is it even meant to be where they are? This mechanism was
         # built for the wizard whose TELEPORT did not land -- same
         # quest, same destination, one client that missed it. A wizard
@@ -9862,6 +10016,11 @@ class LiveWorker(QThread):
             if best is None or len(group) > len(near):
                 best, near = seat, group
         odd = [s for s in at_prompt if s not in near]
+        if self._many_questlines():
+            # Two questers at two sigils in one zone are entering two
+            # dungeons, deliberately. Only muscle standing at the wrong
+            # one is a fault this can fix, so only muscle is moved.
+            odd = [s for s in odd if self._is_booster(s)]
         now = time.monotonic()
         # A strict majority, so "the party's sigil" is a fact rather than
         # a coin toss. Two and two is a party that has genuinely split
@@ -10458,7 +10617,7 @@ class LiveWorker(QThread):
 
         if self._stop or not (self.booster_party or self._solo_pilot()):
             return
-        if seat.index != self.leader:
+        if not (seat.index == self.leader or self._is_boostee(seat)):
             return
 
         def stranded():
@@ -10467,6 +10626,16 @@ class LiveWorker(QThread):
                 if other is seat or other.client is None:
                     continue
                 if other.follow_failing_since is None:
+                    continue
+                if (self._is_booster(other)
+                        and self._boost_target(other) is not seat):
+                    # That booster is with the other quester. Holding
+                    # for muscle that is busy is a two-minute stall for
+                    # nothing, and a party with more questers than
+                    # boosters means somebody fights alone -- that is
+                    # the shape the operator asked for, not a fault.
+                    # With one quester `_boost_target` is always this
+                    # seat, so nothing changes for the runs that exist.
                     continue
                 if (other.zone_seen and seat.zone_seen
                         and other.zone_seen == seat.zone_seen):
