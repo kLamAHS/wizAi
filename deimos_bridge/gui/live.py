@@ -2870,10 +2870,25 @@ class LiveWorker(QThread):
         while the goal ADVANCES is a respawning mob on the route, which
         is normal and must not trip this; the same board beaten while
         the goal stands still is a program going round in a circle.
+
+        Which is why a BOOSTER can never trip it. A booster's journal is
+        a max-level wizard's, parked on whatever it stopped on, and it
+        does not quest -- so its goal standing still is not a symptom,
+        it is the definition of the role. Rev 1f912030: Oz joined three
+        of the quester's fights against `Lost Soul@55` while parked on
+        'Complete Archmastery Tutorial in Arena', this fired at t=176.8
+        and RESTARTED THE SCRIPT at t=177.2 -- while the quester was
+        moving normally from `(0 of 2)` to `(1 of 2)`.
+
+        `_check_in_step` has carried this guard since it was written
+        and this rung was built without it. **No rung may read a
+        booster's quest state as evidence about the party.**
         """
         import time
 
         if won is not True or not seat.tel.fights:
+            return
+        if self._is_booster(seat):
             return
         fight = seat.tel.fights[-1]
         opening = getattr(fight, "opening", "") or ""
@@ -8939,7 +8954,12 @@ class LiveWorker(QThread):
         one unchanged Wizard City goal, while the cure waited.
         """
         goal = (seat.goal or "").strip()
-        if not goal:
+        if not goal or self._is_booster(seat):
+            # A booster's goal never moves, so every board it beats
+            # more than twice looks like a loop and none of them is
+            # one. Same guard as `_watch_for_a_winning_loop`, for the
+            # same reason, and worth having twice: this half is read by
+            # a rung that PAGES THE QUEST BOOK.
             return 0
         best = 0
         for seen in seat.won_to.values():

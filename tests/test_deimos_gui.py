@@ -19191,6 +19191,54 @@ def test_beating_one_board_over_and_over_on_one_step_is_a_loop(qapp):
                 if e["kind"] == "winning-loop"]) == 1
 
 
+def test_a_booster_never_trips_the_winning_loop(qapp):
+    """Rev 1f912030. Oz joined three of the quester's fights against
+    `Lost Soul@55` while parked on 'Complete Archmastery Tutorial in
+    Arena' — a max-level booster's journal, frozen by design — so this
+    fired at t=176.8 and RESTARTED THE SCRIPT at t=177.2, while the
+    quester was moving normally from (0 of 2) to (1 of 2). A booster's
+    goal standing still is the definition of the role, not a symptom.
+
+    `_check_in_step` has carried this guard since it was written."""
+    import time
+
+    worker = _party_worker()
+    worker.booster_party = True
+    worker.leader = 1                        # ...so seat 0 is the muscle
+    muscle = worker.seats[0]
+    muscle.runner = None
+    assert worker._is_booster(muscle)
+
+    for _ in range(worker.WINNING_LOOP + 2):
+        _won_a_fight(worker, muscle, "Lost Soul@55",
+                     "Complete Archmastery Tutorial in Arena")
+    assert not [e for e in muscle.tel.questing
+                if e["kind"] == "winning-loop"], "the booster was convicted"
+    assert not [e for e in muscle.tel.questing
+                if e["kind"] == "script-restarted"], \
+        "a frozen booster goal restarted the party's script"
+    # The read-only half the questline cure reads is silent too — that
+    # rung pages the quest book.
+    assert worker._in_a_winning_loop(muscle, time.monotonic()) == 0
+
+
+def test_the_quester_of_a_booster_party_still_trips_it(qapp):
+    """The guard is about the ROLE, not about the mode. A quester going
+    round in a circle is exactly what this was built to name, and a
+    booster party is where it was first seen doing it."""
+    worker = _party_worker()
+    worker.booster_party = True
+    worker.leader = 1
+    quester = worker.seats[1]
+    quester.runner = None
+    assert not worker._is_booster(quester)
+
+    for _ in range(worker.WINNING_LOOP):
+        _won_a_fight(worker, quester, "Calista@9680",
+                     "Talk To Deirdre Madden in The Wild")
+    assert [e for e in quester.tel.questing if e["kind"] == "winning-loop"]
+
+
 def test_the_winning_loop_watcher_is_wired_into_the_fight_loop():
     """A watcher nothing calls is a comment. It has to run where every
     fight ends, beside `_note_the_loss`, which is the rung that already
