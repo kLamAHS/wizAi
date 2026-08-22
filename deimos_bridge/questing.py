@@ -1117,6 +1117,22 @@ QUEST_BOOK_ALL_SORT_PATH = ["WorldView", "DeckConfiguration", "wndQuestList",
 #: both in the same visible way.
 QUEST_BOOK_ENTRY_GOAL = ["questInfoWindow", "wndQuestInfo", "txtGoal"]
 QUEST_BOOK_SLOTS = 4
+#: name fragments that mark the quest list's own "next page" control,
+#: and the ones that rule a child out. Discovered rather than
+#: hard-coded: `Deimos/src/paths.py` names the four slots and the All
+#: sort and nothing else, so no path in this codebase has ever pointed
+#: at the real control. `_Book.pager` looks for a plausible one, refuses
+#: to click anything that could select a quest, and hands the caller
+#: `wndQuestList`'s ACTUAL child names when it finds nothing -- which is
+#: how the next export names the control instead of this guessing twice.
+QUEST_BOOK_PAGER_HINTS = ("right", "next", "forward", "down", "page")
+QUEST_BOOK_PAGER_SKIP = ("left", "prev", "back", "up", "close", "sort",
+                         "all")
+#: how many pages one search will turn. A wizard mid-arc carries a
+#: dozen or two accepted quests, so six pages covers the journal twice
+#: over -- and it is a hard stop against a control that redraws the
+#: same page forever.
+QUEST_BOOK_MAX_PAGES = 6
 #: how long the receipt poll waits for the hook to be written after the
 #: book closes. The arrow's render loop runs every frame once a quest
 #: is selected, so a cure that worked shows up in the first second or
@@ -1197,6 +1213,15 @@ class _Book:
     def __init__(self, client):
         self.client = client
         self.key = keycode_q()
+        #: how many pages one search actually looked at, and the list's
+        #: own child window names when no paging control could be found
+        #: among them. Both are for the REPORT: "none of these quests
+        #: is in the book" means something different after four entries
+        #: than after twenty-four, and a caller that says the first
+        #: when it means the second writes a wizard off for half an
+        #: hour. See `select_quest`.
+        self.pages_read = 1
+        self.list_children = []
 
     async def visible(self) -> bool:
         book = await window_from_path(self.client.root_window,
@@ -1271,24 +1296,121 @@ class _Book:
         await asyncio.sleep(0.4)
         return True
 
+    async def children(self):
+        """[(name, window)] for the quest list's own children.
+
+        The list itself, not the entries: whatever else `wndQuestList`
+        holds -- a sort, a scrollbar, a page arrow -- lives here, and
+        nothing in this codebase has a path to any of it.
+        """
+        book = await window_from_path(self.client.root_window,
+                                      QUEST_BOOK_LIST_PATH)
+        if book is None:
+            return []
+        try:
+            kids = await book.children()
+        except Exception:
+            return []
+        got = []
+        for kid in kids:
+            try:
+                name = await kid.name()
+            except Exception:
+                name = ""
+            got.append((name or "", kid))
+        return got
+
+    async def pager(self):
+        """(the control that turns to the next page or None, every child
+        name on the list).
+
+        The names come back either way, because the miss is the useful
+        half: a run that cannot page says so in the export WITH the
+        window names it did see, and the next revision points a path at
+        the real control instead of guessing a second time.
+
+        Never an entry window. Clicking `wndQuestInfo{n}` SELECTS the
+        quest under it, and picking one at random is precisely the
+        failure this book work exists to cure -- so entries, the All
+        sort and anything that reads as backwards are refused before a
+        hint is even considered.
+        """
+        kids = await self.children()
+        names = [n for n, _w in kids if n]
+        for name, win in kids:
+            low = name.lower()
+            if low.startswith("wndquestinfo"):
+                continue
+            if any(bad in low for bad in QUEST_BOOK_PAGER_SKIP):
+                continue
+            if not any(hint in low for hint in QUEST_BOOK_PAGER_HINTS):
+                continue
+            try:
+                if not await _visible(win):
+                    continue
+            except Exception:
+                continue
+            return win, names
+        return None, names
+
     async def look_for(self, want):
         """(matching entries, everything seen) for token sets `want`.
 
         Re-sorts to All and looks again when the first page matched
         nothing, because the book opens on whatever the player left it
-        on. Returns every match rather than the first: a caller that
-        must not click the wrong quest needs to know there were two.
+        on -- and then TURNS PAGES, because four entries is not a
+        journal. Returns every match on the page it stops at rather
+        than the first: a caller that must not click the wrong quest
+        needs to know there were two. The book is left open at the page
+        the match is on, which is where the click has to land.
+
+        Rev f27693c2's run 8 is what the missing half cost. The cure
+        finally ran at t=2431 against a page reading "Unicorn Way ...
+        Firecat Alley ... Cyclops Lane" -- a wizard freshly through the
+        journal's Quest Finder carries a page of newly accepted side
+        quests, which is exactly the state this is FOR and exactly the
+        state where page one holds none of the answers -- concluded the
+        Avalon quest it wanted had never been accepted, and stood down
+        for another thirty minutes.
         """
         def hits(seen):
             return [(s, e, t) for (s, e, t) in seen
                     if any(w <= _rearm_tokens(t) for w in want)]
 
+        if self.pages_read > 1:
+            # A previous candidate paged to the end. The All sort
+            # redraws the listing from the top, which is the only way
+            # back this UI is known to offer.
+            await self.show_all()
+            self.pages_read = 1
         seen = await self.entries()
         found = hits(seen)
         if not found and await self.show_all():
             seen = await self.entries()
             found = hits(seen)
-        return found, seen
+        every = list(seen)
+        while not found and self.pages_read < QUEST_BOOK_MAX_PAGES:
+            control, names = await self.pager()
+            if control is None:
+                self.list_children = names
+                break
+            try:
+                await self.client.mouse_handler.click_window(control)
+            except Exception:
+                break
+            await asyncio.sleep(0.4)
+            page = await self.entries()
+            if not page or ([t for (_s, _e, t) in page]
+                            == [t for (_s, _e, t) in seen]):
+                # No entries, or the same four again: the control is
+                # not a pager, or this is the last page. Either way
+                # turning it again learns nothing.
+                break
+            self.pages_read += 1
+            seen = page
+            every.extend(page)
+            found = hits(page)
+        return found, every
 
     async def select(self, entry, slot=0):
         """(ok, reason). ONE click on the entry's goal line.
@@ -1452,9 +1574,11 @@ async def select_quest(client, names, on_status=None):
     responses. True: the book was READ and this attempt failed for a
     reason another attempt can fix -- a matched entry that would not
     select, a close that did not take, a page that showed no entries at
-    all. False: entries were read and none matched -- evidence the
-    quest was never accepted, though not proof, because the book shows
-    `QUEST_BOOK_SLOTS` quests per page and this cannot turn pages.
+    all. False: entries were read across every page the list could be
+    turned to and none matched -- evidence the quest was never
+    accepted, though still not proof, because the paging control is
+    found by name rather than by a path anybody has verified, and a
+    journal that could not be paged at all says so in the reason.
     None: the book was never looked in, because no candidate was safe
     to match on, and saying "not in the book" about a quest nothing
     looked for would be a lie that writes the wizard off.
@@ -1544,14 +1668,20 @@ async def select_quest(client, names, on_status=None):
                                    f"read failure, so whether {tried} is "
                                    f"in the book is unknown"), True
                 listing = " · ".join(t for (_s, _e, t) in seen)
-                return False, (f"none of {tried} is among the quest book's "
-                               f"visible entries. The book shows "
-                               f"{QUEST_BOOK_SLOTS} quests per page and "
-                               f"this cannot turn pages, so this is "
-                               f"evidence, not proof — the quest may be "
-                               f"on a later page, or genuinely not "
-                               f"accepted yet. The visible page: "
-                               f"{listing[:200]}"), False
+                how = (f" No control on the quest list looked like a way "
+                       f"to the next page, so only the first "
+                       f"{QUEST_BOOK_SLOTS} were ever reachable — this is "
+                       f"evidence, not proof, and the list's own children "
+                       f"are: {', '.join(book.list_children)}"
+                       if book.list_children else
+                       f" The pager is matched by window name rather than "
+                       f"by a verified path, so this is evidence, not "
+                       f"proof")
+                return False, (f"none of {tried} is among the "
+                               f"{len(seen)} quest book entries read "
+                               f"across {book.pages_read} page(s)."
+                               + how
+                               + f". The entries: {listing[:280]}"), False
     finally:
         closed = await book.close()
 

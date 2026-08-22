@@ -289,6 +289,12 @@ class _Seat:
         #: whether this wizard was in a duel on its last service tick.
         #: Read from the OTHER seats' ticks -- see `CATCH_UP_IDLE`.
         self.in_duel = False
+        #: when the duel it is in now started, or None. Stamped on the
+        #: transition rather than every tick, because the question it
+        #: answers is "which of these fights has been going longest" --
+        #: a booster with two questers to choose between helps the one
+        #: whose fight it shortens most. See `_boost_target`.
+        self.duel_since = None
         #: when this seat's service loop last came round, stamped before
         #: the one read that can hang. A loop that has stopped ticking
         #: is invisible from inside itself -- and if it is seat 0's, it
@@ -418,6 +424,16 @@ class _Seat:
         self.zone_seen = None
         #: when `zone_seen` last CHANGED.
         self.zone_since = 0.0
+        #: zones this wizard has been in recently, zone -> when it was
+        #: last left. A return to one inside `ZONE_BOUNCE_WINDOW` is a
+        #: shuttle, not progress -- the same test `cells_seen` gives
+        #: positions, one coordinate up. See
+        #: `LiveWorker._nothing_achieved_since`.
+        self.zones_seen = {}
+        #: when this wizard last reached a zone it had NOT just come
+        #: from. The achievement clock reads this rather than
+        #: `zone_since`, which every bounce restamps.
+        self.zone_fresh_at = 0.0
         #: zones this seat has already been rejoined INTO, and when.
         #: The backstop against dragging a wizard in a circle.
         self.rejoin_history = []
@@ -479,6 +495,13 @@ class _Seat:
         #: twice is a wall; the outcome used to be recorded and read by
         #: nothing but the win count. See `_note_the_loss`.
         self.lost_to = {}
+        #: opening -> [(when, the goal held at the time)] for fights this
+        #: wizard WON. The mirror of `lost_to`, and it answers the
+        #: failure wearing the opposite face: eight identical victories
+        #: with an unmoving goal is as stuck as eight defeats. See
+        #: `LiveWorker._watch_for_a_winning_loop`.
+        self.won_to = {}
+        self.said_loop = ""
         #: consecutive rounds where every line the rollout tried ended
         #: with this wizard dead, and the fight that was last reported
         #: for. See `_watch_for_a_fight_that_cannot_be_won`.
@@ -565,7 +588,7 @@ class LiveWorker(QThread):
                  follow_leader=True, leader=0, label_windows=True,
                  solo_script=False, script_step_delay=None,
                  script_dialog_delay=None, script_debug=False,
-                 booster_party=False):
+                 booster_party=False, boosters=None):
         super().__init__()
         # Seat 0 is always the arguments this was called with, so the
         # single-wizard signature is untouched; `seats` adds the rest.
@@ -638,6 +661,20 @@ class LiveWorker(QThread):
         #: combats to beat them as quick as possible (but the booster
         #: doesnt need to quest)".
         self.booster_party = bool(booster_party)
+        #: which seats BOOST, by index, when `booster_party` is on.
+        #:
+        #: None -- the default, and every run before this existed --
+        #: means "every seat but the leader", so a party nobody has
+        #: configured behaves byte for byte as it always did. A
+        #: non-leader seat left OUT of the set is a BOOSTEE: a second
+        #: wizard whose own questline the run levels, sharing the
+        #: party's muscle. The operator asked for it in those words --
+        #: "do we even have a mode for multiple boostees with a
+        #: booster" -- and the answer was no, because `_is_booster` was
+        #: "not the leader" and nothing could spell anything else.
+        #: See `_is_boostee`.
+        self.boosters = (None if boosters is None
+                         else {int(i) for i in boosters})
         #: solo-pilot mode: the script drives ONLY the leader, and the
         #: rest of the party follows it and joins its fights. The whole
         #: class of failure this run has been fighting -- friend
@@ -976,7 +1013,10 @@ class LiveWorker(QThread):
                 # this catch-up actually fighting" is asked from ANOTHER
                 # seat's tick -- a wizard in a duel never reaches
                 # `_check_caught_up` on its own loop. See `CATCH_UP_IDLE`.
+                was_fighting = seat.in_duel
                 seat.in_duel = bool(fighting)
+                if seat.in_duel != was_fighting:
+                    seat.duel_since = seat.ticked_at if seat.in_duel else None
                 # BEFORE the guard below. Konstantin's log has one
                 # heartbeat at t=0 and the next at t=531.7 -- nine
                 # missed beats, because he spent them in a fourteen-round
@@ -1173,7 +1213,8 @@ class LiveWorker(QThread):
                                       self._resolve_party_names(seat),
                                       wheel=True, limit=90)
 
-                if (driven or self.auto_quest) and not self._is_booster(seat):
+                if (driven or self.auto_quest or self._is_boostee(seat)) \
+                        and not self._is_booster(seat):
                     # The one rung that does not need the marker,
                     # because it exists for the state where the marker
                     # is DEAD: quest position unreadable for minutes
@@ -1191,7 +1232,8 @@ class LiveWorker(QThread):
                                       self._maybe_rearm_quest_arrow(seat),
                                       wheel=True, limit=90)
 
-                if (driven or self.auto_quest) and not self._is_booster(seat):
+                if (driven or self.auto_quest or self._is_boostee(seat)) \
+                        and not self._is_booster(seat):
                     # The other lost-tracker state, and the opposite
                     # one: the hook is written perfectly and pointed at
                     # a side quest, so every teleport below aims
@@ -1202,7 +1244,8 @@ class LiveWorker(QThread):
                                       self._maybe_recover_questline(seat),
                                       wheel=True, limit=90)
 
-                if (driven or self.auto_quest) and not self._is_booster(seat):
+                if (driven or self.auto_quest or self._is_boostee(seat)) \
+                        and not self._is_booster(seat):
                     # The rung above the desperate teleport: a Collect
                     # goal parked at its own marker for eight minutes is
                     # a crowded realm, not a wedged wizard. Cheap gates
@@ -1212,7 +1255,8 @@ class LiveWorker(QThread):
                                       self._maybe_realm_hop(seat),
                                       wheel=True, limit=360)
 
-                if (driven or self.auto_quest) and not self._is_booster(seat):
+                if (driven or self.auto_quest or self._is_boostee(seat)) \
+                        and not self._is_booster(seat):
                     # The walk-in door: a wizard parked ON its marker
                     # with no transition, because the collision-solved
                     # teleport stops exactly at the marker and the
@@ -1256,6 +1300,17 @@ class LiveWorker(QThread):
                     # questline and has no step of its own to turn in.
                     await self._stage(seat, "boosting the quester",
                                       self._follow_step(client, seat),
+                                      wheel=True)
+                elif self._is_boostee(seat):
+                    # A second quester, walking its own line. The
+                    # script drives the leader and there is one VM, so
+                    # this seat gets wizAi's own navigator -- see
+                    # `_is_boostee` for what that costs. It reaches
+                    # here rather than the `auto_quest` arm below
+                    # because `auto_quest` is a worker-wide flag and
+                    # "Booster party + script" leaves it off.
+                    await self._stage(seat, "questing on its own line",
+                                      self._quest_step(client, seat),
                                       wheel=True)
                 elif self._follows(seat) and self._solo_pilot():
                     # A solo-pilot follower is not merely an escort: it
@@ -2132,6 +2187,74 @@ class LiveWorker(QThread):
     #: minutes still retries -- the operator may fix the state live --
     #: without eleven reloads per export saying nothing new.
     RELOAD_COOL_MAX = 600.0
+    #: the VM failure that means the tracked quest is not a real quest.
+    #: `_fetch_tracked_quest` (`Deimos/src/deimoslang/vm.py:365`) raises
+    #: it when `quest_id()` names nothing in `quest_data()` -- which is
+    #: what the journal's Quest Finder pseudo-entry looks like from the
+    #: inside, and what the script's own lost-quest routine leaves
+    #: behind when a cycle fails partway.
+    TRACKED_QUEST_ERROR = "unable to fetch the currently tracked quest"
+
+    def _wake_the_questline(self, seat, why):
+        """Let the questline rung look at a script dying on its tracker.
+
+        The reload backoff has already reached the conclusion it cannot
+        act on -- "Reloading is not fixing this, so the next reload
+        waits 30s: the state it crashes on is what needs fixing". When
+        the state it crashes on is the TRACKER, the fixer is two rungs
+        below and was gated behind a clock nothing had started. Rev
+        f27693c2's run 8 spent t=222 to t=476 on four reloads and three
+        backoffs of exactly this error while `select_quest` sat unused,
+        and never recovered: the script's own lost-quest routine took
+        the party to Wizard City and the run ended there 24 minutes
+        later.
+
+        An UN-GATING, not a diagnosis, and that is what makes it safe.
+        Arming `off_line_since` starts a clock and nothing else;
+        `_maybe_recover_questline` still runs the whole placement pass
+        and still refuses everything it refused before. A wizard
+        genuinely on the main line has this cleared by
+        `_check_on_questline` on its very next poll -- the
+        `off_line_since and place.on_main` branch -- so the worst case
+        is a clock that ticks for half a second and a line in the
+        export saying it did.
+
+        Named by client where the error names one: the VM writes the
+        title it failed on ("wizAi 2 - Konstantin - fire"), and a
+        four-seat party has no reason to start three other clocks over
+        one wizard's journal. Every non-booster seat when it names
+        nobody, because a booster has no questline to lose.
+        """
+        import time
+
+        if self.TRACKED_QUEST_ERROR not in (why or "").lower():
+            return
+        now = time.monotonic()
+        named = [s for s in self.seats
+                 if s.name and s.name in why and not self._is_booster(s)]
+        woke = []
+        for one in (named or [s for s in self.seats
+                              if s.client is not None
+                              and not self._is_booster(s)]):
+            if one.off_line_since is not None:
+                continue
+            one.off_line_since = now
+            woke.append(one.name)
+        if not woke:
+            return
+        said = (f"the script keeps dying on the tracked quest itself, and "
+                f"reloading cannot fix a journal — so the questline "
+                f"recovery is being given a look at "
+                f"{' and '.join(woke)} rather than left waiting for a "
+                f"clock nothing had started. It still has to place the "
+                f"tracker before it selects anything; a wizard that is "
+                f"on the main line clears this on the next poll")
+        for other in self.seats:
+            try:
+                other.tel.note_questing("questline-suspect", said)
+            except Exception:
+                pass
+        self._say(seat, said)
 
     async def _script_step(self, seat=None):
         """One burst of the script, not one instruction.
@@ -2220,6 +2343,9 @@ class LiveWorker(QThread):
                     except Exception:
                         pass
                 self._say(seat, said)
+                # ...and the one failure this backoff can name a cure
+                # for. See `_wake_the_questline`.
+                self._wake_the_questline(seat, why)
                 return
             self._say(seat, why)
             if not runner.restart():
@@ -2669,7 +2795,15 @@ class LiveWorker(QThread):
             "leader_seat": self.leader + 1,
             "leader": (boss.wizard_name or boss.name) if boss else "",
             "role": ("leader" if seat.index == self.leader else
-                     "booster" if self._is_booster(seat) else "follower"),
+                     "booster" if self._is_booster(seat) else
+                     "boostee" if self._is_boostee(seat) else "follower"),
+            # How many questlines this run is levelling, named because
+            # every party rule below reads differently at two: the
+            # majority's zone stops being the party's zone, one booster
+            # cannot be in both fights, and two questers on two steps
+            # is the shape rather than a desync. Without it an export
+            # cannot say which shape ran.
+            "questers": len(self._questers()),
             "scripted": bool(self.script),
             "script_drives": ("nobody" if not self.script else
                               "the leader only"
@@ -2708,6 +2842,78 @@ class LiveWorker(QThread):
     #: is the first evidence that the first was not variance -- and the
     #: third costs another ten minutes to learn nothing.
     BOSS_WALL_LOSSES = 2
+
+    #: how many times one board may be beaten, with the quest goal
+    #: unchanged throughout, before the run is looping rather than
+    #: questing.
+    #:
+    #: Rev f27693c2's last thirty minutes: `Calista@9680+Black Cap@1740`
+    #: killed EIGHT times, won every one, `The Wild <-> Cave of Anguish`
+    #: eight times, and the goal `Talk To Deirdre Madden in The Wild`
+    #: never moved. Three is where a respawning mob on the route stops
+    #: being an explanation.
+    WINNING_LOOP = 3
+    #: how long a win is remembered against its board. A grind that
+    #: comes back an hour later is a fresh question.
+    WIN_MEMORY = 1800.0
+
+    def _watch_for_a_winning_loop(self, seat, won):
+        """Notice a fight this wizard keeps winning to no effect.
+
+        `lost_to` has remembered defeats since rev 8ebfcf70 and Phase H
+        acts on them. Nothing remembered victories, because a victory
+        looks like the system working -- and it is, right up until the
+        same board is beaten for the third time with the quest goal
+        exactly where it was.
+
+        The goal is the whole discriminator. A board beaten repeatedly
+        while the goal ADVANCES is a respawning mob on the route, which
+        is normal and must not trip this; the same board beaten while
+        the goal stands still is a program going round in a circle.
+        """
+        import time
+
+        if won is not True or not seat.tel.fights:
+            return
+        fight = seat.tel.fights[-1]
+        opening = getattr(fight, "opening", "") or ""
+        goal = (seat.goal or "").strip()
+        if not opening or not goal:
+            return
+        now = time.monotonic()
+        seen = [(t, g) for t, g in seat.won_to.get(opening, ())
+                if now - t <= self.WIN_MEMORY]
+        seen.append((now, goal))
+        seat.won_to[opening] = seen
+        if len(seat.won_to) > 16:
+            seat.won_to.pop(next(iter(seat.won_to)), None)
+        onthis = [t for t, g in seen if g == goal]
+        if len(onthis) < self.WINNING_LOOP:
+            return
+        key = f"{opening}|{goal}"
+        if seat.said_loop == key:
+            return
+        seat.said_loop = key
+        said = (f"{seat.name} has now beaten {opening} {len(onthis)} times "
+                f"without {goal!r} moving. Winning is not progress on its "
+                f"own — the same board, the same step, and the party is "
+                f"going round in a circle rather than through it")
+        for other in self.seats:
+            try:
+                other.tel.note_questing("winning-loop", said)
+            except Exception:
+                pass
+        self._say(seat, said)
+        # ...and hand it to the actor that already exists for "the
+        # script is looping and getting nowhere". wizAi cannot walk to
+        # an NPC itself; a restart replays the route dispatch, which is
+        # what put the party in the instance in the first place.
+        if now - self._script_restarted_at < self.SCRIPT_RESTART_EVERY:
+            return
+        self._restart_the_script(
+            seat, said + ". Restarting the script so its route dispatch "
+                         "runs fresh against the step the party is "
+                         "actually on")
 
     def _note_the_loss(self, seat, won):
         """Record a defeat, and say when one keeps happening.
@@ -3159,13 +3365,87 @@ class LiveWorker(QThread):
             self._say(seat, f"script not loaded: {exc}")
 
     def _is_booster(self, seat):
-        """Is this seat a booster -- muscle for the quester's fights?
+        """Is this seat a booster -- muscle for a quester's fights?
 
         Only ever true in booster-party mode, and never of the leader:
-        the leader IS the quester the boosters exist for.
+        the leader IS a quester, and the first one.
+
+        `self.boosters` names the boosting seats by index; None means
+        "every seat but the leader", which is what the mode has always
+        meant. A non-leader seat left out of the set is a boostee --
+        see `_is_boostee`.
+        """
+        if not (self.booster_party and len(self.seats) > 1):
+            return False
+        if seat.index == self.leader:
+            return False
+        if self.boosters is None:
+            return True
+        return seat.index in self.boosters
+
+    def _is_boostee(self, seat):
+        """Is this seat a second QUESTER sharing the party's muscle?
+
+        A boostee quests with wizAi's own navigator rather than with
+        the script. `self.seats[0].runner` is one VM for the whole
+        worker and `_script_seat`, `_countdown_held`, `_unstick` and
+        `_maybe_restart_script` all assume that, so a second script is
+        a different piece of work; `_quest_step` is already per-seat.
+
+        The trade is real and worth saying out loud: a boostee is
+        NAVIGATED, not routed. It teleports to its own marker and turns
+        its own steps in, and it will not run a dungeon path the way a
+        Deimos script does.
         """
         return (self.booster_party and len(self.seats) > 1
-                and seat.index != self.leader)
+                and seat.index != self.leader
+                and self.boosters is not None
+                and seat.index not in self.boosters)
+
+    def _questers(self):
+        """Every seat this run is levelling, leader first.
+
+        The whole party outside booster mode -- a solo-pilot party
+        levels every wizard in it. In booster mode, whoever is not
+        muscle.
+        """
+        if not self.booster_party:
+            return list(self.seats)
+        return [s for s in self.seats if not self._is_booster(s)]
+
+    def _many_questlines(self):
+        """Is this run levelling more than one questline at once?
+
+        Only ever the multi-boostee shape. Every other party has ONE
+        line between them however many wizards it holds: a solo
+        pilot's followers turn in the pilot's own steps, a booster
+        party has one quester by definition, and a plain follow party
+        walks the leader's route. So "where the party is" has a single
+        answer everywhere else, and every rule built on that keeps it.
+        """
+        return self.booster_party and len(self._questers()) > 1
+
+    def _boost_target(self, seat):
+        """The quester this booster is here for, right now.
+
+        The operator's framing is the whole rule: "the booster needs to
+        join combats to beat them as quick as possible (but the booster
+        doesnt need to quest)". So: whichever quester is IN a fight,
+        the longest-running one first -- that is the fight help
+        shortens most, and ending it frees the booster for the other.
+        Nobody fighting, and it is the leader, which is what every
+        one-quester party has always done and still does.
+        """
+        boss = self.seats[self.leader]
+        if not self._is_booster(seat):
+            return boss
+        fighting = [s for s in self._questers()
+                    if s.client is not None and s.in_duel]
+        if not fighting:
+            return boss
+        return min(fighting,
+                   key=lambda s: (s.duel_since if s.duel_since is not None
+                                  else float("inf"), s.index))
 
     def _follows(self, seat):
         """Is this seat a follower rather than the one setting the pace?
@@ -3176,7 +3456,13 @@ class LiveWorker(QThread):
         took its own quest would coordinate beautifully with nobody.
         A booster follows for the same reason with the same force: a
         booster that does not chase the quester boosts nothing.
+
+        A BOOSTEE does not follow anybody. It is levelling its own
+        questline, and a wizard walking to somebody else's marker
+        cannot walk to its own.
         """
+        if self._is_boostee(seat):
+            return False
         if self._is_booster(seat):
             return True
         if self._solo_pilot():
@@ -3204,7 +3490,10 @@ class LiveWorker(QThread):
         from .. import party
 
         seat = self._seat_for(client) if seat is None else seat
-        boss = self.seats[self.leader]
+        # Which quester, when there is more than one. See
+        # `_boost_target`; a party with a single quester gets the
+        # leader here exactly as it always did.
+        boss = self._boost_target(seat)
         if boss is seat or boss.client is None:
             return
         now = time.monotonic()
@@ -3916,6 +4205,7 @@ class LiveWorker(QThread):
             won = await self._fight_outcome(seat.client, seat)
             seat.tel.end_fight(won)
             self._note_the_loss(seat, won)
+            self._watch_for_a_winning_loop(seat, won)
             self.seat_fight_done.emit(seat.index, seat.fought)
             if seat.index == 0:
                 self.fight_done.emit(seat.fought)
@@ -4148,6 +4438,13 @@ class LiveWorker(QThread):
     #: stood on within this window, same zone and same goal, has not
     #: gone anywhere -- it has bounced.
     OSCILLATION_WINDOW = 180.0
+    #: how long a ZONE is remembered for the same test. Longer than
+    #: `OSCILLATION_WINDOW`, because a zone round trip is a slower thing
+    #: than a position one: rev f27693c2's party shuttled
+    #: `The Wild -> Cave of Anguish -> The Wild` eight times on a
+    #: ~250-second cycle, which a three-minute window would have called
+    #: eight fresh arrivals.
+    ZONE_BOUNCE_WINDOW = 900.0
     #: how long a quest name that will not read is kept before it counts
     #: as unknown. Keeping the previous value on a blank read is right
     #: (a blank is not evidence of change) -- for a while. Past this,
@@ -5170,7 +5467,6 @@ class LiveWorker(QThread):
             return
         if now - self._script_restarted_at < self.SCRIPT_RESTART_EVERY:
             return
-        self._script_restarted_at = now
         if on_it:
             stuck_at = (f"this wizard standing ON its quest marker "
                         f"({away:,.0f} away) and nothing changing")
@@ -5184,6 +5480,23 @@ class LiveWorker(QThread):
                 f"Restarting it so its route dispatch runs fresh against "
                 f"the party's current quest — the operator's manual reset, "
                 f"automated")
+        self._restart_the_script(seat, said)
+
+    def _restart_the_script(self, seat, said):
+        """Restart the party's script and say so. Throttled by the caller.
+
+        Split out so a second caller can reach it: `_maybe_restart_script`
+        decides the marker-shaped cases, and `_watch_for_a_winning_loop`
+        decides the "this program keeps doing the same thing" one. Both
+        want the same action and the same sentence structure, and
+        neither should own the other's gates.
+        """
+        import time
+
+        runner = self.seats[0].runner
+        if runner is None:
+            return
+        self._script_restarted_at = time.monotonic()
         ok = runner.restart()
         skipped = list(getattr(runner, "skipped_setup", None) or ())
         if not ok:
@@ -6020,11 +6333,32 @@ class LiveWorker(QThread):
     #: gather's teleports, prompt polls and X presses ARE late joins,
     #: then the instance load takes seconds more. Rev 7e1980b5: a 20s
     #: hold expired at t+20.0 and the script's safe-area teleport
-    #: landed at t+20.1, one tick after, mid-entry. The release on a
-    #: zone change is immediate, so a too-long hold at a real sigil
-    #: costs nothing; only a hold at a non-sigil pays the full length,
-    #: once per visit.
-    COUNT_HOLD = 45.0
+    #: landed at t+20.1, one tick after, mid-entry.
+    #:
+    #: 45 was chosen on the reasoning that "a too-long hold at a real
+    #: sigil costs nothing; only a hold at a non-sigil pays the full
+    #: length". The first half is true and the second is the whole
+    #: cost: at rev f27693c2, 19 of 34 episodes ran the clock out and
+    #: fired nothing -- 855 seconds, 17% of an 81-minute run.
+    #:
+    #: So it is measured now rather than argued. Across **151
+    #: successful holds in every export ever taken**, the distribution
+    #: of how long the guard actually needed is:
+    #:
+    #:     median 15.6s | p90 27.7s | p95 32.6s | longest 43.5s
+    #:
+    #: and the trade at each length is
+    #:
+    #:     40s -> loses  1 of 151 fires (1%), saves 11% of the waste
+    #:     35s -> loses  4 of 151 fires (3%), saves 22%
+    #:     30s -> loses 12 of 151 fires (8%), saves 33%
+    #:
+    #: 35 buys a fifth of the waste for 3% of the fires, and a lost
+    #: fire costs one re-approach where a dead hold costs the full
+    #: length every time. Re-judge it from the same numbers: pair
+    #: `countdown-hold` with `countdown-hold-over` in any export and
+    #: histogram the episodes that ended "the zone changed".
+    COUNT_HOLD = 35.0
     #: how many times an EVIDENCED sigil (a helper's prompt seen and
     #: pressed) re-arms its hold after expiring unfired, before the
     #: spot is left to the script's own entry machinery.
@@ -6620,12 +6954,22 @@ class LiveWorker(QThread):
                                f"that have held and never fired"
                                if duds > 1 else ""))
                     return
+                # ...and it pays into the memory that stops the next
+                # one. This branch produced 10 of rev f27693c2's 19
+                # dead holds and charged NOTHING, so `COUNT_HOLD_DUDS`
+                # -- the backstop written for "this spot has held three
+                # times and never fired" -- was inert for the commonest
+                # case. Every branch that spends a full hold and gets
+                # nothing has to pay.
+                duds = self._sigil_dud(seat, +1)
                 seat.tel.note_questing(
                     "countdown-hold-over",
                     f"held {self.COUNT_HOLD:.0f}s and no zone change came — "
                     f"not a counting sigil (or the countdown was already "
                     f"lost). The state left standing is the walk-in door's "
-                    f"exactly, so the sweep gets it before the script does")
+                    f"exactly, so the sweep gets it before the script does"
+                    + (f". That is {duds} visit(s) to this spot that have "
+                       f"held and never fired" if duds > 1 else ""))
                 # An expired hold IS the walk-through's evidence, already
                 # aged: at the marker, no prompt, the hold's length of
                 # proven nothing. Rev d3ed4d3c spent seven minutes at
@@ -7780,14 +8124,54 @@ class LiveWorker(QThread):
     def _nothing_achieved_since(self, seat):
         """When this wizard last achieved anything, as a monotonic stamp.
 
-        A changed goal or a changed zone. Deliberately NOT a changed
-        position: a wizard being teleported around one zone by a retry
-        loop is the failure, not the refutation of it.
+        A changed goal, or arrival in a zone it has not just come from.
+        Deliberately NOT a changed position: a wizard being teleported
+        around one zone by a retry loop is the failure, not the
+        refutation of it.
+
+        And deliberately not a changed ZONE either, which is the half
+        this missed. `zone_since` is restamped on any zone change at
+        all, so a wizard shuttling between two of them looks productive
+        forever -- the clock written to survive the script's position
+        teleports did not survive its zone teleports. Rev f27693c2:
+        thirty minutes on one unchanged goal, `The Wild <-> Cave of
+        Anguish` eight times, `Calista@9680+Black Cap@1740` killed
+        eight times and won every time, and **not one** escalation line
+        in the export, because every clock the ladder reads was being
+        reset twice a cycle.
+
+        `zone_since` keeps its own meaning for the rungs that want
+        "when did this wizard last change zone". This is the one asking
+        whether anything was achieved, and a lap is not.
         """
-        stamps = [t for t in (seat.goal_at, seat.zone_since,
+        stamps = [t for t in (seat.goal_at, seat.zone_fresh_at,
                               seat.progress_at if not seat.goal_at
-                              and not seat.zone_since else 0.0) if t]
+                              and not seat.zone_fresh_at else 0.0) if t]
         return max(stamps) if stamps else seat.progress_at
+
+    def _note_zone(self, seat, zone, now):
+        """Stamp the zone clocks, telling a lap from a journey.
+
+        `zone_since` moves on every change, as it always has. The
+        achievement clock moves only for a zone this wizard has not
+        been in within `ZONE_BOUNCE_WINDOW` -- one coordinate up from
+        the test `_note_progress` gives position cells, and for the
+        same reason.
+        """
+        was = seat.zone_seen
+        if zone == was:
+            return
+        if was:
+            seat.zones_seen[was] = now
+            if len(seat.zones_seen) > 16:
+                cut = now - self.ZONE_BOUNCE_WINDOW
+                for name, at in list(seat.zones_seen.items()):
+                    if at < cut:
+                        del seat.zones_seen[name]
+        seat.zone_since = now
+        if now - seat.zones_seen.get(zone, -1e9) >= self.ZONE_BOUNCE_WINDOW:
+            seat.zone_fresh_at = now
+        seat.zone_seen = zone
 
     def _check_progress(self, seat):
         """Say so when a running script is getting nowhere.
@@ -8492,13 +8876,77 @@ class LiveWorker(QThread):
     #: task lands mid-click turns the click into a misfire.
     RECOVER_CEILING = 60.0
     RECOVER_SETTLE = 3.0
-    #: how long a "not among the visible entries" give-up holds before
-    #: the same candidate list is worth one more look. Half an hour: a
-    #: retry costs ~15 held seconds of paging the book, and the two
-    #: states it recovers from -- the quest sitting on a page the read
-    #: cannot reach, and the party accepting it since -- both persist
-    #: far longer than a cooldown.
+    #: how long a "not among the entries" give-up holds before the same
+    #: candidate list is worth one more look. Half an hour: a retry
+    #: costs ~15 held seconds of paging the book, and the states it
+    #: recovers from persist far longer than a cooldown.
+    #:
+    #: Still half an hour now that `_Book.look_for` turns pages, and the
+    #: reasoning has changed under it. It used to rest mostly on "the
+    #: quest may be sitting on a page the read cannot reach", which was
+    #: true and is now usually not. What is left is thinner and real:
+    #: the paging control is found by NAME rather than by a path
+    #: anybody has verified against the live UI, so a journal that
+    #: could not be paged at all still reads as four entries -- and a
+    #: quest the party accepts in the meantime turns a "never accepted"
+    #: into a fact. The give-up is keyed on the candidate list either
+    #: way, so a party that moves on asks a new question at once.
     RECOVER_GIVEUP_TTL = 1800.0
+
+    def _wrong_world(self, seat):
+        """Where this wizard is standing, when it is not where its own
+        main line is -- and "" when they agree or either is unreadable.
+
+        The discriminator the alone wait never had. `RECOVER_ALONE_AFTER`
+        exists to avoid cutting short a side chain somebody meant to
+        run; a quester whose BODY has left the world its own last
+        main-line quest belongs to is not running a side chain, it is
+        lost. Rev f27693c2's run 8 is the case in full: the tracker fell
+        onto 'Red Heads' at t=907, the script's lost-quest routine put
+        the party in Wizard City at t=1004, and the wizard spent the
+        remaining 24 minutes on Triton Avenue level-10 quests while a
+        max-level Avalon quest sat in `last_main` the whole time.
+
+        Both sides folded through `questlist.world_key`, the pair
+        `_tracker_strayed` already compares, so "WizardCity" and
+        "Wizard City" are one world. "" on either side means the read
+        could not answer, and this must never fire on that: a housing
+        instance, a PvP arena and a bare zone id with the prefix cut
+        off all read as no world at all.
+        """
+        from .. import questlist
+
+        here = questlist.world_of_zone(seat.zone_seen)
+        was = (seat.last_main or (None,))[0]
+        mine = questlist.world_key(was)
+        if not here or not mine or here == mine:
+            return ""
+        return f"{(seat.zone_seen or '').split('/')[0] or here}"
+
+    def _in_a_winning_loop(self, seat, now):
+        """How many times one board has been beaten on this exact goal.
+
+        Zero below `WINNING_LOOP`. The read-only half of
+        `_watch_for_a_winning_loop`, for a caller that wants the FACT
+        rather than the report -- the memory is already recorded, and a
+        second rung reading it costs nothing.
+
+        The questline recovery needs it because its alone wait stands
+        down for "the side quest still shows signs of being worked",
+        and a wizard killing one board over and over on one unmoving
+        goal is the precise opposite of that. Rev f27693c2's run 8:
+        `The Harvest Lord@510+Rotted Fodder@150` won four times under
+        one unchanged Wizard City goal, while the cure waited.
+        """
+        goal = (seat.goal or "").strip()
+        if not goal:
+            return 0
+        best = 0
+        for seen in seat.won_to.values():
+            wins = sum(1 for when, was in seen
+                       if was == goal and now - when <= self.WIN_MEMORY)
+            best = max(best, wins)
+        return best if best >= self.WINNING_LOOP else 0
 
     async def _maybe_recover_questline(self, seat):
         """Put a lost tracker back onto the main questline.
@@ -8576,6 +9024,7 @@ class LiveWorker(QThread):
         # -- and the alone wait below became the cure's ceiling.
         alone = not any(p.on_main for s, p in zip(self.seats, places)
                         if s is not seat and not self._is_booster(s))
+        forced = ""
         if alone and away < self.RECOVER_ALONE_AFTER:
             # A whole party off the line is usually the script running
             # a side chain on purpose -- and a side chain being WORKED
@@ -8586,28 +9035,62 @@ class LiveWorker(QThread):
             # Cult', the script spun ~4,000 instructions a minute at
             # an oyster it has no route for, goal and zone sat frozen
             # for nine straight minutes -- and the twenty-minute alone
-            # wait outlived the run, with the booster party reading as
-            # "alone" by the old rule on top.
-            stalled = (bool(seat.goal_at) and bool(seat.zone_since)
-                       and now - max(seat.goal_at, seat.zone_since)
-                       >= self.RECOVER_QUESTLINE_AFTER)
-            if not stalled:
+            # wait outlived the run.
+            #
+            # Three ways that story dies now, where there was one. The
+            # one there was read `max(goal_at, zone_since)`, and
+            # `zone_since` is restamped by ANY zone change -- so the
+            # failure's own shuttling kept the escape hatch shut. Phase
+            # J wrote `_nothing_achieved_since` to be bounce-proof for
+            # exactly this and this rung was the last place still
+            # reading the raw clock.
+            #
+            # And a note on `alone` itself, because it reads like a
+            # party-shape question and is not one: boosters are
+            # excluded as evidence deliberately -- a booster's journal
+            # is a max-level wizard's, parked wherever it stopped --
+            # which means that in booster-party mode the generator is
+            # EMPTY at every seat count and `alone` is True forever.
+            # The twenty-minute wait has therefore never once been
+            # applied to the case it was written for. Rev f27693c2's
+            # run 8 spent 24 of 41 minutes inside it.
+            since = self._nothing_achieved_since(seat)
+            stalled = bool(since) \
+                and now - since >= self.RECOVER_QUESTLINE_AFTER
+            elsewhere = self._wrong_world(seat)
+            looping = self._in_a_winning_loop(seat, now)
+            if stalled:
+                forced = (f"nothing achieved in "
+                          f"{(now - since) / 60:.0f} min")
+            elif elsewhere:
+                # A quester whose BODY has left the world its own main
+                # line is in is not running a side chain. Categorical,
+                # not a timer -- and safe, because the cure selects a
+                # quest and moves nobody, and a wrong reading clears
+                # itself on the next placement poll.
+                forced = (f"standing in {elsewhere} while its own main "
+                          f"line is in {(seat.last_main or ('', ))[0]}")
+            elif looping:
+                forced = (f"one board beaten {looping} times without "
+                          f"{(seat.goal or '').strip()!r} moving")
+            else:
                 self._say_once(
                     seat, f"recover-wait:{seat.off_line_since:.0f}",
                     f"{seat.name} has been off the main questline for "
-                    f"{away / 60:.0f} min with nobody on the line to "
-                    f"compare against — waiting "
+                    f"{away / 60:.0f} min with no other questing wizard "
+                    f"on the line to compare against — waiting "
                     f"{self.RECOVER_ALONE_AFTER / 60:.0f} min in case "
-                    f"the side quest is deliberate. A stall (no goal or "
-                    f"zone change for "
-                    f"{self.RECOVER_QUESTLINE_AFTER / 60:.0f} min) "
-                    f"skips the wait",
+                    f"the side quest is deliberate. Nothing achieved "
+                    f"for {self.RECOVER_QUESTLINE_AFTER / 60:.0f} min, "
+                    f"a world its own main line does not name, or one "
+                    f"board won {self.WINNING_LOOP} times on this goal "
+                    f"all skip the wait",
                     kind="questline-recovery-waiting",
                     detail=(f"off the line {away / 60:.0f} min on "
-                            f"{place.name!r}, nobody on the main line to "
-                            f"compare against, and the side quest still "
-                            f"shows signs of being worked — holding the "
-                            f"cure back on purpose"))
+                            f"{place.name!r}, no other questing wizard "
+                            f"on the main line to compare against, and "
+                            f"the side quest still shows signs of being "
+                            f"worked — holding the cure back on purpose"))
                 return
         candidates, why = self._lost_quest(seat, places)
         if not candidates:
@@ -8620,9 +9103,10 @@ class LiveWorker(QThread):
         # A give-up holds for the same candidate list -- retrying it
         # every ten minutes would page through the journal forever to
         # learn the same thing -- but it EXPIRES, because "none of them
-        # is among the visible entries" is evidence and not proof. The
-        # book shows four quests per page and `select_quest` cannot
-        # turn pages, so the quest may sit on page two the whole time;
+        # is among the entries" is evidence and not proof. Weaker
+        # evidence than it was -- `_Book.look_for` turns pages now --
+        # but the pager is matched by window NAME, so a journal whose
+        # control does not match still answers on four entries;
         # and a party that turns in the previous step makes the quest
         # accepted where it was not. The 115-min run at rev f2b8101f
         # wrote Phönix off at t=4536 on exactly that reading and never
@@ -8640,8 +9124,11 @@ class LiveWorker(QThread):
         told = self._saved_place(target.name, now, target.area)
         self._say(seat,
                   f"{seat.name} has been off the main questline for "
-                  f"{away / 60:.0f} min on {place.name!r} — putting the "
-                  f"tracker back on {target.describe()} ({source})"
+                  f"{away / 60:.0f} min on {place.name!r}"
+                  + (f" — {forced}, so the alone wait is not being "
+                     f"served" if forced else "")
+                  + f" — putting the tracker back on "
+                    f"{target.describe()} ({source})"
                   + (f"; {told}" if told else ""))
         self._hop_pause_until = now + self.RECOVER_CEILING
         try:
@@ -8660,8 +9147,9 @@ class LiveWorker(QThread):
             seat.tel.note_questing(
                 "questline-recovered",
                 f"{seat.name} had been off the main questline for "
-                f"{away / 60:.0f} min with its tracker on {place.name!r}. "
-                f"Selected {why!r} in the quest book and the tracker now "
+                f"{away / 60:.0f} min with its tracker on {place.name!r}"
+                + (f" ({forced})" if forced else "")
+                + f". Selected {why!r} in the quest book and the tracker now "
                 f"reads it, so every `tp quest` — the script's and "
                 f"wizAi's — aims at the main line again ({source})"
                 + (f". {told[0].upper()}{told[1:]}" if told else ""))
@@ -8702,8 +9190,8 @@ class LiveWorker(QThread):
                 f"not in its book: {why}"
                 + (f" — {told}" if told else "")
                 + f". If it was never accepted, only its NPC can fix "
-                  f"that — but the book shows four quests per page and "
-                  f"the read cannot turn pages, so this is checked "
+                  f"that — but the paging control is matched by name "
+                  f"rather than by a verified path, so this is checked "
                   f"again in {self.RECOVER_GIVEUP_TTL / 60:.0f} min "
                   f"rather than never")
             self._say(seat, f"cannot recover the questline: {why}")
@@ -9151,9 +9639,7 @@ class LiveWorker(QThread):
                             "zone", f"{seat.zone_seen} -> {zones[seat]}")
                     except Exception:
                         pass
-                if zones[seat] != seat.zone_seen:
-                    seat.zone_since = now
-                seat.zone_seen = zones[seat]
+                self._note_zone(seat, zones[seat], now)
             if spot is not None and zones[seat]:
                 seat.last_spot = spot
                 seat.last_spot_zone = zones[seat]
@@ -9197,6 +9683,31 @@ class LiveWorker(QThread):
                                          # straggler, and following one
                                          # of them could be the wrong way
         seat = odd[0]
+
+        if self._many_questlines() and not self._is_booster(seat):
+            # There is no single "where the party is" when the party
+            # levels more than one questline. Two questers in two zones
+            # is the SHAPE of the run, and the majority's zone is only
+            # ever one of them -- so with a quester, a booster and a
+            # second quester, the majority is whichever quester the
+            # booster happens to be standing with, and the other gets
+            # dragged off its own step every poll.
+            #
+            # Muscle in the wrong place IS still a straggler: a booster
+            # has no line of its own and its whole job is to be where a
+            # quester is. A quester never is.
+            self._say_once(
+                seat, f"own-line:{seat.name}",
+                f"{seat.name} is in {zones[seat]} and the majority is in "
+                f"{best}, but this party levels "
+                f"{len(self._questers())} questlines — two questers in "
+                f"two zones is the shape of the run, not a wizard left "
+                f"behind",
+                kind="rejoin-refused",
+                detail=(f"{seat.name} quests on its own line; the "
+                        f"majority's zone is not the party's zone when "
+                        f"the party has more than one quester"))
+            return None, None
 
         # Is it even meant to be where they are? This mechanism was
         # built for the wizard whose TELEPORT did not land -- same
@@ -9505,6 +10016,11 @@ class LiveWorker(QThread):
             if best is None or len(group) > len(near):
                 best, near = seat, group
         odd = [s for s in at_prompt if s not in near]
+        if self._many_questlines():
+            # Two questers at two sigils in one zone are entering two
+            # dungeons, deliberately. Only muscle standing at the wrong
+            # one is a fault this can fix, so only muscle is moved.
+            odd = [s for s in odd if self._is_booster(s)]
         now = time.monotonic()
         # A strict majority, so "the party's sigil" is a fact rather than
         # a coin toss. Two and two is a party that has genuinely split
@@ -10101,7 +10617,7 @@ class LiveWorker(QThread):
 
         if self._stop or not (self.booster_party or self._solo_pilot()):
             return
-        if seat.index != self.leader:
+        if not (seat.index == self.leader or self._is_boostee(seat)):
             return
 
         def stranded():
@@ -10110,6 +10626,16 @@ class LiveWorker(QThread):
                 if other is seat or other.client is None:
                     continue
                 if other.follow_failing_since is None:
+                    continue
+                if (self._is_booster(other)
+                        and self._boost_target(other) is not seat):
+                    # That booster is with the other quester. Holding
+                    # for muscle that is busy is a two-minute stall for
+                    # nothing, and a party with more questers than
+                    # boosters means somebody fights alone -- that is
+                    # the shape the operator asked for, not a fault.
+                    # With one quester `_boost_target` is always this
+                    # seat, so nothing changes for the runs that exist.
                     continue
                 if (other.zone_seen and seat.zone_seen
                         and other.zone_seen == seat.zone_seen):

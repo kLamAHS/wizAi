@@ -1599,6 +1599,7 @@ def test_the_export_says_how_the_run_was_wired(qapp):
         "leader_seat": 2,
         "leader": "Konstantin V",
         "role": "booster",
+        "questers": 1,
         "scripted": False,
         "script_drives": "nobody",
     }
@@ -19151,6 +19152,139 @@ def test_a_lost_duel_is_left_rather_than_played_out(qapp):
     assert said and "chooses the death" in said[0]["detail"]
 
 
+def _won_a_fight(worker, seat, opening, goal):
+    """Play one winning fight against this board, on this goal."""
+    seat.goal = goal
+    seat.tel.start_fight()
+    seat.tel.fights[-1].opening = opening
+    worker._watch_for_a_winning_loop(seat, True)
+
+
+def test_beating_one_board_over_and_over_on_one_step_is_a_loop(qapp):
+    """Rev f27693c2's last thirty minutes: `Calista@9680+Black Cap@1740`
+    killed EIGHT times, won every one, `The Wild <-> Cave of Anguish`
+    eight times, and the goal `Talk To Deirdre Madden in The Wild` never
+    moved. Nothing said a word, because every rung that could have was
+    watching for defeats and every clock was being reset by the laps.
+
+    `lost_to` has remembered defeats since rev 8ebfcf70. A victory looks
+    like the system working — and it is, right up until the same board
+    is beaten a third time with the step exactly where it was."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.runner = None                       # no restart in this test
+    board = "Calista@9680+Black Cap@1740"
+    goal = "Talk To Deirdre Madden in The Wild"
+
+    for _ in range(worker.WINNING_LOOP):
+        _won_a_fight(worker, seat, board, goal)
+
+    said = [e for e in seat.tel.questing if e["kind"] == "winning-loop"]
+    assert said, "eight identical wins and not a word"
+    assert "without 'Talk To Deirdre Madden in The Wild' moving" \
+        in said[0]["detail"]
+
+    # ...once per (board, step), not once per win.
+    for _ in range(4):
+        _won_a_fight(worker, seat, board, goal)
+    assert len([e for e in seat.tel.questing
+                if e["kind"] == "winning-loop"]) == 1
+
+
+def test_the_winning_loop_watcher_is_wired_into_the_fight_loop():
+    """A watcher nothing calls is a comment. It has to run where every
+    fight ends, beside `_note_the_loss`, which is the rung that already
+    owns the opposite face of this."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._fight_loop)
+    assert "_watch_for_a_winning_loop" in src, \
+        "the winning-loop watcher exists and nothing calls it"
+    assert src.index("_note_the_loss") < src.index("_watch_for_a_winning_loop")
+
+
+def test_a_board_beaten_while_the_step_advances_is_just_a_mob(qapp):
+    """The goal is the whole discriminator. A respawning mob on the
+    route is normal, and calling that a loop would fire on every run
+    that fights its way down a street."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.runner = None
+    board = "Night Goblin@1695+Black Cap@1740"
+
+    for i in range(worker.WINNING_LOOP + 3):
+        _won_a_fight(worker, seat, board, f"step number {i}")
+
+    assert not [e for e in seat.tel.questing if e["kind"] == "winning-loop"]
+
+
+def test_a_loss_is_not_counted_as_a_lap(qapp):
+    """`lost_to` and Phase H own defeats. This rung is about the other
+    face, and mixing them would double-count one bad fight."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.runner = None
+    board = "Calista@9680+Black Cap@1740"
+    seat.goal = "Talk To Deirdre Madden in The Wild"
+    for _ in range(worker.WINNING_LOOP + 2):
+        seat.tel.start_fight()
+        seat.tel.fights[-1].opening = board
+        worker._watch_for_a_winning_loop(seat, False)
+    assert not [e for e in seat.tel.questing if e["kind"] == "winning-loop"]
+
+
+def test_the_win_memory_ages_out(qapp):
+    """A grind that comes back an hour later is a fresh question."""
+    import time
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.runner = None
+    board = "Calista@9680+Black Cap@1740"
+    goal = "Talk To Deirdre Madden in The Wild"
+    old = time.monotonic() - worker.WIN_MEMORY - 60
+    seat.won_to[board] = [(old, goal)] * (worker.WINNING_LOOP + 2)
+
+    _won_a_fight(worker, seat, board, goal)
+    assert not [e for e in seat.tel.questing if e["kind"] == "winning-loop"]
+
+
+def test_a_winning_loop_hands_off_to_the_script_restart(qapp):
+    """wizAi cannot walk to an NPC itself. A restart replays the route
+    dispatch, which is what put the party in the instance in the first
+    place — and it is throttled by the same clock every other restart
+    honours, so a loop cannot become a metronome."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    board = "Calista@9680+Black Cap@1740"
+    goal = "Talk To Deirdre Madden in The Wild"
+
+    restarted = []
+
+    class _Runner:
+        skipped_setup = ()
+
+        def restart(self):
+            restarted.append(True)
+            return True
+
+    worker.seats[0].runner = _Runner()
+    worker._script_restarted_at = -1e9
+    for _ in range(worker.WINNING_LOOP):
+        _won_a_fight(worker, seat, board, goal)
+
+    assert restarted, "the loop was reported and nothing acted"
+    assert [e for e in seat.tel.questing if e["kind"] == "script-restarted"]
+
+    # ...and the throttle holds against the next loop.
+    seat.said_loop = ""
+    for _ in range(worker.WINNING_LOOP):
+        _won_a_fight(worker, seat, board, goal)
+    assert len(restarted) == 1, "a loop became a restart metronome"
+
+
 def _walled(worker, seat, opening, n=None, alone=True):
     """Give this seat `n` recorded losses to one board."""
     import time
@@ -20442,6 +20576,76 @@ def test_the_stall_escalation_runs_on_a_clock_the_script_cannot_reset(qapp):
     assert time.monotonic() - worker._nothing_achieved_since(seat) < 5.0
 
 
+def test_shuttling_between_two_zones_is_not_progress(qapp):
+    """Rev f27693c2's last thirty minutes: the goal sat unchanged on
+    `Talk To Deirdre Madden in The Wild` while the party shuttled
+    `The Wild <-> Cave of Anguish` eight times and killed
+    `Calista@9680+Black Cap@1740` eight times, winning every one — and
+    **not one** escalation line reached the export, because
+    `zone_since` is restamped on any zone change at all and every clock
+    the ladder reads was being reset twice a cycle.
+
+    The achievement clock survived the script's position teleports and
+    not its zone teleports."""
+    import time
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    now = time.monotonic() - 1800.0
+    seat.goal_at = now
+    worker._note_zone(seat, "Avalon/AV_Z04_TheWild", now)
+
+    # eight laps, a couple of minutes apart, exactly as the run did.
+    # The FIRST arrival in the cave is real progress and counts; the
+    # seven round trips after it are the lap.
+    for i in range(8):
+        worker._note_zone(seat, "Avalon/Interiors/AV_Z04_Cave02",
+                          now + 250 * i + 100)
+        worker._note_zone(seat, "Avalon/AV_Z04_TheWild",
+                          now + 250 * i + 200)
+
+    assert seat.zone_fresh_at == now + 100, \
+        "the round trips read as fresh arrivals — the shuttle looked "\
+        "like travel"
+    stalled = time.monotonic() - worker._nothing_achieved_since(seat)
+    assert stalled > 1500.0, \
+        f"the stall clock reads {stalled:.0f}s — the shuttle reset it"
+    assert seat.zone_since == now + 250 * 7 + 200, \
+        "`zone_since` must keep its own meaning for the rungs that use it"
+
+
+def test_a_zone_it_has_not_just_come_from_is_still_progress(qapp):
+    """The half that must not change. A party actually travelling is
+    the normal case, and calling that a stall would fire on every run."""
+    import time
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    now = time.monotonic()
+    for i, zone in enumerate(("Avalon/AV_Z00_Hub", "Avalon/AV_Z02_HighRoad",
+                              "Avalon/AV_Z03_CaerLyon",
+                              "Avalon/AV_Z04_TheWild")):
+        worker._note_zone(seat, zone, now + i)
+    assert seat.zone_fresh_at == now + 3, "a real journey was called a lap"
+    assert time.monotonic() - worker._nothing_achieved_since(seat) < 5.0
+
+
+def test_a_zone_revisited_long_afterwards_is_progress_again(qapp):
+    """A lap is a lap for a while. Coming back to the world hub an hour
+    later is a journey, and the memory has to age or a long run writes
+    off everywhere it has ever been."""
+    import time
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    now = time.monotonic()
+    worker._note_zone(seat, "Avalon/AV_Z00_Hub", now)
+    worker._note_zone(seat, "Avalon/AV_Z02_HighRoad", now + 10)
+    late = now + worker.ZONE_BOUNCE_WINDOW + 60
+    worker._note_zone(seat, "Avalon/AV_Z00_Hub", late)
+    assert seat.zone_fresh_at == late, "the zone memory never ages"
+
+
 def test_a_new_cell_does_not_clear_the_stall_escalation(qapp):
     """The 5/10/20/40/80-minute band scheme exists so the export shows a
     stall GROWING. Clearing it on a new position cell collapsed it to
@@ -20591,6 +20795,56 @@ def test_a_sigil_that_finally_fires_owes_nothing(monkeypatch):
     worker._sigil_fired(seat)
     assert worker._sigil_spent(seat) == 0, \
         "a spot that fired kept paying for the tries it took"
+
+
+def test_a_plain_marker_hold_that_fires_nothing_charges_a_dud(monkeypatch):
+    """`COUNT_HOLD_DUDS` is documented as the backstop for "this spot
+    has taken three full holds and never fired", and the whole
+    `_sigil_cell` re-keying exists so that count can accumulate. The
+    branch that produced 10 of rev f27693c2's 19 dead holds charged
+    nothing into it, so the counter it protects was inert for the
+    commonest case."""
+    import asyncio
+    import time
+
+    worker, seat, other = _at_the_sigil(monkeypatch)
+    worker.COUNT_HOLD_EVERY = 0.0
+    before = worker._sigil_dud(seat)
+
+    seat.count_hold_seen = time.monotonic() - 1.0
+    asyncio.run(worker._maybe_count_hold(seat))       # arms the hold
+    assert worker._countdown_held(), "the hold never armed"
+
+    worker._count_hold_until = time.monotonic() - 1.0  # it ran out
+    asyncio.run(worker._maybe_count_hold(seat))        # notices expiry
+
+    assert worker._sigil_dud(seat) == before + 1, \
+        "a full hold that fired nothing paid nothing into the memory "\
+        "that stops the next one"
+    said = [e for e in seat.tel.questing
+            if e["kind"] == "countdown-hold-over"
+            and "not a counting sigil" in e["detail"]]
+    assert said, "it expired down some other branch than the one under test"
+
+
+def test_the_hold_fits_the_measured_shape_of_a_real_countdown(qapp):
+    """Measured, not argued. Across 151 successful holds in every export
+    ever taken the guard needed a median of 15.6s, p95 32.6s, and never
+    more than 43.5s — while 19 of rev f27693c2's 34 episodes ran the
+    clock out and fired nothing, 17% of an 81-minute run.
+
+    The hold has to sit above the p95 of what a real countdown needs and
+    well below the length that made dead holds the run's biggest single
+    cost."""
+    from deimos_bridge.gui.live import LiveWorker
+
+    assert 32.6 <= LiveWorker.COUNT_HOLD <= 40.0, \
+        (f"COUNT_HOLD is {LiveWorker.COUNT_HOLD}s: below the p95 of "
+         f"successful holds (32.6s) it starts costing real entries, and "
+         f"above 40 it is back to paying the full length at every "
+         f"non-sigil")
+    assert LiveWorker.COUNT_HOLD > LiveWorker.COUNT_HOLD_RETRY, \
+        "a hold shorter than its own retry cadence retries nothing"
 
 
 def test_a_partners_prompt_charges_one_dud_per_visit_not_per_tick(
@@ -21112,6 +21366,151 @@ def test_a_quest_that_is_not_in_the_book_is_reported_as_such(monkeypatch):
     assert "txtGoal" not in book.clicked
 
 
+# ---- past the first four entries
+#
+# Rev f27693c2's run 8. The quester's tracker fell onto a Wizard City
+# side quest, the script's own lost-quest routine walked the party to
+# Triton Avenue, and 24 of the run's 41 minutes went on level-10
+# content. The cure finally ran at t=2431 and the export carries the
+# page it read: "Wizard City Unicorn Way ... Firecat Alley ... Cyclops
+# Lane". A wizard freshly through the journal's Quest Finder carries a
+# page of newly accepted side quests -- which is exactly the state this
+# cure is FOR, and exactly the state where the first four entries hold
+# none of the answers. It concluded the Avalon quest had never been
+# accepted and stood down for another thirty minutes.
+
+class _PagedBook(_TrackedBook):
+    """A journal with more accepted quests than fit on one page.
+
+    `btnRight` turns to the next; `pager=False` builds the same journal
+    with no way forward at all, which is the case the report has to be
+    honest about.
+    """
+
+    def __init__(self, pages, tracked="", pager=True, **kw):
+        self.pages = [list(p) for p in pages]
+        self.page = 0
+        super().__init__(listing=self.pages[0], tracked=tracked, **kw)
+        self.all_listing = list(self.pages[0])
+        kids = self.root_window._children[0]._children[0]._children[0]
+        kids._children.append(_RWin("btnRight" if pager
+                                    else "QuestLogUpButton"))
+        book = self
+        inner = self.mouse_handler.click_window
+
+        class _M:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def click_window(self, win):
+                name = await win.name()
+                if name in ("btnRight", "QuestLogAllButton"):
+                    book.clicked.append(name)
+                    # The last page turned again renders the same four:
+                    # that is how a real journal ends, and how a control
+                    # that is not a pager behaves every time.
+                    book.page = (0 if name == "QuestLogAllButton"
+                                 else min(book.page + 1,
+                                          len(book.pages) - 1))
+                    book.listing = list(book.pages[book.page])
+                    return
+                await inner(win)
+
+        self.mouse_handler = _M()
+
+
+def test_a_quest_behind_the_first_page_is_found_and_selected(monkeypatch):
+    """The whole of run 8's last failure. The quest was in the book;
+    the read could not reach it."""
+    import asyncio
+
+    questing = _fast_select(monkeypatch)
+    book = _PagedBook([["Know Thine Enemy", "Shard Trek", "Dirt Mound",
+                        "Blue Oyster Cult"],
+                       ["Family Values", "Red Heads"]],
+                      tracked="Quest Finder")
+    ok, why, in_book = asyncio.run(
+        questing.select_quest(book, ["Family Values"]))
+    assert ok, why
+    assert "btnRight" in book.clicked, "the page was never turned"
+    assert book.tracked == "Family Values"
+
+
+def test_paging_stops_when_the_page_stops_changing(monkeypatch):
+    """A journal's last page turned again renders the same four. So
+    does a control that is not a pager at all — and both have to end
+    the search rather than click forever."""
+    import asyncio
+
+    questing = _fast_select(monkeypatch)
+    book = _PagedBook([["Know Thine Enemy", "Shard Trek"],
+                       ["Family Values", "Red Heads"]],
+                      tracked="Quest Finder")
+    ok, why, in_book = asyncio.run(
+        questing.select_quest(book, ["Eye of Krok"]))
+    assert not ok
+    assert in_book is False
+    assert "across 2 page(s)" in why, why
+    assert book.clicked.count("btnRight") <= questing.QUEST_BOOK_MAX_PAGES
+    assert "Family Values" in why, "the later page belongs in the report"
+
+
+def test_paging_stops_at_the_cap(monkeypatch):
+    """A control that renders a NEW page every time is still bounded:
+    the book is held open for every one of them, and a wizard that
+    cannot move is the cost."""
+    import asyncio
+
+    questing = _fast_select(monkeypatch)
+    book = _PagedBook([[f"Page {i} Quest"] for i in range(9)],
+                      tracked="Quest Finder")
+    ok, why, _in = asyncio.run(
+        questing.select_quest(book, ["Family Values"]))
+    assert not ok
+    assert f"across {questing.QUEST_BOOK_MAX_PAGES} page(s)" in why, why
+
+
+def test_with_no_pager_the_giveup_names_the_lists_own_children(monkeypatch):
+    """The half that makes the next revision cheap. Nothing in this
+    codebase has a verified path to the journal's paging control —
+    `Deimos/src/paths.py` names the four slots and the All sort and
+    stops — so a run that cannot find one puts the window names it DID
+    see in the export, and the guessing happens once."""
+    import asyncio
+
+    questing = _fast_select(monkeypatch)
+    book = _PagedBook([["Know Thine Enemy", "Shard Trek"],
+                       ["Family Values"]],
+                      tracked="Quest Finder", pager=False)
+    ok, why, in_book = asyncio.run(
+        questing.select_quest(book, ["Family Values"]))
+    assert not ok
+    assert in_book is False
+    assert "QuestLogUpButton" in why, why
+    assert "wndQuestInfo0" in why, "name every child, not the odd one out"
+    assert "across 1 page(s)" in why
+    assert "evidence, not proof" in why
+
+
+def test_the_pager_is_never_an_entry_window(monkeypatch):
+    """Clicking `wndQuestInfo{n}` SELECTS the quest under it. Picking
+    one at random is the exact failure the book work exists to cure, so
+    an entry is refused before a name hint is even considered."""
+    import asyncio
+
+    questing = _fast_select(monkeypatch)
+    book = _PagedBook([["Know Thine Enemy"]], tracked="Quest Finder",
+                      pager=False)
+    kids = book.root_window._children[0]._children[0]._children[0]
+    kids._children.append(_RWin("wndQuestInfoDownArrow"))
+    found = asyncio.run(questing._Book(book).pager())
+    assert found[0] is None, "an entry window was taken for a pager"
+    assert "wndQuestInfoDownArrow" in found[1], "still name it in the report"
+
+
 def test_two_matching_entries_are_never_guessed_between(monkeypatch):
     """Clicking the wrong entry re-tracks the wrong quest, which is the
     disease this is the cure for. An ambiguous match is a refusal."""
@@ -21532,6 +21931,165 @@ def test_a_stall_needs_real_clocks_not_unread_ones(monkeypatch):
     monkeypatch.setattr(questing, "select_quest", select)
     asyncio.run(worker._maybe_recover_questline(lost))
     assert calls == [], "unread clocks were taken as a stall"
+
+
+def test_a_quester_in_another_world_skips_the_alone_wait(monkeypatch):
+    """Rev f27693c2's run 8, entire. The tracker fell onto a Wizard
+    City side quest, the script's own lost-quest routine put the party
+    on Triton Avenue, and the quester spent 24 of the run's 41 minutes
+    there — shuttling zones and winning fights, so every "is the side
+    quest being worked" test answered yes — while `last_main` held an
+    Avalon quest throughout. A quester whose BODY has left the world
+    its own main line is in is not running a side chain."""
+    import asyncio
+    import time
+
+    questing = _no_dialogue(monkeypatch)
+    worker, lost = _off_the_line(orders=("Gather the Troops",))
+    worker.booster_party = True
+    worker.leader = lost.index
+    lost.last_main = ("Krokotopia", 12, "Gather the Troops")
+    now = time.monotonic()
+    lost.off_line_since = now - 400
+    # Every sign of the side quest being worked, as run 8 read them.
+    lost.goal_at = now
+    lost.zone_since = now
+    lost.zone_fresh_at = now
+    lost.zone_seen = "WizardCity/WC_Streets/WC_Triton"
+    calls = []
+
+    async def select(_c, names, on_status=None):
+        calls.append(list(names))
+        return True, names[0], True
+
+    monkeypatch.setattr(questing, "select_quest", select)
+    asyncio.run(worker._maybe_recover_questline(lost))
+    assert len(calls) == 1, "the world it is standing in was not evidence"
+    said = [e for e in lost.tel.questing
+            if e["kind"] == "questline-recovered"]
+    assert said, [e["kind"] for e in lost.tel.questing]
+    assert "WizardCity" in said[0]["detail"], "say WHY the wait was skipped"
+
+
+def test_a_quester_in_its_own_world_still_serves_the_alone_wait(monkeypatch):
+    """The half that keeps the rule honest. A side chain run in the
+    world the main line is already in is exactly what
+    `RECOVER_ALONE_AFTER` exists to leave alone, and a rule that fired
+    on it would be wizAi fighting the script it is driving."""
+    import asyncio
+    import time
+
+    questing = _no_dialogue(monkeypatch)
+    worker, lost = _off_the_line(orders=("Gather the Troops",))
+    worker.booster_party = True
+    worker.leader = lost.index
+    lost.last_main = ("Krokotopia", 12, "Gather the Troops")
+    now = time.monotonic()
+    lost.off_line_since = now - 400
+    lost.goal_at = now
+    lost.zone_since = now
+    lost.zone_fresh_at = now
+    lost.zone_seen = "Krokotopia/KT_Hub"
+    calls = []
+
+    async def select(_c, names, on_status=None):
+        calls.append(list(names))
+        return True, names[0], True
+
+    monkeypatch.setattr(questing, "select_quest", select)
+    asyncio.run(worker._maybe_recover_questline(lost))
+    assert calls == [], "a side chain at home was cut short"
+    assert [e for e in lost.tel.questing
+            if e["kind"] == "questline-recovery-waiting"]
+
+
+def test_a_two_zone_shuttle_is_not_the_side_quest_being_worked(monkeypatch):
+    """`zone_since` is restamped by ANY zone change, so a wizard
+    bouncing between two zones defeated the stall test forever — the
+    failure's own repetition holding shut the escape hatch built for
+    it. Phase J's achievement clock ignores a return to a zone just
+    left, and this rung was the last one still reading the raw one."""
+    import asyncio
+    import time
+
+    questing = _no_dialogue(monkeypatch)
+    worker, lost = _off_the_line(orders=("Gather the Troops",))
+    worker.booster_party = True
+    worker.leader = lost.index
+    lost.last_main = ("Krokotopia", 12, "Gather the Troops")
+    now = time.monotonic()
+    lost.off_line_since = now - 400
+    lost.goal_at = now - 400            # the goal has not moved
+    lost.zone_fresh_at = now - 400      # ...nor has it reached anywhere new
+    lost.zone_since = now               # ...but it changed zone a moment ago
+    lost.zone_seen = "Krokotopia/KT_Hub"      # its own world: that rule stays out
+    calls = []
+
+    async def select(_c, names, on_status=None):
+        calls.append(list(names))
+        return True, names[0], True
+
+    monkeypatch.setattr(questing, "select_quest", select)
+    asyncio.run(worker._maybe_recover_questline(lost))
+    assert len(calls) == 1, "the shuttle still read as progress"
+
+
+def test_a_winning_loop_skips_the_alone_wait(monkeypatch):
+    """Fights 7-10 of run 8 were all `The Harvest Lord@510+Rotted
+    Fodder@150` under one unchanged goal. Phase K already records
+    that; a board beaten over and over while the goal stands still is
+    the opposite of a side quest being worked, and the cure was
+    waiting on the claim that it was."""
+    import asyncio
+    import time
+
+    questing = _no_dialogue(monkeypatch)
+    worker, lost = _off_the_line(orders=("Gather the Troops",))
+    worker.booster_party = True
+    worker.leader = lost.index
+    lost.last_main = ("Krokotopia", 12, "Gather the Troops")
+    now = time.monotonic()
+    lost.off_line_since = now - 400
+    lost.goal = "Talk To Sandor Spitfire in Triton Avenue"
+    lost.goal_at = now                  # every clock fresh...
+    lost.zone_since = now
+    lost.zone_fresh_at = now
+    lost.zone_seen = "Krokotopia/KT_Hub"      # ...and its own world
+    lost.won_to = {"The Harvest Lord@510+Rotted Fodder@150":
+                   [(now - 200, lost.goal), (now - 100, lost.goal),
+                    (now - 20, lost.goal)]}
+    calls = []
+
+    async def select(_c, names, on_status=None):
+        calls.append(list(names))
+        return True, names[0], True
+
+    monkeypatch.setattr(questing, "select_quest", select)
+    asyncio.run(worker._maybe_recover_questline(lost))
+    assert len(calls) == 1, "three wins on one unmoving goal read as work"
+
+
+def test_a_board_won_while_the_goal_advances_is_not_a_loop():
+    """The discriminator `_watch_for_a_winning_loop` is built on, read
+    the same way by the read-only half: a board beaten repeatedly while
+    the goal MOVES is a respawning mob on the route."""
+    import time
+
+    worker, lost = _off_the_line(orders=("Gather the Troops",))
+    now = time.monotonic()
+    lost.goal = "Talk To Sandor Spitfire in Triton Avenue"
+    lost.won_to = {"The Harvest Lord@510": [(now - 200, "an older goal"),
+                                            (now - 100, "another one"),
+                                            (now - 20, lost.goal)]}
+    assert worker._in_a_winning_loop(lost, now) == 0
+    lost.won_to["The Harvest Lord@510"] = [(now - 200, lost.goal),
+                                           (now - 100, lost.goal),
+                                           (now - 20, lost.goal)]
+    assert worker._in_a_winning_loop(lost, now) == 3
+    # ...and a win older than the memory does not count towards one.
+    lost.won_to["The Harvest Lord@510"][0] = (now - worker.WIN_MEMORY - 1,
+                                              lost.goal)
+    assert worker._in_a_winning_loop(lost, now) == 0
 
 
 def test_a_quest_that_is_not_in_the_book_is_not_retried_forever(monkeypatch):
@@ -22169,6 +22727,85 @@ def test_the_same_death_straight_after_a_reload_backs_off():
     asyncio.run(worker._script_step(seat))
     assert runner.restarted == 2
     assert worker._reload_cool == 60.0
+
+
+#: the crash rev f27693c2's run 8 opened on. `_fetch_tracked_quest`
+#: (`Deimos/src/deimoslang/vm.py:365`) raises when `quest_id()` names
+#: nothing in `quest_data()` -- the journal's Quest Finder pseudo-entry,
+#: from the inside.
+_TRACKED_QUEST_CRASH = (
+    "stuck on one instruction — it has raised 25 times without the "
+    "script moving on (VMError: Unable to fetch the currently tracked "
+    "quest for client with title wizAi 2 · w0 · fire)")
+
+
+def test_a_tracked_quest_crash_loop_wakes_the_questline_rung():
+    """The backoff already reaches the conclusion it cannot act on:
+    "Reloading is not fixing this — the state it crashes on is what
+    needs fixing". When that state is the TRACKER, wizAi has the cure
+    two rungs down and it was gated behind a clock nothing had
+    started. Run 8 spent t=222 to t=476 on four reloads and three
+    backoffs of this exact error with `select_quest` sitting unused,
+    and the party was in Wizard City twenty minutes later."""
+    import asyncio
+
+    worker, seat, runner = _stale_party()
+    runner.last_error = _TRACKED_QUEST_CRASH
+    runner.stale_sig = "ip 214: VMError: Unable to fetch the currently"
+    asyncio.run(worker._script_step(seat))            # reload #1
+    runner.stale = True                               # ...died the same way
+    assert seat.off_line_since is None
+    asyncio.run(worker._script_step(seat))            # the backoff
+    assert seat.off_line_since is not None, "the cure was never given a look"
+    assert "questline-suspect" in [e["kind"] for e in seat.tel.questing]
+    assert worker.seats[1].off_line_since is None, \
+        "the error named one client; three other clocks started"
+
+
+def test_an_ordinary_crash_loop_leaves_the_questline_alone():
+    """The rev 7d9b6d6b lang-file crash says nothing about the tracker,
+    and starting an off-the-line clock on it would put every wizard
+    whose script hiccups in front of the quest book."""
+    import asyncio
+
+    worker, seat, runner = _stale_party()
+    asyncio.run(worker._script_step(seat))
+    runner.stale = True
+    asyncio.run(worker._script_step(seat))
+    assert "script-reload-backoff" in [e["kind"] for e in seat.tel.questing]
+    assert seat.off_line_since is None
+    assert "questline-suspect" not in [e["kind"] for e in seat.tel.questing]
+
+
+def test_a_booster_is_never_woken_by_the_scripts_tracked_quest_crash():
+    """A booster's journal is a max-level wizard's, parked wherever it
+    stopped. It has no questline to lose and nothing to put back."""
+    import asyncio
+
+    worker, seat, runner = _stale_party()
+    worker.booster_party = True
+    worker.leader = 0                       # seat 0 quests, seat 1 boosts
+    runner.last_error = _TRACKED_QUEST_CRASH.replace("w0", "somebody")
+    runner.stale_sig = "ip 214: VMError: Unable to fetch the currently"
+    asyncio.run(worker._script_step(seat))
+    runner.stale = True
+    asyncio.run(worker._script_step(seat))
+    assert worker.seats[0].off_line_since is not None
+    assert worker.seats[1].off_line_since is None, "the booster was woken"
+
+
+def test_a_wizard_on_the_main_line_clears_the_suspicion_at_once():
+    """What makes the un-gating safe. `_wake_the_questline` starts a
+    clock and nothing else: the placement pass still has to agree, and
+    a wizard reading on-main has it cleared on the very next poll."""
+    import time
+
+    worker = _party_on_quests(["Gather the Troops", "Gather the Troops"])
+    seat = worker.seats[0]
+    seat.off_line_since = time.monotonic() - 5
+    worker._check_on_questline()
+    assert seat.off_line_since is None
+    assert "back-on-questline" in [e["kind"] for e in seat.tel.questing]
 
 
 def test_a_different_death_reloads_immediately_and_resets_the_backoff():
@@ -23777,6 +24414,220 @@ def test_the_service_tick_gates_the_tracker_cures_off_boosters():
     assert booster_rung, "no booster rung in the tick"
     assert all("_sync_follower" not in b for b in booster_rung)
     assert all("_follow_step" in b for b in booster_rung)
+
+
+# ---- more than one boostee
+#
+# The operator's own question, in their words: "do we even have a mode
+# for multiple boostees with a booster? I thought it was just the
+# booster boostee at the moment". It was: `_is_booster` was "not the
+# leader", so N seats gave one quester and N-1 boosters and nothing
+# could spell anything else. Many boosters always worked; many QUESTERS
+# did not exist.
+
+def _boostee_worker(boosters=None, leader=0, seats=3):
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    return LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1,
+                      seats=[SeatConfig(school="fire")
+                             for _ in range(seats - 1)],
+                      booster_party=True, boosters=boosters, leader=leader)
+
+
+def test_boosters_unset_still_means_every_non_leader(qapp):
+    """The default has to be byte for byte what the mode always meant,
+    because every run that exists was configured before roles did."""
+    w = _boostee_worker(boosters=None, leader=1)
+    assert w.boosters is None
+    assert [w._is_booster(s) for s in w.seats] == [True, False, True]
+    assert [w._is_boostee(s) for s in w.seats] == [False, False, False]
+    assert [s.index for s in w._questers()] == [1]
+
+
+def test_a_seat_left_out_of_the_boosters_is_a_second_quester(qapp):
+    """Muscle is named now rather than inferred from "not the leader"."""
+    w = _boostee_worker(boosters={2})
+    assert [w._is_booster(s) for s in w.seats] == [False, False, True]
+    assert [w._is_boostee(s) for s in w.seats] == [False, True, False]
+    assert [s.index for s in w._questers()] == [0, 1]
+
+
+def test_a_boostee_follows_nobody(qapp):
+    """It is levelling its own questline, and a wizard walking to
+    somebody else's marker cannot walk to its own."""
+    w = _boostee_worker(boosters={2})
+    assert [w._follows(s) for s in w.seats] == [False, False, True]
+
+
+def test_a_booster_shadows_whichever_quester_is_fighting(qapp):
+    """The operator's framing is the whole rule: "the booster needs to
+    join combats to beat them as quick as possible"."""
+    w = _boostee_worker(boosters={2})
+    for seat in w.seats:
+        seat.client = object()
+    lead, boostee, muscle = w.seats
+    # Nobody fighting: the leader, exactly as a one-quester party.
+    assert w._boost_target(muscle) is lead
+    boostee.in_duel, boostee.duel_since = True, 100.0
+    assert w._boost_target(muscle) is boostee
+    # ...and the longest-running fight first — that is the one help
+    # shortens most, and ending it frees the booster for the other.
+    lead.in_duel, lead.duel_since = True, 50.0
+    assert w._boost_target(muscle) is lead
+    lead.in_duel = False
+    assert w._boost_target(muscle) is boostee
+
+
+def test_a_quester_is_never_given_a_boost_target(qapp):
+    w = _boostee_worker(boosters={2})
+    for seat in w.seats:
+        seat.client = object()
+    w.seats[1].in_duel, w.seats[1].duel_since = True, 100.0
+    assert w._boost_target(w.seats[0]) is w.seats[0]
+    assert w._boost_target(w.seats[1]) is w.seats[0]
+
+
+def test_the_duel_clock_stamps_the_transition_not_every_tick(qapp):
+    """`_boost_target` asks which fight has been going longest, so the
+    stamp has to be when the duel STARTED."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._service_loop)
+    assert "seat.in_duel != was_fighting" in src, \
+        "the duel clock is restamped every tick, so every fight is new"
+
+
+def test_the_hive_is_not_told_a_boostee_is_muscle(qapp):
+    """The overkill guard never holds a booster. A boostee is not one —
+    it has a next fight of its own, which is the whole reason the guard
+    exists."""
+    w = _boostee_worker(boosters={2})
+    assert w._make_hive().boosters == {2}
+
+
+def test_the_tick_gives_a_boostee_its_own_quest_step():
+    """A boostee gets the cure rungs a booster is gated off — it has a
+    questline to lose — and its own quest step rather than a follow.
+    It cannot reach the `auto_quest` arm below: that flag is
+    worker-wide and "Booster party + script" leaves it off."""
+    import ast
+    import inspect
+    import textwrap
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = textwrap.dedent(inspect.getsource(LiveWorker._service_loop))
+    tree = ast.parse(src)
+    guards = {}
+
+    class Walk(ast.NodeVisitor):
+        def visit_If(self, node):
+            test = ast.unparse(node.test)
+            for sub in node.body:
+                for call in ast.walk(sub):
+                    if (isinstance(call, ast.Call)
+                            and getattr(call.func, "attr", "") == "_stage"
+                            and len(call.args) >= 2
+                            and isinstance(call.args[1], ast.Constant)):
+                        guards.setdefault(call.args[1].value, []).append(
+                            (test, ast.unparse(sub)))
+            self.generic_visit(node)
+
+    Walk().visit(tree)
+    for label in ("re-arming the quest arrow",
+                  "recovering the main questline", "changing realms",
+                  "walking through the door"):
+        assert any("_is_boostee" in test for test, _b in guards[label]), \
+            f"{label!r} is shut to a second quester"
+    arms = [body for test, body in guards["questing on its own line"]
+            if "_is_boostee" in test]
+    assert arms, "no boostee rung in the tick"
+    assert all("_quest_step" in body for body in arms)
+    assert all("_follow_step" not in body for body in arms)
+
+
+def test_only_the_boostee_shape_levels_more_than_one_questline(qapp):
+    """The predicate the party rules stand down on, and it has to be
+    narrow. `_questers()` is every seat outside booster mode, so a
+    plain three-wizard party reads as three questers — guarding on THAT
+    would take the majority-zone rule, the split-sigil drag and the
+    regroup away from every party that has ever run."""
+    from deimos_bridge.gui.live import LiveWorker, SeatConfig
+
+    def party(**kw):
+        return LiveWorker(Telemetry(), "ice", [], "ttk-lookahead", 1,
+                          seats=[SeatConfig(school="fire"),
+                                 SeatConfig(school="storm")], **kw)
+
+    assert not party()._many_questlines()
+    assert not party(follow_leader=True)._many_questlines()
+    assert not party(booster_party=True)._many_questlines()
+    assert party(booster_party=True, boosters={2})._many_questlines()
+
+
+def test_a_second_quester_in_another_zone_is_not_a_straggler(monkeypatch):
+    """There is no single "where the party is" when the party levels
+    two questlines. The majority is only ever one of them — so with a
+    quester, a booster and a second quester, the majority is whichever
+    quester the booster is standing with, and the other would be
+    dragged off its own step every poll."""
+    worker, read_zone = _zoned_party(
+        ["Olde Town", "Unicorn Way", "Olde Town"])
+    worker.booster_party = True
+    worker.leader = 0
+    worker.boosters = {2}
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+    said = [e for e in worker.seats[1].tel.questing
+            if e["kind"] == "rejoin-refused"]
+    assert said, [e["kind"] for e in worker.seats[1].tel.questing]
+    assert "questlines" in said[0]["detail"] \
+        or "quester" in said[0]["detail"], said[0]["detail"]
+
+
+def test_muscle_in_the_wrong_zone_is_still_a_straggler(monkeypatch):
+    """A booster has no line of its own and its whole job is to be
+    where a quester is. The refusal above is about questers only."""
+    worker, read_zone = _zoned_party(
+        ["Olde Town", "Olde Town", "Unicorn Way"])
+    worker.booster_party = True
+    worker.leader = 0
+    worker.boosters = {2}
+    assert _look(worker, read_zone, monkeypatch) == (None, None)
+    worker.seats[2].stranded_since -= worker.STRANDED_AFTER + 1
+    seat, _target = _look(worker, read_zone, monkeypatch)
+    assert seat is worker.seats[2], "the booster was excused as a quester"
+
+
+def test_the_export_names_a_boostee_and_counts_the_questlines(qapp):
+    """Every party rule reads differently at two questlines, so an
+    export that cannot say how many ran cannot be read at all."""
+    w = _boostee_worker(boosters={2})
+    assert [w._party_shape(s)["role"] for s in w.seats] == \
+        ["leader", "boostee", "booster"]
+    assert w._party_shape(w.seats[0])["questers"] == 2
+
+    plain = _boostee_worker(boosters=None)
+    assert [plain._party_shape(s)["role"] for s in plain.seats] == \
+        ["leader", "booster", "booster"]
+    assert plain._party_shape(plain.seats[0])["questers"] == 1
+
+
+def test_the_boosters_row_spells_todays_behaviour_when_untouched(qapp):
+    """An untouched row hands the worker the same None the attribute
+    already defaults to, so a party nobody configured is unchanged."""
+    from deimos_bridge.gui.app import MainWindow
+
+    win = MainWindow(Telemetry())
+    win.booster_party = True
+    win.leader_pick.setCurrentIndex(0)
+    assert win.booster_seats(3) is None, "an untouched row invented a role"
+    win.booster_picks[1].setChecked(False)
+    assert win.booster_seats(3) == {2}
+    # ...and outside booster mode the row means nothing at all.
+    win.booster_party = False
+    assert win.booster_seats(3) is None
 
 
 def test_a_booster_row_reads_boosting(qapp):

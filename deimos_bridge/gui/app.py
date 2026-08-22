@@ -2304,6 +2304,26 @@ class MainWindow(QMainWindow):
             "the one wizard whose questline a booster run levels. "
             "Read at Play live.")
         row.addWidget(self.leader_pick)
+        # Which wizards are MUSCLE, in booster mode. Every non-leader
+        # ticked is what the mode has always meant, so an untouched row
+        # spells today's behaviour exactly; untick one and it becomes a
+        # BOOSTEE — a second quester walking its own line with wizAi's
+        # navigator, sharing the party's boosters.
+        row.addWidget(_label("Boosters", PALETTE["muted"]))
+        self.booster_picks = []
+        for i in range(MAX_WIZARDS):
+            box = QCheckBox(str(i + 1))
+            box.setChecked(True)
+            box.setToolTip(
+                "Booster party only. A ticked wizard is muscle: it joins "
+                "the quester's fights and does not quest. Unticked, it is "
+                "a second quester — it walks its own questline with "
+                "wizAi's navigator (not the script, which drives one "
+                "wizard) and the boosters join whichever quester is "
+                "fighting. The leader always quests. Read live.")
+            box.toggled.connect(self._push_quest_mode)
+            self.booster_picks.append(box)
+            row.addWidget(box)
         self.quest_script_btn = QPushButton("Choose script…")
         self.quest_script_btn.clicked.connect(self.on_edit_script)
         row.addWidget(self.quest_script_btn)
@@ -2422,13 +2442,40 @@ class MainWindow(QMainWindow):
         live.follow_leader = self.follow_leader.isChecked()
         live.leader = max(0, min(self.leader_pick.currentIndex(),
                                  len(live.seats) - 1))
+        live.boosters = self.booster_seats(len(live.seats))
         self.status.setText("questing mode applied to the running party")
+
+    def booster_seats(self, seats):
+        """Which seat indices boost, or None for "every non-leader".
+
+        None is what booster-party mode has always meant, and an
+        untouched Boosters row spells exactly that — so a party nobody
+        has configured hands the worker the same value the attribute
+        already defaults to, and every existing run is byte for byte
+        unchanged. Anything narrower means the seats left out are
+        boostees.
+        """
+        if not getattr(self, "booster_party", False):
+            return None
+        lead = self.leader_pick.currentIndex()
+        # The leader is a quester whatever its own box says, so its
+        # index never belongs in here — leaving it in would put a
+        # contradiction in the export and in every `role` read off it.
+        picked = {i for i, box in enumerate(self.booster_picks[:seats])
+                  if box.isChecked()} - {lead}
+        every = {i for i in range(seats) if i != lead}
+        return None if picked >= every else picked
 
     def _sync_quest_mode(self, _on=None):
         """Point the dropdown at whatever the checkboxes now say."""
+        booster = getattr(self, "booster_party", False)
+        for box in getattr(self, "booster_picks", ()):
+            # Muscle is a booster-party idea and nothing else. Leaving
+            # the row live in the other modes would let somebody spell
+            # a role the run cannot have.
+            box.setEnabled(booster)
         flags = (self.auto_quest.isChecked(), self.use_script.isChecked(),
-                 self.solo_script.isChecked(),
-                 getattr(self, "booster_party", False))
+                 self.solo_script.isChecked(), booster)
         for i, (_name, mode) in enumerate(self.QUEST_MODES):
             if mode == flags:
                 self.quest_mode.blockSignals(True)
@@ -2636,6 +2683,7 @@ class MainWindow(QMainWindow):
                                solo_script=self.solo_script.isChecked(),
                                booster_party=getattr(self, "booster_party",
                                                      False),
+                               boosters=self.booster_seats(len(rest) + 1),
                                leader=self.leader_pick.currentIndex(),
                                script_step_delay=(
                                    self.pace_step.value()
