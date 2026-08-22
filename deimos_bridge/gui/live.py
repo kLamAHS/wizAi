@@ -3334,6 +3334,14 @@ class LiveWorker(QThread):
                 # leader is `p1` and the preset's Main_Account.
                 source, filled = scripts.configure(
                     source, [(s.wizard_name, s.school) for s in crew])
+                # ...and tell it that every client it holds is a
+                # QUESTER. The preset's own default says otherwise --
+                # `All_Accounts_Are_Questing = False` makes p1 the
+                # muscle and skips `Player_One_Handler` entirely in
+                # every playercount branch above 1 -- and the VM here
+                # holds no muscle at all. See `scripts.questing_crew`
+                # for what the shipped default cost rev f6e07e6d.
+                source, all_quest = scripts.questing_crew(source, len(crew))
                 source, skipped_setup = self._fresh_source(seat, source)
                 seat.runner = scripts.make_runner(
                     [s.client for s in crew], source)
@@ -3350,7 +3358,14 @@ class LiveWorker(QThread):
                         + (f" ({len(filled)} account setting(s) filled in "
                            f"so its multi-client branches switch on)"
                            if filled else "")
-                        + "; the boosters are wizAi's — they keep to "
+                        + (f"; {scripts.CREW_VAR} was switched on, because "
+                           f"every client in this VM quests and the "
+                           f"preset's default treats p1 as the booster — "
+                           f"it never calls Player_One_Handler"
+                           if all_quest else
+                           f"; {scripts.CREW_VAR} was left as the script "
+                           f"has it")
+                        + ". The boosters are wizAi's — they keep to "
                           "whichever quester is fighting and join it, "
                           "their own journals ignored")
                 for other in self.seats:
@@ -3601,19 +3616,42 @@ class LiveWorker(QThread):
         doesnt need to quest)". So: whichever quester is IN a fight,
         the longest-running one first -- that is the fight help
         shortens most, and ending it frees the booster for the other.
-        Nobody fighting, and it is the leader, which is what every
-        one-quester party has always done and still does.
+
+        Nobody fighting, and it is the wizard being CAUGHT UP. That is
+        the operator's decision and it is the same rule one step
+        earlier: a catch-up is one wizard being driven through its own
+        content while the script is paused, so it is where the next
+        fight is going to be. Rev f6e07e6d is the cost of not having
+        it -- Oz stood beside a leader that the script was not
+        questing, `unchanged for 2 min` twice, while the other quester
+        walked six zones and fought The Harvest Lord alone
+        (`planned-alone`, round 1, unresolved). "the booster is acting
+        weird."
+
+        Then the leader, which is what every one-quester party has
+        always done and still does: `_catching_up()` is empty and
+        nobody is fighting, so this is unchanged for them.
+
+        Ordered on state that does not flap. A catch-up is singleton
+        worker state that changes only when one starts or ends -- the
+        alternative rule considered, "follow whichever quester moved
+        most recently", would swap the booster between two questers
+        every time one of them crossed a door.
         """
         boss = self.seats[self.leader]
         if not self._is_booster(seat):
             return boss
         fighting = [s for s in self._questers()
                     if s.client is not None and s.in_duel]
-        if not fighting:
-            return boss
-        return min(fighting,
-                   key=lambda s: (s.duel_since if s.duel_since is not None
-                                  else float("inf"), s.index))
+        if fighting:
+            return min(fighting,
+                       key=lambda s: (s.duel_since if s.duel_since is not None
+                                      else float("inf"), s.index))
+        catching = [s for s in self._catching_up()
+                    if s.client is not None and not self._is_booster(s)]
+        if catching:
+            return min(catching, key=lambda s: s.index)
+        return boss
 
     def _follows(self, seat):
         """Is this seat a follower rather than the one setting the pace?
@@ -7452,6 +7490,41 @@ class LiveWorker(QThread):
                         f"here, four minutes of a stopped script has "
                         f"not got the party through it"))
             return
+        apart = self._questers_apart()
+        if apart:
+            # A sigil admits exactly the wizards standing on it that
+            # HOLD THE QUEST. Two questers on different quests cannot
+            # be admitted together however long anybody waits, so there
+            # is no countdown here to protect and the hold is pure
+            # cost.
+            #
+            # The operator watched this: "it tried to have all 3 join a
+            # dungeon but because the lowest quester hadnt dont the
+            # quest yet it couldnt enter". Rev f6e07e6d paid for it
+            # twenty-four times -- eleven holds on Thomas, thirteen on
+            # Crispulo, in 35s cycles -- at the Fireglobe Theatre sigil
+            # that `The Cure` (main #23) opens and `Putting Out the
+            # Fire!` (main #18) does not.
+            #
+            # This is a stop to the bleeding and not the fix. Phase V's
+            # catch-up is the fix; this is what the party stops paying
+            # while it runs. Nothing here fires for a one-quester party
+            # or for a party the quest list cannot place -- `apart` is
+            # a MEASURED gap or nothing at all.
+            seat.count_hold_seen = None
+            self._count_hold_last = now
+            self._say_once(
+                seat, f"questers-apart:{self._sigil_cell(seat)}",
+                f"{seat.name} is not holding for a countdown here — "
+                f"{apart}, so a sigil cannot admit them together",
+                kind="countdown-hold-refused",
+                detail=(f"declined to hold the script: {apart}. A sigil "
+                        f"admits the wizards standing on it that hold "
+                        f"the quest, so there is no countdown here for "
+                        f"this party to be late for. The catch-up is "
+                        f"what closes this; holding is only what it "
+                        f"would cost while it does"))
+            return
         duds = self._sigil_dud(seat)
         if fight and duds >= 1 and not sensed \
                 and questing.goal_counter(seat.goal):
@@ -8639,6 +8712,68 @@ class LiveWorker(QThread):
         return [self._no_further_back(seat, place)
                 for seat, place in zip(self.seats, places)]
 
+    def _questers_apart(self):
+        """"5 quests apart (#18-#23)" when the crew has split, else "".
+
+        Answers only when the quest list can MEASURE the gap. A party
+        it cannot place, a party of one quester, and a party inside
+        `questlist.BEHIND_BY` of itself all return "" -- so every rung
+        that reads this is untouched for every run that existed before
+        a booster party had two questers.
+
+        `_quests_agree` already computes exactly this and phrases the
+        reason; this is the half of its answer that means "and they
+        cannot do the same content".
+
+        Gated exactly as `_check_in_step` is, and for its reasons. In
+        SOLO-PILOT mode the followers are behind by design -- they are
+        combat support, kept together by the follow rather than by the
+        questline -- so their journals say nothing about what a sigil
+        will admit, and reading them here would stop a solo-pilot run
+        holding for any sigil at all. `_questers()` is every seat
+        outside booster mode, which is what makes that trap possible.
+        """
+        if self.booster_party:
+            if len(self._questers()) < 2:
+                return ""
+        elif self._solo_pilot() or len(self._questers()) < 2:
+            return ""
+        together, why = self._quests_agree()
+        return "" if together is not False else (why or "")
+
+    def _quester_places(self):
+        """`_places`, with the muscle blanked out.
+
+        Positionally aligned to `self.seats` exactly as `_places` is;
+        a booster's entry is `None`. Every consumer already handles
+        that -- `questlist.furthest_behind` skips `None` outright, and
+        `_quests_agree` filters on `comparable` -- so this is a MASK
+        over the one placement function rather than a second way of
+        placing a party.
+
+        Why it has to exist. A booster's journal points wherever its
+        book was left; Oz spent rev f6e07e6d on `Magic: The
+        Archmastering` -- which the index places in CELESTIA -- while
+        the two questers worked Wizard City #18 and #23. Compared as
+        one party that is not even a gap, it is a party "split across 2
+        worlds", which `furthest_behind` refuses outright; park the
+        booster in the same world instead and it is "behind" forever,
+        so every catch-up starts on a wizard nobody is questing and
+        none of them can ever end. That is why `_check_in_step`
+        returned early for the whole mode -- and Phase Q made the
+        blanket refusal wrong, because a booster party now has a
+        QUESTING CREW whose divergence is exactly the failure the
+        catch-up exists for.
+
+        Outside booster mode `_questers()` is every seat, so this is
+        the identity and nothing that already works changes. Phase P's
+        `_many_questlines` broke seventeen tests by getting that
+        backwards, which is why it has a test of its own.
+        """
+        questers = {id(s) for s in self._questers()}
+        return [place if id(seat) in questers else None
+                for seat, place in zip(self.seats, self._places())]
+
     def _no_further_back(self, seat, place):
         """A wizard cannot un-finish a quest. Clamp a backwards read.
 
@@ -8690,7 +8825,15 @@ class LiveWorker(QThread):
         bits = []
         for seat, place in zip(self.seats, self._places()):
             where = f"#{place.order}" if place.comparable else "unplaced"
-            bits.append(f"{seat.name} {where} ({place.how or 'no quest'})")
+            how = place.how or "no quest"
+            # Named, not dropped. A booster's placement is real and
+            # worth seeing -- rev f6e07e6d's Oz reads Celestia #1
+            # beside two questers in Wizard City -- but it is not part
+            # of the gap anything measures, and a reader comparing
+            # three numbers in this line has no way to know that.
+            if self._is_booster(seat):
+                how += ", muscle — not compared"
+            bits.append(f"{seat.name} {where} ({how})")
         return " · ".join(bits)
 
     #: how long a wizard may be off the main line before it is said.
@@ -8808,15 +8951,20 @@ class LiveWorker(QThread):
             return
         now = time.monotonic()
         places = self._places()
-        # Where the party as a whole is, so the message can say what
-        # this wizard should be on instead of just what it is on.
-        main = [p for p in places if p.on_main]
+        # Where the QUESTING part of the party is, so the message can
+        # say what this wizard should be on instead of just what it is
+        # on. Quester places, because a booster parked on Wizard City
+        # main #1 would otherwise make "the party is on #1" the advice
+        # given to a wizard five worlds along.
+        main = [p for p in self._quester_places()
+                if p is not None and p.on_main]
         theirs = (f"#{min(p.order for p in main)}" if main else "")
         for seat, place in zip(self.seats, places):
             if seat.client is None:
                 continue
             if ((self._solo_pilot() or self.booster_party)
-                    and seat.index != self.leader):
+                    and seat.index != self.leader
+                    and not self._is_boostee(seat)):
                 # A follower's tracker drifting is expected -- nothing
                 # is questing it. The PILOT is still checked: it is the
                 # one wizard whose lost questline stalls the run, and
@@ -8825,6 +8973,19 @@ class LiveWorker(QThread):
                 # for the same reason, and more so: their recovery
                 # rungs are off by design, so a warning here would
                 # nag about a state nothing is ever going to cure.
+                #
+                # A BOOSTEE is not either of those. It is a quester,
+                # its lost questline stalls the run exactly as the
+                # leader's does, and the rungs that cure one are
+                # already running for it every tick
+                # (`_maybe_rearm_quest_arrow`, `_maybe_recover_questline`).
+                # What it was missing is the thing recorded three lines
+                # below: `seat.last_main`, which is the ONLY input to
+                # Phase M's `_wrong_world`. Never recorded, never
+                # compared -- so at rev f6e07e6d Crispulo finished the
+                # run in `WC_Triton_T1` fighting The Harvest Lord on a
+                # quest that names Fireglobe Theatre, and the rung
+                # built to notice exactly that could not fire.
                 continue
             if place.on_main:
                 # The last place on the line this wizard actually held,
@@ -9495,7 +9656,9 @@ class LiveWorker(QThread):
 
         if not questlist.loaded():
             return None, "the quest list did not load"
-        places = self._places()
+        # The questing crew, not the party. See `_quester_places`: a
+        # booster's frozen journal is not a gap in anybody's line.
+        places = [p for p in self._quester_places() if p is not None]
         orders = [p.order for p in places if p.comparable]
         if len(orders) < 2:
             return None, "fewer than two wizards could be placed"
@@ -9527,7 +9690,7 @@ class LiveWorker(QThread):
 
         if not questlist.loaded():
             return None
-        places = self._places()
+        places = self._quester_places()
         indices, gap, why = questlist.furthest_behind(places)
         if not indices:
             self._behind_why = why
@@ -9587,7 +9750,7 @@ class LiveWorker(QThread):
         honest "cannot tell" beats confidently walking the party to the
         wrong wizard, because `_should_catch_up` MOVES them.
         """
-        readable = [s for s in self.seats if s.goal]
+        readable = [s for s in self._questers() if s.goal]
         if len(readable) < 2:
             return None
         ranked = self._behind_by_questline()
@@ -9625,11 +9788,22 @@ class LiveWorker(QThread):
         instruction aimed at the wizard that fell behind is aimed at the
         wrong step.
 
-        Not in a booster party. A booster's journal points wherever it
-        was left -- diverging from the quester is the DESIGN -- so the
-        comparison has nothing to warn about, and at rev dbced750 it
-        spent a run reporting the booster "behind" on a quest nobody
-        was questing.
+        In a booster party this compares the QUESTERS. A booster's
+        journal points wherever it was left -- diverging from the
+        quester is the DESIGN -- so at rev dbced750 comparing the whole
+        party spent a run reporting the booster "behind" on a quest
+        nobody was questing, and the answer then was to switch the
+        whole mechanism off for the mode.
+
+        Phase Q made that answer wrong. A booster party is now the
+        script's questing CREW plus muscle, and two questers drifting
+        apart is precisely the failure this exists for -- rev f6e07e6d
+        is Thomas on Wizard City main #18 and Crispulo on #23 for six
+        and a half minutes, the operator watching it and wizAi's whole
+        catch-up engine sitting behind this one `or`. So the muscle is
+        masked out (`_quester_places`) rather than the mechanism turned
+        off, and a booster party with only ONE quester still has
+        nothing to compare and still returns here.
 
         This does not try to fix it. Nothing here can: the wizard that
         is behind has to actually complete the step it missed, and the
@@ -9672,11 +9846,21 @@ class LiveWorker(QThread):
         """
         import time
 
-        if len(self.seats) < 2 or self._solo_pilot() or self.booster_party:
+        if len(self.seats) < 2:
+            return
+        if self.booster_party:
+            # Booster mode forces `solo_script`, so `_solo_pilot()` is
+            # True for every booster party and testing it FIRST would
+            # leave this rung dead exactly where Phase Q needs it. The
+            # quester count is the real question here.
+            if len(self._questers()) < 2:
+                return
+        elif self._solo_pilot():
             return
         from .. import questing, questlist
 
-        goals = [s.goal for s in self.seats]
+        crew = self._questers()
+        goals = [s.goal for s in crew]
         now = time.monotonic()
         together, why = self._quests_agree()
         if together is None:
@@ -9700,7 +9884,7 @@ class LiveWorker(QThread):
         # Named, not counted. "the party is out of sync" sends you to
         # look at two windows; this says which wizard is on what.
         where = " · ".join(f"{s.name}: {s.goal or 'unreadable'}"
-                           for s in self.seats)
+                           for s in crew)
         # Bound before the `if`, not inside it. It was assigned inside,
         # and read after -- so on every tick where the desync line had
         # not CHANGED, `behind` was unbound and the whole service loop
@@ -10389,6 +10573,14 @@ class LiveWorker(QThread):
         behind = getattr(self, "_behind", None)
         if behind is None or len(self.seats) < 2:
             return False
+        # Never the muscle. Unreachable today -- a booster is not
+        # `driven`, and the only caller gates on that -- and it should
+        # stay unreachable on purpose rather than by accident: a
+        # booster sent "back to help" is a booster taken off the
+        # quester it was following, by a second mechanism, on a rule
+        # that was never about it.
+        if self._is_booster(seat):
+            return False
         # Never a wizard that is itself behind: it has its own step to
         # finish and following a wizard that is equally behind is a
         # circle. With a tied group that is two of three wizards, which
@@ -10407,6 +10599,21 @@ class LiveWorker(QThread):
     #: catch-up half-done, and no bound at all replaces one stall with a
     #: better-documented one, which is the failure this whole project
     #: exists to remove.
+    #:
+    #: PER QUEST OF THE GAP, and that is the operator's decision:
+    #: asked how hard wizAi should work to close a five-quest gap
+    #: between two questers, "close it however long it takes". A gap
+    #: that size is not one missed dialogue, it is five quests to play,
+    #: and 15 minutes for it is a limit that guarantees giving up.
+    #:
+    #: Safe because the absolute clock was never the one doing the
+    #: work. `CATCH_UP_STALL` and `CATCH_UP_IDLE` below are what kill a
+    #: catch-up that is not working, and both restart on every goal
+    #: change -- so this is unbounded patience for a catch-up that is
+    #: making progress and none at all for a wizard standing still.
+    #: Measured on the gap the catch-up STARTED with, not the one it
+    #: has now: `state["gap"]` shrinks as the laggard closes, and a
+    #: budget that shrank with it would cut off the last quest.
     CATCH_UP_LIMIT = 900.0
     #: and how long without the laggard's quest advancing before it is
     #: written off as something wizAi's questing cannot finish.
@@ -10504,8 +10711,9 @@ class LiveWorker(QThread):
                         f"{self.CATCH_UP_CHURN_REST / 60:.0f} min"))
             return
         self._catch_up_state = {
-            "seats": seats, "gap": gap, "started": now, "moved": now,
-            "goals": {id(s): s.goal for s in seats}, "why": why,
+            "seats": seats, "gap": gap, "gap0": gap, "started": now,
+            "moved": now, "goals": {id(s): s.goal for s in seats},
+            "why": why,
         }
         names = " and ".join(s.name for s in seats)
         is_are = "is" if len(seats) == 1 else "are"
@@ -10703,7 +10911,19 @@ class LiveWorker(QThread):
                 state["goals"][id(one)] = one.goal
                 state["moved"] = now
 
-        indices, gap, _why = questlist.furthest_behind(self._places())
+        # The SAME measurement the start used -- see `_quester_places`.
+        # `_behind_by_questline` masks the muscle out, and if this did
+        # not, a booster party's catch-up could not end correctly: a
+        # booster parked at the start of the line answers "behind" on
+        # every tick forever, so the questers agreeing reads as "a
+        # DIFFERENT wizard is behind now" and the catch-up ends on the
+        # churn branch -- three of those in a minute and wizAi stops
+        # starting catch-ups at all for five minutes. A start condition
+        # and a stop
+        # condition computed two different ways is the bug `_places`
+        # was written to remove, one level up.
+        indices, gap, _why = questlist.furthest_behind(
+            self._quester_places())
         behind = {id(self.seats[i]) for i in indices}
         started = {id(s) for s in seats}
         if not behind:
@@ -10784,11 +11004,13 @@ class LiveWorker(QThread):
                     for s in seats if s.progress is not None), default=0.0)
         going_nowhere = (idle >= self.CATCH_UP_IDLE
                          and not any(s.in_duel for s in seats))
-        if (waited >= self.CATCH_UP_LIMIT or stalled >= self.CATCH_UP_STALL
+        budget = self.CATCH_UP_LIMIT * max(1, int(state.get("gap0") or 1))
+        if (waited >= budget or stalled >= self.CATCH_UP_STALL
                 or going_nowhere):
             self._stop_catching_up(
                 "catch-up-gave-up",
-                f"{waited / 60:.0f} min trying to finish "
+                f"{waited / 60:.0f} min of a {budget / 60:.0f} min budget "
+                f"({state.get('gap0')} quest(s) to close) trying to finish "
                 f"{' and '.join(s.name for s in seats)}'s step "
                 f"and still {gap} quest(s) behind"
                 + (f" — nothing has moved for {stalled / 60:.0f} min"

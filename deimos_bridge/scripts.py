@@ -761,6 +761,72 @@ def steady_sigil(source: str):
     return (out, True) if n else (source, False)
 
 
+#: the preset setting that says whether p1 is a quester or the muscle.
+#: TTS ships it False, with the comment "Set to true if you do not have
+#: a booster and all accounts are questing."
+CREW_VAR = "All_Accounts_Are_Questing"
+
+
+def questing_crew(source: str, crew_size: int):
+    """(source, changed) — tell the script every client in it quests.
+
+    The setting decides who `p1` IS, and the presets' own code is the
+    proof. With `All_Accounts_Are_Questing = False` and two or more
+    clients, TTS Arc 1 reads::
+
+        } elif playercount 2 {
+            if All_Accounts_Are_Questing = True {
+                call Player_One_Handler          # the ONLY p1 questing
+            }
+            ...
+            call Dungeons_And_Broken_Quests_For_P2
+
+        block TP_All_Quest {
+            if All_Accounts_Are_Questing = True {
+                p1 tp quest ... p4 tp quest
+            } else {
+                p2 tp quest ... p4 tp quest
+                p1 tp p2                         # p1 FOLLOWS p2
+            }
+        }
+
+    So False means p1 is the booster: never quested, teleported after
+    whichever questee it is minding. That is a real mode and it is not
+    wizAi's -- `_script_party` builds the VM over the QUESTERS and
+    excludes every booster, so p1 is a quester by construction and the
+    shipped default is a lie about the party.
+
+    Rev f6e07e6d is what the lie cost. Two questers in the VM, and from
+    the moment the crew build came up the script log has no `for P1`
+    line in it at all: every read `Client wizAi 2 . Crispulo`, every
+    handler `for P2`, every teleport `p2`. Thomas -- the leader, the
+    seat the operator picked -- stood in Firecat Alley `unchanged for 2
+    min` while the preset dragged him after the other quester, and
+    finished the run five main quests behind. "they're standing around
+    for a while."
+
+    Only for a crew of two or more. A solo VM runs `playercount 1`,
+    where `Player_One_Handler` is called unconditionally and the
+    setting changes nothing, so there is no reason to touch an
+    operator's file for it.
+
+    The `var` line only, exactly as `configure` does: the comparisons
+    elsewhere are how the script tests its own settings and must keep
+    reading what they read. Already True, or no such variable (a preset
+    that is not TTS-shaped), is `changed=False` and no rewrite.
+    """
+    import re
+
+    if int(crew_size or 0) < 2:
+        return source, False
+    new, n = re.subn(rf'(^\s*var\s+{CREW_VAR}\s*=\s*)False\b',
+                     lambda m: f"{m.group(1)}True",
+                     source, count=1, flags=re.MULTILINE)
+    if not n or new == source:
+        return source, False
+    return new, True
+
+
 def set_pacing(source: str, step=None, dialog=None):
     """(source, changed) — override the script's own pacing settings.
 
