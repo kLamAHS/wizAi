@@ -515,6 +515,17 @@ def _world_key(world) -> str:
     return re.sub(r"[^a-z0-9]", "", (world or "").lower())
 
 
+def world_key(world) -> str:
+    """A world name folded so two spellings of it compare equal.
+
+    Public because the comparison is wanted outside this module -- a
+    tracker's world against the last main-line quest's world, where one
+    side comes from the quest data ("Wizard City") and the other from a
+    live zone id ("WizardCity").
+    """
+    return _world_key(world)
+
+
 def _worlds() -> frozenset:
     """Every world the quest data names, folded by `_world_key`."""
     index = _load()

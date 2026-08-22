@@ -188,6 +188,14 @@ class _Seat:
         #: was said. See `LiveWorker._check_on_questline`.
         self.off_line_since = None
         self.said_off_line = ""
+        #: since when the tracker has held a quest name the questline
+        #: index has never heard of, and which name. A CLEAN read of a
+        #: real quest that is simply missing from the data is not the
+        #: same thing as a read that failed, and treating them as one
+        #: silently disarmed the whole recovery rung for 152 minutes at
+        #: rev ebc4aff8. See `LiveWorker._tracker_strayed`.
+        self.unplaced_since = None
+        self.unplaced_name = ""
         #: the last main-line quest this wizard's tracker held, as
         #: (world, order, name), and when. The first and best answer to
         #: "which quest was lost": a wizard on a side quest now was on
@@ -7644,6 +7652,83 @@ class LiveWorker(QThread):
     #: not, because the tracker follows the SELECTED quest and every
     #: `tp quest` goes there until something changes it.
     OFF_QUESTLINE_AFTER = 120.0
+    #: how long a quest name the index cannot place must be held before
+    #: it counts as a side quest rather than a bad read.
+    #:
+    #: Deliberately much longer than `OFF_QUESTLINE_AFTER`, because it
+    #: is weaker evidence: `known` False covers a garbled read, a load
+    #: screen, and a real quest the data is simply missing -- the data
+    #: has `objectives` for Arc 1 only, and rev ebc4aff8's side quest
+    #: ('you can dig it') is absent from all 2,640 entries. Ten minutes
+    #: of ONE unchanging unplaced name is not a load screen.
+    #:
+    #: A tracker that has jumped WORLDS does not wait for this: see
+    #: `_tracker_strayed`.
+    UNPLACED_IS_EVIDENCE = 600.0
+
+    def _tracker_world(self, seat, place):
+        """The world this seat's tracker is pointing at, or "".
+
+        The placed quest's world when the index knows it; otherwise the
+        world of the area the GOAL line names. The second is the half
+        that matters here, because it works for a quest the index has
+        never heard of: `world` and `area` are populated for all 2,640
+        entries, only `objectives` is empty past Arc 1.
+        """
+        from .. import questlist
+
+        if getattr(place, "world", None):
+            return questlist.world_of_area(place.world) or place.world
+        try:
+            return questlist.world_of_area(questlist.goal_area(seat.goal))
+        except Exception:
+            return ""
+
+    def _tracker_strayed(self, seat, place, now):
+        """Is an unplaceable tracker evidence of a lost questline?
+
+        `known` False covers three different states and the code used
+        to treat all of them as "no evidence": a read that failed, a
+        load screen, and a CLEAN read of a real quest the index does
+        not list. Only the first two deserve silence.
+
+        Rev ebc4aff8 is what the third costs. At t=2893 the tracker
+        left Zafaria main #149 ('Heart of Darkness') for a Wizard City
+        side quest -- 'you can dig it', absent from all 2,640 entries
+        -- and because `place.known` was False, `off_line_since` was
+        cleared on every poll, `_maybe_recover_questline` returned at
+        its first gate, and `off-questline` never fired once in 206
+        minutes. The cure was sitting behind that gate the whole time,
+        and `seat.last_main` had already recorded its target.
+
+        Two signals, and neither needs the missing data:
+
+          * the tracker has jumped WORLDS, away from the last main-line
+            quest this wizard held. Immediate -- a quest cannot advance
+            from Zafaria to Wizard City, so this is not a load screen
+            however briefly it reads;
+          * or ONE unplaceable name has been held for
+            `UNPLACED_IS_EVIDENCE` without changing.
+
+        Never true on a blank name: that IS a read that failed, and
+        saying "off the questline" on one would fire on every load.
+        """
+        from .. import questlist
+
+        name = (seat.quest_name or "").strip()
+        if not name:
+            seat.unplaced_since = None
+            seat.unplaced_name = ""
+            return False
+        if seat.unplaced_name != name:
+            seat.unplaced_name = name
+            seat.unplaced_since = now
+        theirs = questlist.world_key(self._tracker_world(seat, place))
+        was = questlist.world_key((seat.last_main or (None,))[0])
+        if theirs and was and theirs != was:
+            return True
+        return bool(seat.unplaced_since
+                    and now - seat.unplaced_since >= self.UNPLACED_IS_EVIDENCE)
 
     def _check_on_questline(self):
         """Notice a wizard whose tracker has wandered off the storyline.
@@ -7712,11 +7797,18 @@ class LiveWorker(QThread):
             # below. It gets the off-line clock, and the recovery rung
             # takes it from there.
             none_selected = questlist.no_quest_selected(seat.quest_name)
-            if place.on_main or (not place.known and not none_selected):
-                # `known` False is a read that failed or a quest the
-                # list has never heard of -- not evidence of anything.
-                # Saying "off the questline" on an unreadable tracker
-                # would fire on every load screen.
+            strayed = (not place.on_main and not place.known
+                       and not none_selected
+                       and self._tracker_strayed(seat, place, now))
+            if place.on_main or (not place.known and not none_selected
+                                 and not strayed):
+                # `known` False is a read that failed, a load screen, or
+                # a real quest the list has never heard of -- and only
+                # the first two are "not evidence of anything". Saying
+                # "off the questline" on an unreadable tracker would
+                # fire on every load; saying nothing about a clean read
+                # of an unlisted quest cost rev ebc4aff8 152 minutes.
+                # `_tracker_strayed` is what tells them apart.
                 if seat.off_line_since and place.on_main:
                     seat.tel.note_questing(
                         "back-on-questline",
@@ -7726,6 +7818,14 @@ class LiveWorker(QThread):
                     self._say(seat, f"{seat.name} is back on the main line")
                 seat.off_line_since = None
                 seat.said_off_line = ""
+                if place.on_main:
+                    # Only a wizard genuinely back on the line forgets
+                    # how long its tracker was unplaceable. Clearing it
+                    # on the waiting branch too would reset the clock on
+                    # every poll, so `UNPLACED_IS_EVIDENCE` could never
+                    # be reached and the wait would be a silence.
+                    seat.unplaced_since = None
+                    seat.unplaced_name = ""
                 # A wizard back on the line has no give-up to honour.
                 # The next loss is a fresh one, and it may be a quest
                 # the book DOES list.
@@ -7737,9 +7837,14 @@ class LiveWorker(QThread):
             away = now - seat.off_line_since
             if away < self.OFF_QUESTLINE_AFTER:
                 continue
-            if seat.said_off_line == place.name:
+            # Keyed on the name that was actually read: a strayed
+            # tracker has no `place.name` at all, and deduping every one
+            # of those against "" would say it once per run instead of
+            # once per quest.
+            saying = place.name or (seat.quest_name or "").strip()
+            if seat.said_off_line == saying:
                 continue
-            seat.said_off_line = place.name
+            seat.said_off_line = saying
             if none_selected:
                 said = (f"{seat.name} has had NO quest selected for "
                         f"{away / 60:.0f} min — its journal is on the "
@@ -7750,6 +7855,19 @@ class LiveWorker(QThread):
                            else "")
                         + ". Every `tp quest` has nothing to aim at until "
                           "a real quest is selected again")
+            elif not place.known:
+                said = (f"{seat.name} has been off the main questline for "
+                        f"{away / 60:.0f} min — its tracker is on "
+                        f"{saying!r}, which the questline data does not "
+                        f"list at all"
+                        + (f" and which is in "
+                           f"{self._tracker_world(seat, place)}"
+                           if self._tracker_world(seat, place) else "")
+                        + (f", while the party is on {theirs}" if theirs
+                           else "")
+                        + ". A quest the book cannot place is still a "
+                          "quest the script has no route for, and every "
+                          "`tp quest` goes to it")
             else:
                 said = (f"{seat.name} has been off the main questline for "
                         f"{away / 60:.0f} min — its tracker is on "
@@ -8040,10 +8158,16 @@ class LiveWorker(QThread):
         place = dict(zip((id(s) for s in self.seats), places)).get(id(seat))
         if place is None or place.on_main:
             return
-        if not place.known and not questlist.no_quest_selected(seat.quest_name):
+        if not place.known \
+                and not questlist.no_quest_selected(seat.quest_name) \
+                and not self._tracker_strayed(seat, place, now):
             # Unknown is a read that failed, and selecting a quest on
-            # that evidence would fire on every loading screen. The one
-            # exception is the journal's Quest Finder pseudo-entry,
+            # that evidence would fire on every loading screen. Two
+            # exceptions, and both are affirmative reads rather than
+            # absent ones: a tracker that has strayed (see
+            # `_tracker_strayed` -- a world jump, or one unplaceable
+            # name held for `UNPLACED_IS_EVIDENCE`), and the journal's
+            # Quest Finder pseudo-entry,
             # which is not a failed read -- it is the journal saying
             # nothing is selected, and putting a real quest back is
             # exactly what this rung is for. Rev f2b8101f: Sebastian

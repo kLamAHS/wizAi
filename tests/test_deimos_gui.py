@@ -13046,6 +13046,110 @@ def test_an_unreadable_tracker_is_not_called_a_side_quest():
                 if e["kind"] == "off-questline"]
 
 
+def test_a_tracker_that_jumped_worlds_is_lost_however_unlistable_it_is():
+    """Rev ebc4aff8's 152-minute wedge, in one call.
+
+    At t=2893 the quester's tracker left Zafaria main #149 ('Heart of
+    Darkness') for a Wizard City side quest — 'you can dig it', which is
+    absent from all 2,640 entries in the questline data. `place.known`
+    was therefore False, `off_line_since` was cleared on every poll,
+    `_maybe_recover_questline` returned at its first gate, and
+    `off-questline` never fired once in a 206-minute run. The party
+    stood in `WizardCity/WC_Hub` for the rest of it.
+
+    A quest cannot advance from Zafaria to Wizard City, so a world jump
+    is evidence immediately — no data about the new quest required."""
+    import time
+
+    from deimos_bridge import questlist
+
+    worker = _party_on_quests(["Heart of Darkness", "you can dig it"],
+                              ["Talk To Someone in Baobab Crown",
+                               "Collect Dirt Mound in Cyclops Lane"])
+    assert not questlist.position_of("you can dig it").known, \
+        "the premise: the data has never heard of this quest"
+    worker._places = lambda: [questlist.position_of("Heart of Darkness"),
+                              questlist.position_of("you can dig it")]
+    lost = worker.seats[1]
+    lost.last_main = ("Zafaria", 149, "Heart of Darkness")
+
+    worker._check_on_questline()
+    assert lost.off_line_since is not None, \
+        "an unlisted quest in another world was read as 'no evidence'"
+
+    lost.off_line_since = time.monotonic() - 300
+    worker._check_on_questline()
+    said = [e for e in lost.tel.questing if e["kind"] == "off-questline"]
+    assert said, "it noticed and never said so"
+    assert "you can dig it" in said[0]["detail"]
+    assert "does not list" in said[0]["detail"]
+    assert "Wizard City" in said[0]["detail"], \
+        "the world it strayed to is the actionable half"
+
+
+def test_one_unlistable_name_held_long_enough_is_evidence_on_its_own():
+    """Without a world jump the same read is weaker, so it waits — but
+    ten minutes of ONE unchanging unplaceable name is not a load
+    screen, and used to be silence forever."""
+    import time
+
+    from deimos_bridge import questlist
+
+    worker = _party_on_quests(["Gather the Troops", "you can dig it"])
+    worker._places = lambda: [questlist.position_of("Gather the Troops"),
+                              questlist.position_of("you can dig it")]
+    lost = worker.seats[1]
+    lost.last_main = None                     # nothing to compare worlds
+
+    worker._check_on_questline()
+    assert lost.off_line_since is None, "it did not wait"
+    assert lost.unplaced_since is not None, "it did not start the clock"
+
+    lost.unplaced_since = time.monotonic() - worker.UNPLACED_IS_EVIDENCE - 1
+    worker._check_on_questline()
+    assert lost.off_line_since is not None, \
+        "ten minutes of one unplaceable name is still being called a bad read"
+
+
+def test_a_name_that_keeps_changing_never_becomes_evidence():
+    """The clock is per NAME. A tracker cycling through unreadable
+    values is a client with a problem, not a wizard on a side quest,
+    and it must never accumulate its way into a journal edit."""
+    import time
+
+    from deimos_bridge import questlist
+
+    worker = _party_on_quests(["Gather the Troops", "one"])
+    worker._places = lambda: [questlist.position_of("Gather the Troops"),
+                              questlist.Position(name="", how="")]
+    lost = worker.seats[1]
+    lost.last_main = None
+    for name in ("one", "two", "three", "four"):
+        lost.quest_name = name
+        lost.unplaced_since = (time.monotonic()
+                               - worker.UNPLACED_IS_EVIDENCE - 1)
+        worker._check_on_questline()
+        assert lost.off_line_since is None, \
+            f"a name that had just changed ({name}) counted as ten minutes"
+
+
+def test_an_unreadable_tracker_is_still_not_a_side_quest():
+    """The half that must not change. A blank name IS a read that
+    failed, and no clock may accumulate on one."""
+    from deimos_bridge import questlist
+
+    worker = _party_on_quests(["Gather the Troops", ""])
+    worker._places = lambda: [questlist.position_of("Gather the Troops"),
+                              questlist.Position()]
+    lost = worker.seats[1]
+    lost.last_main = ("Zafaria", 149, "Heart of Darkness")
+    worker._check_on_questline()
+    worker._check_on_questline()
+    assert lost.off_line_since is None
+    assert lost.unplaced_since is None
+    assert not [e for e in lost.tel.questing if e["kind"] == "off-questline"]
+
+
 # ---------------------------------------------------- finishing a missed step
 def _desynced(orders):
     """A scripted party whose wizards are on the given Krokotopia steps."""
@@ -22619,6 +22723,47 @@ def test_the_recovery_selects_a_real_quest_for_a_quest_finder_journal(
     said = [e for e in lost.tel.questing
             if e["kind"] == "questline-recovered"]
     assert said and "'Quest Finder'" in said[0]["detail"]
+
+
+def test_the_recovery_reaches_a_quest_the_book_has_never_heard_of(
+        monkeypatch):
+    """The cure that was sitting behind the gate for 152 minutes.
+
+    `_maybe_recover_questline`'s own docstring says selection is the
+    whole cure — "the moment the right quest is tracked, the marker
+    points at the main line again and every mover already in the ladder
+    aims correctly without being told". Rev ebc4aff8 never reached it:
+    the side quest was missing from the data, so `place.known` was
+    False, and both this rung's gate and `_check_on_questline` read
+    that as "no evidence".
+
+    `seat.last_main` had already recorded the answer at t=1995 —
+    Zafaria main #149, 'Heart of Darkness' — and nothing used it."""
+    import asyncio
+    import time
+
+    from deimos_bridge import questlist
+
+    questing = _no_dialogue(monkeypatch)
+    worker = _party_on_quests(["Heart of Darkness", "you can dig it"],
+                              ["Talk To Someone in Baobab Crown",
+                               "Collect Dirt Mound in Cyclops Lane"])
+    lost = worker.seats[1]
+    worker._places = lambda: [questlist.position_of("Heart of Darkness"),
+                              questlist.position_of("you can dig it")]
+    lost.last_main = ("Zafaria", 149, "Heart of Darkness")
+    lost.off_line_since = time.monotonic() - 400
+    calls = []
+
+    async def select(_c, names, on_status=None):
+        calls.append(list(names))
+        return True, names[0], True
+
+    monkeypatch.setattr(questing, "select_quest", select)
+    asyncio.run(worker._maybe_recover_questline(lost))
+    assert calls, "an unlistable quest still cannot reach the recovery"
+    assert "Heart of Darkness" in calls[0], \
+        f"it selected {calls[0]} rather than the line the party is on"
 
 
 # ---------------------------------------------------- archmastery school pips
