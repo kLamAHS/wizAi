@@ -20110,6 +20110,97 @@ def test_a_marker_that_flapped_is_left_alone_for_a_moment(monkeypatch):
             if e["kind"] == "marker-flapped"], "the rest never expired"
 
 
+def test_a_wizard_that_died_is_not_recorded_as_the_winner(qapp):
+    """Two independent outcome paths that did not talk to each other.
+    `on_defeated` knows the truth in the round it happens, off the board
+    it is reading; `_fight_outcome` re-derived it from a stat read taken
+    after the between-fight boundary, by which time the game has already
+    respawned the wizard.
+
+    Rev ebc4aff8's fight 4: Konstantin went 2,573 to 0 against four
+    Shadow-Web Haunts and it is recorded `won: True`. Four things follow
+    from that one wrong bit — `wins` reads 3 of 4, `_note_the_loss`
+    never fires so a repeated wall is never called one, `_health_needed`
+    is fed 155.4 of damage for a fight that took 2,573, and
+    `_let_it_heal` sees a healthy winner and lets the next duel start."""
+    import asyncio
+
+    from deimos_bridge.telemetry import RoundRecord
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.tel.start_fight()
+    seat.tel.rounds.append(RoundRecord(fight=seat.tel.fights[-1].index,
+                                       round=1, passing=False))
+    seat.tel.fights[-1].rounds = 1
+
+    class _Respawned:
+        class stats:
+            @staticmethod
+            async def current_hitpoints():
+                return 2573          # the game has already put it back
+
+    assert asyncio.run(worker._fight_outcome(_Respawned(), seat)) is True
+
+    worker._defeated_hook(seat)()    # ...but it died during the fight
+    assert seat.died_this_fight
+    assert asyncio.run(worker._fight_outcome(_Respawned(), seat)) is False, \
+        "a corpse the game had already respawned was recorded as a win"
+
+
+def test_the_stall_escalation_runs_on_a_clock_the_script_cannot_reset(qapp):
+    """`progress_at` is restamped every time the wizard lands somewhere
+    it has not been in three minutes — and the scripts hammer `tp` in
+    exactly that pattern. Rev ebc4aff8's script landed 320+ teleports in
+    `WizardCity/WC_Hub` onto genuinely new cells, so across 143
+    heartbeats of a 147-minute stall the position clock crossed three
+    minutes six times, this rung fired ONCE, and Oz — watching the same
+    stall from the same zone — produced nothing at all.
+
+    The realm-hop rung is the only consumer that noticed, wrote down
+    why, and used `goal_at` instead. Its number reached 150 minutes."""
+    import time
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    now = time.monotonic()
+    seat.zone_since = now - 3000.0
+    seat.goal_at = now - 3000.0
+    # ...and the script has just teleported it somewhere new, as it has
+    # been doing every few seconds for the last fifty minutes.
+    seat.progress_at = now - 1.0
+    seat.progress = ("WizardCity/WC_Hub", (1, 2, 3), seat.goal)
+
+    stalled = time.monotonic() - worker._nothing_achieved_since(seat)
+    assert stalled > 2000.0, \
+        f"the stall clock reads {stalled:.0f}s — the retry loop reset it"
+
+    # A real achievement is what clears it.
+    seat.goal_at = time.monotonic()
+    assert time.monotonic() - worker._nothing_achieved_since(seat) < 5.0
+
+
+def test_a_new_cell_does_not_clear_the_stall_escalation(qapp):
+    """The 5/10/20/40/80-minute band scheme exists so the export shows a
+    stall GROWING. Clearing it on a new position cell collapsed it to
+    one line per stall, and one line is what rev ebc4aff8 got out of 147
+    minutes and two wizards."""
+    import time
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    now = time.monotonic()
+    seat.progress = ("WizardCity/WC_Hub", (1, 2, 3), seat.goal)
+    seat.said_stuck = "WizardCity/WC_Hub · a goal @4"
+
+    worker._note_progress(seat, "WizardCity/WC_Hub", (9, 9, 9), now)
+    assert seat.said_stuck == "WizardCity/WC_Hub · a goal @4", \
+        "a teleport inside one zone wiped the escalation"
+
+    worker._note_progress(seat, "WizardCity/WC_Ravenwood", (9, 9, 9), now)
+    assert seat.said_stuck == "", "a real zone change did not clear it"
+
+
 def test_the_heartbeat_names_the_quest_not_only_its_goal(qapp):
     """Every rung in the questline layer keys on the quest NAME and the
     export published only the goal, so the one question rev ebc4aff8's

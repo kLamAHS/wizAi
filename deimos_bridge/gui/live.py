@@ -455,6 +455,11 @@ class _Seat:
         #: of its round, because that coroutine owns the mouse. See
         #: `LiveWorker._maybe_flee`.
         self.flee_asked = False
+        #: did this wizard hit zero health during the fight it is in?
+        #: Latched by `on_defeated`, which is the only moment it is
+        #: readable -- `_fight_outcome` runs after the game respawns the
+        #: wizard and reads a corpse as a winner.
+        self.died_this_fight = False
         #: consecutive door-walk failures, per (from zone, to zone). The
         #: per-seat counter above says a follow is failing; this says
         #: THIS ROUTE is not working, which is the one an escalation can
@@ -2601,11 +2606,28 @@ class LiveWorker(QThread):
         BEFORE the between-fight upkeep runs -- a potion would launder
         a defeat into a win. A fight that recorded no rounds (a
         spurious boundary) stays unknown rather than guessed.
+
+        A health read is the FALLBACK, though, not the first answer.
+        There are two independent outcome paths here and they did not
+        talk to each other: `_down`/`on_defeated` knows the truth in
+        the round it happens, off the board it is reading; this
+        re-derived it from a stat read taken after the between-fight
+        boundary, by which time the game has already respawned the
+        wizard. Rev ebc4aff8's fight 4 is the cost -- Konstantin went
+        from 2,573 to 0 against four Shadow-Web Haunts and the fight
+        is recorded `won: True`. Four things follow from that one
+        wrong bit: `wins` reads 3 of 4, `_note_the_loss` never fires
+        so a repeated wall is never called one, `_health_needed` is
+        fed `damage_taken: 155.4` for a fight that took 2,573, and
+        `_let_it_heal` sees a healthy winner and lets the next duel
+        start.
         """
         seat = self._seat_for(client) if seat is None else seat
         try:
             if not seat.tel.fights or seat.tel.fights[-1].rounds == 0:
                 return None
+            if seat.died_this_fight:
+                return False
             hp = await client.stats.current_hitpoints()
             return bool(hp and int(hp) > 0)
         except Exception:
@@ -3835,6 +3857,7 @@ class LiveWorker(QThread):
             # rounds belongs to the duel that produced it.
             seat.no_line_survives = 0
             seat.flee_asked = False
+            seat.died_this_fight = False
             try:
                 # blocks until a duel starts, then plays it out -- but
                 # looks up while it waits, so Stop is answered between
@@ -4140,9 +4163,19 @@ class LiveWorker(QThread):
                       and now - seat.cells_seen.get(position, -1e9)
                       < self.OSCILLATION_WINDOW)
             if not bounce:
+                was = seat.progress
                 seat.progress = where
                 seat.progress_at = now
-                seat.said_stuck = ""
+                if was is None or was[0] != zone or was[2] != seat.goal:
+                    # Only an ACHIEVEMENT clears the escalation -- a new
+                    # ZONE or a new GOAL. A new position cell is not
+                    # one: it is what the script's own retry loop
+                    # produces while getting nowhere, and clearing on it
+                    # collapsed the 5/10/20/40/80-minute band scheme to
+                    # a single line per stall. Rev ebc4aff8 got one
+                    # `no-progress` line out of 147 minutes and two
+                    # wizards.
+                    seat.said_stuck = ""
         if position is not None:
             seat.cells_seen[position] = now
             if len(seat.cells_seen) > 32:
@@ -7659,6 +7692,18 @@ class LiveWorker(QThread):
             seat.x_pressed, seat.x_pressed_at = 0, here
         seat.x_pressed += 1
 
+    def _nothing_achieved_since(self, seat):
+        """When this wizard last achieved anything, as a monotonic stamp.
+
+        A changed goal or a changed zone. Deliberately NOT a changed
+        position: a wizard being teleported around one zone by a retry
+        loop is the failure, not the refutation of it.
+        """
+        stamps = [t for t in (seat.goal_at, seat.zone_since,
+                              seat.progress_at if not seat.goal_at
+                              and not seat.zone_since else 0.0) if t]
+        return max(stamps) if stamps else seat.progress_at
+
     def _check_progress(self, seat):
         """Say so when a running script is getting nowhere.
 
@@ -7682,7 +7727,26 @@ class LiveWorker(QThread):
 
         if seat.progress is None or not self._script_drives(seat):
             return
-        idle = time.monotonic() - seat.progress_at
+        # The ACHIEVEMENT clock, not the position clock.
+        #
+        # `progress_at` is restamped by `_note_progress` every time the
+        # wizard lands somewhere it has not been in the last three
+        # minutes -- and the scripts hammer `tp` in exactly that
+        # pattern. Rev ebc4aff8: the script landed 320+ teleports in
+        # `WizardCity/WC_Hub` onto genuinely new cells, so across 143
+        # heartbeats of a 147-minute stall the position clock crossed
+        # three minutes SIX times and this rung fired ONCE, at band 1.
+        # Oz, watching the identical stall from the same zone, produced
+        # zero. Two observers, one sentence.
+        #
+        # The realm-hop rung is the only consumer that noticed, and it
+        # wrote down why (`_maybe_realm_hop`: "`progress_at` resets on
+        # every one of those teleports, so a stillness gate never fires
+        # for the very case this rung exists for") and then used
+        # `goal_at` instead. Its number reached 150 minutes and was
+        # printed 26 times. This is the same clock, for the rung that
+        # exists to say the stall is growing.
+        idle = time.monotonic() - self._nothing_achieved_since(seat)
         if idle < self.STUCK_AFTER:
             return
         zone, _where, goal = seat.progress
@@ -10194,6 +10258,11 @@ class LiveWorker(QThread):
         recorded fights at rev 85a68184 were losses.
         """
         def defeated():
+            # Latched for the fight, because this is the only moment the
+            # truth is readable: `_fight_outcome` runs after the game has
+            # respawned the wizard and reads it as a win. Cleared by
+            # `start_fight`.
+            seat.died_this_fight = True
             where = seat.zone_seen or "an unreadable zone"
             try:
                 seat.tel.note_questing(
