@@ -2822,7 +2822,17 @@ class LiveWorker(QThread):
             # cannot say which shape ran.
             "questers": len(self._questers()),
             "scripted": bool(self.script),
+            # What the VM was actually BUILT over, when it has been
+            # built. Rev d91c3e24's export said "the leader only" for a
+            # run whose VM held two clients and whose preset had
+            # answered "playercount 2 mode active" — and this is the
+            # field every other line in the file is read against.
             "script_drives": ("nobody" if not self.script else
+                              " and ".join(
+                                  self.seats[i].name
+                                  for i in sorted(self._script_crew)
+                                  if i < len(self.seats))
+                              if self._script_crew else
                               "the leader only"
                               if self._solo_pilot() or self.booster_party
                               else "every seat"),
@@ -3303,9 +3313,12 @@ class LiveWorker(QThread):
                 unnamed = [s.name for s in crew if not s.wizard_name]
                 needs = scripts.wants_clients(source)
                 if unnamed:
-                    downgraded = (f"{' and '.join(unnamed)} has not named "
-                                  f"itself yet, so its account settings "
-                                  f"cannot be filled in")
+                    downgraded = (f"{' and '.join(unnamed)} "
+                                  f"{'has' if len(unnamed) == 1 else 'have'} "
+                                  f"not named "
+                                  f"{'itself' if len(unnamed) == 1 else 'themselves'} "
+                                  f"yet, so the account settings cannot be "
+                                  f"filled in")
                 elif needs > len(crew):
                     downgraded = (f"this script's '@clients' header asks "
                                   f"for {needs} wizards and {len(crew)} "
@@ -7088,7 +7101,53 @@ class LiveWorker(QThread):
                 # the clock out -- see `_retry_boarding`.
                 await self._retry_boarding(seat)
                 return
+            if not holder:
+                # The clock has run out on somebody ELSE's hold, and
+                # everything below this line -- the dud charge, the
+                # sweep, the evidenced-sigil replay -- is that seat's
+                # to do. Clearing the state here and returning is what
+                # this branch used to do, and it threw all of it away
+                # silently.
+                #
+                # It could not happen until Phase Q. This rung is gated
+                # `driven and not _is_booster`, which in booster mode
+                # was exactly one seat, so the holder was always the
+                # seat that ticked its own expiry. A second questing
+                # wizard in the VM made it a race, and roughly half the
+                # expiries went to the wrong seat: rev d91c3e24's
+                # Críspulo armed three holds and logged NOT ONE
+                # `countdown-hold-over` -- so `COUNT_HOLD_DUDS`, the
+                # counter that stops a spot holding a fourth time,
+                # never reached one while the party stood still.
+                #
+                # ...unless the holder is not coming back. A seat whose
+                # loop has stopped, or whose client went away, would
+                # otherwise freeze this guard for every other wizard
+                # forever, so a hold left un-retired for a whole extra
+                # `COUNT_HOLD` is retired by whoever notices.
+                if now - self._count_hold_until < self.COUNT_HOLD:
+                    return
+                stale = self.seats[self._count_hold_seat] \
+                    if 0 <= self._count_hold_seat < len(self.seats) else None
+                late = now - self._count_hold_until
+                self._count_hold_until = 0.0
+                self._say_once(
+                    seat, f"hold-abandoned:{self._count_hold_seat}",
+                    f"released a countdown hold "
+                    f"{(stale.name + ' took') if stale else 'taken'} "
+                    f"and never came back for — its own loop has not "
+                    f"ticked since",
+                    kind="countdown-hold-abandoned",
+                    detail=(f"the hold {stale.name if stale else 'a seat'} "
+                            f"took expired {late:.0f}s ago and it has not "
+                            f"come round to end it. Retired from "
+                            f"{seat.name}'s tick so the guard is not "
+                            f"frozen for the whole party by one stopped "
+                            f"loop"))
+                return
             self._count_hold_until = 0.0
+            # Always true now that a non-holder returns above; kept as
+            # the statement of who this block belongs to.
             if holder:
                 if self._count_hold_sigil:
                     # A helper's prompt was SEEN and pressed here: this
@@ -7394,6 +7453,47 @@ class LiveWorker(QThread):
                         f"not got the party through it"))
             return
         duds = self._sigil_dud(seat)
+        if fight and duds >= 1 and not sensed \
+                and questing.goal_counter(seat.goal):
+            # A kill-count that has already held once and never fired.
+            #
+            # Fight goals are in the marker case on purpose -- "Defeat
+            # Maito in Tatakai Outpost" is a boss INSIDE a dungeon and
+            # its marker sits at the sigil -- on the reasoning that "a
+            # street-pack defeat pays one hold per visit, and usually
+            # not even that: the pack pulls the wizard into a duel long
+            # before the hold expires". Rev d91c3e24 is that reasoning
+            # failing: the pack was dead and respawning, nothing pulled
+            # anybody in, and `Defeat Haunted Minion in Triton Avenue
+            # (2 of 3)` held twelve times across two questers in two
+            # minutes while the script crawled 47 instructions a
+            # minute.
+            #
+            # The counter is the discriminator, and it is deliberately
+            # not the only one. Asked whether a goal that sends you
+            # INTO a dungeon ever carries "(n of m)", the operator said
+            # SOMETIMES -- so the first visit still holds and a counted
+            # dungeon entry keeps its protection. Only a repeat, with
+            # no helper's prompt beside the wizard, is written off.
+            seat.count_hold_seen = None
+            self._count_hold_last = now
+            self._say_once(
+                seat, f"kill-count:{self._sigil_cell(seat)}",
+                f"{seat.name} is not holding here again — "
+                f"{seat.goal!r} is a kill-count, and this spot has "
+                f"already held once without firing",
+                kind="countdown-hold-refused",
+                detail=(f"declined to hold the script: the goal carries "
+                        f"an (n of m) counter, so its marker is a mob "
+                        f"pack to be worked through rather than an "
+                        f"entrance to be admitted to — and this spot "
+                        f"has already spent one full "
+                        f"{self.COUNT_HOLD:.0f}s hold proving it. A "
+                        f"first visit still holds, because a counted "
+                        f"goal can name a boss inside a dungeon, and a "
+                        f"partner's press-X prompt beside this wizard "
+                        f"would hold on any goal at all"))
+            return
         if duds >= self.COUNT_HOLD_DUDS:
             # This spot has taken three full holds and never fired. It
             # is not a sigil, and holding the script here again buys

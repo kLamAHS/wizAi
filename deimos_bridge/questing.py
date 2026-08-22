@@ -230,6 +230,29 @@ def is_collect_goal(goal) -> str:
     return text if re.search(r"\bcollect\b", text, re.IGNORECASE) else ""
 
 
+def goal_counter(goal):
+    """(what, done, total) for ANY goal carrying "(n of m)", or None.
+
+    The shape, without the Collect test. A counter says the step is a
+    tally of several of something -- three minions, four gemstones --
+    and that is a fact about the step whatever verb opens it.
+
+    `Defeat Haunted Minion in Triton Avenue (2 of 3)` is the case that
+    wanted this: a street kill-count, where the marker sits on a mob
+    pack that respawns, and rev d91c3e24's party spent the back half of
+    its run holding the script at one because nothing could tell that
+    goal from a dungeon boss's. See `LiveWorker._maybe_count_hold`.
+    """
+    import re
+
+    text = strip_markup(goal)
+    m = re.search(r"\(\s*(\d+)\s+of\s+(\d+)\s*\)", text)
+    if not m:
+        return None
+    what = text[:m.start()].strip().lower()
+    return what, int(m.group(1)), int(m.group(2))
+
+
 def collect_count(goal):
     """(what, done, total) for a Collect step, or None.
 
@@ -239,16 +262,10 @@ def collect_count(goal):
     so nothing else can tell "picking them up slowly" from "never found
     them at all".
     """
-    import re
-
     text = strip_markup(goal)
     if not is_collect_goal(text):
         return None
-    m = re.search(r"\(\s*(\d+)\s+of\s+(\d+)\s*\)", text)
-    if not m:
-        return None
-    what = text[:m.start()].strip().lower()
-    return what, int(m.group(1)), int(m.group(2))
+    return goal_counter(text)
 
 
 def strip_markup(text) -> str:
