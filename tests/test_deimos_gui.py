@@ -18974,6 +18974,149 @@ def test_a_landed_hop_restarts_only_its_own_clock(monkeypatch):
         assert seat.cells_seen == {}
 
 
+# --------------------------------- not fighting what cannot be won
+def test_a_lost_duel_is_left_rather_than_played_out(qapp):
+    """The verdict has always been available and was always only
+    reported: "Reported, not acted on. What to DO about it depends on
+    why the line is missing". True of the CAUSE, and not of the round in
+    front of us — once every line INCLUDING passing ends in this
+    wizard's death, playing on chooses the death.
+
+    Rev ebc4aff8: `unwinnable` fired at t=401 on round 5 of 9 against
+    `Shadow-Web Wraith@2555 + Shadow-Web Wraith@2555`. Konstantin
+    fought four more rounds, died at 121 of 2,573, and was sent to the
+    Commons — where the script lost its place and a 206-minute run
+    never got it back. The fight cost fifteen minutes; losing the
+    script's place cost the rest."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.tel.start_fight()
+    seat.tel.fights[-1].opening = "Shadow-Web Wraith@2555+Shadow-Web Wraith@2555"
+    for _ in range(worker.UNWINNABLE_ROUNDS):
+        _no_line_round(worker, seat, hp=121.0)
+
+    assert seat.flee_asked, "it watched the wizard die and said so"
+    said = [e for e in seat.tel.questing if e["kind"] == "fleeing"]
+    assert said and "chooses the death" in said[0]["detail"]
+
+
+def test_a_duel_the_party_is_still_swinging_in_is_not_fled(qapp):
+    """The verdict is about THIS wizard's lines. A party-mate's cast can
+    change the board, and leaving would take the quester out of a fight
+    its booster is winning."""
+    worker = _party_worker()
+    seat, other = worker.seats[0], worker.seats[1]
+    other.client, other.in_duel = object(), True
+    seat.tel.start_fight()
+    for _ in range(worker.UNWINNABLE_ROUNDS):
+        _no_line_round(worker, seat, hp=121.0, seats_in_plan=1)
+
+    assert not seat.flee_asked, "it left a duel its partner was still in"
+    assert [e for e in seat.tel.questing if e["kind"] == "unwinnable"], \
+        "and it should still SAY the line is hopeless"
+
+
+def test_a_wizard_already_at_zero_is_not_asked_to_flee(qapp):
+    """`_down` has that case, and the game puts its own flee button on
+    the defeated window."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.tel.start_fight()
+    for _ in range(worker.UNWINNABLE_ROUNDS):
+        _no_line_round(worker, seat, hp=0.0)
+    assert not seat.flee_asked
+
+
+def test_the_quester_waits_for_a_booster_that_cannot_reach_it(qapp):
+    """The whole point of a booster party is that the quester does not
+    fight alone, and the only pre-fight veto wizAi had was about this
+    wizard's own hit points.
+
+    Rev ebc4aff8: Oz could not teleport to Konstantin from t=1, so
+    Konstantin walked into 5,110 HP of drain mobs as a 2,573 HP solo
+    fire wizard, lost in nine rounds, and the whole rest of the run
+    followed from it."""
+    import asyncio
+    import time
+
+    worker = _party_worker()
+    worker.booster_party, worker.leader = True, 0
+    boss, booster = worker.seats
+    worker.PARTY_WAIT, worker.PARTY_WAIT_POLL = 0.3, 0.02
+    boss.zone_seen = "Zafaria/Interiors/ZF_Z10_I02_Didos_Mausoleum"
+    booster.zone_seen = "Zafaria/ZF_Z08_Waterfront"
+    booster.follow_failing_since = time.monotonic() - 300
+
+    began = time.monotonic()
+    asyncio.run(worker._wait_for_the_party(boss))
+    assert time.monotonic() - began >= 0.25, "it walked straight in"
+    said = [e for e in boss.tel.questing
+            if e["kind"] == "fighting-without-the-party"]
+    assert said, "it went in anyway and never said so"
+
+
+def test_the_party_wait_is_wired_into_the_fight_loop():
+    """The pause is worth nothing unless it runs BETWEEN fights, on the
+    loop that walks into the next one — beside `_let_it_heal`, which is
+    the only other pre-fight veto and was, until now, the only one."""
+    import inspect
+
+    from deimos_bridge.gui.live import LiveWorker
+
+    src = inspect.getsource(LiveWorker._fight_loop)
+    assert "_wait_for_the_party" in src, \
+        "the wait exists and nothing calls it"
+    assert src.index("_let_it_heal") < src.index("_wait_for_the_party"), \
+        "health first: a wizard that cannot survive the fight should not "\
+        "spend the party wait before finding that out"
+
+
+def test_the_wait_ends_the_moment_the_booster_arrives(qapp):
+    """A finite wait that ends early. The follow ladder runs on the
+    service tick throughout — this is the pause that gives it time to
+    work, not a replacement for it."""
+    import asyncio
+    import time
+
+    worker = _party_worker()
+    worker.booster_party, worker.leader = True, 0
+    boss, booster = worker.seats
+    worker.PARTY_WAIT, worker.PARTY_WAIT_POLL = 30.0, 0.02
+    boss.zone_seen = "Zafaria/ZF_Z09_Drum_Jungle"
+    booster.zone_seen = "Zafaria/ZF_Z08_Waterfront"
+    booster.follow_failing_since = time.monotonic() - 300
+
+    async def drive():
+        task = asyncio.ensure_future(worker._wait_for_the_party(boss))
+        await asyncio.sleep(0.05)
+        booster.follow_failing_since = None       # it got there
+        await asyncio.wait_for(task, 5)
+
+    asyncio.run(drive())
+    said = [e for e in boss.tel.questing
+            if e["kind"] == "waited-for-the-party"]
+    assert said, "it never recorded the wait it just paid"
+
+
+def test_an_independent_party_is_never_held_before_a_fight(qapp):
+    """Only the wizard a booster party exists to protect. Two wizards
+    questing independently are not waiting on each other, and a
+    follower simply walking is not stranded."""
+    import asyncio
+    import time
+
+    worker = _party_worker()
+    worker.booster_party = False
+    boss, other = worker.seats
+    worker.PARTY_WAIT, worker.PARTY_WAIT_POLL = 30.0, 0.02
+    boss.zone_seen, other.zone_seen = "A", "B"
+    other.follow_failing_since = time.monotonic() - 300
+
+    began = time.monotonic()
+    asyncio.run(worker._wait_for_the_party(boss))
+    assert time.monotonic() - began < 1.0, "an independent party was held"
+
+
 # ------------------ the operator's manual reset, as the last rung
 #
 # Rev 817b9f20, the wedge in full: all three wizards in KT_Pyramid/

@@ -647,6 +647,67 @@ def test_handler_targets_the_mob_the_policy_meant():
         f"aimed at {card.cast_log} instead of the summon"
 
 
+# ------------------------------------------------------------ leaving a duel
+def test_the_handler_leaves_a_duel_the_run_has_given_up_on():
+    """Asked at the TOP of the round, before anything is read or
+    clicked: leaving is only cheaper than playing if it happens instead
+    of the round rather than after it."""
+    be = _backend()
+    be.should_flee = lambda: True
+    card = MockCard("Sunbird")
+    combat = MockCombat(
+        [MockMember("Wizard", 2000, client=True, normal_pips=6, team_id=0),
+         MockMember("Shadow-Web Wraith", 2555, monster=True, team_id=1)],
+        [card])
+    h = _Handler(combat, be)
+    fled = []
+    h.flee_button = lambda: fled.append(True) or _done()
+    run(h.handle_round())
+    assert fled, "it played the round it had already lost"
+    assert card.cast_log == [], "it cast on the way out"
+
+
+def test_a_duel_nobody_gave_up_on_is_played_normally():
+    be = _backend(policy=lambda sim, s: "Sunbird")
+    be.should_flee = lambda: False
+    card = MockCard("Sunbird")
+    combat = MockCombat(
+        [MockMember("Wizard", 2000, client=True, normal_pips=6, team_id=0),
+         MockMember("Lost Soul", 900, monster=True, team_id=1)],
+        [card])
+    h = _Handler(combat, be)
+    fled = []
+    h.flee_button = lambda: fled.append(True) or _done()
+    run(h.handle_round())
+    assert not fled
+    assert card.cast_log, "the round was not played"
+
+
+def test_a_flee_that_will_not_click_leaves_the_duel_to_be_played():
+    """Never raises and never blocks the round. A flee that fails leaves
+    the fight to be played, which is what happened before this existed
+    — the worse outcome is a handler that stops handling."""
+    be = _backend(policy=lambda sim, s: "Sunbird")
+    be.should_flee = lambda: True
+    card = MockCard("Sunbird")
+    combat = MockCombat(
+        [MockMember("Wizard", 2000, client=True, normal_pips=6, team_id=0),
+         MockMember("Lost Soul", 900, monster=True, team_id=1)],
+        [card])
+    h = _Handler(combat, be)
+
+    async def _boom():
+        raise RuntimeError("no flee button here")
+
+    h.flee_button = _boom
+    run(h.handle_round())
+    assert card.cast_log, "a failed flee cost the round as well"
+
+
+async def _done():
+    return None
+
+
 # ------------------------------------------------------------ enchantments
 def test_the_sun_enchant_cards_resolve():
     """"Epic" in a live hand used to be an unresolvable name: hidden

@@ -207,6 +207,12 @@ class WizAiBackend:
         #: optional callback() the first time this wizard is found at 0
         #: health in a duel it is still nominally in. See `_check_defeated`.
         self.on_defeated = None
+        #: asked once a round: has the run decided this duel is lost and
+        #: should be left? Set by the worker from the policy's own
+        #: no-surviving-line verdict, read here because the combat
+        #: coroutine is the one that owns the mouse. See
+        #: `WizAiCombatHandler._maybe_flee`.
+        self.should_flee = None
         #: optional callback() -> enemy health this wizard removes per
         #: round, for the coordinator to hand the OTHER seats' rollouts.
         #: A hook rather than a `Telemetry` reference because the backend
@@ -1342,6 +1348,54 @@ class WizAiCombatHandler:
     #: mispriced board.
     ENCHANT_CAST_TIME = 0.3
 
+    async def _maybe_flee(self):
+        """Leave a duel the run has given up on. True if we left.
+
+        Asked at the top of the round, before anything is read or
+        clicked, because leaving is only cheaper than playing if it
+        happens instead of the round rather than after it.
+
+        The verdict is the policy's own and it has always been
+        available: once every line the rollout tries -- INCLUDING
+        passing -- ends with this wizard dead, playing on chooses the
+        death. Rev ebc4aff8's Konstantin fought four more rounds after
+        that verdict against 5,110 HP of drain mobs, died at 121 of
+        2,573, and was sent to the Commons; the script lost its place
+        there and a 206-minute run never got it back. The fight cost
+        fifteen minutes. Losing the script's place cost the rest.
+
+        Never raises and never blocks the round: a flee that will not
+        click leaves the duel to be played, which is what happened
+        before this existed.
+        """
+        from contextlib import suppress
+
+        ask = getattr(self.backend, "should_flee", None)
+        if not callable(ask):
+            return False
+        try:
+            if not ask():
+                return False
+        except Exception:
+            return False
+        try:
+            async with self.client.mouse_handler:
+                await self.flee_button()
+        except Exception as exc:
+            self._report("report_slow_cast",
+                         f"the duel could not be left "
+                         f"({type(exc).__name__}: {exc})")
+            return False
+        hive = getattr(self.backend, "coordinator", None)
+        seat = getattr(self.backend, "seat", None)
+        if hive is not None and seat is not None:
+            # Out of the circle at once: the rest of the party must not
+            # spend a barrier timeout per round waiting for a wizard
+            # that has left the duel.
+            with suppress(Exception):
+                hive.leave_combat(seat)
+        return True
+
     def _report(self, channel, *args):
         """Say something on one of the backend's status channels.
 
@@ -1667,6 +1721,8 @@ class WizAiCombatHandler:
         # the planning wait, which is where it has to happen to beat the
         # other seat's `decide()`; this covers a round reached by any
         # path that did not come through there.
+        if await self._maybe_flee():
+            return
         hive = getattr(self.backend, "coordinator", None)
         if hive is not None:
             hive.enter_combat(self.backend.seat)

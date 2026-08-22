@@ -439,6 +439,11 @@ class _Seat:
         #: client and the walk ladder is used directly.
         self.friends_ui_fails = 0
         self.friends_ui_dead = False
+        #: set when the policy has given up on the duel this seat is in
+        #: and it should be left. Read by the combat handler at the top
+        #: of its round, because that coroutine owns the mouse. See
+        #: `LiveWorker._maybe_flee`.
+        self.flee_asked = False
         #: consecutive door-walk failures, per (from zone, to zone). The
         #: per-seat counter above says a follow is failing; this says
         #: THIS ROUTE is not working, which is the one an escalation can
@@ -3602,6 +3607,8 @@ class LiveWorker(QThread):
                 backend.on_failed_cast = self._failed_cast_hook(seat)
                 backend.on_school_mismatch = self._school_hook(seat)
                 backend.on_defeated = self._defeated_hook(seat)
+                backend.should_flee = (
+                    lambda s=seat: bool(s.flee_asked) and not self._stop)
                 backend.on_slow_cast = self._slow_cast_hook(seat)
                 backend.on_round_timing = self._round_timing_hook(seat)
                 # Bound late and read per round: the rate only becomes
@@ -3793,6 +3800,7 @@ class LiveWorker(QThread):
             # A new board is a new verdict. The run of no-surviving-line
             # rounds belongs to the duel that produced it.
             seat.no_line_survives = 0
+            seat.flee_asked = False
             try:
                 # blocks until a duel starts, then plays it out -- but
                 # looks up while it waits, so Stop is answered between
@@ -3881,6 +3889,7 @@ class LiveWorker(QThread):
                     seat.in_upkeep = False
             if not self._stop:
                 await self._let_it_heal(seat)
+                await self._wait_for_the_party(seat)
             self._say(seat,
                       f"fight {seat.fought} over — waiting for the next"
                       if not self._stop else "stopping…")
@@ -9792,6 +9801,97 @@ class LiveWorker(QThread):
             self._say_once(seat, "catch-up",
                            f"trying to get back to {behind.name} — {why}")
 
+    #: how long the quester waits between fights for a party-mate that
+    #: cannot reach it, before going in anyway.
+    #:
+    #: The whole point of a booster party is that the quester does not
+    #: fight alone, and the only pre-fight veto wizAi had was about this
+    #: wizard's own hit points. Rev ebc4aff8: Oz could not teleport to
+    #: Konstantin from t=1, so Konstantin walked into
+    #: `Shadow-Web Wraith@2555 + Shadow-Web Wraith@2555` -- 5,110 HP of
+    #: drain mobs against a 2,573 HP solo fire wizard -- lost in nine
+    #: rounds, was sent to the Commons, and the script never recovered
+    #: its place. Everything the rest of that 206-minute run did wrong
+    #: started there.
+    #:
+    #: Finite, and for the same reason `LOW_HEALTH_WAIT` is: a run that
+    #: blocks forever on a stranded booster is as broken as one that
+    #: suicides, and unlike the suicide it produces nothing to diagnose
+    #: from.
+    PARTY_WAIT = 120.0
+    #: how often the wait re-checks. The follow ladder runs on the
+    #: service tick meanwhile, so this only has to notice.
+    PARTY_WAIT_POLL = 3.0
+
+    async def _wait_for_the_party(self, seat):
+        """Do not walk into the next duel while a booster cannot reach us.
+
+        Only for the seat the party exists to protect -- the leader of a
+        booster party or a solo-pilot run -- and only while some other
+        hooked seat is BOTH in another zone and actively failing to
+        follow. A follower that is simply walking is not stranded, and a
+        party questing independently is not a party this applies to.
+
+        Nothing here can teleport anybody: the follow ladder is running
+        on the service tick throughout, and this is the pause that gives
+        it time to work.
+        """
+        import time
+
+        if self._stop or not (self.booster_party or self._solo_pilot()):
+            return
+        if seat.index != self.leader:
+            return
+
+        def stranded():
+            out = []
+            for other in self.seats:
+                if other is seat or other.client is None:
+                    continue
+                if other.follow_failing_since is None:
+                    continue
+                if (other.zone_seen and seat.zone_seen
+                        and other.zone_seen == seat.zone_seen):
+                    continue
+                out.append(other)
+            return out
+
+        waiting = stranded()
+        if not waiting:
+            return
+        began = time.monotonic()
+        names = ", ".join(o.name for o in waiting)
+        self._say(seat, f"holding before the next fight — {names} cannot "
+                        f"reach {seat.name}")
+        while not self._stop:
+            left = self.PARTY_WAIT - (time.monotonic() - began)
+            if left <= 0:
+                break
+            if not stranded():
+                seat.tel.note_questing(
+                    "waited-for-the-party",
+                    f"held {time.monotonic() - began:.0f}s before the next "
+                    f"fight until {names} could reach {seat.name} — a "
+                    f"booster party's whole point is that the quester "
+                    f"does not fight alone")
+                self._say(seat, f"{names} is back — going in")
+                return
+            await asyncio.sleep(min(self.PARTY_WAIT_POLL, left))
+        if self._stop:
+            return
+        said = (f"{seat.name} is going into the next fight without "
+                f"{names}, which has been unable to reach it for "
+                f"{(time.monotonic() - began) / 60:.0f} min. A booster "
+                f"party's quester fighting alone is how rev ebc4aff8 lost "
+                f"a 5,110 HP board in nine rounds and its place in the "
+                f"script with it")
+        for other in self.seats:
+            try:
+                other.tel.note_questing("fighting-without-the-party", said)
+            except Exception:
+                pass
+        self._say(seat, said)
+
     async def _let_it_heal(self, seat):
         """Do not walk into the next duel on almost no health.
 
@@ -10207,6 +10307,57 @@ class LiveWorker(QThread):
         self._say(seat,
                   f"{seat.name} has no surviving line against {opening} — "
                   f"{seat.no_line_survives} rounds running")
+        self._maybe_flee(seat, rec, opening)
+
+    #: whether a duel the policy has given up on is fled rather than
+    #: played out to the death.
+    #:
+    #: The verdict has always been available and was always only
+    #: reported: "Reported, not acted on. What to DO about it depends on
+    #: why the line is missing". That is true of the CAUSE and not of
+    #: the round in front of us -- once every line including passing
+    #: ends in this wizard's death, playing on chooses the death. Rev
+    #: ebc4aff8's Konstantin fought four more rounds after the verdict,
+    #: died, and was sent to the Commons; the script lost its place
+    #: there and the run never got it back.
+    FLEE_WHEN_LOST = True
+
+    def _maybe_flee(self, seat, rec, opening):
+        """Ask the duel to be left, on the coroutine that owns the mouse.
+
+        A flag rather than a click: the combat handler holds the mouse
+        for the whole round, and a second coroutine clicking into it is
+        the misclick this program has been bitten by before. The handler
+        reads this at the top of its next round.
+
+        Not for a wizard already at zero -- `_down` has that case and
+        the game offers its own flee button there -- and not while a
+        party-mate is still swinging, because the verdict is about THIS
+        wizard's lines and a partner's cast can change the board.
+        """
+        if not self.FLEE_WHEN_LOST or seat.client is None:
+            return
+        if (rec.player_hp or 0) <= 0:
+            return
+        if (rec.seats_in_plan or 1) > 1:
+            return
+        others = [s for s in self.seats
+                  if s is not seat and s.client is not None and s.in_duel]
+        if others:
+            return
+        seat.flee_asked = True
+        for other in self.seats:
+            try:
+                other.tel.note_questing(
+                    "fleeing",
+                    f"leaving the duel against {opening}: every line the "
+                    f"rollout tried, including passing, ends with "
+                    f"{seat.name} dead, and it is fighting alone. Playing "
+                    f"on from here chooses the death — and a wizard sent "
+                    f"to the Commons loses the script its place, which "
+                    f"costs far more than the fight did")
+            except Exception:
+                pass
 
     def _learn_name(self, seat, read):
         """Take the wizard's own name off the duel it is standing in.
