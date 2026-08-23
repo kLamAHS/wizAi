@@ -12769,6 +12769,41 @@ def test_a_script_wedged_on_a_dialogue_gets_the_box_cleared(monkeypatch):
     assert "cleared 2 window(s)" in seat.tel.questing[1]["detail"]
 
 
+def test_stuck_detail_names_the_idle_span_and_the_goals_cycled(monkeypatch):
+    """Rev c1d4981c's export had to be reconstructed by hand from three
+    files on a shared clock to see "3 goals, 16 returns, nothing
+    achieved for 89 min". A wizard being teleported round a circuit
+    looks busy in every other line of the file; these two numbers are
+    what make a lap legible."""
+    import asyncio
+    import time
+
+    worker, seat = _wedged(dialogue=False, monkeypatch=monkeypatch)
+    now = time.monotonic()
+    seat.goal_fresh_at = now - 5400.0
+    for goal, at in (("Defeat Prince Suten Sokkwi in Emperor's Retreat",
+                      now - 400.0),
+                     ("Defeat Krokhotep in Emperor's Retreat", now - 200.0)):
+        seat.goals_at[goal] = at
+
+    asyncio.run(worker._unstick(seat))
+    said = [e for e in seat.tel.questing if e["kind"] == "stuck-detail"]
+    assert said, [e["kind"] for e in seat.tel.questing]
+    assert "nothing achieved for 90 min" in said[0]["detail"], said[0]["detail"]
+    assert "cycling 3 goals" in said[0]["detail"], said[0]["detail"]
+
+
+def test_a_wizard_that_is_merely_stuck_reports_no_cycle(monkeypatch):
+    """The control. A wizard frozen on one step has cycled nothing, and
+    a count of one would read as a lap that is not there."""
+    import asyncio
+
+    worker, seat = _wedged(dialogue=False, monkeypatch=monkeypatch)
+    asyncio.run(worker._unstick(seat))
+    said = [e for e in seat.tel.questing if e["kind"] == "stuck-detail"]
+    assert said and "cycling" not in said[0]["detail"]
+
+
 def test_a_wedged_script_with_no_box_open_is_only_reported(monkeypatch):
     """A retry loop with nothing open is not a dialogue problem. The log
     could not tell "the box is open and the script cannot advance it"
@@ -21197,7 +21232,7 @@ def test_the_stall_escalation_runs_on_a_clock_the_script_cannot_reset(qapp):
     seat = worker.seats[0]
     now = time.monotonic()
     seat.zone_since = now - 3000.0
-    seat.goal_at = now - 3000.0
+    seat.goal_at = seat.goal_fresh_at = now - 3000.0
     # ...and the script has just teleported it somewhere new, as it has
     # been doing every few seconds for the last fifty minutes.
     seat.progress_at = now - 1.0
@@ -21207,8 +21242,14 @@ def test_the_stall_escalation_runs_on_a_clock_the_script_cannot_reset(qapp):
     assert stalled > 2000.0, \
         f"the stall clock reads {stalled:.0f}s — the retry loop reset it"
 
-    # A real achievement is what clears it.
+    # A real achievement is what clears it — a goal this wizard has not
+    # just been on, which is what `goal_fresh_at` records. `goal_at`
+    # alone is not one: rev c1d4981c alternated two live quests every
+    # ~180s for eighty-nine minutes. See `_note_goal_fresh`.
     seat.goal_at = time.monotonic()
+    assert time.monotonic() - worker._nothing_achieved_since(seat) > 2000.0, \
+        "a goal change alone cleared the clock — a lap would reset it"
+    seat.goal_fresh_at = time.monotonic()
     assert time.monotonic() - worker._nothing_achieved_since(seat) < 5.0
 
 
@@ -21228,7 +21269,7 @@ def test_shuttling_between_two_zones_is_not_progress(qapp):
     worker = _party_worker()
     seat = worker.seats[0]
     now = time.monotonic() - 1800.0
-    seat.goal_at = now
+    seat.goal_at = seat.goal_fresh_at = now
     worker._note_zone(seat, "Avalon/AV_Z04_TheWild", now)
 
     # eight laps, a couple of minutes apart, exactly as the run did.
@@ -21248,6 +21289,134 @@ def test_shuttling_between_two_zones_is_not_progress(qapp):
         f"the stall clock reads {stalled:.0f}s — the shuttle reset it"
     assert seat.zone_since == now + 250 * 7 + 200, \
         "`zone_since` must keep its own meaning for the rungs that use it"
+
+
+def test_alternating_two_goals_is_not_progress(qapp):
+    """Rev c1d4981c's last eighty-nine minutes: two live quests in the
+    Emperor's Retreat, `Guardians at the Gate` and `Retribution`,
+    alternating every ~180s as the preset's watchdog ejected the wizard
+    from the dungeon and its own route walked it back in. Sixteen laps
+    of a four-zone circuit, three distinct goals, ZERO fights, the
+    questline floor stuck on #52 the whole time — and `no-progress`,
+    `stuck-detail` and `desperate-hop` all fired exactly zero times.
+
+    The clock survived the script's position teleports (rev ebc4aff8)
+    and then its zone teleports (rev f27693c2), and still did not
+    survive its GOAL teleports."""
+    import time
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    now = time.monotonic() - 5000.0
+    seat.progress_at = time.monotonic() - 1.0
+    worker._note_zone(seat, "Krokotopia/KT_Krokosphinx/KT_Retreat", now)
+    worker._note_goal_fresh(seat, "Defeat Prince Suten Sokkwi in "
+                                  "Emperor's Retreat", now)
+    seat.goal = "Defeat Prince Suten Sokkwi in Emperor's Retreat"
+
+    # sixteen laps, ~360s apart, exactly as the run did.
+    for i in range(16):
+        at = now + 360 * i
+        for goal in ("Defeat Krokhotep in Emperor's Retreat",
+                     "Defeat Prince Suten Sokkwi in Emperor's Retreat"):
+            worker._note_goal_fresh(seat, goal, at)
+            seat.goal = goal
+            at += 180
+
+    assert seat.goal_fresh_at == now, \
+        "a lap back onto a goal it had just held read as a fresh step"
+    stalled = time.monotonic() - worker._nothing_achieved_since(seat)
+    assert stalled > 4000.0, \
+        f"the stall clock reads {stalled:.0f}s — the lap reset it"
+
+
+def test_a_goal_it_has_not_just_held_is_still_progress(qapp):
+    """The half that must not change: a wizard working down a questline
+    reaches a new step every few minutes, and calling that a stall
+    would fire on every healthy run."""
+    import time
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    now = time.monotonic()
+    for i, goal in enumerate(("Talk To Shalek the Wise in Entrance Hall",
+                              "Defeat Itennu Sokkwi in Grand Arena",
+                              "Talk To Ako in Grand Arena",
+                              "Defeat Krokhotep in Emperor's Retreat")):
+        worker._note_goal_fresh(seat, goal, now + i)
+        seat.goal = goal
+    assert seat.goal_fresh_at == now + 3, "a real questline was called a lap"
+    assert time.monotonic() - worker._nothing_achieved_since(seat) < 5.0
+
+
+def test_a_goal_held_again_long_afterwards_is_progress(qapp):
+    """A lap is a lap for a while. Coming back to `Talk To General
+    Khaba` an hour later is the questline, not a circuit, and the
+    memory has to age or a long run writes off every step it has
+    ever been on."""
+    import time
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    now = time.monotonic()
+    worker._note_goal_fresh(seat, "Talk To General Khaba in Hall of "
+                                  "Champions", now)
+    seat.goal = "Talk To General Khaba in Hall of Champions"
+    worker._note_goal_fresh(seat, "Defeat Odji Sokkwi in Hall of "
+                                  "Champions", now + 10)
+    seat.goal = "Defeat Odji Sokkwi in Hall of Champions"
+
+    late = now + worker.GOAL_BOUNCE_WINDOW + 60
+    worker._note_goal_fresh(seat, "Talk To General Khaba in Hall of "
+                                  "Champions", late)
+    assert seat.goal_fresh_at == late, "the goal memory never ages"
+
+
+def test_a_questline_floor_that_rises_is_progress_whatever_the_goal_says(qapp):
+    """The exception, and it has to exist. One goal line belongs to as
+    many as nine consecutive quests — `Talk To General Khaba in Hall of
+    Champions` is the second objective of Krokotopia #26 through #34 —
+    so a party legitimately grinding that chain returns to one string
+    over and over. A floor that rises is monotone by construction."""
+    import time
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    now = time.monotonic() - 5000.0
+    seat.progress_at = time.monotonic() - 1.0
+    worker._note_goal_fresh(seat, "Talk To General Khaba in Hall of "
+                                  "Champions", now)
+    seat.goal = "Talk To General Khaba in Hall of Champions"
+    _placed(worker, seat, "Krokotopia", 26)
+    assert time.monotonic() - worker._nothing_achieved_since(seat) > 4000.0
+
+    # ...and the chain advances, on the same goal string.
+    _placed(worker, seat, "Krokotopia", 27)
+    assert time.monotonic() - worker._nothing_achieved_since(seat) < 5.0, \
+        "a quest finished on a repeated goal line read as a stall"
+
+
+def test_a_wizard_lapping_two_goals_reaches_the_desperate_hop(qapp):
+    """The whole point of the two phases together. rev c1d4981c had the
+    objective 1,347 units away inside the Retreat, thirty-one separate
+    times, and never hopped to it — `_desperate_hop` gates on the
+    POSITION clock, which a circuit restamps every few seconds."""
+    import time
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    now = time.monotonic()
+    seat.goal_fresh_at = now - worker.STUCK_AFTER - worker.UNSTICK_EVERY - 60
+    seat.zone_fresh_at = seat.goal_fresh_at
+    # The script has just teleported it somewhere new, as it does every
+    # few seconds all the way round the circuit.
+    seat.progress_at = now - 1.0
+
+    import inspect
+    src = inspect.getsource(worker.__class__._desperate_hop)
+    assert "_nothing_achieved_since" in src, \
+        "the hop still reads the position clock a circuit resets"
+    assert "seat.progress_at <" not in src
 
 
 def test_a_zone_it_has_not_just_come_from_is_still_progress(qapp):
@@ -22698,7 +22867,10 @@ def test_a_stalled_wizard_skips_the_alone_wait(monkeypatch):
     lost.last_main = ("Krokotopia", 12, "Gather the Troops")
     now = time.monotonic()
     lost.off_line_since = now - 400
-    lost.goal_at = now - 400            # frozen the whole time
+    # Frozen the whole time. `goal_fresh_at` is what the achievement
+    # clock reads -- `goal_at` alone moves on a lap back onto a goal
+    # this wizard has just held. See `_note_goal_fresh`.
+    lost.goal_at = lost.goal_fresh_at = now - 400
     lost.zone_since = now - 400
     calls = []
 

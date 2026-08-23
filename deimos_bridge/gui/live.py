@@ -194,6 +194,16 @@ class _Seat:
         #: a step another has already left is the one behind -- see
         #: `LiveWorker._who_is_behind`.
         self.goals_seen = []
+        #: goals this wizard has held recently, goal -> when it was last
+        #: left. A return to one inside `GOAL_BOUNCE_WINDOW` is a lap,
+        #: not progress -- the same test `zones_seen` gives zones and
+        #: `cells_seen` gives positions, one coordinate further up. See
+        #: `LiveWorker._note_goal_fresh`.
+        self.goals_at = {}
+        #: when this wizard last reached a goal it had NOT recently
+        #: held, or advanced its questline floor. The achievement clock
+        #: reads this rather than `goal_at`, which every lap restamps.
+        self.goal_fresh_at = 0.0
         #: since when this wizard's tracker has been on something that
         #: is not the world's main line, and the last side quest that
         #: was said. See `LiveWorker._check_on_questline`.
@@ -5265,6 +5275,10 @@ class LiveWorker(QThread):
             # outcome a realm hop is trying to buy. Its budget starts
             # again. See `REALM_HOP_BUDGET`.
             self._hops_for.pop(id(seat), None)
+            # ...but only a goal it has not just been on is an
+            # ACHIEVEMENT. See `_note_goal_fresh`; called before
+            # `seat.goal` moves, because it compares against it.
+            self._note_goal_fresh(seat, goal, now)
             # In order, and bounded. `_who_is_behind` needs to know that
             # a step was HELD and left, which a single current value
             # cannot say.
@@ -5900,7 +5914,17 @@ class LiveWorker(QThread):
         if seat.progress is None:
             return
         now = time.monotonic()
-        idle = now - seat.progress_at
+        # The ACHIEVEMENT clock, not the position one.
+        # `progress_at` is restamped by `_note_progress` on every
+        # landing in a cell the wizard has not been in for three
+        # minutes, and the scripts hammer `tp` in exactly that
+        # pattern -- which is why `_check_progress` moved off it
+        # and this ladder, the one that would have ACTED, did
+        # not. Rev c1d4981c: sixteen laps of a four-zone circuit,
+        # eighty-nine minutes, zero fights, and this rung fired
+        # zero times with the objective 1,347 units away on
+        # thirty-one separate reads.
+        idle = now - self._nothing_achieved_since(seat)
         if idle < self.DIALOG_WEDGE:
             seat.unstuck_at = NEVER
             seat.steps_seen = None
@@ -5940,12 +5964,23 @@ class LiveWorker(QThread):
             return
         near = await questing.near_interactable(seat.client)
         at_marker, why = await questing.at_quest_marker(seat.client)
+        # ...and the two numbers a LAP needs, which a wizard being
+        # teleported round a circuit does not otherwise give: how long
+        # since anything was achieved, and how many distinct goals it
+        # has cycled inside `GOAL_BOUNCE_WINDOW`. Rev c1d4981c's export
+        # had to be reconstructed by hand from three files on a shared
+        # clock to see "3 goals, 16 returns, nothing achieved for 89
+        # min".
+        lapping = len([t for t in seat.goals_at
+                       if now - seat.goals_at[t] < self.GOAL_BOUNCE_WINDOW])
         seat.tel.note_questing(
             "stuck-detail",
             f"script {'parked on one instruction' if parked else 'looping'}"
             f" · dialogue {'open' if open_box else 'closed'}"
             f" · {'an interactable in range' if near else 'nothing in range'}"
-            f" · {'at the quest marker' if at_marker else (why or 'not at the marker')}")
+            f" · {'at the quest marker' if at_marker else (why or 'not at the marker')}"
+            f" · nothing achieved for {idle / 60:.0f} min"
+            + (f", cycling {lapping + 1} goals" if lapping else ""))
 
         mins = (now - seat.progress_at) / 60.0
         if open_box:
@@ -6221,7 +6256,18 @@ class LiveWorker(QThread):
         from .. import questing
 
         now = time.monotonic()
-        if now - seat.progress_at < self.STUCK_AFTER + self.UNSTICK_EVERY:
+        # ...and on the same clock `_maybe_unstick` reads, for the same
+        # reason. This is the operator's own last resort and rev
+        # c1d4981c never reached it: the wizard was being teleported
+        # around a four-zone circuit, so the position clock never
+        # aged, so the hop that would have closed 1,347 units was
+        # never asked -- thirty-one times over eighty-nine minutes.
+        #
+        # `_maybe_restart_script` above deliberately keeps the
+        # position clock: restarting the program is the heavier
+        # move and the operator picked the hop.
+        if (now - self._nothing_achieved_since(seat)
+                < self.STUCK_AFTER + self.UNSTICK_EVERY):
             return
         here = seat.progress or (None, None, None)
         if seat.hop_tried_at == here:
@@ -8979,8 +9025,13 @@ class LiveWorker(QThread):
         around one zone by a retry loop is the failure, not the
         refutation of it.
 
+        And deliberately not a changed GOAL either, which is the half
+        rev c1d4981c found: two live quests alternating every ~180s
+        kept `goal_at` fresh through eighty-nine minutes of a
+        four-zone circuit with no fights in it. See `_note_goal_fresh`.
+
         And deliberately not a changed ZONE either, which is the half
-        this missed. `zone_since` is restamped on any zone change at
+        rev f27693c2 found. `zone_since` is restamped on any zone change at
         all, so a wizard shuttling between two of them looks productive
         forever -- the clock written to survive the script's position
         teleports did not survive its zone teleports. Rev f27693c2:
@@ -8994,8 +9045,8 @@ class LiveWorker(QThread):
         "when did this wizard last change zone". This is the one asking
         whether anything was achieved, and a lap is not.
         """
-        stamps = [t for t in (seat.goal_at, seat.zone_fresh_at,
-                              seat.progress_at if not seat.goal_at
+        stamps = [t for t in (seat.goal_fresh_at, seat.zone_fresh_at,
+                              seat.progress_at if not seat.goal_fresh_at
                               and not seat.zone_fresh_at else 0.0) if t]
         return max(stamps) if stamps else seat.progress_at
 
@@ -9022,6 +9073,53 @@ class LiveWorker(QThread):
         if now - seat.zones_seen.get(zone, -1e9) >= self.ZONE_BOUNCE_WINDOW:
             seat.zone_fresh_at = now
         seat.zone_seen = zone
+
+    #: how long a goal this wizard has already held stays "already
+    #: held". The same span as `ZONE_BOUNCE_WINDOW` and for the same
+    #: reason -- rev c1d4981c's laps returned to each of two goals
+    #: every ~360s for eighty-nine minutes.
+    GOAL_BOUNCE_WINDOW = 900.0
+
+    def _note_goal_fresh(self, seat, goal, now):
+        """Stamp the goal clocks, telling a lap from a step.
+
+        `goal_at` moves on every change, as it always has. The
+        achievement clock moves only for a goal this wizard has not
+        held within `GOAL_BOUNCE_WINDOW` -- one coordinate up from the
+        test `_note_zone` gives zones, and for the same reason.
+
+        Rev c1d4981c is the reason it has to exist. The clock was
+        written to survive the script's position teleports, then taught
+        (rev f27693c2) to survive its zone teleports, and it still did
+        not survive its GOAL teleports: two live quests in the Emperor's
+        Retreat, `Guardians at the Gate` and `Retribution`, alternating
+        every ~180s as the preset's watchdog ejected the wizard and its
+        route walked it back in. Sixteen laps, three distinct goals,
+        zero fights, the questline floor stuck on #52 the whole time --
+        and `no-progress`, `stuck-detail` and `desperate-hop` all fired
+        exactly zero times, because every clock the ladder reads was
+        being restamped twice a lap.
+
+        The questline FLOOR is the exception, and it has to be. One goal
+        line belongs to as many as nine consecutive quests -- `Talk To
+        General Khaba in Hall of Champions` is the second objective of
+        Krokotopia #26 through #34 -- so a party legitimately grinding
+        that chain returns to one goal string over and over. A floor
+        that rises is monotone by construction and is an achievement
+        whatever the goal line repeats.
+        """
+        was = seat.goal
+        if goal == was:
+            return
+        if was:
+            seat.goals_at[was] = now
+            if len(seat.goals_at) > 16:
+                cut = now - self.GOAL_BOUNCE_WINDOW
+                for text, at in list(seat.goals_at.items()):
+                    if at < cut:
+                        del seat.goals_at[text]
+        if now - seat.goals_at.get(goal, -1e9) >= self.GOAL_BOUNCE_WINDOW:
+            seat.goal_fresh_at = now
 
     def _check_progress(self, seat):
         """Say so when a running script is getting nowhere.
@@ -9393,6 +9491,13 @@ class LiveWorker(QThread):
         if best is None or place.order > best:
             seat.furthest[place.world] = place.order
             seat.floor_doubted.pop(place.world, None)
+            # A floor that RISES is an achievement whatever the goal
+            # line repeats -- one goal line belongs to as many as nine
+            # consecutive quests, so a party grinding that chain
+            # returns to one string over and over. See
+            # `_note_goal_fresh`, whose exception this is.
+            if best is not None:
+                seat.goal_fresh_at = time.monotonic()
             return place
         if place.order == best:
             seat.floor_doubted.pop(place.world, None)
