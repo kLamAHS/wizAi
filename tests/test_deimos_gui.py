@@ -317,6 +317,43 @@ def test_the_export_says_how_many_rounds_were_actually_a_party():
     assert tel2.summary()["planned_alone"] == {"alone": 1, "rounds": 1}
 
 
+def test_planned_alone_breaks_its_count_down_by_reason():
+    """The count on its own cannot be acted on. Rev c1d4981c planned 16
+    of Thomas's 22 rounds alone and said why three times, because
+    `_say_why_it_planned_alone` is throttled once per fight — right for
+    a status line, useless for weighing "the partner was late" against
+    "this wizard was". They want opposite fixes."""
+    from deimos_bridge.telemetry import RoundRecord
+
+    tel = Telemetry()
+    tel.start_fight()
+    late = "waited 2.5s for Críspulo and it did not submit"
+    mine = "reached round 6 after the party had already planned it"
+    for why in (late, late, mine, ""):
+        tel.rounds.append(RoundRecord(fight=1, round=1, passing=False,
+                                      seats_in_plan=1, alone_why=why))
+    tel.rounds.append(RoundRecord(fight=1, round=2, passing=False,
+                                  seats_in_plan=2))
+
+    out = tel.summary()["planned_alone"]
+    assert (out["alone"], out["rounds"]) == (4, 5)
+    # Heaviest first: the question this answers is which one to fix.
+    assert list(out["why"]) == [late, mine]
+    assert out["why"] == {late: 2, mine: 1}
+
+
+def test_a_party_that_fuses_every_round_has_no_why_at_all():
+    """The control. A breakdown of nothing is a key that should not be
+    in the file."""
+    from deimos_bridge.telemetry import RoundRecord
+
+    tel = Telemetry()
+    tel.start_fight()
+    tel.rounds.append(RoundRecord(fight=1, round=1, passing=False,
+                                  seats_in_plan=3))
+    assert "why" not in tel.summary()["planned_alone"]
+
+
 def test_the_export_names_a_board_the_party_fought_twice():
     """The operator's report was about EFFICIENCY and no export could
     answer it: "it seems pretty inneficient when they're both on the
@@ -2508,6 +2545,135 @@ def test_auto_dialogue_clicks_without_being_asked(qapp):
 
     asyncio.run(drive())
     assert client.mouse_handler.clicks, "auto-dialogue never fired"
+
+
+def test_an_alone_round_carries_its_reason_on_the_round_record(qapp):
+    """`_say_why_it_planned_alone` says it once per FIGHT, which is
+    right for a status line and wrong for counting — rev c1d4981c's
+    Thomas planned 22 rounds alone and the export has three lines about
+    it. The record needs no throttle."""
+    from deimos_bridge.telemetry import RoundRecord
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.tel.start_fight()
+    worker.hive = type("H", (), {
+        "alone_reason": staticmethod(
+            lambda i: "waited 2.5s for Críspulo and it did not submit")})()
+
+    first = RoundRecord(fight=1, round=1, passing=False, seats_in_plan=1)
+    second = RoundRecord(fight=1, round=2, passing=False, seats_in_plan=1)
+    worker._say_why_it_planned_alone(seat, first)
+    worker._say_why_it_planned_alone(seat, second)
+
+    assert first.alone_why == second.alone_why == \
+        "waited 2.5s for Críspulo and it did not submit"
+    # ...and the LOG still says it once, which is what it is for.
+    said = [e for e in seat.tel.questing if e["kind"] == "planned-alone"]
+    assert len(said) == 1, [e["detail"] for e in said]
+
+
+def test_a_round_the_party_fused_carries_no_reason(qapp):
+    """The control. There is nothing to explain about a round that
+    worked, and a reason on one would be counted as a failure."""
+    from deimos_bridge.telemetry import RoundRecord
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.tel.start_fight()
+    worker.hive = type("H", (), {
+        "alone_reason": staticmethod(lambda i: "should never be read")})()
+
+    rec = RoundRecord(fight=1, round=1, passing=False, seats_in_plan=2)
+    worker._say_why_it_planned_alone(seat, rec)
+    assert rec.alone_why == ""
+
+
+def test_three_teleports_refused_for_a_duel_hold_the_script(qapp):
+    """Rev c1d4981c: `teleport-failed` nineteen times, ten of them
+    consecutive "the wizard was in a duel" at ~6.4s apart. Every one is
+    wasted -- the VM cannot move a fighting wizard, and upstream the
+    teleport returns nothing at all, so it cannot tell."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.in_duel = True
+    assert worker._duel_held() is False
+
+    for _ in range(worker.TP_INTO_DUEL):
+        worker._teleport_outcome(False, "the wizard was in a duel", "",
+                                 client=seat.client)
+    assert worker._duel_held() is True
+    said = [e for e in seat.tel.questing if e["kind"] == "teleport-into-duel"]
+    assert said and "in a duel" in said[0]["detail"]
+    # Said once per episode, not once per refusal — that is the whole
+    # point of holding rather than reporting a tenth time.
+    worker._teleport_outcome(False, "the wizard was in a duel", "",
+                             client=seat.client)
+    assert len([e for e in seat.tel.questing
+                if e["kind"] == "teleport-into-duel"]) == 1
+
+
+def test_the_duel_hold_releases_when_the_duel_does(qapp):
+    """The real release is the fight ending, checked rather than timed,
+    so the script gets its wheel back the moment the wizard can move."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.in_duel = True
+    for _ in range(worker.TP_INTO_DUEL):
+        worker._teleport_outcome(False, "the wizard was in a duel", "",
+                                 client=seat.client)
+    assert worker._duel_held() is True
+
+    seat.in_duel = False
+    assert worker._duel_held() is False
+    assert worker._tp_into_duel == {}, "the streak outlived the duel"
+
+
+def test_the_duel_hold_expires_even_if_the_duel_read_sticks(qapp):
+    """The backstop. `in_duel` is a memory read like any other, and one
+    that stops coming back must never park the VM for a run."""
+    import time
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.in_duel = True
+    for _ in range(worker.TP_INTO_DUEL):
+        worker._teleport_outcome(False, "the wizard was in a duel", "",
+                                 client=seat.client)
+    assert worker._duel_held() is True
+
+    worker._duel_hold_until = time.monotonic() - 1
+    assert worker._duel_held() is False
+
+
+def test_a_teleport_failing_for_another_reason_holds_nothing(qapp):
+    """The control. A collision solve that ran out of tries is a
+    different failure and the script's next instruction may well be the
+    thing that fixes it."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.in_duel = True
+    for _ in range(worker.TP_INTO_DUEL + 2):
+        worker._teleport_outcome(False, "spiral (nav exhausted)", "",
+                                 client=seat.client)
+    assert worker._duel_held() is False
+    assert not [e for e in seat.tel.questing
+                if e["kind"] == "teleport-into-duel"]
+
+
+def test_a_teleport_that_lands_ends_the_duel_streak(qapp):
+    """Whatever the VM was aiming at a fighting wizard, it is not now."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.in_duel = True
+    for _ in range(worker.TP_INTO_DUEL - 1):
+        worker._teleport_outcome(False, "the wizard was in a duel", "",
+                                 client=seat.client)
+    worker._teleport_outcome(True, "direct", "Krokotopia/KT_Hub",
+                             client=seat.client)
+    worker._teleport_outcome(False, "the wizard was in a duel", "",
+                             client=seat.client)
+    assert worker._duel_held() is False
 
 
 def test_auto_dialogue_presses_x_as_a_ladder_not_once(monkeypatch):
@@ -11897,7 +12063,7 @@ def test_being_too_far_from_the_marker_says_how_far():
     finally:
         questing.read_quest_position = orig
     assert near is False
-    assert "4,000" in why and "750" in why
+    assert "4,000" in why and "1,000" in why
 
 
 # ------------------------------------------ the wizard left behind
@@ -26651,18 +26817,60 @@ def test_the_same_far_marker_after_a_zone_change_is_believed(monkeypatch):
     assert worker._marker_out_of_reach([seat]) == 75742.0
 
 
-def test_the_same_far_marker_after_the_goal_moved_is_believed(monkeypatch):
-    """The other half of the precondition, and the reason the receipt
-    carries the goal as well as the zone: a quest that advanced to
-    another world without the wizard moving is exactly
-    `goal_is_elsewhere`'s case, and vouching for it on the zone alone
-    would re-create the bug rev 09a0af80 paid for at 81 units."""
+def test_the_bounce_count_survives_a_goal_change_in_one_zone(monkeypatch):
+    """Rev c1d4981c's Críspulo: `off-questline` x7,
+    `questline-quest-missing` x2, `back-on-questline` x5 — its tracker
+    flipped between the main line, two side quests and the Quest Finder
+    pseudo-entry all run. The receipt was keyed on (zone, goal), so the
+    count reset on every flip, the vouch never accumulated, and
+    `catch-up-out-of-zone` reported "960 times in a row" about a wizard
+    the preset was parking and un-parking.
+
+    A wizard teleported to the safe spot and back is doing the same
+    thing whether or not its journal moved underneath it."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch,
+        # The tracker flips to a side quest half way through, in the
+        # same zone and the same world.
+        goals=["Talk To Arena Master in Grand Arena"] * 3
+              + ["Defeat Sokkwi Gougers in Grand Arena"] * 20,
+        positions=[
+            _XYZ(1616.0, 0.0, 0.0),
+            _XYZ(75742.0, 0.0, 0.0), _XYZ(75742.0, 0.0, 0.0),
+            _XYZ(3470.0, 0.0, 0.0), _XYZ(3470.0, 0.0, 0.0),
+            _XYZ(75742.0, 0.0, 0.0), _XYZ(75742.0, 0.0, 0.0),
+            _XYZ(541.0, 0.0, 0.0), _XYZ(541.0, 0.0, 0.0),
+            _XYZ(75742.0, 0.0, 0.0),
+        ])
+    seat.zone_seen = "Krokotopia/KT_Krokosphinx/KT_Arena"
+    worker.MARKER_FLAP_REST = 0.0
+    for _ in range(6):
+        asyncio.run(worker._read_goal(seat))
+    assert seat.goal != "Talk To Arena Master in Grand Arena", \
+        "the fixture's tracker never flipped"
+    assert seat.marker_bounces >= worker.MARKER_BOUNCES, seat.marker_bounces
+
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away == worker.MARKER_IN_ZONE
+    assert worker._marker_out_of_reach([seat]) is None
+
+
+def test_the_same_far_marker_for_another_world_is_believed(monkeypatch):
+    """The other half of the precondition. The receipt used to carry the
+    goal STRING and refuse on any change, and rev c1d4981c is what that
+    cost: Críspulo's tracker flipped seven times, the bounce count reset
+    on every flip, and `catch-up-out-of-zone` ran to "960 times in a
+    row". What the string was standing in for is this question asked
+    exactly — has the objective moved to another WORLD without the
+    wizard moving — which is rev 09a0af80's case, at 81 units."""
     import asyncio
 
     worker, seat = _goal_worker(
         monkeypatch,
         goals=["Talk To Arena Master in Grand Arena"] * 7
-              + ["Talk To Merle Ambrose in The Commons"],
+              + ["Talk To Private Connelly in Unicorn Way"],
         positions=[
             _XYZ(1616.0, 0.0, 0.0),
             _XYZ(75742.0, 0.0, 0.0), _XYZ(75742.0, 0.0, 0.0),
@@ -26677,11 +26885,14 @@ def test_the_same_far_marker_after_the_goal_moved_is_believed(monkeypatch):
         asyncio.run(worker._read_goal(seat))
     assert seat.marker_bounces >= worker.MARKER_BOUNCES
 
-    # The step advanced without the wizard moving — which is exactly
-    # `goal_is_elsewhere`'s case, and it read 81 units at rev 09a0af80.
+    # The step advanced to WIZARD CITY without the wizard leaving
+    # Krokotopia. Its marker is read in another world's coordinate
+    # space and means nothing here, at any distance.
     asyncio.run(worker._read_goal(seat))
-    assert seat.goal == "Talk To Merle Ambrose in The Commons", \
+    assert seat.goal == "Talk To Private Connelly in Unicorn Way", \
         "the fixture's goal never moved"
+    assert worker._marker_is_another_world(seat), \
+        "the fixture's new goal is not in another world"
     assert seat.marker_away == 75742.0
 
 

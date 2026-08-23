@@ -763,6 +763,13 @@ class LiveWorker(QThread):
         #: and keeps cancelling with its next teleport. Deadline, like
         #: the hop's. See `_maybe_count_hold` and `_countdown_held`.
         self._count_hold_until = 0.0
+        #: until when the script takes no instructions because it keeps
+        #: teleporting a wizard that is IN A DUEL, and how many such
+        #: refusals each client has taken in a row. Its own deadline and
+        #: its own release condition, rather than a second use of the
+        #: sigil hold above. See `_note_teleport_into_duel`.
+        self._duel_hold_until = 0.0
+        self._tp_into_duel = {}
         #: has this hold already stepped the wizard off its pad and
         #: back? That move un-joins a counting sigil, so it is worth
         #: exactly one counter restart per hold and no more. See
@@ -1204,7 +1211,8 @@ class LiveWorker(QThread):
                 # seat 0 unless seat 0's loop has stopped coming round.
                 # See `_script_seat`.
                 driving = self._script_seat() is seat
-                if driving and not catching and self._countdown_held():
+                if driving and not catching and (self._countdown_held()
+                                                 or self._duel_held()):
                     # Not stepped, not torn down: the VM keeps its state
                     # and resumes when the hold releases -- to a changed
                     # zone if the sigil fired, to the same spot if not.
@@ -1212,7 +1220,11 @@ class LiveWorker(QThread):
                         seat, "countdown-held",
                         "script held — this wizard may be standing on a "
                         "counting sigil, and the script's next teleport "
-                        "is the one that keeps cancelling the entry")
+                        "is the one that keeps cancelling the entry"
+                        if self._countdown_held() else
+                        "script held — its last teleports were all "
+                        "refused because a wizard is in a duel, and it "
+                        "cannot move a fighting wizard")
                 elif driving and not catching:
                     await self._stage(seat, "script step",
                                       self._script_step(seat), wheel=True)
@@ -4940,10 +4952,11 @@ class LiveWorker(QThread):
         # one impossible distance "480 times in a row").
         if raw is not None and raw <= self.MARKER_IN_ZONE and seat.goal:
             near = seat.marker_near
-            if near and near[:2] != (seat.zone_seen, seat.goal):
-                # A different zone or a different step is a different
-                # question; nothing this wizard learned about the last
-                # one carries over.
+            if near and near[0] != seat.zone_seen:
+                # A different ZONE is a different question; nothing this
+                # wizard learned about the last one carries over. A
+                # different goal in the same zone is not -- see
+                # `_marker_vouched_in_zone`.
                 seat.marker_bounces = 0
             elif near and was_away is not None \
                     and was_away > self.MARKER_IN_ZONE:
@@ -5668,6 +5681,9 @@ class LiveWorker(QThread):
         """
         name = self._whose_client(client)
         if landed:
+            # A teleport that took ends the streak below: whatever the
+            # VM was aiming at a duelling wizard, it is not now.
+            self._tp_into_duel.pop(id(client), None)
             key = how.split(" (", 1)[0] if how else "unknown"
             counts = self._tp_landed
             n = counts[key] = counts.get(key, 0) + 1
@@ -5683,6 +5699,7 @@ class LiveWorker(QThread):
             return
         said = (f"{name}'s scripted teleport did not land" if name
                 else "a scripted teleport did not land")
+        self._note_teleport_into_duel(client, how)
         for other in self.seats:
             try:
                 other.tel.note_questing(
@@ -5997,10 +6014,13 @@ class LiveWorker(QThread):
     #: two of walking before its effect is judgeable -- restarting
     #: faster than this is thrash, not persistence.
     SCRIPT_RESTART_EVERY = 420.0
-    #: how close counts as standing ON the quest marker. The same 750
-    #: the quest-marker check itself uses (`questing.at_quest_marker`),
-    #: so "at the marker" means one thing everywhere.
-    AT_THE_MARKER = 750.0
+    #: how close counts as standing ON the quest marker. The same number
+    #: the quest-marker check itself uses (`questing.QUEST_RADIUS`), so
+    #: "at the marker" means one thing everywhere -- and it moves with
+    #: it: rev c1d4981c refused a wizard 831 units from its objective
+    #: five times over, which shut auto-dialogue's press AND this
+    #: rung's sigil hold on the same eighty-one units.
+    AT_THE_MARKER = 1000.0
     #: how long a wizard may stand ON its marker, script looping and
     #: nothing changing, before the script is restarted.
     #:
@@ -6288,7 +6308,7 @@ class LiveWorker(QThread):
         return time.monotonic() < self._hop_pause_until
 
     #: how close to the marker "standing at a walk-in door" starts. NOT
-    #: `AT_THE_MARKER`'s 750: that is conversation range, and a wizard
+    #: `AT_THE_MARKER`'s 1,000: that is conversation range, and a wizard
     #: 700 units from a door is a wizard the script is still walking.
     #: The stall this rung answers reads single digits -- rev 9e13d385's
     #: Konstantin sat at "marker 2 away", then "marker 8 away" -- with
@@ -7065,6 +7085,74 @@ class LiveWorker(QThread):
         import time
 
         return time.monotonic() < self._count_hold_until
+
+    #: how many teleports the script may have refused for "the wizard
+    #: was in a duel" before it is held off that wizard. Three, because
+    #: one is the ordinary race -- a duel starts between the VM reading
+    #: the world and issuing the move -- and three in a row is a loop.
+    TP_INTO_DUEL = 3
+    #: ...and the longest that hold may last. The real release is the
+    #: duel ending; this only bounds a `seat.in_duel` that stops
+    #: coming back, which must never park the VM for a run.
+    TP_INTO_DUEL_HOLD = 120.0
+
+    def _note_teleport_into_duel(self, client, how):
+        """A scripted teleport refused because the wizard is fighting.
+
+        Rev c1d4981c: `teleport-failed` nineteen times, ten of them
+        consecutive "the wizard was in a duel" at ~6.4s apart
+        (t=3878-3969). Every one is wasted -- the VM cannot move that
+        wizard until the duel ends, and it does not know that, because
+        upstream the teleport returns nothing at all.
+
+        So the third one in a row holds the script rather than being
+        reported for a tenth time. Held, not torn down: the VM keeps
+        its instruction pointer and resumes on a world where the duel
+        it kept aiming at is over.
+        """
+        import time
+
+        if not how or "in a duel" not in how.lower():
+            return
+        key = id(client)
+        n = self._tp_into_duel[key] = self._tp_into_duel.get(key, 0) + 1
+        if n < self.TP_INTO_DUEL:
+            return
+        now = time.monotonic()
+        already = now < self._duel_hold_until
+        self._duel_hold_until = now + self.TP_INTO_DUEL_HOLD
+        if already:
+            return
+        who = self._whose_client(client) or "a wizard"
+        said = (f"the script has had {n} teleports in a row refused "
+                f"because {who} is in a duel. Holding it until the duel "
+                f"ends rather than spending another ten: the VM cannot "
+                f"move a fighting wizard, and upstream the teleport "
+                f"returns nothing at all, so it cannot tell")
+        for other in self.seats:
+            try:
+                other.tel.note_questing("teleport-into-duel", said)
+            except Exception:
+                pass
+        self._say(self.seats[0], said)
+
+    def _duel_held(self):
+        """Is the script held off a wizard it keeps teleporting mid-duel?
+
+        The deadline is the backstop; the real release is the duel
+        ending, which is checked here rather than on a timer so the
+        script gets its wheel back the moment the fight does.
+        """
+        import time
+
+        if not self._duel_hold_until:
+            return False
+        fighting = any(s.in_duel for s in self.seats if s.client is not None)
+        if not fighting or time.monotonic() >= self._duel_hold_until:
+            self._duel_hold_until = 0.0
+            self._tp_into_duel.clear()
+            return False
+        return True
 
     async def _press_on_prompt(self, seat, polls):
         """Poll for this wizard's own press-X prompt; X when it shows.
@@ -11022,8 +11110,9 @@ class LiveWorker(QThread):
 
     #: How far apart two wizards at a press-X prompt can be and still be
     #: at the SAME one. A sigil's own interact range is a few hundred
-    #: units (`questing.QUEST_RADIUS` is 750 for the comparable "is this
-    #: the quest NPC" question), so anything past this is two prompts.
+    #: units (`questing.QUEST_RADIUS` is 1,000 for the comparable "is
+    #: this the quest NPC" question), so anything past this is two
+    #: prompts.
     SAME_SIGIL_WITHIN = 1200.0
     #: ...and for how long, before it is said. Wizards reach a sigil at
     #: different times and one still walking is not a split party.
@@ -11582,10 +11671,27 @@ class LiveWorker(QThread):
             return False
         if getattr(seat, "marker_bounces", 0) < self.MARKER_BOUNCES:
             return False
-        zone, goal, when = near
+        zone, _goal, when = near
         if now - when > self.MARKER_ZONE_VOUCH:
             return False
-        return zone == seat.zone_seen and goal == seat.goal
+        if zone != seat.zone_seen:
+            return False
+        # The goal is NOT required to be the one the receipt was written
+        # on. It was, and rev c1d4981c is the bill: Críspulo's tracker
+        # flipped seven times (`off-questline` x7,
+        # `questline-quest-missing` x2), the count reset on every flip,
+        # the vouch never accumulated and `catch-up-out-of-zone` ran to
+        # "960 times in a row". A wizard teleported to the preset's
+        # parking spot and back is doing the same thing whether or not
+        # its journal moved underneath it.
+        #
+        # What the goal was standing in for is this question, asked
+        # exactly: has the objective moved to another WORLD without the
+        # wizard moving? That is rev 09a0af80's case -- a Wysteria
+        # marker read from the Zafaria hub at 81 units -- and
+        # `goal_is_elsewhere` answers it on the goal's own destination
+        # rather than on whether the string changed.
+        return not self._marker_is_another_world(seat)
 
     def _marker_out_of_reach(self, seats):
         """Is the laggard's objective somewhere a hop cannot go?
@@ -12398,6 +12504,16 @@ class LiveWorker(QThread):
                else getattr(self.hive, "last_alone", None))
         if not why:
             return
+        # Onto the ROUND first, before the once-per-fight throttle
+        # below. The throttle is right for a status line and wrong for
+        # counting: rev c1d4981c planned 22 rounds alone and said so
+        # three times, so the export could not weigh "the partner was
+        # late" against "this wizard was". See `RoundRecord.alone_why`
+        # and `Telemetry.planned_alone`.
+        try:
+            rec.alone_why = why
+        except Exception:
+            pass
         index = getattr(seat.tel.fights[-1], "index", None) \
             if seat.tel.fights else None
         if seat.alone_said_for == index:
