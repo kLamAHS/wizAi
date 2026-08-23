@@ -761,6 +761,78 @@ def steady_sigil(source: str):
     return (out, True) if n else (source, False)
 
 
+def wake_dialogue(source: str):
+    """(source, name) — declare the guard that switches a preset's own
+    dialogue clearer off, so its press actually happens.
+
+    `dead_dialogue_guard` has found this bug in every preset wizAi
+    ships and wizAi has reported it, run after run, without fixing
+    it::
+
+        if any hasdialogue {
+            print "Dialogue detected. Clearing..."
+            if Handle_Dialogue = True {          # declared NOWHERE
+                sameany sendkey SPACEBAR, .1     # so this never runs
+            }
+        }
+
+    Rev b37ab0a2 is the bill in full. `Dialogue detected. Clearing...`
+    printed **90 times** while the script pressed nothing, and Thomas
+    spent **79 of that run's 136 minutes** -- 58% -- on one line, `Talk
+    To Arena Master in Grand Arena`. The script's other way in was no
+    better: `Checking X key type for P1` ran 131 times and found the
+    press-X prompt 14.
+
+    The variable is inserted rather than the guard rewritten. The
+    author's intent is on the line already -- the press is there, the
+    branch is there, the name is there -- and one missing declaration
+    is what makes deimoslang answer it `False` (`vm.py:1109`). Adding
+    the declaration restores what the preset says it does; editing the
+    press would be wizAi deciding what it should do instead.
+
+    Placed after the last `var` in the file's declaration prefix, which
+    is where the preset keeps its settings and, more importantly, is
+    executed before any `block` is called. Idempotent by construction:
+    once the name is declared, `dead_dialogue_guard` returns "" and
+    this is a no-op.
+
+    wizAi's own clicker stays on. `_dialogue_is_ours` reads the
+    operator's `self.script`, which this does not touch, so both press
+    -- and that is the intended arrangement rather than an oversight:
+    two idempotent advancers beat a race that nobody wins.
+    """
+    import re
+
+    name = dead_dialogue_guard(source)
+    if not name:
+        return source, ""
+    lines = (source or "").splitlines(keepends=True)
+    # The declaration PREFIX: everything before the first block, which
+    # is where a deimoslang program's top-level statements run. A `var`
+    # after the first block would be dead code in exactly the way this
+    # is fixing.
+    last = None
+    for i, raw in enumerate(lines):
+        if re.match(r'^\s*block\s+\w+', raw):
+            break
+        if re.match(rf'^\s*var\s+\w+\s*=', raw):
+            last = i
+    decl = f"var {name} = True\n"
+    if last is None:
+        # No settings block to join -- put it at the very top, after
+        # the `###deimos_expertmode` header line the parser needs
+        # first.
+        at = 1 if lines and lines[0].lstrip().startswith("###") else 0
+    else:
+        at = last + 1
+        # Match the file's own line endings, which are CRLF in the
+        # shipped presets. `steady_sigil` takes the same care.
+        if lines[last].endswith("\r\n"):
+            decl = f"var {name} = True\r\n"
+    lines.insert(at, decl)
+    return "".join(lines), name
+
+
 #: the preset setting that says whether p1 is a quester or the muscle.
 #: TTS ships it False, with the comment "Set to true if you do not have
 #: a booster and all accounts are questing."

@@ -245,6 +245,12 @@ class _Seat:
         #: because the coordinates are in that zone's space -- which is
         #: precisely the discriminator `_start_catching_up` needs.
         self.marker_away = None
+        #: (zone, goal, when) of the last RAW reading that landed inside
+        #: `MARKER_IN_ZONE`, and how many times the marker has come BACK
+        #: inside it on that same pair after being believed far. See
+        #: `LiveWorker._marker_vouched_in_zone`.
+        self.marker_near = None
+        self.marker_bounces = 0
         #: since when the quest position has been UNREADABLE while the
         #: goal line still reads -- the dead-quest-hook signature, and a
         #: different fact from `marker_away is None` (one bad read).
@@ -1744,9 +1750,11 @@ class LiveWorker(QThread):
                         f"`{guard}`, which it never declares — deimoslang "
                         f"reads an undefined name as False, so it prints "
                         f"\"Dialogue detected. Clearing...\" and presses "
-                        f"nothing. wizAi is clicking dialogue for these "
-                        f"wizards instead of standing back for a handler "
-                        f"that does not run")
+                        f"nothing. wizAi declares `{guard}` in the copy it "
+                        f"builds the VM over (see scripts.wake_dialogue) AND "
+                        f"keeps clicking dialogue itself — two advancers "
+                        f"that both just move the box on beat a race that "
+                        f"nobody wins")
                 for seat in self.seats:
                     try:
                         seat.tel.note_questing("script-dialogue-dead", said)
@@ -2484,10 +2492,34 @@ class LiveWorker(QThread):
             if await questing.near_interactable(client):
                 near, why = await questing.at_quest_marker(client)
                 if near:
-                    ok, pressed_why = await questing.press_x(client)
+                    # A LADDER, not one press. `press_x_until` has said
+                    # why since it was written -- "X is a proximity
+                    # interact ... after a teleport that can be a
+                    # second or two of settling. A single press lands
+                    # in the gap and the step never starts" -- and the
+                    # preset presses up to twenty for the same reason.
+                    # This caller was the one still pressing once, and
+                    # rev b37ab0a2 spent 79 of its 136 minutes on one
+                    # `Talk To ...` step that a press had to start.
+                    async def opened():
+                        return (await questing.in_dialogue(client)
+                                or await questing.in_battle(client))
+
+                    ok, pressed_why = await questing.press_x_until(
+                        client, opened)
                     if ok:
                         self._say(seat, "opened the quest dialogue")
-                        await questing.dialogue_opened(client)
+                        # ...and into the RUN's record, not only the
+                        # status line. Rev b37ab0a2's exports could not
+                        # say whether wizAi's clicker had done anything
+                        # at all while the script's dead handler
+                        # printed "Dialogue detected. Clearing..." 90
+                        # times -- which is the one question that run
+                        # turned on.
+                        seat.tel.note_questing(
+                            "dialogue-opened",
+                            f"pressed X {ok} time(s) at the quest marker "
+                            f"and a dialogue opened — {seat.goal or 'no goal'}")
                     elif pressed_why:
                         self._say_once(seat, "press-x", pressed_why)
                 elif why and not seat.warned_quest_arrow:
@@ -2510,6 +2542,10 @@ class LiveWorker(QThread):
             n, click_why = await questing.advance_dialogue(client)
             if n:
                 self._say(seat, f"auto-dialogue: {n} window(s)")
+                seat.tel.note_questing(
+                    "dialogue-cleared",
+                    f"clicked {n} dialogue window(s) through — "
+                    f"{seat.goal or 'no goal'}")
             elif click_why:
                 # Reported, not spun on: this used to loop twice a second
                 # forever against an open dialogue it could not click,
@@ -3370,6 +3406,31 @@ class LiveWorker(QThread):
             if paced:
                 self._say(seat, "script pacing — " + ", ".join(
                     f"{n} = {v}s" for n, v in paced))
+            source, woken = scripts.wake_dialogue(source)
+            if woken:
+                # Every seat's log, like `script-party` and
+                # `script-dialogue-dead`: this is a fact about the run,
+                # and whichever export gets opened first should show it.
+                woke = (f"`{woken}` gates this preset's only general "
+                        f"dialogue press and is declared nowhere, so "
+                        f"deimoslang read it False and the script printed "
+                        f"\"Dialogue detected. Clearing...\" without "
+                        f"pressing anything — 90 times in one run at rev "
+                        f"b37ab0a2, which spent 58% of itself on a single "
+                        f"Talk step. Declared True in the copy this VM "
+                        f"runs, so the press happens; wizAi's own clicker "
+                        f"stays on beside it")
+                for other in self.seats:
+                    try:
+                        other.tel.note_questing("script-dialogue-woken", woke)
+                    except Exception:
+                        pass
+                self._say_once(
+                    seat, f"dialogue-woken:{woken}",
+                    f"the preset's own dialogue clearer was switched off by "
+                    f"`{woken}`, a name it never declares — declared it True "
+                    f"in the copy this VM runs, so its SPACEBAR press "
+                    f"actually happens")
             source, steadied = scripts.steady_sigil(source)
             if steadied:
                 self._say_once(
@@ -4746,6 +4807,9 @@ class LiveWorker(QThread):
                 away = (dx * dx + dy * dy) ** 0.5
         except Exception:
             pass
+        # What the client actually said, kept aside before any branch
+        # below substitutes a believed value for it.
+        raw = away
         # A marker that has just come within arm's reach is the single
         # most consequential read this poll makes -- it is what
         # `marker_case` gates the whole sigil rung on -- and it is the
@@ -4805,6 +4869,34 @@ class LiveWorker(QThread):
             away = (min(was_away, self.MARKER_IN_ZONE)
                     if was_away is not None else self.MARKER_IN_ZONE)
             leaving = False
+        elif (away is not None and away > self.MARKER_IN_ZONE
+                and self._marker_vouched_in_zone(seat, now)):
+            # ...and the same refusal on the wizard's own history
+            # rather than on the quest list's area names, which is the
+            # half `_marker_cannot_be_out_of_zone` cannot reach:
+            # `area_is_this_zone('Grand Arena',
+            # 'Krokotopia/KT_Krokosphinx/KT_Arena')` answers None,
+            # because a three-segment zone path is "inside something;
+            # unnameable". The wizard's own reading a minute ago is not
+            # ambiguous about it.
+            self._say_once(
+                seat, f"marker-same-zone:{seat.zone_seen}:{seat.goal}",
+                f"{seat.name}'s quest marker reads {away:,.0f} away, but it "
+                f"read inside this zone on this same goal and has not "
+                f"changed zone since — the wizard moved, the objective did "
+                f"not",
+                kind="marker-same-zone",
+                detail=(f"the marker read {away:,.0f} away, past "
+                        f"{self.MARKER_IN_ZONE:,.0f}, in {seat.zone_seen} — "
+                        f"the same zone it read inside "
+                        f"{self.MARKER_IN_ZONE:,.0f} from "
+                        f"{now - seat.marker_near[2]:.0f}s ago on this same "
+                        f"goal, with no zone change in between. Another "
+                        f"zone needs a zone change; the preset parks its "
+                        f"wizards at `tp XYZ(0,100000,0)` every loop and "
+                        f"that is what a six-figure reading here means"))
+            away = self.MARKER_IN_ZONE
+            leaving = False
         resting = now - seat.marker_flapped_at <= self.MARKER_FLAP_REST
         if arriving and resting:
             # Still disbelieved from a moment ago. Suppress the reading
@@ -4841,6 +4933,26 @@ class LiveWorker(QThread):
             else:
                 away = confirmed
         seat.marker_away = away
+        # The receipt `_marker_vouched_in_zone` reads back. From the RAW
+        # reading, never from `away`: a clamped value that refreshed its
+        # own vouch would keep itself alive forever, which is Phase AK's
+        # lesson about a fallback that feeds itself (rev e86044f2 kept
+        # one impossible distance "480 times in a row").
+        if raw is not None and raw <= self.MARKER_IN_ZONE and seat.goal:
+            near = seat.marker_near
+            if near and near[:2] != (seat.zone_seen, seat.goal):
+                # A different zone or a different step is a different
+                # question; nothing this wizard learned about the last
+                # one carries over.
+                seat.marker_bounces = 0
+            elif near and was_away is not None \
+                    and was_away > self.MARKER_IN_ZONE:
+                # It came BACK. Counted off the last BELIEVED distance
+                # rather than the last raw one, so a single far read the
+                # confirmation already threw out is not a return from
+                # anywhere -- it never got there.
+                seat.marker_bounces += 1
+            seat.marker_near = (seat.zone_seen, seat.goal, now)
         # The dead-hook clock. One failed read is noise -- a zone change
         # makes several fail in a row -- but a marker that will not read
         # for minutes WHILE the goal line reads fine is the quest arrow
@@ -11407,6 +11519,73 @@ class LiveWorker(QThread):
     #: whose objectives were all elsewhere. Twenty thousand is far above
     #: any real within-zone distance and far below those.
     MARKER_IN_ZONE = 20000.0
+
+    #: how long a reading taken inside `MARKER_IN_ZONE` keeps vouching
+    #: for its (zone, goal). Half an hour: long enough to cover the
+    #: minutes a scripted wizard spends parked at the preset's safe
+    #: spot, short enough that a stale receipt cannot speak for a wizard
+    #: that has been somewhere else all along.
+    MARKER_ZONE_VOUCH = 1800.0
+
+    #: how many times the marker must come BACK inside `MARKER_IN_ZONE`,
+    #: on one (zone, goal), before a far reading on it stops meaning
+    #: another zone.
+    #:
+    #: Not one. The first cut of this rung had no such count and broke
+    #: four of Phase AC's tests outright, because near-then-far on one
+    #: zone and goal is ALSO the shape of a wizard whose objective
+    #: genuinely is elsewhere -- rev 1843e387's 98,813, and rev
+    #: 36d7c152's flapping hook, which is allowed one contradiction and
+    #: is still believed on its second opinion afterwards.
+    #:
+    #: What no cross-zone objective does is come back. A marker for
+    #: somewhere else reads far and STAYS far; only a wizard being
+    #: teleported away and back reads 1,616, then 75,742, then 3,470,
+    #: then 75,742. Rev b37ab0a2's heartbeats -- which sample once a
+    #: minute, so this is a floor and not a count -- caught seven of
+    #: those returns on one goal.
+    MARKER_BOUNCES = 2
+
+    def _marker_vouched_in_zone(self, seat, now):
+        """Has this wizard read its marker INSIDE this zone, on this goal?
+
+        `MARKER_IN_ZONE`'s premise is that six figures means a zone
+        boundary, because a marker in another zone is read in that
+        zone's coordinate space. Rev b37ab0a2 is where the premise
+        breaks: the preset opens every main-loop iteration with
+
+            print "Teleporting all clients to a safe area."
+            times 2 { tp XYZ(0,100000,0) }
+
+        -- `questing.NOWHERE`, the out-of-bounds bump -- so a wizard
+        standing at its quest NPC is yanked 100,000 units up, sampled
+        there, and read as "another zone". It happened 152 times in
+        that run. Thomas's marker read 1,616 and then 75,742 in the
+        SAME room, seven times over, and wizAi restarted the script six
+        times saying "another zone … No teleport can help from here"
+        about an NPC ten feet away. 79 of that run's 136 minutes went
+        on the one conversation.
+
+        The distance was true; the inference was not. So the inference
+        gets a precondition: another zone requires a ZONE CHANGE. If
+        the last reading inside `MARKER_IN_ZONE` was taken in this zone
+        on this goal, the objective is still in this zone and the
+        wizard is what moved.
+
+        Both halves matter. The zone alone would vouch wrongly for a
+        wizard whose quest advanced to another world without it moving
+        -- which is `goal_is_elsewhere`'s case, at 81 units, and the
+        reason `_marker_is_another_world` stays a separate question.
+        """
+        near = getattr(seat, "marker_near", None)
+        if not near:
+            return False
+        if getattr(seat, "marker_bounces", 0) < self.MARKER_BOUNCES:
+            return False
+        zone, goal, when = near
+        if now - when > self.MARKER_ZONE_VOUCH:
+            return False
+        return zone == seat.zone_seen and goal == seat.goal
 
     def _marker_out_of_reach(self, seats):
         """Is the laggard's objective somewhere a hop cannot go?

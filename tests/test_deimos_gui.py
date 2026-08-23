@@ -2510,6 +2510,109 @@ def test_auto_dialogue_clicks_without_being_asked(qapp):
     assert client.mouse_handler.clicks, "auto-dialogue never fired"
 
 
+def test_auto_dialogue_presses_x_as_a_ladder_not_once(monkeypatch):
+    """`press_x_until` has said why since it was written: "X is a
+    proximity interact ... after a teleport that can be a second or two
+    of settling. A single press lands in the gap and the step never
+    starts." The preset presses up to twenty for the same reason, and
+    `hop_once` already uses the ladder. This caller was the last one
+    still pressing once — and rev b37ab0a2 spent 79 of its 136 minutes
+    on one `Talk To ...` step that a press had to start."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    async def _no(_c):
+        return False
+
+    async def _yes(_c):
+        return True
+
+    async def _at_marker(_c, radius=None):
+        return True, ""
+
+    def _never(_c):
+        raise AssertionError("auto-dialogue pressed X exactly once")
+
+    seen = {}
+
+    async def _ladder(client, done, **kw):
+        seen["done"] = done
+        return 3, ""
+
+    monkeypatch.setattr(questing, "in_dialogue", _no)
+    monkeypatch.setattr(questing, "in_battle", _no)
+    monkeypatch.setattr(questing, "near_interactable", _yes)
+    monkeypatch.setattr(questing, "at_quest_marker", _at_marker)
+    monkeypatch.setattr(questing, "press_x", _never)
+    monkeypatch.setattr(questing, "press_x_until", _ladder)
+    monkeypatch.setattr(questing, "dialogue_opened", _no)
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    asyncio.run(worker._auto_dialogue(seat.client, seat))
+
+    assert "done" in seen, "the ladder was never reached"
+    # ...and the ladder stops on the thing it was pressing FOR, which is
+    # the predicate `hop_once` already uses.
+    assert asyncio.run(seen["done"]()) is False
+    monkeypatch.setattr(questing, "in_dialogue", _yes)
+    assert asyncio.run(seen["done"]()) is True
+
+
+def test_auto_dialogue_writes_what_it_did_into_the_run(monkeypatch):
+    """Rev b37ab0a2's exports could not say whether wizAi's clicker had
+    done anything at all, while the script's dead handler printed
+    "Dialogue detected. Clearing..." 90 times — and that was the one
+    question the run turned on. `_say` goes to the status line; the run
+    record needs it too."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    boxes = {"open": False}
+
+    async def _in_dialogue(_c):
+        return boxes["open"]
+
+    async def _no(_c):
+        return False
+
+    async def _yes(_c):
+        return True
+
+    async def _at_marker(_c, radius=None):
+        return True, ""
+
+    async def _ladder(_client, _done, **kw):
+        boxes["open"] = True
+        return 2, ""
+
+    async def _advance(_c):
+        boxes["open"] = False
+        return 4, ""
+
+    monkeypatch.setattr(questing, "in_dialogue", _in_dialogue)
+    monkeypatch.setattr(questing, "in_battle", _no)
+    monkeypatch.setattr(questing, "near_interactable", _yes)
+    monkeypatch.setattr(questing, "at_quest_marker", _at_marker)
+    monkeypatch.setattr(questing, "press_x_until", _ladder)
+    monkeypatch.setattr(questing, "dialogue_opened", _no)
+    monkeypatch.setattr(questing, "advance_dialogue", _advance)
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    asyncio.run(worker._auto_dialogue(seat.client, seat))
+
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert "dialogue-opened" in kinds, kinds
+    assert "dialogue-cleared" in kinds, kinds
+    opened = [e for e in seat.tel.questing if e["kind"] == "dialogue-opened"]
+    cleared = [e for e in seat.tel.questing if e["kind"] == "dialogue-cleared"]
+    assert "2 time(s)" in opened[0]["detail"]
+    assert "4 dialogue window(s)" in cleared[0]["detail"]
+
+
 # ------------------------------------------------- Deimos's own questing
 def test_deimos_questing_reports_why_it_is_unavailable():
     """It has to name the module that actually failed, and must never
@@ -15018,6 +15121,40 @@ def test_a_downgrade_that_never_clears_gives_the_quester_back(monkeypatch):
     assert said and "its own line" in said[0]["detail"]
 
 
+def test_building_the_script_wakes_its_dialogue_clearer(monkeypatch):
+    """The repair happens where every other one does — beside
+    `steady_sigil`, on the source both build paths share — and it says
+    so, because a silent rewrite of the operator's preset is not
+    something an export should have to be reverse-engineered for."""
+    from deimos_bridge import scripts
+
+    worker, built = _crewed_party(monkeypatch, boosters=(0,), leader=2)
+    worker.script = _DEAD_GUARD
+    _build_the_script(worker)
+
+    assert "var Handle_Dialogue = True" in built["source"]
+    assert scripts.dead_dialogue_guard(built["source"]) == ""
+    said = [e for e in worker.seats[2].tel.questing
+            if e["kind"] == "script-dialogue-woken"]
+    assert said, [e["kind"] for e in worker.seats[2].tel.questing]
+    assert "Handle_Dialogue" in said[0]["detail"]
+
+
+def test_wizai_still_clicks_dialogue_after_the_repair(monkeypatch):
+    """The operator's call, in their words: repair it, *and* keep wizAi
+    clicking. Two advancers that both only move the box on beat a race
+    that nobody wins — and the repair reaches the VM's copy, not
+    `self.script`, so `_dialogue_is_ours` is unmoved. Pinned here so a
+    later tidy cannot turn wizAi's clicker off as a side effect."""
+    worker, built = _crewed_party(monkeypatch, boosters=(0,), leader=2)
+    worker.script = _DEAD_GUARD
+    _build_the_script(worker)
+
+    assert "var Handle_Dialogue = True" in built["source"], \
+        "the fixture did not actually repair anything"
+    assert worker._dialogue_is_ours() is True
+
+
 def test_a_preset_that_wants_more_wizards_downgrades_loudly(monkeypatch):
     worker, built = _crewed_party(monkeypatch, boosters=(0,), leader=2)
     worker.script = worker.script.replace("@clients: > 1", "@clients: 4")
@@ -24513,6 +24650,70 @@ def test_every_shipped_preset_has_its_dialogue_clearer_switched_off():
         assert scripts.dead_dialogue_guard(source) == "Handle_Dialogue", title
 
 
+def test_the_dead_dialogue_guard_is_declared_rather_than_left_dead():
+    """Reporting it was not enough. Rev b37ab0a2 printed "Dialogue
+    detected. Clearing..." **90 times** while pressing nothing, and
+    Thomas spent 79 of that run's 136 minutes — 58% — on one line,
+    `Talk To Arena Master in Grand Arena`.
+
+    The declaration is added rather than the guard rewritten: the
+    author's press is already on the line, and one missing `var` is the
+    whole reason deimoslang answers it False."""
+    from deimos_bridge import scripts
+
+    out, name = scripts.wake_dialogue(_DEAD_GUARD)
+    assert name == "Handle_Dialogue"
+    assert "var Handle_Dialogue = True" in out
+    assert scripts.dead_dialogue_guard(out) == ""
+    # ...and the press itself is untouched.
+    assert "sameany sendkey SPACEBAR, .1" in out
+
+
+def test_the_declaration_lands_before_the_first_block():
+    """A deimoslang `var` is a top-level statement. Put after the first
+    `block` it would be as dead as the guard it is fixing."""
+    from deimos_bridge import scripts
+
+    out, _name = scripts.wake_dialogue(_DEAD_GUARD)
+    lines = out.splitlines()
+    decl = next(i for i, l in enumerate(lines)
+                if l.startswith("var Handle_Dialogue"))
+    block = next(i for i, l in enumerate(lines) if l.startswith("block "))
+    assert decl < block
+
+
+def test_waking_a_script_twice_changes_nothing_the_second_time():
+    """Idempotent by construction — once the name is declared,
+    `dead_dialogue_guard` returns "" and there is nothing to do. The VM
+    is rebuilt on every reload and a rewrite that stacked would grow the
+    file each time."""
+    from deimos_bridge import scripts
+
+    once, _n = scripts.wake_dialogue(_DEAD_GUARD)
+    twice, name = scripts.wake_dialogue(once)
+    assert twice == once and name == ""
+
+
+def test_every_shipped_preset_can_be_woken():
+    """The companion to
+    `test_every_shipped_preset_has_its_dialogue_clearer_switched_off`:
+    all six are broken the same way and all six take the same repair,
+    line endings and all."""
+    from deimos_bridge import scripts
+
+    presets = scripts.presets()
+    assert presets, "no presets shipped"
+    for title, path in presets:
+        source = scripts.read_preset(path)
+        out, name = scripts.wake_dialogue(source)
+        assert name == "Handle_Dialogue", title
+        assert scripts.dead_dialogue_guard(out) == "", title
+        # The shipped presets are CRLF. A lone LF inserted into one is a
+        # line deimoslang's parser sees differently from its neighbours.
+        if "\r\n" in source:
+            assert "var Handle_Dialogue = True\r\n" in out, title
+
+
 def test_undeclared_guards_are_reported_generally():
     """`Handle_Dialogue` is not the only one — the presets also guard on
     `Delay_Combat`, declared nowhere either. A guard on a name that
@@ -26370,6 +26571,148 @@ def test_a_marker_cannot_be_out_of_zone_when_the_goal_names_this_zone(
     said = [e for e in seat.tel.questing if e["kind"] == "marker-impossible"]
     assert said and "98,673" in said[0]["detail"]
     assert worker._marker_out_of_reach([seat]) is None
+
+
+def test_a_far_marker_with_no_zone_change_is_not_another_zone(monkeypatch):
+    """The preset opens every main-loop iteration with
+
+        print "Teleporting all clients to a safe area."
+        times 2 { tp XYZ(0,100000,0) }
+
+    -- `questing.NOWHERE` -- so a wizard standing at its quest NPC is
+    yanked 100,000 units up and sampled there. Rev b37ab0a2 did that
+    152 times: Thomas's marker read 1,616 and then 75,742 in the SAME
+    room, seven times over, and wizAi restarted the script six times
+    saying "another zone ... No teleport can help from here" about an
+    NPC ten feet away. 79 of that run's 136 minutes went on the one
+    conversation.
+
+    `area_is_this_zone('Grand Arena',
+    'Krokotopia/KT_Krokosphinx/KT_Arena')` answers None, so Phase AG
+    cannot reach this. The wizard's own reading a minute ago can."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Arena Master in Grand Arena"],
+        positions=[
+            _XYZ(1616.0, 0.0, 0.0),                          # at the NPC
+            _XYZ(75742.0, 0.0, 0.0), _XYZ(75742.0, 0.0, 0.0),  # parked
+            _XYZ(3470.0, 0.0, 0.0), _XYZ(3470.0, 0.0, 0.0),    # back — 1
+            _XYZ(75742.0, 0.0, 0.0), _XYZ(75742.0, 0.0, 0.0),  # parked
+            _XYZ(541.0, 0.0, 0.0), _XYZ(541.0, 0.0, 0.0),      # back — 2
+            _XYZ(75742.0, 0.0, 0.0),                           # and again
+        ])
+    seat.zone_seen = "Krokotopia/KT_Krokosphinx/KT_Arena"
+    worker.MARKER_FLAP_REST = 0.0
+
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away == 1616.0
+    assert seat.marker_near[:2] == (seat.zone_seen, seat.goal)
+
+    # Two believed round trips: the marker keeps coming back to this
+    # zone on this goal, which nothing in another zone does.
+    for _ in range(5):
+        asyncio.run(worker._read_goal(seat))
+    assert seat.marker_bounces >= worker.MARKER_BOUNCES, seat.marker_bounces
+
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away == worker.MARKER_IN_ZONE, \
+        "the wizard moved; the objective did not"
+    assert worker._marker_out_of_reach([seat]) is None
+    said = [e for e in seat.tel.questing if e["kind"] == "marker-same-zone"]
+    assert said and "75,742" in said[0]["detail"]
+
+
+def test_the_same_far_marker_after_a_zone_change_is_believed(monkeypatch):
+    """The control, and the whole precondition: another zone needs a
+    ZONE CHANGE. A wizard that crossed one has no receipt to show."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Arena Master in Grand Arena"],
+        positions=[
+            _XYZ(1616.0, 0.0, 0.0),
+            _XYZ(75742.0, 0.0, 0.0), _XYZ(75742.0, 0.0, 0.0),
+            _XYZ(3470.0, 0.0, 0.0), _XYZ(3470.0, 0.0, 0.0),
+            _XYZ(75742.0, 0.0, 0.0), _XYZ(75742.0, 0.0, 0.0),
+            _XYZ(541.0, 0.0, 0.0), _XYZ(541.0, 0.0, 0.0),
+            _XYZ(75742.0, 0.0, 0.0),
+        ])
+    seat.zone_seen = "Krokotopia/KT_Krokosphinx/KT_Arena"
+    worker.MARKER_FLAP_REST = 0.0
+    # Everything the vouch needs EXCEPT the standing-still part.
+    for _ in range(6):
+        asyncio.run(worker._read_goal(seat))
+    assert seat.marker_bounces >= worker.MARKER_BOUNCES
+
+    seat.zone_seen = "Krokotopia/KT_Hub"
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away == 75742.0
+    assert worker._marker_out_of_reach([seat]) == 75742.0
+
+
+def test_the_same_far_marker_after_the_goal_moved_is_believed(monkeypatch):
+    """The other half of the precondition, and the reason the receipt
+    carries the goal as well as the zone: a quest that advanced to
+    another world without the wizard moving is exactly
+    `goal_is_elsewhere`'s case, and vouching for it on the zone alone
+    would re-create the bug rev 09a0af80 paid for at 81 units."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch,
+        goals=["Talk To Arena Master in Grand Arena"] * 7
+              + ["Talk To Merle Ambrose in The Commons"],
+        positions=[
+            _XYZ(1616.0, 0.0, 0.0),
+            _XYZ(75742.0, 0.0, 0.0), _XYZ(75742.0, 0.0, 0.0),
+            _XYZ(3470.0, 0.0, 0.0), _XYZ(3470.0, 0.0, 0.0),
+            _XYZ(75742.0, 0.0, 0.0), _XYZ(75742.0, 0.0, 0.0),
+            _XYZ(541.0, 0.0, 0.0), _XYZ(541.0, 0.0, 0.0),
+            _XYZ(75742.0, 0.0, 0.0),
+        ])
+    seat.zone_seen = "Krokotopia/KT_Krokosphinx/KT_Arena"
+    worker.MARKER_FLAP_REST = 0.0
+    for _ in range(6):
+        asyncio.run(worker._read_goal(seat))
+    assert seat.marker_bounces >= worker.MARKER_BOUNCES
+
+    # The step advanced without the wizard moving — which is exactly
+    # `goal_is_elsewhere`'s case, and it read 81 units at rev 09a0af80.
+    asyncio.run(worker._read_goal(seat))
+    assert seat.goal == "Talk To Merle Ambrose in The Commons", \
+        "the fixture's goal never moved"
+    assert seat.marker_away == 75742.0
+
+
+def test_a_clamped_reading_does_not_renew_its_own_vouch(monkeypatch):
+    """Phase AK's lesson, applied one rung over. A fallback that writes
+    the receipt it was authorised by keeps itself alive forever — rev
+    e86044f2 held one impossible distance "480 times in a row" doing
+    exactly that. Only the RAW reading may vouch."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Arena Master in Grand Arena"],
+        positions=[
+            _XYZ(1616.0, 0.0, 0.0),
+            _XYZ(75742.0, 0.0, 0.0), _XYZ(75742.0, 0.0, 0.0),
+            _XYZ(3470.0, 0.0, 0.0), _XYZ(3470.0, 0.0, 0.0),
+            _XYZ(75742.0, 0.0, 0.0), _XYZ(75742.0, 0.0, 0.0),
+            _XYZ(541.0, 0.0, 0.0), _XYZ(541.0, 0.0, 0.0),
+            _XYZ(75742.0, 0.0, 0.0),
+        ])
+    seat.zone_seen = "Krokotopia/KT_Krokosphinx/KT_Arena"
+    worker.MARKER_FLAP_REST = 0.0
+    for _ in range(6):
+        asyncio.run(worker._read_goal(seat))
+    first, bounces = seat.marker_near, seat.marker_bounces
+    assert bounces >= worker.MARKER_BOUNCES, bounces
+
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away == worker.MARKER_IN_ZONE
+    assert (seat.marker_near, seat.marker_bounces) == (first, bounces), \
+        "the clamp refreshed the receipt that authorised it"
 
 
 def test_a_far_marker_is_still_believed_when_the_area_does_not_match(
