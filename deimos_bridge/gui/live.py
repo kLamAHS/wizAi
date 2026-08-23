@@ -309,6 +309,12 @@ class _Seat:
         #: goal line -- never the wizard going backwards. See
         #: `LiveWorker._no_further_back`.
         self.furthest = {}
+        #: {world: (the order the clamp keeps reading instead, when it
+        #: first read it)} -- the evidence that a floor was never true.
+        #: A floor is one unconfirmed placement away from being wrong
+        #: for the rest of the run, and rev 242ae08b spent 40 minutes
+        #: inside one. See `LiveWorker.FLOOR_WRONG_AFTER`.
+        self.floor_doubted = {}
         #: (zone, rounded position, goal) as last seen, and when it last
         #: CHANGED. A script that is stepping while none of these move is
         #: a script hammering something that is not working -- see
@@ -4540,6 +4546,13 @@ class LiveWorker(QThread):
             name = await questing.read_quest_name(seat.client)
         except Exception:
             name = ""
+        if name and seat.quest_name and name != seat.quest_name:
+            # Confirmed before it is believed, exactly as the goal line
+            # is. Not on the FIRST name a seat ever reads: an unplaced
+            # wizard drops out of every comparison the questline makes,
+            # which is worse than a possibly-wrong one that the next
+            # poll corrects. See `_confirmed_name`.
+            name = await self._confirmed_name(seat, name)
         self._note_name(seat, name, now)
 
         zone = position = None
@@ -4602,6 +4615,26 @@ class LiveWorker(QThread):
         leaving = (away is not None and away > self.MARKER_IN_ZONE
                    and was_away is not None
                    and was_away <= self.MARKER_IN_ZONE)
+        # ...and one far reading that needs no second opinion at all,
+        # because the goal itself refutes it. See
+        # `_marker_cannot_be_out_of_zone`.
+        if (away is not None and away > self.MARKER_IN_ZONE
+                and self._marker_cannot_be_out_of_zone(seat)):
+            self._say_once(
+                seat, f"marker-in-this-zone:{seat.zone_seen}:{seat.goal}",
+                f"{seat.name}'s quest marker reads {away:,.0f} away for a "
+                f"goal in the zone it is standing in — not believing it",
+                kind="marker-impossible",
+                detail=(f"the marker read {away:,.0f} away, past "
+                        f"{self.MARKER_IN_ZONE:,.0f}, while {seat.goal!r} "
+                        f"names the area this wizard is standing in "
+                        f"({seat.zone_seen}). The objective is here, so "
+                        f"the reading is the arrow hook's and not this "
+                        f"wizard's — keeping the last distance that was "
+                        f"believed rather than letting every rung gated "
+                        f"on MARKER_IN_ZONE refuse"))
+            away = was_away
+            leaving = False
         resting = now - seat.marker_flapped_at <= self.MARKER_FLAP_REST
         if arriving and resting:
             # Still disbelieved from a moment ago. Suppress the reading
@@ -4841,6 +4874,58 @@ class LiveWorker(QThread):
         except Exception:
             pass
         return seat.goal
+
+    async def _confirmed_name(self, seat, first):
+        """A changed quest name, read twice, or the previous one.
+
+        The exact sibling of `_confirmed_goal`, and it should have been
+        written with it. The goal line got a second opinion because one
+        read of an unnamed window slot could move the party; the NAME
+        is what `questlist` places every wizard BY, and it had none.
+
+        Rev 242ae08b is the bill. One read placed Thomas at Krokotopia
+        #20 (`Permission to Enter`) while his own heartbeat said #6
+        (`Speak to the Assistant`), and `_no_further_back` floored him
+        there for the rest of a 49-minute run -- every `quest-desync`
+        line in the export reads "Thomas #20 (by quest name, clamped --
+        it read #6, which is behind #20 it has already done)". With the
+        placement stuck, `_behind_basis` never said "questline", the
+        catch-up gate that requires it never fired once, and Crispulo
+        finished eight quests behind on five fights to Thomas's
+        thirteen. The same path wrote MARLEYBONE #44 into Crispulo's
+        `last_main`, which `_lost_quest` then offered the recovery for a
+        level-10 wizard in Krokotopia.
+
+        The same run shows the mechanism plainly on the other read:
+        `goal-flapped` fired nine times, four of them on `Talk To Diego
+        the Duelmaster in Unicorn Way` -- a Wizard City quest, on a
+        wizard in Krokotopia.
+
+        Costs one `GOAL_CONFIRM` on the poll where the name changed, and
+        nothing on any other. A real change reads the same twice from
+        the next poll on.
+        """
+        from .. import questing
+
+        await asyncio.sleep(self.GOAL_CONFIRM)
+        try:
+            again = await questing.read_quest_name(seat.client)
+        except Exception:
+            again = ""
+        if again == first:
+            return first
+        try:
+            seat.tel.note_questing(
+                "name-flapped",
+                f"the tracked quest read {first!r} and then {again!r} "
+                f"{self.GOAL_CONFIRM:.2f}s later — keeping "
+                f"{seat.quest_name or 'nothing'!r} rather than placing "
+                f"this wizard in the questline on one read. The name is "
+                f"what every placement is made from, and a wrong one "
+                f"sets a floor `_no_further_back` will not lower")
+        except Exception:
+            pass
+        return seat.quest_name
 
     def _note_goal(self, seat, goal, now):
         """Keep the freshest goal, and stop keeping a dead one.
@@ -8827,6 +8912,17 @@ class LiveWorker(QThread):
         return [place if id(seat) in questers else None
                 for seat, place in zip(self.seats, self._places())]
 
+    #: how long one order has to be read, against a floor that refuses
+    #: it, before the FLOOR is the thing that is wrong.
+    #:
+    #: The clamp's own case corrects itself in seconds: rev 3822cc6c's
+    #: Sebastian read Krokotopia #7 for ONE tick and was back at #15
+    #: fifteen seconds later. A wrong floor does the opposite -- rev
+    #: 242ae08b pinned Thomas at #20 against a steady #6 for forty
+    #: minutes, and every `quest-desync` line in that export says so.
+    #: Five minutes is far outside the first and far inside the second.
+    FLOOR_WRONG_AFTER = 300.0
+
     def _no_further_back(self, seat, place):
         """A wizard cannot un-finish a quest. Clamp a backwards read.
 
@@ -8845,19 +8941,51 @@ class LiveWorker(QThread):
 
         Per world, because the order restarts at every world boundary
         and Marleybone #1 is not behind Krokotopia #15.
+
+        And the floor comes DOWN when it has been contradicted long
+        enough to have been wrong -- see `FLOOR_WRONG_AFTER`. The clamp
+        is right about the game and was silently wrong about the run:
+        it takes one placement to set a floor and nothing could ever
+        lower it.
         """
+        import time
+
         if not place.comparable:
             return place
         best = seat.furthest.get(place.world)
         if best is None or place.order > best:
             seat.furthest[place.world] = place.order
+            seat.floor_doubted.pop(place.world, None)
             return place
         if place.order == best:
+            seat.floor_doubted.pop(place.world, None)
             return place
-        # Backwards. Keep the wizard where it has actually got to, and
-        # say in `how` that the read disagreed -- a silent clamp would
-        # hide a genuine questline reset behind a number that never
-        # moves.
+        # Backwards. Either the read is wrong -- which is what this is
+        # for -- or the FLOOR is, and only time tells them apart: a
+        # wrong read corrects itself on the next poll, and a wrong floor
+        # is contradicted by every placement for as long as it stands.
+        now = time.monotonic()
+        doubted, since = seat.floor_doubted.get(place.world, (None, now))
+        if doubted != place.order:
+            doubted, since = place.order, now
+        seat.floor_doubted[place.world] = (doubted, since)
+        held = now - since
+        if held >= self.FLOOR_WRONG_AFTER:
+            seat.furthest[place.world] = place.order
+            seat.floor_doubted.pop(place.world, None)
+            try:
+                seat.tel.note_questing(
+                    "questline-floor-lowered",
+                    f"{seat.name} has read {place.world} #{place.order} "
+                    f"for {held / 60:.0f} min while being clamped to "
+                    f"#{best} — a wizard cannot un-finish a quest, so "
+                    f"#{best} was never true. It came from a single "
+                    f"placement and nothing could lower it; taking the "
+                    f"reading the wizard keeps giving instead")
+            except Exception:
+                pass
+            return place
+
         from .. import questlist
 
         return questlist.Position(
@@ -10904,6 +11032,35 @@ class LiveWorker(QThread):
         except Exception:
             return False
 
+    def _marker_cannot_be_out_of_zone(self, seat):
+        """Is this wizard standing in the very area its goal names?
+
+        True ONLY on a positive match, because that is the only answer
+        `questlist.area_is_this_zone` guarantees: it documents itself as
+        a veto that "may VETO an action and may never authorise one",
+        and both `False` and `None` are read here as no answer.
+
+        What it is for. `MARKER_IN_ZONE` assumes another zone comes back
+        as six figures, and the same assumption run backwards says a six
+        figure reading means another zone. Rev 242ae08b shows that
+        second half failing on its own: Thomas read 98,673 / 99,824 /
+        98,813 / 97,435 for `Talk To Professor Winthrop in Altar of
+        Kings` while standing IN `KT_Pyramid/KT_AltarOfKings`. The
+        objective was in the room. Phase AC only rejects a far reading a
+        second read contradicts, and these repeat, so they are believed
+        -- and every rung gated at `MARKER_IN_ZONE` refuses on them, which
+        is Crispulo's three `rejoin-adrift` lines ("marker 96,727 away
+        ... every rung that could move it refuses an out-of-zone
+        objective").
+        """
+        from .. import questlist
+
+        try:
+            return questlist.area_is_this_zone(
+                questlist.goal_area(seat.goal), seat.zone_seen) is True
+        except Exception:
+            return False
+
     def _written_off(self, group):
         """Has a catch-up already given up on this exact step?
 
@@ -12015,6 +12172,13 @@ class LiveWorker(QThread):
             # 1,053 HP ice wizard, then six of a 713 HP fire one.
             was, kept = seat.tel.wizard, len(seat.tel.rounds)
             seat.tel.clear()
+            # ...and the questline floor with it. It is exactly as
+            # per-wizard as the round record it sits beside, and
+            # nothing cleared it -- so a seat that came back holding a
+            # different client kept the last wizard's progress as a
+            # floor the new one could not read below.
+            seat.furthest.clear()
+            seat.floor_doubted.clear()
             self._say(seat,
                       f"this seat was {was} last run and is {name} now — "
                       f"the clients come back in whatever order the game "

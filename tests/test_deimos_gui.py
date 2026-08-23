@@ -20472,12 +20472,15 @@ def test_the_dead_clock_starts_and_clears_on_the_goal_poll():
 
 
 # ------------------------------------------- confirming what was read
-def _goal_worker(monkeypatch, goals, positions=(), position=None):
+def _goal_worker(monkeypatch, goals, positions=(), position=None,
+                 names=()):
     """A one-seat worker whose quest reads come from these lists.
 
-    `goals` and `positions` are consumed one per read, and the last
-    entry repeats -- so a test writes the sequence it wants to
-    photograph and nothing else.
+    `goals`, `positions` and `names` are consumed one per read, and the
+    last entry repeats -- so a test writes the sequence it wants to
+    photograph and nothing else. `names` defaults to empty, which reads
+    as "" and leaves the seat unplaced, exactly as it did before the
+    quest name had a confirmation.
     """
     from deimos_bridge import questing
     from deimos_bridge.gui.live import LiveWorker
@@ -20506,7 +20509,8 @@ def _goal_worker(monkeypatch, goals, positions=(), position=None):
     seat = worker.seats[0]
     seat.client = _Client()
 
-    reads = {"goal": list(goals), "pos": list(positions)}
+    reads = {"goal": list(goals), "pos": list(positions),
+             "name": list(names)}
 
     def _next(which):
         queue = reads[which]
@@ -20521,7 +20525,7 @@ def _goal_worker(monkeypatch, goals, positions=(), position=None):
         return (got, "") if got is not None else (None, "no marker")
 
     async def read_name(_c):
-        return ""
+        return _next("name") or ""
 
     monkeypatch.setattr(questing, "read_quest_goal", read_goal)
     monkeypatch.setattr(questing, "read_quest_position", read_position)
@@ -26069,3 +26073,211 @@ def test_a_catch_up_whose_step_goes_out_of_zone_ends_too(qapp):
     said = [e for e in worker.seats[0].tel.questing
             if e["kind"] == "catch-up-unreachable"]
     assert said and "113,557 away" in said[0]["detail"], said
+
+
+# ---------------------------------------------------------------------
+# Run 13 (rev 242ae08b): the quest NAME had no second opinion, and one
+# read of it floored a wizard's questline for the rest of the run.
+# ---------------------------------------------------------------------
+
+
+def test_a_changed_quest_name_is_read_twice_before_it_is_believed(
+        monkeypatch):
+    """The goal line got a second opinion because one read of an unnamed
+    window slot could move the party. The NAME is what `questlist`
+    places every wizard BY, and it had none.
+
+    Rev 242ae08b: one read placed Thomas at Krokotopia #20 (`Permission
+    to Enter`) while his own heartbeat said #6, and every `quest-desync`
+    line in that 49-minute export reads "Thomas #20 (by quest name,
+    clamped — it read #6, which is behind #20 it has already done)".
+    The same run's `goal-flapped` fired nine times, four of them on a
+    WIZARD CITY quest read off a wizard in Krokotopia."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Professor Winthrop in Altar of Kings"],
+        names=["Speak to the Assistant",     # believed: the first read
+               "Permission to Enter",        # a changed name...
+               "Speak to the Assistant"])    # ...its own second opinion
+    asyncio.run(worker._read_goal(seat))
+    assert seat.quest_name == "Speak to the Assistant"
+
+    asyncio.run(worker._read_goal(seat))
+    assert seat.quest_name == "Speak to the Assistant", \
+        "one read of the tracked quest placed the wizard twelve quests on"
+    flapped = [e for e in seat.tel.questing if e["kind"] == "name-flapped"]
+    assert flapped and "Permission to Enter" in flapped[0]["detail"]
+
+
+def test_a_quest_name_that_agrees_with_itself_is_believed(monkeypatch):
+    """A real quest change reads the same twice from the next poll on,
+    so it costs one `GOAL_CONFIRM` and nothing else."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Professor Winthrop in Altar of Kings"],
+        names=["Speak to the Assistant", "New Digs", "New Digs"])
+    asyncio.run(worker._read_goal(seat))
+    asyncio.run(worker._read_goal(seat))
+    assert seat.quest_name == "New Digs", "a real quest change was refused"
+    assert not [e for e in seat.tel.questing if e["kind"] == "name-flapped"]
+
+
+def test_the_first_quest_name_a_seat_reads_is_taken_at_once(monkeypatch):
+    """An unplaced wizard drops out of every comparison the questline
+    makes, which is worse than a possibly-wrong one the next poll
+    corrects. The same exception `_note_goal` has."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Professor Winthrop in Altar of Kings"],
+        names=["Speak to the Assistant"])
+    assert seat.quest_name == ""
+    asyncio.run(worker._read_goal(seat))
+    assert seat.quest_name == "Speak to the Assistant"
+
+
+def test_a_blank_quest_name_read_still_keeps_the_previous_one(monkeypatch):
+    """Unchanged. A blank is not evidence the wizard changed quest —
+    `maybe_text` returns "" for a zero length, a mid-write pointer or a
+    decode failure — and it still expires at `NAME_MAX_AGE`."""
+    import asyncio
+    import time
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Professor Winthrop in Altar of Kings"],
+        names=["Speak to the Assistant", ""])
+    asyncio.run(worker._read_goal(seat))
+    asyncio.run(worker._read_goal(seat))
+    assert seat.quest_name == "Speak to the Assistant"
+    assert not [e for e in seat.tel.questing if e["kind"] == "name-flapped"], \
+        "a failed read was reported as a disagreement"
+
+    seat.name_read_at = time.monotonic() - worker.NAME_MAX_AGE - 1
+    asyncio.run(worker._read_goal(seat))
+    assert seat.quest_name == "", "a dead read was kept as fact forever"
+
+
+def _placed(worker, seat, world, order):
+    """One placement through the clamp, as `_places` makes it."""
+    from deimos_bridge import questlist
+
+    return worker._no_further_back(
+        seat, questlist.Position(world=world, order=order,
+                                 name=f"#{order}", questline="main",
+                                 how="by quest name"))
+
+
+def test_a_questline_floor_that_is_always_contradicted_comes_down(qapp):
+    """It took one placement to set a floor and nothing could ever lower
+    it. Rev 242ae08b pinned Thomas at Krokotopia #20 against a steady #6
+    for forty minutes; with the placement stuck, `_behind_basis` never
+    said "questline", the catch-up gate that requires it never fired,
+    and the other quester finished eight quests behind."""
+    import time
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    assert _placed(worker, seat, "Krokotopia", 20).order == 20
+    got = _placed(worker, seat, "Krokotopia", 6)
+    assert got.order == 20 and "clamped" in got.how, \
+        "the clamp stopped clamping"
+
+    # ...and the same reading, held past the deadline.
+    doubted, _since = seat.floor_doubted["Krokotopia"]
+    seat.floor_doubted["Krokotopia"] = (
+        doubted, time.monotonic() - worker.FLOOR_WRONG_AFTER - 1)
+    got = _placed(worker, seat, "Krokotopia", 6)
+    assert got.order == 6, "a floor that was never true stood forever"
+    assert "clamped" not in (got.how or "")
+    said = [e for e in seat.tel.questing
+            if e["kind"] == "questline-floor-lowered"]
+    assert said and "#20" in said[0]["detail"] and "#6" in said[0]["detail"]
+    # And it stays down.
+    assert _placed(worker, seat, "Krokotopia", 6).order == 6
+
+
+def test_a_briefly_contradicted_floor_still_clamps(qapp):
+    """The control, and the case the clamp was written for. Rev
+    3822cc6c's Sebastian read Krokotopia #7 for ONE tick — a real goal
+    belonging to #7 — and was back at #15 fifteen seconds later. The
+    party declared an eight-quest gap and paused the script for it."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    _placed(worker, seat, "Krokotopia", 15)
+    got = _placed(worker, seat, "Krokotopia", 7)
+    assert got.order == 15 and "clamped" in got.how
+    # Fifteen seconds later it reads #15 again, and the doubt is gone.
+    assert _placed(worker, seat, "Krokotopia", 15).order == 15
+    assert "Krokotopia" not in seat.floor_doubted
+    assert not [e for e in seat.tel.questing
+                if e["kind"] == "questline-floor-lowered"]
+
+
+def test_a_seat_that_holds_a_different_wizard_loses_the_old_ones_floor(
+        qapp):
+    """The floor is exactly as per-wizard as the round record it sits
+    beside, and nothing cleared it — so a seat that came back holding a
+    different client kept the last wizard's progress as a floor the new
+    one could not read below. "The clients come back in whatever order
+    the game was launched in"."""
+    from types import SimpleNamespace
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    _placed(worker, seat, "Krokotopia", 40)
+    seat.tel.wizard = "Konstantin"
+    seat.wizard_name = None
+
+    worker._learn_name(seat, SimpleNamespace(
+        state=SimpleNamespace(player=SimpleNamespace(name="Thomas"))))
+    assert seat.tel.wizard == "Thomas"
+    assert seat.furthest == {}, "the new wizard inherited a floor"
+    assert _placed(worker, seat, "Krokotopia", 2).order == 2
+
+
+def test_a_marker_cannot_be_out_of_zone_when_the_goal_names_this_zone(
+        monkeypatch):
+    """`MARKER_IN_ZONE` assumes another zone comes back as six figures;
+    run backwards that says six figures means another zone, and rev
+    242ae08b shows the second half failing on its own. Thomas read
+    98,673 / 99,824 / 98,813 / 97,435 for `Talk To Professor Winthrop in
+    Altar of Kings` while standing IN `KT_Pyramid/KT_AltarOfKings`."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Professor Winthrop in Altar of Kings"],
+        positions=[_XYZ(5000.0, 0.0, 0.0), _XYZ(98673.0, 0.0, 0.0)])
+    seat.zone_seen = "Krokotopia/KT_Pyramid/KT_AltarOfKings"
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away == 5000.0
+
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away == 5000.0, \
+        "the objective is in the room the wizard is standing in"
+    said = [e for e in seat.tel.questing if e["kind"] == "marker-impossible"]
+    assert said and "98,673" in said[0]["detail"]
+    assert worker._marker_out_of_reach([seat]) is None
+
+
+def test_a_far_marker_is_still_believed_when_the_area_does_not_match(
+        monkeypatch):
+    """The control. `area_is_this_zone` documents itself as a veto that
+    "may never authorise", so `False` and `None` change nothing — an
+    interior, a hub under an internal alias and a wizard walking towards
+    its area all answer `None`, and their markers may genuinely be out
+    of zone."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Find Key Stone Pile of Dirt in Royal Hall"],
+        positions=[_XYZ(5000.0, 0.0, 0.0), _XYZ(96727.0, 0.0, 0.0),
+                   _XYZ(96727.0, 0.0, 0.0)])
+    seat.zone_seen = "Krokotopia/KT_Pyramid/KT_AltarOfKings"
+    assert not worker._marker_cannot_be_out_of_zone(seat)
+    asyncio.run(worker._read_goal(seat))
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away == 96727.0
+    assert not [e for e in seat.tel.questing
+                if e["kind"] == "marker-impossible"]
