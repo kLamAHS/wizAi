@@ -810,6 +810,11 @@ class LiveWorker(QThread):
         #: behind now", and when the last was. See `CATCH_UP_CHURN`.
         self._churn = 0
         self._churn_at = NEVER
+        #: {id(seat): (failures in a row, when the last one ended, the
+        #: step it was on)} for catch-ups that ended with the laggard's
+        #: quest exactly where it started. Keyed on the WIZARD, because
+        #: the step is what varies -- see `CATCH_UP_FAILS`.
+        self._catch_up_fails = {}
         #: {combat first name: friends-list full name}. What the
         #: quester's account settings have to be filled with, because
         #: every teleport that reads them matches the list exactly. See
@@ -4630,10 +4635,20 @@ class LiveWorker(QThread):
                         f"names the area this wizard is standing in "
                         f"({seat.zone_seen}). The objective is here, so "
                         f"the reading is the arrow hook's and not this "
-                        f"wizard's — keeping the last distance that was "
-                        f"believed rather than letting every rung gated "
-                        f"on MARKER_IN_ZONE refuse"))
-            away = was_away
+                        f"wizard's — answering with a distance that says "
+                        f"'in this zone' rather than letting every rung "
+                        f"gated on MARKER_IN_ZONE refuse"))
+            # NOT `was_away` on its own. That was this rung as it
+            # shipped, and rev e86044f2 shows what it does when the
+            # previous reading is ALSO the impossible one: 29,351 was
+            # kept, re-kept, and reported by `catch-up-out-of-zone`
+            # "60 times in a row", then 120, 240, 480. What is actually
+            # known here is not a distance -- it is that the objective
+            # is in this zone -- so the answer is the largest distance
+            # that says so, and the last believed one only when it
+            # already did.
+            away = (min(was_away, self.MARKER_IN_ZONE)
+                    if was_away is not None else self.MARKER_IN_ZONE)
             leaving = False
         resting = now - seat.marker_flapped_at <= self.MARKER_FLAP_REST
         if arriving and resting:
@@ -8738,6 +8753,25 @@ class LiveWorker(QThread):
             f"{idle / 60:.0f} min with no change — {note} — while "
             f"{count} ran")
 
+    #: how far the goal fallback may sit from the name it is replacing.
+    #:
+    #: `goal_disowns` says "this name is stale", and a stale name lags
+    #: the goal by A QUEST OR TWO -- that is the whole premise, and rev
+    #: 30e83468's case (the one it was written for) is exactly two.
+    #: Nothing bounded what it handed over to, and rev e86044f2 is what
+    #: that cost: Thomas's `Fangdango` is Krokotopia main #21, correct
+    #: and on-main, and its goal line `Talk To Alhazred in Balance
+    #: School` is simply missing from that quest's recorded objectives
+    #: while `Back to Balance` (#56) does list it. The name was thrown
+    #: away, the goal placed him THIRTY-FIVE quests on, the party read
+    #: as 43 apart, and eight catch-ups paused the script over a gap
+    #: that did not exist.
+    #:
+    #: Three, because two is the observed lag and the index's data is
+    #: incomplete past Arc 1 -- a missing objective must not be able to
+    #: outvote a name that places perfectly well.
+    DISOWN_SPAN = 3
+
     def _place_by_name(self, seat):
         """`position_of` the tracked name — unless the goal disowns it.
 
@@ -8751,6 +8785,9 @@ class LiveWorker(QThread):
         Sebastian stood on the same goal line as Konstantin and was
         held two quests behind him. A name the goal line disowns places
         nothing; the goal fallback in `_places` takes over from there.
+
+        ...as long as the goal is offering somewhere a stale name could
+        plausibly have been. See `DISOWN_SPAN`.
         """
         from .. import questlist
 
@@ -8759,6 +8796,34 @@ class LiveWorker(QThread):
         place = questlist.position_of(seat.quest_name)
         if (place.comparable and seat.goal
                 and questlist.goal_disowns(seat.quest_name, seat.goal)):
+            instead = questlist.position_from_goal(
+                seat.goal, place.world, None)
+            far = (instead.comparable and instead.world == place.world
+                   and abs(instead.order - place.order) > self.DISOWN_SPAN)
+            if far:
+                # The disown was right that the objective belongs to
+                # another quest and wrong about which read is stale.
+                # Keep the name: it places, it is on the line, and the
+                # alternative is a goal line two quests share being
+                # read as thirty-five quests of progress.
+                self._say_once(
+                    seat, f"name-kept:{seat.quest_name}:{seat.goal}",
+                    f"{seat.name}'s goal line belongs to another quest, "
+                    f"but that quest is #{instead.order} against the "
+                    f"name's #{place.order} — keeping the name",
+                    kind="name-kept-over-goal",
+                    detail=(f"{seat.goal!r} is not among "
+                            f"{seat.quest_name!r}'s recorded objectives, so "
+                            f"the name reads as stale — but the quest that "
+                            f"DOES claim that goal line is "
+                            f"{instead.name!r} at #{instead.order}, "
+                            f"{abs(instead.order - place.order)} quests "
+                            f"from the name's #{place.order}. A stale name "
+                            f"lags by one or two; this is one goal line "
+                            f"shared by two quests, and the index's "
+                            f"objectives are incomplete past Arc 1. "
+                            f"Placing this wizard at #{place.order}"))
+                return place
             return questlist.Position(
                 how=(f"the name read {seat.quest_name!r} (#{place.order}), "
                      f"but the goal line belongs to a different quest — a "
@@ -8878,6 +8943,23 @@ class LiveWorker(QThread):
             return ""
         together, why = self._quests_agree()
         return "" if together is not False else (why or "")
+
+    def _placed_by_goal_text(self):
+        """The questers placed by their GOAL rather than their quest.
+
+        Named, as a string, or "" when every comparable quester was
+        placed by its quest name. `Position.how` is the record --
+        `_place_by_name` writes "by quest name" and
+        `position_from_goal` writes "by goal text" -- so this asks the
+        placement how it was made rather than re-deriving it.
+        """
+        weak = []
+        for seat, place in zip(self.seats, self._quester_places()):
+            if place is None or not place.comparable:
+                continue
+            if "goal text" in (place.how or ""):
+                weak.append(seat.name)
+        return " and ".join(weak)
 
     def _quester_places(self):
         """`_places`, with the muscle blanked out.
@@ -10112,7 +10194,34 @@ class LiveWorker(QThread):
         # finish, so it stops reporting and starts questing. Only that
         # kind: `_behind` from the older rules says who, not how far, and
         # without a distance there is no way to tell when to stop.
-        if (behind is not None and self.script
+        #
+        # ...and only one measured off the quest NAMES. `_places` falls
+        # back to the goal line for a wizard whose name will not place,
+        # and `read_quest_name` exists because that fallback is weak in
+        # exactly the direction that matters here: "one goal line
+        # belongs to as many as nine quests seventeen steps apart -- and
+        # `_catch_up` MOVES wizards". Rev e86044f2 measured 43 quests
+        # off one such placement and paused the script eight times for
+        # it. Reported either way; only a name-based measurement is
+        # allowed to act.
+        by_goal = self._placed_by_goal_text()
+        if by_goal and behind is not None and self.script \
+                and getattr(self, "_behind_gap", 0) >= 1 \
+                and "questline" in getattr(self, "_behind_basis", ""):
+            self._say_once(
+                behind, f"goal-text-gap:{self._behind_gap}:{by_goal}",
+                f"the party reads {self._behind_gap} quest(s) apart, but "
+                f"{by_goal} was placed by its goal line rather than its "
+                f"quest — not pausing the script on that",
+                kind="catch-up-refused-goal-text",
+                detail=(f"{by_goal} could not be placed by the quest it is "
+                        f"tracking, so its position came from the goal "
+                        f"line — and one goal line belongs to as many as "
+                        f"nine quests seventeen steps apart. The "
+                        f"{self._behind_gap}-quest gap is reported but not "
+                        f"acted on: a catch-up pauses the script and moves "
+                        f"wizards, and this measurement cannot carry that"))
+        if (behind is not None and self.script and not by_goal
                 and getattr(self, "_behind_gap", 0) >= 1
                 and "questline" in getattr(self, "_behind_basis", "")):
             group = getattr(self, "_behind_group", None) or [behind]
@@ -10877,6 +10986,19 @@ class LiveWorker(QThread):
         # `_check_caught_up`: three answers in a minute is not three
         # laggards, it is one unstable reading, and each restart costs
         # the script another pause.
+        rested = self._catch_up_rested(seats, now)
+        if rested:
+            self._say_once(
+                seats[0], f"catch-up-rest:{rested[:32]}",
+                f"not starting another catch-up — {rested}",
+                kind="catch-up-rested",
+                detail=(f"{rested}. A catch-up pauses the script for the "
+                        f"whole party, and one that leaves the laggard on "
+                        f"the same quest has spent that for nothing — the "
+                        f"step it is on publishes no marker to aim a hop "
+                        f"at, or the script has to move it first. Letting "
+                        f"the script run at it instead"))
+            return
         if (self._churn >= self.CATCH_UP_CHURN
                 and now - self._churn_at < self.CATCH_UP_CHURN_REST):
             self._say_once(
@@ -10919,6 +11041,11 @@ class LiveWorker(QThread):
                 pass
         seats = self._catching_up()
         self._catch_up_state = None
+        # Per wizard, before the per-step write-off below. See
+        # `CATCH_UP_FAILS`: eight catch-ups for one laggard in rev
+        # e86044f2 and not one of them tripped the step rule, because
+        # the step was the thing that kept changing.
+        self._note_catch_up_outcome(seats, kind == "catch-up-done")
         if kind == "catch-up-gave-up":
             # Remembered, or giving up is a word rather than an act.
             # Rev 3822cc6c: `catch-up-gave-up` and `catch-up-started`
@@ -10949,6 +11076,68 @@ class LiveWorker(QThread):
     #: a real run at the problem, short enough that a party which
     #: genuinely settles is caught up before it drifts further.
     CATCH_UP_CHURN_REST = 300.0
+
+    #: how many catch-ups for ONE wizard may end with its quest exactly
+    #: where it started before catch-ups rest for that wizard, and how
+    #: long that rest is.
+    #:
+    #: `_written_off` already answers "have we tried this exact step",
+    #: and it is right about that. It is not enough, because the STEP is
+    #: what varies: rev e86044f2's Crispulo cycled `Nirini Warrior` ->
+    #: `Flame Guardian` -> `Lieutenant Standish` -> `Edo` -> `Nebit` ->
+    #: `Akori` -> `Edo` -> `Nebit` inside one stalled sequence, so the
+    #: key changed every time and eight catch-ups started. Each paused
+    #: the script -- 0 instructions for the first two minutes, ~11,000
+    #: for the run against the previous run's 63,304 -- and every one
+    #: gave up with "nothing is attempting this step". None closed
+    #: anything.
+    #:
+    #: Two, because the second failure is the evidence the first was
+    #: not bad luck. Twenty minutes, because the thing it is waiting
+    #: for is the SCRIPT getting the laggard somewhere its marker
+    #: publishes, which is the script's own loop and not a fast one.
+    CATCH_UP_FAILS = 2
+    CATCH_UP_FAIL_REST = 1200.0
+
+    def _catch_up_rested(self, seats, now):
+        """Why a catch-up for these wizards is not being started, or "".
+
+        Reads the per-wizard failure ledger. The counter is cleared by
+        `_note_catch_up_outcome` the moment that wizard's quest
+        position actually moves, so a rest never outlives the problem
+        it is resting from.
+        """
+        for one in seats:
+            fails, ended, _step = self._catch_up_fails.get(id(one),
+                                                           (0, 0.0, None))
+            if fails < self.CATCH_UP_FAILS:
+                continue
+            left = self.CATCH_UP_FAIL_REST - (now - ended)
+            if left > 0:
+                return (f"{one.name}: {fails} catch-ups in a row ended with "
+                        f"its quest exactly where it started, so this one "
+                        f"is resting for another {left / 60:.0f} min")
+        return ""
+
+    def _note_catch_up_outcome(self, seats, closed):
+        """Record whether this catch-up moved the laggard's quest.
+
+        `closed` is True when the gap actually shut. Anything else --
+        gave up, unreachable, the group changed underneath it -- counts
+        against the wizard unless its STEP moved, because a step that
+        moved is progress even if the gap did not close.
+        """
+        import time
+
+        now = time.monotonic()
+        for one in seats:
+            fails, _ended, step = self._catch_up_fails.get(id(one),
+                                                           (0, 0.0, None))
+            here = self._step_key(one)
+            if closed or (step is not None and here != step):
+                self._catch_up_fails.pop(id(one), None)
+                continue
+            self._catch_up_fails[id(one)] = (fails + 1, now, here)
 
     def _step_key(self, seat):
         """What step this wizard is on, for "have we tried this already".

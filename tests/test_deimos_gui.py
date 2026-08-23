@@ -26281,3 +26281,219 @@ def test_a_far_marker_is_still_believed_when_the_area_does_not_match(
     assert seat.marker_away == 96727.0
     assert not [e for e in seat.tel.questing
                 if e["kind"] == "marker-impossible"]
+
+
+# ---------------------------------------------------------------------
+# Run 14 (rev e86044f2): a correct quest name thrown away, and eight
+# catch-ups for a 43-quest gap that was never there.
+# ---------------------------------------------------------------------
+
+
+def test_a_disowned_name_is_kept_when_the_goal_offers_somewhere_far(qapp):
+    """Thomas's tracked quest was `Fangdango` — Krokotopia main #21,
+    correct, on-main, comparable. Its goal line `Talk To Alhazred in
+    Balance School` is simply missing from that quest's recorded
+    objectives while `Back to Balance` (#56) does list it, so
+    `goal_disowns` called the name stale and the goal fallback placed
+    him THIRTY-FIVE quests on. The party read as 43 apart and eight
+    catch-ups paused the script over it.
+
+    A stale name lags by a quest or two. That is `goal_disowns`'s own
+    premise, and nothing bounded what it handed over to."""
+    from deimos_bridge import questlist
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.quest_name = "Fangdango"
+    seat.goal = "Talk To Alhazred in Balance School"
+    # The premise: the index really does disown it, and really does
+    # place the goal line thirty-five quests further on.
+    assert questlist.goal_disowns(seat.quest_name, seat.goal)
+    assert questlist.position_from_goal(
+        seat.goal, "Krokotopia", None).order == 56
+
+    place = worker._place_by_name(seat)
+    assert place.order == 21, "a correct on-main name was thrown away"
+    said = [e for e in seat.tel.questing if e["kind"] == "name-kept-over-goal"]
+    assert said and "#56" in said[0]["detail"] and "#21" in said[0]["detail"]
+
+
+def test_a_name_the_goal_disowns_by_a_step_or_two_still_places_nothing(qapp):
+    """The control, and the case `goal_disowns` was written for. Rev
+    30e83468: `_read_goal` keeps the previous quest name on a blank
+    read, so the name lags the goal by a quest — and a stale name that
+    still places beat a fresh goal that was never consulted, holding
+    Sebastian two quests behind Konstantin."""
+    from deimos_bridge import questlist
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    # Krokotopia #18 against #20 — inside DISOWN_SPAN either way.
+    seat.quest_name = questlist.quest_at("Krokotopia", 18).name
+    seat.goal = "Talk To Sergeant Major Talbot in The Oasis"
+    if not questlist.goal_disowns(seat.quest_name, seat.goal):
+        import pytest
+        pytest.skip("the index no longer disowns this pair")
+    near = questlist.position_from_goal(seat.goal, "Krokotopia", None)
+    if near.comparable and abs(near.order - 18) > worker.DISOWN_SPAN:
+        import pytest
+        pytest.skip("this pair is no longer a short lag")
+    assert not worker._place_by_name(seat).comparable, \
+        "a genuinely stale name was placed anyway"
+
+
+def test_a_name_the_index_cannot_place_still_falls_through(qapp):
+    """Untouched. `DISOWN_SPAN` is about a name that DOES place; a name
+    the book has never heard of has nothing to compare against and the
+    goal fallback is the only answer there is."""
+    worker = _party_worker()
+    seat = worker.seats[0]
+    seat.quest_name = "You Can Dig It"
+    seat.goal = "Talk To Alhazred in Balance School"
+    assert not worker._place_by_name(seat).comparable
+
+
+def _goal_text_party():
+    """Two questers, the ahead one placed by its GOAL rather than a name.
+
+    Exactly rev e86044f2's shape: `placed: wizard 1 #56 (by goal text) ·
+    wizard 2 #12 (by quest name)`.
+    """
+    worker = _two_quester_party(orders=(18, 23), booster_order=0)
+    lead, other, _muscle = worker.seats
+    # Both in Krokotopia, or `furthest_behind` refuses the comparison
+    # for a different reason (a party split across worlds is not a gap
+    # in one line) and this would prove nothing.
+    lead.quest_name = "Gather the Troops"          # Krokotopia #12
+    lead.goal = "Talk To Private Livingston in Palace of Fire"
+    lead.goals_seen = [lead.goal]
+    # ...and the wizard the run read at Krokotopia #56 off one shared
+    # goal line, with no quest name of its own to place by.
+    other.quest_name = ""
+    other.goal = "Talk To Alhazred in Balance School"
+    other.goals_seen = [other.goal]
+    return worker
+
+
+def test_a_gap_measured_off_a_goal_line_does_not_pause_the_script(qapp):
+    """`read_quest_name` exists because the goal fallback is weak in
+    exactly this direction: "one goal line belongs to as many as nine
+    quests seventeen steps apart -- and `_catch_up` MOVES wizards".
+    Rev e86044f2 measured 43 quests off one such placement."""
+    import time
+
+    worker = _goal_text_party()
+    assert worker._placed_by_goal_text(), "the fixture places by name"
+
+    worker._check_in_step(worker.seats[0])
+    worker._in_step_since = time.monotonic() - 600
+    worker._check_in_step(worker.seats[0])
+
+    assert worker._catching_up() == [], \
+        "the script was paused on a goal-line measurement"
+    said = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "catch-up-refused-goal-text"]
+    assert said and "goal line" in said[0]["detail"]
+    # ...and the desync is still REPORTED. The gap is worth knowing.
+    assert [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "quest-desync"]
+
+
+def test_a_gap_measured_off_quest_names_still_starts_a_catch_up(qapp):
+    """The control. Nothing about a name-based measurement changes."""
+    import time
+
+    worker = _two_quester_party(orders=(18, 23), booster_order=0)
+    assert worker._placed_by_goal_text() == ""
+    worker._check_in_step(worker.seats[0])
+    worker._in_step_since = time.monotonic() - 600
+    worker._check_in_step(worker.seats[0])
+    assert worker._catching_up() == [worker.seats[0]]
+
+
+def test_two_catch_ups_that_move_nothing_rest_the_wizard(qapp):
+    """`_written_off` is keyed on the STEP, and the step is what varied:
+    Críspulo cycled `Nirini Warrior` → `Flame Guardian` → `Lieutenant
+    Standish` → `Edo` → `Nebit` → `Akori` → `Edo` → `Nebit` inside one
+    stalled sequence, so no write-off ever held and eight catch-ups
+    started. The script sat at 0 instructions for the first two
+    minutes and finished the run on ~11,000 against 63,304."""
+    worker = _two_quester_party(orders=(18, 23), booster_order=0)
+    lead = worker.seats[0]
+    lead.marker_away = 900.0
+
+    for _ in range(worker.CATCH_UP_FAILS):
+        worker._start_catching_up(lead, 5, "the questline says so")
+        assert worker._catching_up() == [lead]
+        worker._stop_catching_up("catch-up-gave-up", "nothing moved")
+
+    worker._start_catching_up(lead, 5, "the questline says so")
+    assert worker._catching_up() == [], "it started a third for nothing"
+    said = [e for e in worker.seats[0].tel.questing
+            if e["kind"] == "catch-up-rested"]
+    assert said and "exactly where it started" in said[0]["detail"]
+
+
+def test_the_rest_clears_the_moment_the_laggard_moves(qapp):
+    """A rest that outlived the problem would be the stall it replaces.
+    The counter is cleared by a step that actually moved, even when the
+    gap did not close."""
+    worker = _two_quester_party(orders=(18, 23), booster_order=0)
+    lead = worker.seats[0]
+    lead.marker_away = 900.0
+
+    worker._start_catching_up(lead, 5, "the questline says so")
+    worker._stop_catching_up("catch-up-gave-up", "nothing moved")
+    # The script gets it somewhere: the step moves, gap still open.
+    lead.quest_name = "Talk To Duncan Grimwater"
+    lead.goal = "step 19"
+    worker._start_catching_up(lead, 4, "the questline says so")
+    worker._stop_catching_up("catch-up-gave-up", "nothing moved")
+    assert worker._catch_up_fails.get(id(lead), (0,))[0] == 0, \
+        "a step that moved still counted against the wizard"
+
+    # ...so it takes CATCH_UP_FAILS more standing-still ones to rest.
+    for _ in range(worker.CATCH_UP_FAILS - 1):
+        worker._start_catching_up(lead, 4, "the questline says so")
+        assert worker._catching_up() == [lead], "it rested a wizard that moved"
+        worker._stop_catching_up("catch-up-gave-up", "nothing moved")
+
+
+def test_a_different_wizard_falling_behind_is_not_rested(qapp):
+    """The control. The ledger is per wizard, so one laggard's failures
+    say nothing about another's."""
+    worker = _two_quester_party(orders=(18, 23), booster_order=0)
+    lead, other = worker.seats[0], worker.seats[1]
+    for _ in range(worker.CATCH_UP_FAILS):
+        worker._start_catching_up(lead, 5, "the questline says so")
+        worker._stop_catching_up("catch-up-gave-up", "nothing moved")
+    assert worker._catch_up_rested([lead], __import__("time").monotonic())
+    assert not worker._catch_up_rested([other],
+                                       __import__("time").monotonic())
+    worker._start_catching_up(other, 5, "the questline says so")
+    assert worker._catching_up() == [other]
+
+
+def test_an_impossible_marker_falls_back_inside_the_zone(monkeypatch):
+    """The bug this rung shipped with. `away = was_away` keeps the
+    impossible value when the PREVIOUS reading was impossible too — rev
+    e86044f2 froze 29,351 and `catch-up-out-of-zone` reported it "60
+    times in a row", then 120, 240, 480. What is known is not a
+    distance; it is that the objective is in this zone."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Professor Winthrop in Altar of Kings"],
+        positions=[_XYZ(29351.0, 0.0, 0.0)])
+    seat.zone_seen = "Krokotopia/KT_Pyramid/KT_AltarOfKings"
+    # No previous believed distance at all: it must still answer.
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away == worker.MARKER_IN_ZONE
+    assert worker._marker_out_of_reach([seat]) is None
+
+    # ...and a previous reading that was itself impossible is clamped
+    # rather than kept.
+    seat.marker_away = 29351.0
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away == worker.MARKER_IN_ZONE, \
+        "the impossible reading was kept as the last believed one"
