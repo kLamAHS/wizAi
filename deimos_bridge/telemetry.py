@@ -567,6 +567,16 @@ class RoundRecord:
     #: happening on every round the two wizards shared while
     #: `policy_mix` reported 100% "party". A label is not a measurement.
     seats_in_plan: int = 1
+    #: when this round was planned alone, WHY -- `Hivemind.alone_reason`
+    #: for this seat, verbatim. Per round, because the two causes want
+    #: opposite fixes and a run mixes them: "waited for and it did not
+    #: submit" is a slow partner, "reached the round after the party had
+    #: planned it" is this wizard being the slow one, and "was not in a
+    #: duel when the plan was opened" is not a coordination problem at
+    #: all. Rev c1d4981c had 22 alone rounds and three log lines about
+    #: them -- `_say_why_it_planned_alone` says it once per fight, which
+    #: is right for a status line and useless for counting.
+    alone_why: str = ""
     party_hits: dict = field(default_factory=dict)
     #: what the WHOLE party expected to take off this round's target,
     #: this wizard's own share included. The measurement that survives a
@@ -1717,10 +1727,25 @@ class Telemetry:
         party". A seat that misses the coordinator's barrier plans on
         its own and still records `ttk-lookahead · party`, so the mix
         alone cannot tell a coordinated run from a pair of solo ones.
+
+        ...and, when the rounds carry one, a breakdown by REASON. The
+        count on its own cannot be acted on: rev c1d4981c planned 16 of
+        22 rounds alone and the export could not say whether the missing
+        seat was late, early, or never in the duel. See
+        `RoundRecord.alone_why`.
         """
         rounds = [r for r in self.rounds if not r.passing]
-        alone = sum(1 for r in rounds if (r.seats_in_plan or 1) <= 1)
-        return {"alone": alone, "rounds": len(rounds)}
+        alone = [r for r in rounds if (r.seats_in_plan or 1) <= 1]
+        why = {}
+        for r in alone:
+            if r.alone_why:
+                why[r.alone_why] = why.get(r.alone_why, 0) + 1
+        out = {"alone": len(alone), "rounds": len(rounds)}
+        if why:
+            # Ordered by weight, because the question this answers is
+            # "which one do I fix first".
+            out["why"] = dict(sorted(why.items(), key=lambda kv: -kv[1]))
+        return out
 
     def repeat_boards(self):
         """Openings this wizard fought more than once, and where.

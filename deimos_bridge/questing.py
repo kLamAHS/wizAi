@@ -956,7 +956,21 @@ async def at_a_sigil(client) -> bool:
 #: and quest markers sit on the objective rather than beside it, so this
 #: is generous enough to survive a marker on the far side of an NPC and
 #: tight enough to exclude the next vendor along.
-QUEST_RADIUS = 750.0
+#:
+#: Seven hundred and fifty was not generous enough. Rev c1d4981c logged
+#: `stuck-detail` five times reading "standing 831 away and the cutoff
+#: is 750" -- a wizard essentially on its objective, refused by eighty-
+#: one units, with auto-dialogue's press and `_maybe_count_hold` both
+#: gated behind this. `desperate-hop` took six minutes to close it.
+#:
+#: This is not the range test that decides whether an interact can
+#: happen; the game's own press-X prompt is, and every caller checks
+#: `near_interactable` first. This only decides whether the thing in
+#: range is the QUEST's -- so the cost of being wide is greeting a
+#: vendor standing within a thousand units of the objective, and the
+#: cost of being narrow is a wizard that cannot talk to the NPC it is
+#: standing on.
+QUEST_RADIUS = 1000.0
 
 
 async def at_quest_marker(client, radius: float = QUEST_RADIUS):

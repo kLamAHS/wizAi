@@ -553,7 +553,30 @@ class Hivemind:
     #: arrived -- evidence, not optimism. A seat that announces nothing
     #: gets precisely the old `TIMEOUT`, which is why every test written
     #: before this existed still measures what it measured.
-    PATIENCE = 12.0
+    #:
+    #: Twelve was half an answer. Rev c1d4981c measured the gap between
+    #: two questers reaching the SAME round, forty paired rounds of it,
+    #: and it is not jitter -- it is bimodal. Rounds the party planned
+    #: together: median gap 0.1s. Rounds it planned alone: median 9.2s,
+    #: up to 24.1s. Twelve covers about half of the second group and
+    #: nothing in between.
+    #:
+    #: What that costs is the difference between a fight and a grind.
+    #: The same party killed `Prince Suten Sokkwi@750 + Sokkwi
+    #: Frostmancer@435` in ONE round when it fused, and lost to `Krag
+    #: Stonechin@580 + Ice Weaver@395` over ten when it did not -- one
+    #: of those ten rounds was planned together, and the other nine had
+    #: the seats 7 to 24 seconds apart.
+    #:
+    #: Twenty-five covers the worst gap that run measured. It is
+    #: affordable for the reason the paragraph above gives: this is
+    #: spent only on a seat that has announced THIS round and is still
+    #: in `_fighting`, and the clock runs from the announcement rather
+    #: than from the wait -- so the most a ready seat can lose is this
+    #: constant, once, and only to a partner that is demonstrably
+    #: coming. A planning phase is ~30s, which still leaves room to
+    #: plan in.
+    PATIENCE = 25.0
 
     #: how many planned rounds are remembered, for spotting a seat that
     #: arrives after its round is over. Small on purpose: the only

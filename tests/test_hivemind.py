@@ -503,6 +503,58 @@ def test_patience_is_spent_on_evidence_not_on_hope():
     assert len(hive.last_plan.moves) == 1
 
 
+def test_the_patience_covers_the_spread_this_party_actually_has():
+    """The number, measured rather than guessed. Rev c1d4981c lined the
+    two questers' rounds up on their shared clock, forty paired rounds:
+    the ones planned TOGETHER had a median gap of 0.1s, the ones planned
+    ALONE 9.2s, up to 24.1s. It is bimodal — either both seats hit the
+    round in the same fraction of a second or one is many seconds
+    behind — and twelve covered about half of the second group.
+
+    What that cost: the same party killed `Prince Suten Sokkwi@750 +
+    Sokkwi Frostmancer@435` in one round when it fused, and lost to
+    `Krag Stonechin@580 + Ice Weaver@395` over ten when it did not."""
+    from deimos_bridge.hivemind import _Gather
+    import time
+
+    assert Hivemind.PATIENCE >= 24.1, \
+        "the barrier no longer covers the worst gap rev c1d4981c measured"
+
+    hive = Hivemind(passes=1)
+    subs = party(2)
+    for sub in subs:
+        hive.join(sub.seat, sub.name)
+        hive.enter_combat(sub.seat)
+    # Announced this round twenty seconds ago and still not here — the
+    # exact shape of rev c1d4981c's rounds 6 to 10.
+    hive.arriving(subs[1].seat, 4)
+    hive._announced[subs[1].seat] = (4, time.monotonic() - 20.0)
+
+    gather = _Gather({s.seat for s in subs}, 4)
+    assert hive._still_coming(gather) > 0.0, \
+        "a partner that announced this round 20s ago was written off"
+
+
+def test_the_patience_still_runs_out_on_a_partner_that_never_comes():
+    """The control. The clock runs from the ANNOUNCEMENT, so the most a
+    ready seat can lose is the constant, once — a seat that announced
+    long enough ago is written off however wide the constant is."""
+    from deimos_bridge.hivemind import _Gather
+    import time
+
+    hive = Hivemind(passes=1)
+    subs = party(2)
+    for sub in subs:
+        hive.join(sub.seat, sub.name)
+        hive.enter_combat(sub.seat)
+    hive.arriving(subs[1].seat, 4)
+    hive._announced[subs[1].seat] = (
+        4, time.monotonic() - Hivemind.PATIENCE - 1)
+
+    gather = _Gather({s.seat for s in subs}, 4)
+    assert hive._still_coming(gather) == 0.0
+
+
 def test_patience_for_a_partner_announcing_a_different_round_is_not_spent():
     """It is behind, or it has moved on. Either way this board is not
     the one it is holding, and waiting for it buys nothing."""
