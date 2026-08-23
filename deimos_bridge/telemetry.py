@@ -638,6 +638,17 @@ class FightRecord:
     #: quarter of the rounds: three Ice Weavers at 395 is the same key
     #: in every fight against three Ice Weavers.
     opening: str = ""
+    #: where this wizard stood on its questline when the duel opened,
+    #: as the placement prints it -- "Krokotopia #32", or the tracked
+    #: quest when the list cannot place it, or "" when neither read.
+    #:
+    #: The join key for `repeat_boards`. A board fought twice at the
+    #: SAME quest is a kill-count step doing what kill-count steps do;
+    #: the same board at two DIFFERENT quests is the party walking
+    #: content it had already cleared, because its two questers held
+    #: different quests. Rev b37ab0a2 did that twice in nine duels and
+    #: the only way to see it was to line up three exports by hand.
+    quest: str = ""
     rounds: int = 0
     won: bool = None
     damage_dealt: float = 0.0
@@ -1711,6 +1722,46 @@ class Telemetry:
         alone = sum(1 for r in rounds if (r.seats_in_plan or 1) <= 1)
         return {"alone": alone, "rounds": len(rounds)}
 
+    def repeat_boards(self):
+        """Openings this wizard fought more than once, and where.
+
+        The operator's report was "it seems pretty inneficient when
+        they're both on the same quest/ task/ combat but one quester
+        does the quest while the other waits, then the other catches up
+        and does the same quest", and no export could answer it: fight
+        openings were in the file, but nothing said whether two of them
+        were the same work done twice.
+
+        Not every repeat is waste, and this deliberately does not
+        decide. A kill-count step -- `Defeat Glacial Avenger and Collect
+        Ice Shards (0 of 2)` -- is SUPPOSED to fight the same board
+        twice, and it does so on one quest. A party whose two questers
+        hold different quests walks the ahead wizard back through
+        content it has already cleared, and that shows up as one board
+        at two different quests. So both fight indices and both quests
+        are reported and the reader can tell them apart; a metric that
+        cannot be misread is worth more than a smaller one.
+        """
+        seen = {}
+        for f in self.fought():
+            if not f.opening:
+                continue
+            seen.setdefault(f.opening, []).append(f)
+        out = {}
+        for opening, fights in seen.items():
+            if len(fights) < 2:
+                continue
+            quests = [f.quest or "" for f in fights]
+            out[opening] = {
+                "fights": [f.index for f in fights],
+                "quests": quests,
+                # True when the same board was fought on two different
+                # questline positions -- the shape that means the party
+                # was out of step, rather than a kill-count step.
+                "across_quests": len({q for q in quests if q}) > 1,
+            }
+        return out
+
     def policy_mix(self):
         """Rounds played, per policy and per path within it.
 
@@ -1799,6 +1850,8 @@ class Telemetry:
             # 100% party. A policy's NAME is not evidence that it had
             # anybody to coordinate with.
             "planned_alone": self.planned_alone(),
+            # Was this run doing everything twice? See `repeat_boards`.
+            "repeat_boards": self.repeat_boards(),
             "unresolved": self.unresolved_names(),
             "hand_visibility": self.hand_visibility(),
             "hidden_cards": self.hidden_cards(),

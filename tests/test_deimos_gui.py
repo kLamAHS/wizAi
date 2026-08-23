@@ -317,6 +317,52 @@ def test_the_export_says_how_many_rounds_were_actually_a_party():
     assert tel2.summary()["planned_alone"] == {"alone": 1, "rounds": 1}
 
 
+def test_the_export_names_a_board_the_party_fought_twice():
+    """The operator's report was about EFFICIENCY and no export could
+    answer it: "it seems pretty inneficient when they're both on the
+    same quest/ task/ combat but one quester does the quest while the
+    other waits, then the other catches up and does the same quest".
+
+    Rev b37ab0a2 fought `Hall Servant@235` at t=1039 and again at
+    t=1238, and `Sokkwi Crusher@310 x2` at t=1102 and again at t=1291 —
+    two of nine duels — and the only way to see it was to line three
+    exports up by hand on a shared clock.
+
+    A kill-count step legitimately repeats a board, so this reports
+    rather than judges: the same opening at ONE quest is a kill count,
+    the same opening at two different quests is content re-walked."""
+    tel = Telemetry()
+    for opening, quest in (("Hall Servant@235", "Krokotopia #32"),
+                           ("Sokkwi Crusher@310", "Krokotopia #33"),
+                           ("Hall Servant@235", "Krokotopia #34")):
+        f = tel.start_fight()
+        f.opening, f.quest, f.rounds, f.won = opening, quest, 1, True
+
+    boards = tel.summary()["repeat_boards"]
+    assert list(boards) == ["Hall Servant@235"], boards
+    assert boards["Hall Servant@235"]["fights"] == [1, 3]
+    assert boards["Hall Servant@235"]["across_quests"] is True
+
+    # The same board twice on ONE quest is a kill count doing its job.
+    kills = Telemetry()
+    for _ in range(2):
+        f = kills.start_fight()
+        f.opening, f.quest, f.rounds, f.won = "Glacial Avenger@395", "KT #29", 1, True
+    assert kills.summary()["repeat_boards"][
+        "Glacial Avenger@395"]["across_quests"] is False
+
+
+def test_a_fight_with_no_opening_is_not_a_repeat():
+    """`start_fight` is claimed before the duel exists, so a stopped run
+    leaves a record with no board on it. Two of those are not two
+    fights of the same thing."""
+    tel = Telemetry()
+    for _ in range(2):
+        f = tel.start_fight()
+        f.rounds, f.won = 1, True
+    assert tel.summary()["repeat_boards"] == {}
+
+
 def test_blade_rounds_are_not_damage_observations():
     """A blade predicts 0 and delivers 0. Counting it as a perfect
     prediction would make a buff-heavy deck look more accurate purely for
@@ -14914,6 +14960,64 @@ def test_a_quester_that_has_not_named_itself_downgrades_loudly(monkeypatch):
     assert "has not named itself" in said[0]["detail"]
 
 
+def test_a_quester_the_script_cannot_drive_stays_with_the_pilot(monkeypatch):
+    """The expensive half of rev b37ab0a2. The script was downgraded to
+    one client from t=14 to t=342 because neither wizard had named
+    itself, and in those 328 seconds Críspulo walked from Krokotopia
+    #27 to #29 on wizAi's own navigator while Thomas sat on a side
+    quest at #26. The party never closed that gap, and the preset walks
+    and FIGHTS every quest twice while its two questers hold different
+    ones — Thomas fought `Hall Servant@235` at t=1039 and again at
+    t=1238.
+
+    The operator: "one quester does the quest while the other waits,
+    then the other catches up and does the same quest"."""
+    worker, _built = _crewed_party(monkeypatch, boosters=(0,), leader=2)
+    worker.seats[1].wizard_name = ""
+    _build_the_script(worker)
+
+    assert worker._script_crew == {2}, "the fixture did not downgrade"
+    assert worker._crew_downgraded_at is not None
+    stray = worker.seats[1]
+    assert worker._is_boostee(stray), "the fixture's quester is not a boostee"
+    assert worker._sync_while_downgraded(stray) is True
+
+    said = [e for e in stray.tel.questing if e["kind"] == "downgrade-synced"]
+    assert said, [e["kind"] for e in stray.tel.questing]
+    assert "the VM holds one client" in said[0]["detail"]
+
+
+def test_a_quester_the_script_does_drive_still_quests_its_own_line(monkeypatch):
+    """The control. A boostee inside the VM is walking the questline the
+    script is walking it down, and nothing about that changes."""
+    worker, _built = _crewed_party(monkeypatch, boosters=(0,), leader=2)
+    _build_the_script(worker)
+
+    assert worker._script_crew == {1, 2}, "the fixture downgraded"
+    assert worker._crew_downgraded_at is None
+    assert worker._sync_while_downgraded(worker.seats[1]) is False
+
+
+def test_a_downgrade_that_never_clears_gives_the_quester_back(monkeypatch):
+    """A name is read from a duel, and a party that does not fight has
+    none to read. One wizard held forever beside a pilot is a worse run
+    than two wizards a quest apart, so the sync is bounded."""
+    import time
+
+    worker, _built = _crewed_party(monkeypatch, boosters=(0,), leader=2)
+    worker.seats[1].wizard_name = ""
+    _build_the_script(worker)
+    stray = worker.seats[1]
+    assert worker._sync_while_downgraded(stray) is True
+
+    worker._crew_downgraded_at = (time.monotonic()
+                                  - worker.DOWNGRADE_SYNC_MAX - 1)
+    assert worker._sync_while_downgraded(stray) is False
+    said = [e for e in stray.tel.questing
+            if e["kind"] == "downgrade-sync-over"]
+    assert said and "its own line" in said[0]["detail"]
+
+
 def test_a_preset_that_wants_more_wizards_downgrades_loudly(monkeypatch):
     worker, built = _crewed_party(monkeypatch, boosters=(0,), leader=2)
     worker.script = worker.script.replace("@clients: > 1", "@clients: 4")
@@ -24945,6 +25049,13 @@ def test_the_tick_gives_a_boostee_its_own_quest_step():
     assert arms, "no boostee rung in the tick"
     assert all("_quest_step" in body for body in arms)
     assert all("_follow_step" not in body for body in arms)
+    # ...and the one case where its own line is the wrong line: while
+    # the script cannot drive it at all, walking its own marker walks
+    # it away from the party, and every quest is then done twice. See
+    # `_sync_while_downgraded`.
+    synced = [body for _t, body in guards["staying with the scripted wizard"]]
+    assert synced, "a downgraded quester still walks off on its own"
+    assert all("_sync_follower" in body for body in synced)
 
 
 def test_only_the_boostee_shape_levels_more_than_one_questline(qapp):
@@ -26379,7 +26490,11 @@ def test_a_gap_measured_off_a_goal_line_does_not_pause_the_script(qapp):
     """`read_quest_name` exists because the goal fallback is weak in
     exactly this direction: "one goal line belongs to as many as nine
     quests seventeen steps apart -- and `_catch_up` MOVES wizards".
-    Rev e86044f2 measured 43 quests off one such placement."""
+    Rev e86044f2 measured 43 quests off one such placement.
+
+    Phase AL turned the ban into a bound and this is the half of it
+    that still refuses: 44 quests is not a wizard that missed a
+    turn-in, and a catch-up drives one step at a time."""
     import time
 
     worker = _goal_text_party()
@@ -26389,6 +26504,8 @@ def test_a_gap_measured_off_a_goal_line_does_not_pause_the_script(qapp):
     worker._in_step_since = time.monotonic() - 600
     worker._check_in_step(worker.seats[0])
 
+    assert worker._behind_gap > worker.GOAL_TEXT_GAP, \
+        "the fixture's gap is no longer past the bound"
     assert worker._catching_up() == [], \
         "the script was paused on a goal-line measurement"
     said = [e for e in worker.seats[0].tel.questing
@@ -26409,6 +26526,133 @@ def test_a_gap_measured_off_quest_names_still_starts_a_catch_up(qapp):
     worker._in_step_since = time.monotonic() - 600
     worker._check_in_step(worker.seats[0])
     assert worker._catching_up() == [worker.seats[0]]
+
+
+def test_the_party_block_says_how_long_the_questers_were_apart(qapp):
+    """The number the operator's question needed and no export had.
+    With a script, the seconds the two questers hold DIFFERENT quests
+    are the seconds every quest is walked and fought twice: the
+    preset's `playercount 2` branch is `if NOT sameplace { p2 tp quest
+    }` — each wizard driven to its own objective in turn — and
+    `TP_All_Quest`, one walk and one shared fight, only when they
+    agree. Rev b37ab0a2 spent 72% of its run on the wrong side."""
+    worker = _two_quester_party(orders=(18, 23), booster_order=0)
+
+    worker._account_in_step(1000.0, False)      # first call only stamps
+    worker._account_in_step(1003.0, False)
+    worker._account_in_step(1005.0, True)
+
+    totals = worker._in_step_totals()
+    assert (totals["apart_s"], totals["together_s"]) == (3.0, 2.0)
+    assert totals["apart_pct"] == 60.0
+    assert worker._party_shape(worker.seats[0])["in_step"] == totals
+
+    # A worker that was paused, blocked or stopped between two ticks
+    # must not charge the whole gap to either side.
+    worker._account_in_step(2000.0, False)
+    assert worker._in_step_totals()["apart_s"] == 3.0 + worker.IN_STEP_STEP_MAX
+
+
+def test_a_single_quester_has_nothing_to_be_out_of_step_with(qapp):
+    """One wizard is never out of step with itself, and a block that
+    reported 0% for a solo run would read as a party that never
+    diverged rather than as a party that does not exist."""
+    worker = _party_worker()
+    worker.booster_party = True
+    worker.boosters = {1}
+    assert len(worker._questers()) == 1
+    assert "in_step" not in worker._party_shape(worker.seats[0])
+
+
+def test_a_fight_is_filed_under_the_quest_it_opened_on(qapp):
+    """`start_fight` is claimed before the wait for a duel — minutes
+    before the board exists, and on a quest the wizard may have turned
+    in since. The first round is when the board is real, and the stamp
+    is kept from then on so a long duel is filed under one quest."""
+    worker = _two_quester_party(orders=(18, 23), booster_order=0)
+    seat = worker.seats[0]
+    seat.tel.start_fight()
+
+    worker._stamp_fight_quest(seat)
+    assert seat.tel.fights[-1].quest == "Wizard City #18"
+
+    # Kept: the wizard turning its step in mid-duel does not re-file
+    # the fight it is already in.
+    seat.quest_name = "The Cure"
+    worker._stamp_fight_quest(seat)
+    assert seat.tel.fights[-1].quest == "Wizard City #18"
+
+
+def _small_goal_text_gap():
+    """Two questers three quests apart, the BEHIND one placed by goal.
+
+    Rev b37ab0a2's shape: `placed: Thomas #26 (by goal text) · Críspulo
+    #29 (by quest name)`. Thomas's tracker sat on a side quest and then
+    flapped, so the goal line was the only thing that could place it —
+    and the goal line was RIGHT: five of that run's six goal-text
+    placements were later confirmed exactly by a name placement of the
+    same wizard.
+    """
+    worker = _two_quester_party(orders=(18, 23), booster_order=0)
+    behind, ahead, _muscle = worker.seats
+    # Krokotopia #34, by its goal line alone: this wizard's name read is
+    # unusable, exactly as Thomas's was. Not a Collect step, because
+    # those publish no quest position at all and the catch-up would
+    # refuse for that separate reason (`catch-up-refused-no-marker`).
+    behind.quest_name = ""
+    behind.goal = "Defeat Odji Sokkwi in Hall of Champions"
+    behind.goals_seen = [behind.goal]
+    # ...and Krokotopia #37 by name. Its goal is a `Talk to Ako` line
+    # that two quests share, so it places nothing on its own and does
+    # not disown the name either.
+    ahead.quest_name = "Mark of the Gladiator"
+    ahead.goal = "Talk To Ako in Grand Arena"
+    ahead.goals_seen = [ahead.goal]
+    return worker
+
+
+def test_a_small_gap_off_a_goal_line_is_caught_up_after_all(qapp):
+    """Phase AI banned this outright and rev b37ab0a2 is the bill: the
+    two questers were 2-3 quests apart for 1,068s of a 1,652s run while
+    the preset walked and fought every quest twice, once per wizard.
+    Thomas fought `Hall Servant@235` at t=1039 and again at t=1238.
+
+    The operator: "one quester does the quest while the other waits,
+    then the other catches up and does the same quest"."""
+    import time
+
+    worker = _small_goal_text_gap()
+    behind = worker.seats[0]
+    assert worker._placed_by_goal_text() == behind.name, \
+        "the fixture no longer places the laggard by its goal line"
+
+    worker._check_in_step(behind)
+    worker._in_step_since = time.monotonic() - 600
+    worker._check_in_step(behind)
+
+    assert worker._behind_gap <= worker.GOAL_TEXT_GAP, \
+        "the fixture's gap is no longer inside the bound"
+    assert worker._catching_up() == [behind], \
+        "a gap a catch-up can actually close was refused for its source"
+
+
+def test_a_catch_up_started_on_a_goal_line_says_so(qapp):
+    """A rule that only speaks when it refuses leaves the export unable
+    to say whether it ever helped."""
+    import time
+
+    worker = _small_goal_text_gap()
+    behind = worker.seats[0]
+    worker._check_in_step(behind)
+    worker._in_step_since = time.monotonic() - 600
+    worker._check_in_step(behind)
+
+    said = [e for e in behind.tel.questing
+            if e["kind"] == "catch-up-on-goal-text"]
+    assert said, [e["kind"] for e in behind.tel.questing]
+    assert "goal line" in said[0]["detail"]
+    assert not [e for e in behind.tel.questing
+                if e["kind"] == "catch-up-refused-goal-text"]
 
 
 def test_two_catch_ups_that_move_nothing_rest_the_wizard(qapp):
