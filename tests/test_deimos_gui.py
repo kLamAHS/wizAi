@@ -317,6 +317,52 @@ def test_the_export_says_how_many_rounds_were_actually_a_party():
     assert tel2.summary()["planned_alone"] == {"alone": 1, "rounds": 1}
 
 
+def test_the_export_names_a_board_the_party_fought_twice():
+    """The operator's report was about EFFICIENCY and no export could
+    answer it: "it seems pretty inneficient when they're both on the
+    same quest/ task/ combat but one quester does the quest while the
+    other waits, then the other catches up and does the same quest".
+
+    Rev b37ab0a2 fought `Hall Servant@235` at t=1039 and again at
+    t=1238, and `Sokkwi Crusher@310 x2` at t=1102 and again at t=1291 —
+    two of nine duels — and the only way to see it was to line three
+    exports up by hand on a shared clock.
+
+    A kill-count step legitimately repeats a board, so this reports
+    rather than judges: the same opening at ONE quest is a kill count,
+    the same opening at two different quests is content re-walked."""
+    tel = Telemetry()
+    for opening, quest in (("Hall Servant@235", "Krokotopia #32"),
+                           ("Sokkwi Crusher@310", "Krokotopia #33"),
+                           ("Hall Servant@235", "Krokotopia #34")):
+        f = tel.start_fight()
+        f.opening, f.quest, f.rounds, f.won = opening, quest, 1, True
+
+    boards = tel.summary()["repeat_boards"]
+    assert list(boards) == ["Hall Servant@235"], boards
+    assert boards["Hall Servant@235"]["fights"] == [1, 3]
+    assert boards["Hall Servant@235"]["across_quests"] is True
+
+    # The same board twice on ONE quest is a kill count doing its job.
+    kills = Telemetry()
+    for _ in range(2):
+        f = kills.start_fight()
+        f.opening, f.quest, f.rounds, f.won = "Glacial Avenger@395", "KT #29", 1, True
+    assert kills.summary()["repeat_boards"][
+        "Glacial Avenger@395"]["across_quests"] is False
+
+
+def test_a_fight_with_no_opening_is_not_a_repeat():
+    """`start_fight` is claimed before the duel exists, so a stopped run
+    leaves a record with no board on it. Two of those are not two
+    fights of the same thing."""
+    tel = Telemetry()
+    for _ in range(2):
+        f = tel.start_fight()
+        f.rounds, f.won = 1, True
+    assert tel.summary()["repeat_boards"] == {}
+
+
 def test_blade_rounds_are_not_damage_observations():
     """A blade predicts 0 and delivers 0. Counting it as a perfect
     prediction would make a buff-heavy deck look more accurate purely for
@@ -2462,6 +2508,109 @@ def test_auto_dialogue_clicks_without_being_asked(qapp):
 
     asyncio.run(drive())
     assert client.mouse_handler.clicks, "auto-dialogue never fired"
+
+
+def test_auto_dialogue_presses_x_as_a_ladder_not_once(monkeypatch):
+    """`press_x_until` has said why since it was written: "X is a
+    proximity interact ... after a teleport that can be a second or two
+    of settling. A single press lands in the gap and the step never
+    starts." The preset presses up to twenty for the same reason, and
+    `hop_once` already uses the ladder. This caller was the last one
+    still pressing once — and rev b37ab0a2 spent 79 of its 136 minutes
+    on one `Talk To ...` step that a press had to start."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    async def _no(_c):
+        return False
+
+    async def _yes(_c):
+        return True
+
+    async def _at_marker(_c, radius=None):
+        return True, ""
+
+    def _never(_c):
+        raise AssertionError("auto-dialogue pressed X exactly once")
+
+    seen = {}
+
+    async def _ladder(client, done, **kw):
+        seen["done"] = done
+        return 3, ""
+
+    monkeypatch.setattr(questing, "in_dialogue", _no)
+    monkeypatch.setattr(questing, "in_battle", _no)
+    monkeypatch.setattr(questing, "near_interactable", _yes)
+    monkeypatch.setattr(questing, "at_quest_marker", _at_marker)
+    monkeypatch.setattr(questing, "press_x", _never)
+    monkeypatch.setattr(questing, "press_x_until", _ladder)
+    monkeypatch.setattr(questing, "dialogue_opened", _no)
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    asyncio.run(worker._auto_dialogue(seat.client, seat))
+
+    assert "done" in seen, "the ladder was never reached"
+    # ...and the ladder stops on the thing it was pressing FOR, which is
+    # the predicate `hop_once` already uses.
+    assert asyncio.run(seen["done"]()) is False
+    monkeypatch.setattr(questing, "in_dialogue", _yes)
+    assert asyncio.run(seen["done"]()) is True
+
+
+def test_auto_dialogue_writes_what_it_did_into_the_run(monkeypatch):
+    """Rev b37ab0a2's exports could not say whether wizAi's clicker had
+    done anything at all, while the script's dead handler printed
+    "Dialogue detected. Clearing..." 90 times — and that was the one
+    question the run turned on. `_say` goes to the status line; the run
+    record needs it too."""
+    import asyncio
+
+    from deimos_bridge import questing
+
+    boxes = {"open": False}
+
+    async def _in_dialogue(_c):
+        return boxes["open"]
+
+    async def _no(_c):
+        return False
+
+    async def _yes(_c):
+        return True
+
+    async def _at_marker(_c, radius=None):
+        return True, ""
+
+    async def _ladder(_client, _done, **kw):
+        boxes["open"] = True
+        return 2, ""
+
+    async def _advance(_c):
+        boxes["open"] = False
+        return 4, ""
+
+    monkeypatch.setattr(questing, "in_dialogue", _in_dialogue)
+    monkeypatch.setattr(questing, "in_battle", _no)
+    monkeypatch.setattr(questing, "near_interactable", _yes)
+    monkeypatch.setattr(questing, "at_quest_marker", _at_marker)
+    monkeypatch.setattr(questing, "press_x_until", _ladder)
+    monkeypatch.setattr(questing, "dialogue_opened", _no)
+    monkeypatch.setattr(questing, "advance_dialogue", _advance)
+
+    worker = _party_worker()
+    seat = worker.seats[0]
+    asyncio.run(worker._auto_dialogue(seat.client, seat))
+
+    kinds = [e["kind"] for e in seat.tel.questing]
+    assert "dialogue-opened" in kinds, kinds
+    assert "dialogue-cleared" in kinds, kinds
+    opened = [e for e in seat.tel.questing if e["kind"] == "dialogue-opened"]
+    cleared = [e for e in seat.tel.questing if e["kind"] == "dialogue-cleared"]
+    assert "2 time(s)" in opened[0]["detail"]
+    assert "4 dialogue window(s)" in cleared[0]["detail"]
 
 
 # ------------------------------------------------- Deimos's own questing
@@ -14914,6 +15063,98 @@ def test_a_quester_that_has_not_named_itself_downgrades_loudly(monkeypatch):
     assert "has not named itself" in said[0]["detail"]
 
 
+def test_a_quester_the_script_cannot_drive_stays_with_the_pilot(monkeypatch):
+    """The expensive half of rev b37ab0a2. The script was downgraded to
+    one client from t=14 to t=342 because neither wizard had named
+    itself, and in those 328 seconds Críspulo walked from Krokotopia
+    #27 to #29 on wizAi's own navigator while Thomas sat on a side
+    quest at #26. The party never closed that gap, and the preset walks
+    and FIGHTS every quest twice while its two questers hold different
+    ones — Thomas fought `Hall Servant@235` at t=1039 and again at
+    t=1238.
+
+    The operator: "one quester does the quest while the other waits,
+    then the other catches up and does the same quest"."""
+    worker, _built = _crewed_party(monkeypatch, boosters=(0,), leader=2)
+    worker.seats[1].wizard_name = ""
+    _build_the_script(worker)
+
+    assert worker._script_crew == {2}, "the fixture did not downgrade"
+    assert worker._crew_downgraded_at is not None
+    stray = worker.seats[1]
+    assert worker._is_boostee(stray), "the fixture's quester is not a boostee"
+    assert worker._sync_while_downgraded(stray) is True
+
+    said = [e for e in stray.tel.questing if e["kind"] == "downgrade-synced"]
+    assert said, [e["kind"] for e in stray.tel.questing]
+    assert "the VM holds one client" in said[0]["detail"]
+
+
+def test_a_quester_the_script_does_drive_still_quests_its_own_line(monkeypatch):
+    """The control. A boostee inside the VM is walking the questline the
+    script is walking it down, and nothing about that changes."""
+    worker, _built = _crewed_party(monkeypatch, boosters=(0,), leader=2)
+    _build_the_script(worker)
+
+    assert worker._script_crew == {1, 2}, "the fixture downgraded"
+    assert worker._crew_downgraded_at is None
+    assert worker._sync_while_downgraded(worker.seats[1]) is False
+
+
+def test_a_downgrade_that_never_clears_gives_the_quester_back(monkeypatch):
+    """A name is read from a duel, and a party that does not fight has
+    none to read. One wizard held forever beside a pilot is a worse run
+    than two wizards a quest apart, so the sync is bounded."""
+    import time
+
+    worker, _built = _crewed_party(monkeypatch, boosters=(0,), leader=2)
+    worker.seats[1].wizard_name = ""
+    _build_the_script(worker)
+    stray = worker.seats[1]
+    assert worker._sync_while_downgraded(stray) is True
+
+    worker._crew_downgraded_at = (time.monotonic()
+                                  - worker.DOWNGRADE_SYNC_MAX - 1)
+    assert worker._sync_while_downgraded(stray) is False
+    said = [e for e in stray.tel.questing
+            if e["kind"] == "downgrade-sync-over"]
+    assert said and "its own line" in said[0]["detail"]
+
+
+def test_building_the_script_wakes_its_dialogue_clearer(monkeypatch):
+    """The repair happens where every other one does — beside
+    `steady_sigil`, on the source both build paths share — and it says
+    so, because a silent rewrite of the operator's preset is not
+    something an export should have to be reverse-engineered for."""
+    from deimos_bridge import scripts
+
+    worker, built = _crewed_party(monkeypatch, boosters=(0,), leader=2)
+    worker.script = _DEAD_GUARD
+    _build_the_script(worker)
+
+    assert "var Handle_Dialogue = True" in built["source"]
+    assert scripts.dead_dialogue_guard(built["source"]) == ""
+    said = [e for e in worker.seats[2].tel.questing
+            if e["kind"] == "script-dialogue-woken"]
+    assert said, [e["kind"] for e in worker.seats[2].tel.questing]
+    assert "Handle_Dialogue" in said[0]["detail"]
+
+
+def test_wizai_still_clicks_dialogue_after_the_repair(monkeypatch):
+    """The operator's call, in their words: repair it, *and* keep wizAi
+    clicking. Two advancers that both only move the box on beat a race
+    that nobody wins — and the repair reaches the VM's copy, not
+    `self.script`, so `_dialogue_is_ours` is unmoved. Pinned here so a
+    later tidy cannot turn wizAi's clicker off as a side effect."""
+    worker, built = _crewed_party(monkeypatch, boosters=(0,), leader=2)
+    worker.script = _DEAD_GUARD
+    _build_the_script(worker)
+
+    assert "var Handle_Dialogue = True" in built["source"], \
+        "the fixture did not actually repair anything"
+    assert worker._dialogue_is_ours() is True
+
+
 def test_a_preset_that_wants_more_wizards_downgrades_loudly(monkeypatch):
     worker, built = _crewed_party(monkeypatch, boosters=(0,), leader=2)
     worker.script = worker.script.replace("@clients: > 1", "@clients: 4")
@@ -24409,6 +24650,70 @@ def test_every_shipped_preset_has_its_dialogue_clearer_switched_off():
         assert scripts.dead_dialogue_guard(source) == "Handle_Dialogue", title
 
 
+def test_the_dead_dialogue_guard_is_declared_rather_than_left_dead():
+    """Reporting it was not enough. Rev b37ab0a2 printed "Dialogue
+    detected. Clearing..." **90 times** while pressing nothing, and
+    Thomas spent 79 of that run's 136 minutes — 58% — on one line,
+    `Talk To Arena Master in Grand Arena`.
+
+    The declaration is added rather than the guard rewritten: the
+    author's press is already on the line, and one missing `var` is the
+    whole reason deimoslang answers it False."""
+    from deimos_bridge import scripts
+
+    out, name = scripts.wake_dialogue(_DEAD_GUARD)
+    assert name == "Handle_Dialogue"
+    assert "var Handle_Dialogue = True" in out
+    assert scripts.dead_dialogue_guard(out) == ""
+    # ...and the press itself is untouched.
+    assert "sameany sendkey SPACEBAR, .1" in out
+
+
+def test_the_declaration_lands_before_the_first_block():
+    """A deimoslang `var` is a top-level statement. Put after the first
+    `block` it would be as dead as the guard it is fixing."""
+    from deimos_bridge import scripts
+
+    out, _name = scripts.wake_dialogue(_DEAD_GUARD)
+    lines = out.splitlines()
+    decl = next(i for i, l in enumerate(lines)
+                if l.startswith("var Handle_Dialogue"))
+    block = next(i for i, l in enumerate(lines) if l.startswith("block "))
+    assert decl < block
+
+
+def test_waking_a_script_twice_changes_nothing_the_second_time():
+    """Idempotent by construction — once the name is declared,
+    `dead_dialogue_guard` returns "" and there is nothing to do. The VM
+    is rebuilt on every reload and a rewrite that stacked would grow the
+    file each time."""
+    from deimos_bridge import scripts
+
+    once, _n = scripts.wake_dialogue(_DEAD_GUARD)
+    twice, name = scripts.wake_dialogue(once)
+    assert twice == once and name == ""
+
+
+def test_every_shipped_preset_can_be_woken():
+    """The companion to
+    `test_every_shipped_preset_has_its_dialogue_clearer_switched_off`:
+    all six are broken the same way and all six take the same repair,
+    line endings and all."""
+    from deimos_bridge import scripts
+
+    presets = scripts.presets()
+    assert presets, "no presets shipped"
+    for title, path in presets:
+        source = scripts.read_preset(path)
+        out, name = scripts.wake_dialogue(source)
+        assert name == "Handle_Dialogue", title
+        assert scripts.dead_dialogue_guard(out) == "", title
+        # The shipped presets are CRLF. A lone LF inserted into one is a
+        # line deimoslang's parser sees differently from its neighbours.
+        if "\r\n" in source:
+            assert "var Handle_Dialogue = True\r\n" in out, title
+
+
 def test_undeclared_guards_are_reported_generally():
     """`Handle_Dialogue` is not the only one — the presets also guard on
     `Delay_Combat`, declared nowhere either. A guard on a name that
@@ -24945,6 +25250,13 @@ def test_the_tick_gives_a_boostee_its_own_quest_step():
     assert arms, "no boostee rung in the tick"
     assert all("_quest_step" in body for body in arms)
     assert all("_follow_step" not in body for body in arms)
+    # ...and the one case where its own line is the wrong line: while
+    # the script cannot drive it at all, walking its own marker walks
+    # it away from the party, and every quest is then done twice. See
+    # `_sync_while_downgraded`.
+    synced = [body for _t, body in guards["staying with the scripted wizard"]]
+    assert synced, "a downgraded quester still walks off on its own"
+    assert all("_sync_follower" in body for body in synced)
 
 
 def test_only_the_boostee_shape_levels_more_than_one_questline(qapp):
@@ -26261,6 +26573,148 @@ def test_a_marker_cannot_be_out_of_zone_when_the_goal_names_this_zone(
     assert worker._marker_out_of_reach([seat]) is None
 
 
+def test_a_far_marker_with_no_zone_change_is_not_another_zone(monkeypatch):
+    """The preset opens every main-loop iteration with
+
+        print "Teleporting all clients to a safe area."
+        times 2 { tp XYZ(0,100000,0) }
+
+    -- `questing.NOWHERE` -- so a wizard standing at its quest NPC is
+    yanked 100,000 units up and sampled there. Rev b37ab0a2 did that
+    152 times: Thomas's marker read 1,616 and then 75,742 in the SAME
+    room, seven times over, and wizAi restarted the script six times
+    saying "another zone ... No teleport can help from here" about an
+    NPC ten feet away. 79 of that run's 136 minutes went on the one
+    conversation.
+
+    `area_is_this_zone('Grand Arena',
+    'Krokotopia/KT_Krokosphinx/KT_Arena')` answers None, so Phase AG
+    cannot reach this. The wizard's own reading a minute ago can."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Arena Master in Grand Arena"],
+        positions=[
+            _XYZ(1616.0, 0.0, 0.0),                          # at the NPC
+            _XYZ(75742.0, 0.0, 0.0), _XYZ(75742.0, 0.0, 0.0),  # parked
+            _XYZ(3470.0, 0.0, 0.0), _XYZ(3470.0, 0.0, 0.0),    # back — 1
+            _XYZ(75742.0, 0.0, 0.0), _XYZ(75742.0, 0.0, 0.0),  # parked
+            _XYZ(541.0, 0.0, 0.0), _XYZ(541.0, 0.0, 0.0),      # back — 2
+            _XYZ(75742.0, 0.0, 0.0),                           # and again
+        ])
+    seat.zone_seen = "Krokotopia/KT_Krokosphinx/KT_Arena"
+    worker.MARKER_FLAP_REST = 0.0
+
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away == 1616.0
+    assert seat.marker_near[:2] == (seat.zone_seen, seat.goal)
+
+    # Two believed round trips: the marker keeps coming back to this
+    # zone on this goal, which nothing in another zone does.
+    for _ in range(5):
+        asyncio.run(worker._read_goal(seat))
+    assert seat.marker_bounces >= worker.MARKER_BOUNCES, seat.marker_bounces
+
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away == worker.MARKER_IN_ZONE, \
+        "the wizard moved; the objective did not"
+    assert worker._marker_out_of_reach([seat]) is None
+    said = [e for e in seat.tel.questing if e["kind"] == "marker-same-zone"]
+    assert said and "75,742" in said[0]["detail"]
+
+
+def test_the_same_far_marker_after_a_zone_change_is_believed(monkeypatch):
+    """The control, and the whole precondition: another zone needs a
+    ZONE CHANGE. A wizard that crossed one has no receipt to show."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Arena Master in Grand Arena"],
+        positions=[
+            _XYZ(1616.0, 0.0, 0.0),
+            _XYZ(75742.0, 0.0, 0.0), _XYZ(75742.0, 0.0, 0.0),
+            _XYZ(3470.0, 0.0, 0.0), _XYZ(3470.0, 0.0, 0.0),
+            _XYZ(75742.0, 0.0, 0.0), _XYZ(75742.0, 0.0, 0.0),
+            _XYZ(541.0, 0.0, 0.0), _XYZ(541.0, 0.0, 0.0),
+            _XYZ(75742.0, 0.0, 0.0),
+        ])
+    seat.zone_seen = "Krokotopia/KT_Krokosphinx/KT_Arena"
+    worker.MARKER_FLAP_REST = 0.0
+    # Everything the vouch needs EXCEPT the standing-still part.
+    for _ in range(6):
+        asyncio.run(worker._read_goal(seat))
+    assert seat.marker_bounces >= worker.MARKER_BOUNCES
+
+    seat.zone_seen = "Krokotopia/KT_Hub"
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away == 75742.0
+    assert worker._marker_out_of_reach([seat]) == 75742.0
+
+
+def test_the_same_far_marker_after_the_goal_moved_is_believed(monkeypatch):
+    """The other half of the precondition, and the reason the receipt
+    carries the goal as well as the zone: a quest that advanced to
+    another world without the wizard moving is exactly
+    `goal_is_elsewhere`'s case, and vouching for it on the zone alone
+    would re-create the bug rev 09a0af80 paid for at 81 units."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch,
+        goals=["Talk To Arena Master in Grand Arena"] * 7
+              + ["Talk To Merle Ambrose in The Commons"],
+        positions=[
+            _XYZ(1616.0, 0.0, 0.0),
+            _XYZ(75742.0, 0.0, 0.0), _XYZ(75742.0, 0.0, 0.0),
+            _XYZ(3470.0, 0.0, 0.0), _XYZ(3470.0, 0.0, 0.0),
+            _XYZ(75742.0, 0.0, 0.0), _XYZ(75742.0, 0.0, 0.0),
+            _XYZ(541.0, 0.0, 0.0), _XYZ(541.0, 0.0, 0.0),
+            _XYZ(75742.0, 0.0, 0.0),
+        ])
+    seat.zone_seen = "Krokotopia/KT_Krokosphinx/KT_Arena"
+    worker.MARKER_FLAP_REST = 0.0
+    for _ in range(6):
+        asyncio.run(worker._read_goal(seat))
+    assert seat.marker_bounces >= worker.MARKER_BOUNCES
+
+    # The step advanced without the wizard moving — which is exactly
+    # `goal_is_elsewhere`'s case, and it read 81 units at rev 09a0af80.
+    asyncio.run(worker._read_goal(seat))
+    assert seat.goal == "Talk To Merle Ambrose in The Commons", \
+        "the fixture's goal never moved"
+    assert seat.marker_away == 75742.0
+
+
+def test_a_clamped_reading_does_not_renew_its_own_vouch(monkeypatch):
+    """Phase AK's lesson, applied one rung over. A fallback that writes
+    the receipt it was authorised by keeps itself alive forever — rev
+    e86044f2 held one impossible distance "480 times in a row" doing
+    exactly that. Only the RAW reading may vouch."""
+    import asyncio
+
+    worker, seat = _goal_worker(
+        monkeypatch, goals=["Talk To Arena Master in Grand Arena"],
+        positions=[
+            _XYZ(1616.0, 0.0, 0.0),
+            _XYZ(75742.0, 0.0, 0.0), _XYZ(75742.0, 0.0, 0.0),
+            _XYZ(3470.0, 0.0, 0.0), _XYZ(3470.0, 0.0, 0.0),
+            _XYZ(75742.0, 0.0, 0.0), _XYZ(75742.0, 0.0, 0.0),
+            _XYZ(541.0, 0.0, 0.0), _XYZ(541.0, 0.0, 0.0),
+            _XYZ(75742.0, 0.0, 0.0),
+        ])
+    seat.zone_seen = "Krokotopia/KT_Krokosphinx/KT_Arena"
+    worker.MARKER_FLAP_REST = 0.0
+    for _ in range(6):
+        asyncio.run(worker._read_goal(seat))
+    first, bounces = seat.marker_near, seat.marker_bounces
+    assert bounces >= worker.MARKER_BOUNCES, bounces
+
+    asyncio.run(worker._read_goal(seat))
+    assert seat.marker_away == worker.MARKER_IN_ZONE
+    assert (seat.marker_near, seat.marker_bounces) == (first, bounces), \
+        "the clamp refreshed the receipt that authorised it"
+
+
 def test_a_far_marker_is_still_believed_when_the_area_does_not_match(
         monkeypatch):
     """The control. `area_is_this_zone` documents itself as a veto that
@@ -26379,7 +26833,11 @@ def test_a_gap_measured_off_a_goal_line_does_not_pause_the_script(qapp):
     """`read_quest_name` exists because the goal fallback is weak in
     exactly this direction: "one goal line belongs to as many as nine
     quests seventeen steps apart -- and `_catch_up` MOVES wizards".
-    Rev e86044f2 measured 43 quests off one such placement."""
+    Rev e86044f2 measured 43 quests off one such placement.
+
+    Phase AL turned the ban into a bound and this is the half of it
+    that still refuses: 44 quests is not a wizard that missed a
+    turn-in, and a catch-up drives one step at a time."""
     import time
 
     worker = _goal_text_party()
@@ -26389,6 +26847,8 @@ def test_a_gap_measured_off_a_goal_line_does_not_pause_the_script(qapp):
     worker._in_step_since = time.monotonic() - 600
     worker._check_in_step(worker.seats[0])
 
+    assert worker._behind_gap > worker.GOAL_TEXT_GAP, \
+        "the fixture's gap is no longer past the bound"
     assert worker._catching_up() == [], \
         "the script was paused on a goal-line measurement"
     said = [e for e in worker.seats[0].tel.questing
@@ -26409,6 +26869,133 @@ def test_a_gap_measured_off_quest_names_still_starts_a_catch_up(qapp):
     worker._in_step_since = time.monotonic() - 600
     worker._check_in_step(worker.seats[0])
     assert worker._catching_up() == [worker.seats[0]]
+
+
+def test_the_party_block_says_how_long_the_questers_were_apart(qapp):
+    """The number the operator's question needed and no export had.
+    With a script, the seconds the two questers hold DIFFERENT quests
+    are the seconds every quest is walked and fought twice: the
+    preset's `playercount 2` branch is `if NOT sameplace { p2 tp quest
+    }` — each wizard driven to its own objective in turn — and
+    `TP_All_Quest`, one walk and one shared fight, only when they
+    agree. Rev b37ab0a2 spent 72% of its run on the wrong side."""
+    worker = _two_quester_party(orders=(18, 23), booster_order=0)
+
+    worker._account_in_step(1000.0, False)      # first call only stamps
+    worker._account_in_step(1003.0, False)
+    worker._account_in_step(1005.0, True)
+
+    totals = worker._in_step_totals()
+    assert (totals["apart_s"], totals["together_s"]) == (3.0, 2.0)
+    assert totals["apart_pct"] == 60.0
+    assert worker._party_shape(worker.seats[0])["in_step"] == totals
+
+    # A worker that was paused, blocked or stopped between two ticks
+    # must not charge the whole gap to either side.
+    worker._account_in_step(2000.0, False)
+    assert worker._in_step_totals()["apart_s"] == 3.0 + worker.IN_STEP_STEP_MAX
+
+
+def test_a_single_quester_has_nothing_to_be_out_of_step_with(qapp):
+    """One wizard is never out of step with itself, and a block that
+    reported 0% for a solo run would read as a party that never
+    diverged rather than as a party that does not exist."""
+    worker = _party_worker()
+    worker.booster_party = True
+    worker.boosters = {1}
+    assert len(worker._questers()) == 1
+    assert "in_step" not in worker._party_shape(worker.seats[0])
+
+
+def test_a_fight_is_filed_under_the_quest_it_opened_on(qapp):
+    """`start_fight` is claimed before the wait for a duel — minutes
+    before the board exists, and on a quest the wizard may have turned
+    in since. The first round is when the board is real, and the stamp
+    is kept from then on so a long duel is filed under one quest."""
+    worker = _two_quester_party(orders=(18, 23), booster_order=0)
+    seat = worker.seats[0]
+    seat.tel.start_fight()
+
+    worker._stamp_fight_quest(seat)
+    assert seat.tel.fights[-1].quest == "Wizard City #18"
+
+    # Kept: the wizard turning its step in mid-duel does not re-file
+    # the fight it is already in.
+    seat.quest_name = "The Cure"
+    worker._stamp_fight_quest(seat)
+    assert seat.tel.fights[-1].quest == "Wizard City #18"
+
+
+def _small_goal_text_gap():
+    """Two questers three quests apart, the BEHIND one placed by goal.
+
+    Rev b37ab0a2's shape: `placed: Thomas #26 (by goal text) · Críspulo
+    #29 (by quest name)`. Thomas's tracker sat on a side quest and then
+    flapped, so the goal line was the only thing that could place it —
+    and the goal line was RIGHT: five of that run's six goal-text
+    placements were later confirmed exactly by a name placement of the
+    same wizard.
+    """
+    worker = _two_quester_party(orders=(18, 23), booster_order=0)
+    behind, ahead, _muscle = worker.seats
+    # Krokotopia #34, by its goal line alone: this wizard's name read is
+    # unusable, exactly as Thomas's was. Not a Collect step, because
+    # those publish no quest position at all and the catch-up would
+    # refuse for that separate reason (`catch-up-refused-no-marker`).
+    behind.quest_name = ""
+    behind.goal = "Defeat Odji Sokkwi in Hall of Champions"
+    behind.goals_seen = [behind.goal]
+    # ...and Krokotopia #37 by name. Its goal is a `Talk to Ako` line
+    # that two quests share, so it places nothing on its own and does
+    # not disown the name either.
+    ahead.quest_name = "Mark of the Gladiator"
+    ahead.goal = "Talk To Ako in Grand Arena"
+    ahead.goals_seen = [ahead.goal]
+    return worker
+
+
+def test_a_small_gap_off_a_goal_line_is_caught_up_after_all(qapp):
+    """Phase AI banned this outright and rev b37ab0a2 is the bill: the
+    two questers were 2-3 quests apart for 1,068s of a 1,652s run while
+    the preset walked and fought every quest twice, once per wizard.
+    Thomas fought `Hall Servant@235` at t=1039 and again at t=1238.
+
+    The operator: "one quester does the quest while the other waits,
+    then the other catches up and does the same quest"."""
+    import time
+
+    worker = _small_goal_text_gap()
+    behind = worker.seats[0]
+    assert worker._placed_by_goal_text() == behind.name, \
+        "the fixture no longer places the laggard by its goal line"
+
+    worker._check_in_step(behind)
+    worker._in_step_since = time.monotonic() - 600
+    worker._check_in_step(behind)
+
+    assert worker._behind_gap <= worker.GOAL_TEXT_GAP, \
+        "the fixture's gap is no longer inside the bound"
+    assert worker._catching_up() == [behind], \
+        "a gap a catch-up can actually close was refused for its source"
+
+
+def test_a_catch_up_started_on_a_goal_line_says_so(qapp):
+    """A rule that only speaks when it refuses leaves the export unable
+    to say whether it ever helped."""
+    import time
+
+    worker = _small_goal_text_gap()
+    behind = worker.seats[0]
+    worker._check_in_step(behind)
+    worker._in_step_since = time.monotonic() - 600
+    worker._check_in_step(behind)
+
+    said = [e for e in behind.tel.questing
+            if e["kind"] == "catch-up-on-goal-text"]
+    assert said, [e["kind"] for e in behind.tel.questing]
+    assert "goal line" in said[0]["detail"]
+    assert not [e for e in behind.tel.questing
+                if e["kind"] == "catch-up-refused-goal-text"]
 
 
 def test_two_catch_ups_that_move_nothing_rest_the_wizard(qapp):
