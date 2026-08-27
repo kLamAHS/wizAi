@@ -42,6 +42,22 @@ ARRIVAL_RADIUS = 120.0
 BUY_POTIONS_TIMEOUT = 180.0
 
 
+def _walking() -> bool:
+    """Is the walk-only questing mode on?
+
+    Same lazy-import shape as `questing._navmap_tp`: on a light install
+    (no Deimos modules on the path) the answer is simply False and the
+    chores keep teleporting, which is what they always did.
+    """
+    try:
+        from .deimos_path import ensure_path
+        ensure_path()
+        from src import walk_nav
+        return walk_nav.walking()
+    except Exception:
+        return False
+
+
 async def _read(obj, path, default=None):
     """Read `obj.a.b()`, or give up quietly.
 
@@ -259,7 +275,18 @@ async def collect_wisps(client, safe_only: bool = True, limit: int = 12,
     for entity in entities[:limit]:
         try:
             where = await entity.location()
-            await client.teleport(where)
+            if _walking():
+                # Walk-only mode: wisps are near and on open ground, so
+                # a bounded straight walk does it. Running out the clock
+                # skips the wisp rather than stalling the chore; the
+                # arrival check below still decides what counts.
+                try:
+                    await asyncio.wait_for(
+                        client.goto(where.x, where.y), 8.0)
+                except asyncio.TimeoutError:
+                    pass
+            else:
+                await client.teleport(where)
             await asyncio.sleep(0.15)
         except Exception as exc:
             refused = f"{type(exc).__name__}: {exc}"

@@ -1554,7 +1554,8 @@ class MainWindow(QMainWindow):
                     "use_potions": "use_potions",
                     "buy_potions": "buy_potions",
                     "follow_leader": "follow_leader",
-                    "script_debug": "script_debug"}
+                    "script_debug": "script_debug",
+                    "walk_quests": "walk_to_objectives"}
 
     def _wire_live_toggles(self):
         for box_name, attr in self.LIVE_TOGGLES.items():
@@ -2367,6 +2368,20 @@ class MainWindow(QMainWindow):
         self.pace_override.toggled.connect(
             lambda on: [s.setEnabled(on)
                         for s in (self.pace_step, self.pace_dialog)])
+        self.walk_quests = QCheckBox("Walk to objectives (no teleport)")
+        self.walk_quests.setToolTip(
+            "Questing navigation goes ON FOOT: quest markers, entity and "
+            "mob approaches, collect coordinates and zone-gate runs are "
+            "pathed over the zone's walk mesh and walked leg by leg, for "
+            "the whole party, in auto-quest and script runs alike. "
+            "In-game transports still happen — X at doors and sigils, the "
+            "spiral door, dungeon and hub recall, friend teleports. When "
+            "a target is unreachable on foot or a wizard stays stuck "
+            "after re-plans, the old teleport is used for that one hop "
+            "and the questing log says 'walk fallback'. Expect runs to "
+            "take longer and pull extra fights along the road. A live "
+            "toggle: flips take effect on the next hop, no reconnect.")
+        pace.addWidget(self.walk_quests)
         pace.addStretch()
         v.addLayout(pace)
 
@@ -2730,7 +2745,9 @@ class MainWindow(QMainWindow):
                                script_dialog_delay=(
                                    self.pace_dialog.value()
                                    if self.pace_override.isChecked()
-                                   else None))
+                                   else None),
+                               walk_to_objectives=(
+                                   self.walk_quests.isChecked()))
         self.live.status.connect(self.on_live_status)
         # Per wizard as well as into the one-line status bar: with four
         # of them talking the bar holds whichever spoke last, and a

@@ -1698,3 +1698,184 @@ def test_the_walk_owns_its_stop_decisions():
         "a walk that finished (or had nothing to do) must answer False"
     assert "return not refine" in walk, \
         "a truncated walk must answer stopped-short through `refine`"
+
+
+# ----------------------------------------------------------- walk-only mode
+# wizAi's walk-only questing: `Deimos/src/walk_nav.py` holds the mode
+# switch and the on-foot navigator (driven tests in `test_walk_nav.py`),
+# and the guards below pin the ROUTING -- the places in the vendored
+# tree that now ask `walk_nav.walking()` before writing position memory.
+# A Deimos bump that drops any of them silently turns the "Walk to
+# objectives" checkbox back into a teleport.
+
+WALK_NAV = "Deimos/src/walk_nav.py"
+QUESTING = "Deimos/src/questing.py"
+WIZ_NAVIGATOR = ("Deimos/libs/wizsprinter/wizwalker/extensions/"
+                 "wizsprinter/wiz_navigator.py")
+
+
+def test_walk_mode_walks_before_it_teleports():
+    """Both teleport primitives try the hop on foot first when the mode
+    is on: `collision_tp` before its solve, `navmap_tp` before its
+    direct teleport -- and the exhausted-fallback delegation passes
+    `_walk_first_try=not walked` so one hop never attempts the same
+    failed walk twice."""
+    src = _source(TP)
+    assert "from src import walk_nav" in src, \
+        "teleport_math no longer knows about the walk mode"
+
+    nav = src.split("async def navmap_tp", 1)[1].split("\nasync def ", 1)[0]
+    walk_gate = nav.find("_walk_first_try and walk_nav.walking()")
+    direct_tp = nav.find("await client.teleport(target_xyz)")
+    assert 0 <= walk_gate < direct_tp, \
+        "navmap_tp teleports before it considers walking"
+
+    body = src.split("async def collision_tp", 1)[1].split("\ndef ", 1)[0]
+    assert "if walk_nav.walking():" in body, \
+        "collision_tp lost its walk-first gate"
+    assert body.find("walk_nav.walking()") < body.find("safe_xyz = None"), \
+        "collision_tp solves for a teleport before considering the walk"
+    assert "_walk_first_try=not walked" in body, \
+        "a failed walk would be attempted twice in one hop"
+
+
+def test_a_walk_fallback_is_spoken_not_silent():
+    """When walking cannot deliver, the teleport that covers for it is
+    announced through `on_teleport_note` ('walk fallback: ...'), and a
+    walk that lands reports through `on_teleport_result` with its own
+    outcome kinds -- except an off-mesh target, the script-bump case,
+    which stays quiet on purpose."""
+    src = _source(TP)
+    assert 'f"walk fallback: {outcome} ({detail})' in src, \
+        "the fallback teleport went silent"
+    assert '_tp_result(True, "walk", zone_name, client)' in src, \
+        "a walked arrival no longer reports a landing"
+    assert 'f"walk-partial ({detail})"' in src, \
+        "partial walks lost their own outcome kind"
+    assert '"walk (interrupted)"' in src, \
+        "an interrupted walk lost its own outcome kind"
+    assert "DETAIL_OFF_MESH" in src, \
+        "the off-mesh quiet path (script bumps) is gone"
+
+
+def test_the_vms_position_tp_is_mode_aware_and_the_bump_still_bumps():
+    """`tp XYZ` routes through `nav_teleport`, which walks in walk mode
+    but teleports RAW for an off-mesh target -- the arc scripts' 116
+    `tp XYZ(0, 100000, 0)`-style bumps rely on the game clamping an
+    impossible position. `+tp`/`-tp` stay raw teleports: they are
+    micro-adjust idioms, not navigation."""
+    src = _source(VM)
+    assert "tg.create_task(nav_teleport(client, pos))" in src, \
+        "the VM's position teleport is no longer mode-aware"
+    assert src.count("tg.create_task(client.teleport(newpos))") == 2, \
+        "+tp/-tp must stay raw teleports"
+    # The 3.14 routing guard, re-asserted here so a refactor that breaks
+    # it names this feature too: the walk branches deliberately spell
+    # their calls differently (`xyz=pos`).
+    assert src.count("await collision_tp(client, pos)") == 3
+    assert src.count("await collision_tp(client, xyz=pos)") == 2, \
+        "the entitytp walk branches are gone"
+    assert '"direct (walk-only bump)"' in _source(TP), \
+        "nav_teleport lost the off-mesh bump short-circuit"
+
+
+def test_the_questers_defeat_probe_walks_in_walk_mode():
+    """The defeat-quest stagger opens with a RAW probe teleport whose
+    whole purpose is detecting a collided landing; a walk makes that
+    moot, so in walk mode the probe becomes a walk-first collision_tp.
+    The wait-for-combat loop's mob approach walks too."""
+    src = _source(QUESTING)
+    assert "from src import walk_nav" in src
+    stagger = src.split("staggering teleports", 1)[1]
+    probe = stagger.split("detected_interact_from_popup", 1)[0]
+    assert "if walk_nav.walking():" in probe, \
+        "the defeat probe teleports raw even in walk mode"
+    combat_wait = stagger.split("entity_detect_combat_status:", 2)[1]
+    assert "find_closest_mob()" in combat_wait, \
+        "the mob approach lost its walk branch"
+
+
+def test_collect_scans_stay_teleports_under_walk_mode():
+    """The chunk sweep parks the wizard 550u UNDER the map to stream
+    entities -- off any walkable mesh -- and the grab/return hops start
+    from there. The whole sequence runs under `walk_nav.suspended()`;
+    the hardcoded-collect coordinates, which are ordinary surface
+    points, walk instead (via `_nav_hop`)."""
+    src = _source(QUESTING)
+    wrapper = src.split("async def auto_collect_rewrite", 1)[1]
+    wrapper = wrapper.split("async def _auto_collect_rewrite_impl", 1)[0]
+    assert "with walk_nav.suspended():" in wrapper, \
+        "the underground collect scan would try to walk"
+    assert "_auto_collect_rewrite_impl" in wrapper
+    hardcoded = src.split("async def hardcoded_collect", 1)[1]
+    hardcoded = hardcoded.split("\n    async def ", 1)[0]
+    assert "async def _nav_hop" in hardcoded, \
+        "hardcoded collect coordinates lost their walk branch"
+    assert hardcoded.count("await _nav_hop(") == 4, \
+        "a hardcoded-collect hop bypasses the mode"
+
+
+def test_the_zone_gates_walk_up_before_pressing_x():
+    """Every gate coordinate in `gateTypeDifferentiation` used to be a
+    raw `p.teleport(XYZ(...))`. They all go through `_nav_move` now:
+    the same teleport with the mode off, a walk to the gate (then the
+    unchanged X-press / zone-wait logic) with it on."""
+    src = _source(WIZ_NAVIGATOR)
+    assert "async def _nav_move" in src, \
+        "wiz_navigator lost its mode-aware move"
+    gate = src.split("async def gateTypeDifferentiation", 1)[1]
+    gate = gate.split("async def interactiveTeleportToZone", 1)[0]
+    raw = [line for line in gate.splitlines()
+           if line.lstrip().startswith("await p.teleport(")]
+    assert raw == [], f"gate teleports bypass the mode again: {raw}"
+    assert gate.count("await _nav_move(p, XYZ(") >= 25, \
+        "the gate table shrank suspiciously -- check the _nav_move sweep"
+    # Proximity gates fire the transition DURING the walk, and
+    # `wait_for_zone_change()` anchors on whatever zone it reads at
+    # entry -- so the waits that directly follow a move must anchor on
+    # the zone read BEFORE it, or they hang on a change that already
+    # happened.
+    assert gate.count("await p.wait_for_zone_change(zone_before)") == 4, \
+        "a proximity gate's wait lost its pre-move zone anchor"
+    assert "zone_before = await _nav_move(p, XYZ(" in gate
+
+
+def test_walk_nav_stays_importable_without_the_game():
+    """The navigator's top level must stay stdlib-only -- that is what
+    lets `test_walk_nav.py` DRIVE the walk loop on a machine with no
+    game, and what keeps importing it safe from anywhere in the tree
+    (teleport_math, the VM, the quester all pull it in at module top)."""
+    import ast
+    import importlib.util
+
+    tree = ast.parse(_source(WALK_NAV))
+    banned = {"wizwalker", "loguru", "shapely", "numpy", "src"}
+    top = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            top.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            top.add(node.module or "")
+    hits = {t for t in top if t.split(".")[0] in banned}
+    assert not hits, f"walk_nav grew game imports at top level: {hits}"
+
+    spec = importlib.util.spec_from_file_location(
+        "_walk_nav_guard", ROOT / WALK_NAV)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)    # the proof: it loads right here
+    assert mod.nav_mode() == mod.NAV_TELEPORT, \
+        "the mode must default to the behaviour that shipped"
+
+
+def test_the_wisp_hops_walk_in_walk_mode():
+    """Deimos's wisp collection teleports wisp to wisp; in walk mode
+    both collectors go on foot through `_wisp_hop`, bounded so a walk
+    that cannot finish skips the wisp instead of stalling the chore."""
+    src = _source("Deimos/src/utils.py")
+    assert "async def _wisp_hop" in src, \
+        "the wisp collectors lost their mode-aware hop"
+    assert src.count("await _wisp_hop(client, wisp_xyz)") == 2, \
+        "a wisp collector bypasses the mode"
+    hop = src.split("async def _wisp_hop", 1)[1].split("\nasync def ", 1)[0]
+    assert "walk_nav.walking()" in hop and "asyncio.wait_for" in hop, \
+        "the wisp walk lost its mode gate or its bound"

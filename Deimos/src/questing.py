@@ -8,6 +8,7 @@ from loguru import logger
 import re
 from src.auto_pet import auto_pet
 from src.teleport_math import *
+from src import walk_nav
 from wizwalker import XYZ, Keycode, MemoryReadError, Client, Rectangle, HookAlreadyActivated, HookNotActive
 from wizwalker.file_readers.wad import Wad
 from wizwalker.memory import DynamicClientObject
@@ -648,6 +649,17 @@ class Quester():
 
 
     async def auto_collect_rewrite(self, client: Client):
+        # Collect scans stay teleports even in walk-only mode: the chunk
+        # sweep below deliberately parks the wizard 550 units UNDER the
+        # map (off any walkable mesh) to stream entities without pulling
+        # mobs, and `collect_entity`'s grab-and-return hops start from
+        # that off-mesh position. A walk planned from under the map is
+        # unsalvageable, so the whole sequence runs suspended -- these
+        # are mechanics, not navigation.
+        with walk_nav.suspended():
+            return await self._auto_collect_rewrite_impl(client)
+
+    async def _auto_collect_rewrite_impl(self, client: Client):
         quest_item_list = await self.get_collect_quest_object_name()
 
         entities_to_skip = ['Basic Positional', 'WispHealth', 'WispMana', 'KT_WispHealth', 'KT_WispMana', 'WispGold', 'DuelCircle', 'Player Object', 'SkeletonKeySigilArt', 'Basic Ambient', 'TeleportPad']
@@ -890,16 +902,24 @@ class Quester():
 
                 location_before_sendback = await proxy_leader_client.body.position()
                 zone_before_teleport = await proxy_leader_client.zone_name()
-                await proxy_leader_client.teleport(leader_client_objective_xyz)
-                await asyncio.sleep(1.0)
-
-                # we collided and were sent back - we likely aren't in the right zone for our defeat quest
-                distance = calc_Distance(location_before_sendback, await proxy_leader_client.body.position())
-
-                # leader client collided and got sent back
-                if distance < 20:
-                    logger.debug('client ' + proxy_leader_client.title + ' collided on initial teleport')
+                if walk_nav.walking():
+                    # walk-only mode: walk the proxy leader in. collision_tp
+                    # goes on foot first and its own fallback answers a hop
+                    # the walk could not make, so the raw probe teleport and
+                    # its collide-and-retry below have nothing left to detect.
                     await collision_tp(client=proxy_leader_client, xyz=leader_client_objective_xyz, leader_client=self.current_leader_client)
+                    await asyncio.sleep(1.0)
+                else:
+                    await proxy_leader_client.teleport(leader_client_objective_xyz)
+                    await asyncio.sleep(1.0)
+
+                    # we collided and were sent back - we likely aren't in the right zone for our defeat quest
+                    distance = calc_Distance(location_before_sendback, await proxy_leader_client.body.position())
+
+                    # leader client collided and got sent back
+                    if distance < 20:
+                        logger.debug('client ' + proxy_leader_client.title + ' collided on initial teleport')
+                        await collision_tp(client=proxy_leader_client, xyz=leader_client_objective_xyz, leader_client=self.current_leader_client)
 
                 await asyncio.sleep(1.0)
                 while await proxy_leader_client.is_loading():
@@ -928,7 +948,15 @@ class Quester():
                     sprinter = SprintyClient(proxy_leader_client)
                     while not proxy_leader_client.entity_detect_combat_status:
                         try:
-                            await sprinter.tp_to_closest_mob()
+                            if walk_nav.walking():
+                                # walk-only mode: approach the mob on foot.
+                                mob = await sprinter.find_closest_mob()
+                                if mob is not None:
+                                    await collision_tp(client=proxy_leader_client, xyz=await mob.location())
+                                else:
+                                    await asyncio.sleep(1.0)
+                            else:
+                                await sprinter.tp_to_closest_mob()
                         # wizwalker throws should update bool even with wait_on_inuse on
                         except ValueError:
                             await asyncio.sleep(1.0)
@@ -1045,11 +1073,26 @@ class Quester():
 
             # first check - most likely scenario (and easiest to solve) is that we just need to move away and back towards the NPC or sigil
             if iterations_since_last_quest_change >= 5:
+                # Stays a raw teleport even in walk-only mode: this shove
+                # aims 1500u under the ground ON PURPOSE (the game clamps
+                # it back to a fresh surface spot, which is the un-stick).
+                # It is a mechanic, not navigation, and it is also the
+                # escape hatch when walking itself is what got the party
+                # stuck in a popup-less corner.
                 location = await self.current_leader_client.body.position()
                 await asyncio.gather(*[p.teleport(XYZ(location.x + 500, location.y, location.z - 1500)) for p in self.clients])
                 await asyncio.sleep(2.0)
 
     async def hardcoded_collect(self, incompatible_hardcoded_quests, truncated_quest_obj: str):
+        async def _nav_hop(hop_client: Client, coord: XYZ):
+            # These are ordinary surface waypoints (unlike the underground
+            # chunk scans), so walk-only mode walks them -- collision_tp
+            # goes on foot first with its spoken teleport fallback.
+            if walk_nav.walking():
+                await collision_tp(client=hop_client, xyz=coord)
+            else:
+                await hop_client.teleport(coord)
+
         entity_data = incompatible_hardcoded_quests.get(truncated_quest_obj[:-1])
         for c in self.clients:
             if c.process_id != self.current_leader_client.process_id:
@@ -1060,7 +1103,7 @@ class Quester():
                     follower_on_collect = True
                     for coord in entity_data[1:]:
                         try:
-                            await c.teleport(coord)
+                            await _nav_hop(c, coord)
                             await asyncio.sleep(1.0)
 
                             for i in range(3):
@@ -1076,7 +1119,7 @@ class Quester():
                         await asyncio.sleep(1.0)
 
                     if await is_free(c) and not c.entity_detect_combat_status:
-                        await c.teleport(safe_location)
+                        await _nav_hop(c, safe_location)
                     logger.debug('Waiting for collect items to respawn.')
                     await asyncio.sleep((entity_data[0] + 5))
 
@@ -1085,7 +1128,7 @@ class Quester():
         while current_quest == truncated_quest_obj:
             for coord in entity_data[1:]:
                 try:
-                    await self.current_leader_client.teleport(coord)
+                    await _nav_hop(self.current_leader_client, coord)
                     await asyncio.sleep(1.0)
 
                     for i in range(3):
@@ -1100,7 +1143,7 @@ class Quester():
             await asyncio.sleep(1.0)
 
         if await is_free(self.current_leader_client) and not self.current_leader_client.entity_detect_combat_status:
-            await self.current_leader_client.teleport(safe_location)
+            await _nav_hop(self.current_leader_client, safe_location)
 
         entity_data = incompatible_hardcoded_quests.get(truncated_quest_obj[:-1])
         current_quest = truncated_quest_obj

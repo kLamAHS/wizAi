@@ -1242,6 +1242,24 @@ async def get_friend_popup_wizard_name(client: Client):
         return ''
 
 
+async def _wisp_hop(client: Client, wisp_xyz):
+    """One move onto a wisp: a walk in walk-only mode (wisps are near, on
+    open ground -- a straight `goto` with a bound is enough), the usual
+    teleport otherwise. A walk that cannot finish in its window skips the
+    wisp rather than stalling the chore. Imported lazily to keep the
+    utils <- teleport_math <- walk_nav import graph cycle-proof."""
+    from src import walk_nav
+    if walk_nav.walking():
+        try:
+            await asyncio.wait_for(client.goto(wisp_xyz.x, wisp_xyz.y), 8.0)
+        except asyncio.TimeoutError:
+            pass
+        except ValueError:
+            pass
+    else:
+        await client.teleport(wisp_xyz)
+
+
 async def collect_wisps(client: Client, nothing_but_safe_entities=True):
     # Collects all the wisps in the current area, only works within the entity draw distance.
     entities = []
@@ -1257,7 +1275,7 @@ async def collect_wisps(client: Client, nothing_but_safe_entities=True):
     if safe_entities:
         for entity in safe_entities:
             wisp_xyz = await entity.location()
-            await client.teleport(wisp_xyz)
+            await _wisp_hop(client, wisp_xyz)
             await asyncio.sleep(0.1)
 
 
@@ -1271,7 +1289,7 @@ async def collect_wisps_with_limit(client: Client, limit=3):
 
     for entity in entities:
         wisp_xyz = await entity.location()
-        await client.teleport(wisp_xyz)
+        await _wisp_hop(client, wisp_xyz)
         total_collected += 1
 
         if total_collected == limit:

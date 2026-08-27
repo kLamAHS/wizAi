@@ -27467,3 +27467,119 @@ def test_an_impossible_marker_falls_back_inside_the_zone(monkeypatch):
     asyncio.run(worker._read_goal(seat))
     assert seat.marker_away == worker.MARKER_IN_ZONE, \
         "the impossible reading was kept as the last believed one"
+
+
+# ----------------------------------------------------- walk-only questing
+
+def test_the_walk_toggle_reaches_a_running_fight(qapp, monkeypatch):
+    """"Walk to objectives" rides the same LIVE_TOGGLES rail as
+    auto-quest: read fresh by the worker every tick, so flipping it
+    mid-run changes the very next hop — and a seat restore must not
+    push a snapshot's idea of it onto the party."""
+    from deimos_bridge.gui import app as app_mod
+    from deimos_bridge.gui.app import MainWindow
+
+    assert MainWindow.LIVE_TOGGLES["walk_quests"] == "walk_to_objectives"
+
+    monkeypatch.setattr(app_mod.LiveWorker, "start", lambda self, *a: None)
+    win = MainWindow(Telemetry())
+    win.on_start_live()
+    live = win.live
+    monkeypatch.setattr(type(live), "isRunning", lambda self: True)
+
+    assert live.walk_to_objectives is False
+    win.walk_quests.setChecked(True)
+    assert live.walk_to_objectives is True
+    win.walk_quests.setChecked(False)
+    assert live.walk_to_objectives is False
+
+    # The `_loading` guard: restoring a seat's saved boxes fires
+    # `toggled` exactly like a click, and must not steer the run.
+    win._loading = True
+    win.walk_quests.setChecked(True)
+    assert live.walk_to_objectives is False
+    win._loading = False
+    win.walk_quests.setChecked(False)
+
+
+def test_play_live_carries_the_walk_choice(qapp, monkeypatch):
+    from deimos_bridge.gui import app as app_mod
+    from deimos_bridge.gui.app import MainWindow
+
+    monkeypatch.setattr(app_mod.LiveWorker, "start", lambda self, *a: None)
+    win = MainWindow(Telemetry())
+    win.walk_quests.setChecked(True)
+    win.on_start_live()
+    assert win.live.walk_to_objectives is True
+
+
+def test_the_walk_flag_is_pushed_into_deimos_once_per_change(qapp):
+    """The worker pushes the checkbox into Deimos's `walk_nav` module —
+    once per change, not once per tick, because the push speaks a
+    status line and twice a second would drown the bar. The module is
+    the real vendored one: its top level is stdlib-only precisely so
+    this test can flip it here."""
+    from deimos_bridge.deimos_path import ensure_path
+    from deimos_bridge.gui.live import LiveWorker
+
+    ensure_path()
+    from src import walk_nav
+
+    pushes = []
+    real = walk_nav.set_nav_mode
+
+    def recording(mode):
+        pushes.append(mode)
+        return real(mode)
+
+    walk_nav.set_nav_mode = recording
+    try:
+        w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1,
+                       walk_to_objectives=True)
+        said = []
+        w.status = type("S", (), {"emit": staticmethod(said.append)})()
+        w.seat_status = type(
+            "S", (), {"emit": staticmethod(lambda *a: None)})()
+
+        w._push_walk_mode()
+        w._push_walk_mode()             # unchanged: no second push
+        assert pushes == [walk_nav.NAV_WALK]
+        assert any("walking to objectives" in m for m in said), said
+
+        w.walk_to_objectives = False
+        w._push_walk_mode()
+        assert pushes == [walk_nav.NAV_WALK, walk_nav.NAV_TELEPORT]
+    finally:
+        walk_nav.set_nav_mode = real
+        real(walk_nav.NAV_TELEPORT)     # leave the module as it shipped
+
+
+def test_quest_only_runs_still_install_the_teleport_hooks(qapp):
+    """The teleport hooks were installed only when a script runner
+    existed, which was right while scripts were the only thing that
+    teleported through them — a walk-mode auto-quest run lands and
+    falls back through the same hooks, and without them every 'walk
+    fallback' would be invisible."""
+    from deimos_bridge.gui.live import LiveWorker
+
+    quiet = type("S", (), {"emit": staticmethod(lambda *a: None)})()
+
+    # No script, no quester, walk mode OFF: nothing to hook, as before.
+    w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    w.status = w.seat_status = quiet
+    w._watch_waitfor(w.seats[0])
+    assert w._waitfor_hooked is False
+
+    # Same run with the walk box ticked: the hooks must go in.
+    w2 = LiveWorker(Telemetry(), "ice", [], "school-aware", 1,
+                    walk_to_objectives=True)
+    w2.status = w2.seat_status = quiet
+    w2._watch_waitfor(w2.seats[0])
+    assert w2._waitfor_hooked is True
+
+    # And a Deimos quester without a script hooks too.
+    w3 = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+    w3.status = w3.seat_status = quiet
+    w3.seats[0].quester = object()
+    w3._watch_waitfor(w3.seats[0])
+    assert w3._waitfor_hooked is True
