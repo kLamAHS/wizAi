@@ -622,7 +622,8 @@ class LiveWorker(QThread):
                  follow_leader=True, leader=0, label_windows=True,
                  solo_script=False, script_step_delay=None,
                  script_dialog_delay=None, script_debug=False,
-                 booster_party=False, boosters=None):
+                 booster_party=False, boosters=None,
+                 walk_to_objectives=False):
         super().__init__()
         # Seat 0 is always the arguments this was called with, so the
         # single-wizard signature is untouched; `seats` adds the rest.
@@ -644,6 +645,14 @@ class LiveWorker(QThread):
         #: forward the script's own `print` commentary into the run's
         #: log. A live toggle like the others -- see `_script_logging`.
         self.script_debug = bool(script_debug)
+        #: walk-only questing: navigation goes on foot over the zone's
+        #: walk mesh, teleporting only as a spoken fallback. A live
+        #: toggle like the others, pushed into Deimos's `walk_nav` each
+        #: tick by `_push_walk_mode` -- module-global there on purpose,
+        #: because the quester, the script VM and the light quester all
+        #: run on this worker's one loop and the mode is a party thing.
+        self.walk_to_objectives = bool(walk_to_objectives)
+        self._walk_mode_pushed = None
         self._stop_capture = None
         self._logged = {}
         #: between-fights upkeep. An unattended run dies by attrition
@@ -1119,6 +1128,7 @@ class LiveWorker(QThread):
                 # the switch works during a run rather than only at
                 # Play live.
                 self._script_logging(self.script_debug)
+                self._push_walk_mode()
                 await self._stage(seat, "script", self._sync_script(seat))
                 self._watch_waitfor(seat)
 
@@ -3341,6 +3351,56 @@ class LiveWorker(QThread):
                 pass
             self._stop_capture = None
 
+    def _push_walk_mode(self):
+        """Keep Deimos's navigation mode in step with the checkbox.
+
+        Idempotent and cheap -- called every service tick beside
+        `_script_logging`, which is what makes "Walk to objectives" a
+        live toggle: the next hop after a flip goes the new way, no
+        reconnect. On a light install (Deimos's modules not importable)
+        it says so once and pins itself off rather than retrying a
+        broken import twice a second.
+        """
+        want = bool(self.walk_to_objectives)
+        was = self._walk_mode_pushed
+        if want == was:
+            return
+        try:
+            from ..deimos_path import ensure_path
+            ensure_path()
+            from src import walk_nav
+            if want:
+                # The probe that actually decides "can this install
+                # walk". walk_nav itself is stdlib-only and imports
+                # anywhere; the walking is done by teleport_math's
+                # collision stack, and on a light install (no loguru/
+                # wizwalker extras) THAT import is what fails --
+                # without this line the toggle would announce walking
+                # while every hop quietly kept teleporting.
+                from src import teleport_math  # noqa: F401
+        except Exception:
+            if want:
+                self._say(self.seats[0],
+                          "walk-only questing needs Deimos's navigation "
+                          "modules, which are not importable here — the "
+                          "light quester keeps teleporting")
+            self._walk_mode_pushed = want
+            return
+        walk_nav.set_nav_mode(walk_nav.NAV_WALK if want
+                              else walk_nav.NAV_TELEPORT)
+        self._walk_mode_pushed = want
+        if want:
+            self._say(self.seats[0],
+                      "walking to objectives — quest navigation goes on "
+                      "foot, and a teleport now means the walk failed "
+                      "and says so in the log")
+        elif was is not None:
+            # Only a real flip is news. The first push of a run that
+            # started with the box unticked is normalization, and
+            # announcing it made every ordinary run open with a line
+            # about a feature nobody turned on.
+            self._say(self.seats[0], "teleporting to objectives again")
+
     def _note_script_log(self, text):
         """One line of the script's own commentary, thinned by content.
 
@@ -4389,6 +4449,11 @@ class LiveWorker(QThread):
             # happens once rather than interleaved with the reads.
             await self._activate_all_hooks()
 
+            # The navigation mode, before any quester or script exists:
+            # the first hop of the run should already go the way the
+            # checkbox says. The service loop re-pushes it every tick.
+            self._push_walk_mode()
+
             for seat in self.seats:
                 client = seat.client
                 await self._verify_hooks(seat)
@@ -4759,6 +4824,7 @@ class LiveWorker(QThread):
             goal = await questing.read_quest_goal(seat.client)
         except Exception:
             goal = ""
+        self._prewarm_walk_zone(seat)
         if goal and goal != seat.goal:
             # A CHANGE is confirmed before it is believed. This read
             # resolves a window path whose fifth element is an UNNAMED
@@ -5740,7 +5806,15 @@ class LiveWorker(QThread):
         VM's own module-level hook -- so it fires for every wizard the
         script drives, not just this one.
         """
-        if self._waitfor_hooked or self.seats[0].runner is None:
+        if self._waitfor_hooked:
+            return
+        if self.seats[0].runner is None and not self.walk_to_objectives:
+            # No script and no walk mode: exactly the runs that hooked
+            # nothing before, kept that way -- a walk-OFF quester run
+            # must not suddenly grow scripted-teleport logging. Walk
+            # mode hooks regardless of a runner, because its landings
+            # and "walk fallback" notes travel the same `on_teleport_*`
+            # hooks and would otherwise be invisible.
             return
         self._waitfor_hooked = True
         from .. import scripts
@@ -9073,6 +9147,39 @@ class LiveWorker(QThread):
         if now - seat.zones_seen.get(zone, -1e9) >= self.ZONE_BOUNCE_WINDOW:
             seat.zone_fresh_at = now
         seat.zone_seen = zone
+        self._prewarm_walk_zone(seat)
+
+    def _prewarm_walk_zone(self, seat):
+        """Build the current zone's walk grid in the background, walk mode on.
+
+        `teleport_math.prewarm_zone` reads the zone itself, is idempotent
+        per zone and swallows its own errors; kicked here the ~1.5s grid
+        build runs during the arrival bustle instead of inside the first
+        hop's plan. The first caller this function has ever had. Called
+        from the zone-change stamp AND from every goal poll -- the stamp
+        lives in `_check_together`, which a single-wizard run never
+        enters -- so a light per-seat rate limit stands in for "only on
+        change".
+        """
+        if not self.walk_to_objectives or seat.client is None:
+            return
+        import time
+
+        now = time.monotonic()
+        if now - getattr(seat, "prewarm_kicked", 0.0) < 10.0:
+            return
+        seat.prewarm_kicked = now
+        try:
+            from ..deimos_path import ensure_path
+            ensure_path()
+            from src.teleport_math import prewarm_zone
+        except Exception:
+            return
+        try:
+            task = asyncio.ensure_future(prewarm_zone(seat.client))
+            task.add_done_callback(lambda t: t.exception())
+        except Exception:
+            pass
 
     #: how long a goal this wizard has already held stays "already
     #: held". The same span as `ZONE_BOUNCE_WINDOW` and for the same

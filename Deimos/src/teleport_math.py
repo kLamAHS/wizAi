@@ -8,6 +8,7 @@ from typing import Tuple, Union
 from loguru import logger
 from src.utils import is_free, is_visible_by_path
 from src.paths import advance_dialog_path
+from src import walk_nav
 from copy import copy
 
 type_format_dict = {
@@ -404,7 +405,114 @@ def _tp_result(landed: bool, how: str, zone: str = "", client=None) -> bool:
     return bool(landed)
 
 
-async def navmap_tp(client: Client, xyz: XYZ = None, leader_client: Client = None) -> bool:
+# ---------------------------------------------------------------------------
+# wizAi walk-only mode. When `walk_nav.walking()` is on, the teleport
+# primitives below try the whole hop ON FOOT first -- A* over the zone's
+# walk grid, leg-by-leg goto -- and only fall back to writing position
+# memory when walking cannot deliver (per `walk_nav.fallback()`). The
+# principle and its exceptions are documented in `walk_nav` itself.
+
+#: Walk outcomes that settle the hop -- the teleport machinery is not
+#: needed after any of these. `interrupted` is success by the same
+#: contract as `_arrived`'s "no longer free / zone changed; done", and
+#: `partial` is success because every caller re-issues navigation on its
+#: next iteration, so covered ground composes into arrival.
+_WALK_SETTLED = (walk_nav.WALK_ARRIVED, walk_nav.WALK_PARTIAL,
+                 walk_nav.WALK_INTERRUPTED)
+
+
+def _walk_result(outcome: str, detail: str, zone_name: str, client) -> bool:
+    """A settled walk outcome, reported like any other landing kind."""
+    if outcome == walk_nav.WALK_PARTIAL:
+        return _tp_result(True, f"walk-partial ({detail})", zone_name, client)
+    if outcome == walk_nav.WALK_INTERRUPTED:
+        return _tp_result(True, "walk (interrupted)", zone_name, client)
+    if detail.startswith("path end"):
+        # As close as the mesh goes -- its own outcome kind (like
+        # 'collision-short') so a systematically short walk shows in the
+        # export instead of thinning away under the successes.
+        return _tp_result(True, f"walk-short ({detail})", zone_name, client)
+    return _tp_result(True, "walk", zone_name, client)
+
+
+async def _walk_first(client: Client, target_xyz: XYZ, zone_name: str):
+    """Try the hop on foot. Returns the final bool when walking settled
+    it, or None when the caller should run its teleport machinery -- the
+    fallback having already been spoken through `_tp_note`, except for
+    an off-mesh target (script bumps aim there on purpose).
+
+    A target walking failed at moments ago is not re-walked: scripts and
+    the quester retry the same hop in tight loops, and re-proving the
+    same failure for a full walk budget each round starves the teleport
+    that actually gets them there. The first failure already spoke.
+    """
+    if walk_nav.recently_failed(zone_name, target_xyz):
+        return None
+    outcome, detail = await walk_nav.walk_to(client, target_xyz)
+    if outcome in _WALK_SETTLED:
+        return _walk_result(outcome, detail, zone_name, client)
+    walk_nav.note_walk_failure(zone_name, target_xyz)
+    if walk_nav.fallback() == walk_nav.FALLBACK_NEVER:
+        return _tp_result(False, f"walk-only: {outcome} ({detail})",
+                          zone_name, client)
+    if not (outcome == walk_nav.WALK_UNREACHABLE
+            and detail == walk_nav.DETAIL_OFF_MESH):
+        _tp_note(f"walk fallback: {outcome} ({detail}) — teleporting "
+                 f"instead", client)
+    return None
+
+
+async def nav_teleport(client: Client, xyz: XYZ) -> bool:
+    """Mode-aware stand-in for a RAW positional `client.teleport(xyz)`.
+
+    The script VM's `tp XYZ(...)` legs are navigation written as exact
+    coordinates, so in walk mode they walk. Two deliberate differences
+    from `_walk_first`'s routing:
+
+    * An off-mesh target teleports RAW and silently -- the scripts' 116
+      `tp XYZ(0, 100000, 0)`-style bumps rely on the game clamping an
+      impossible position, and that trick has no walking equivalent.
+    * The fallback is the raw teleport to the exact point the script
+      asked for, not the collision solve -- the script knows its own
+      coordinates better than the solver knows its intent.
+
+    In teleport mode this is exactly the raw call it replaces: no result
+    reporting, so the log does not change while the toggle is off.
+    """
+    if walk_nav.walking():
+        try:
+            zone_name = await client.zone_name()
+        except Exception:
+            zone_name = ""
+        if walk_nav.recently_failed(zone_name, xyz):
+            # Walking already failed at this spot moments ago (script
+            # retry loops re-issue the same tp); go straight to the raw
+            # teleport the script asked for. The first failure spoke.
+            await client.teleport(xyz)
+            return _tp_result(True, "direct (walk fallback)",
+                              zone_name, client)
+        outcome, detail = await walk_nav.walk_to(client, xyz)
+        if outcome in _WALK_SETTLED:
+            return _walk_result(outcome, detail, zone_name, client)
+        walk_nav.note_walk_failure(zone_name, xyz)
+        if (outcome == walk_nav.WALK_UNREACHABLE
+                and detail == walk_nav.DETAIL_OFF_MESH):
+            await client.teleport(xyz)
+            return _tp_result(True, "direct (walk-only bump)",
+                              zone_name, client)
+        if walk_nav.fallback() == walk_nav.FALLBACK_NEVER:
+            return _tp_result(False, f"walk-only: {outcome} ({detail})",
+                              zone_name, client)
+        _tp_note(f"walk fallback: {outcome} ({detail}) — teleporting "
+                 f"instead", client)
+        await client.teleport(xyz)
+        return _tp_result(True, "direct (walk fallback)", zone_name, client)
+    await client.teleport(xyz)
+    return True
+
+
+async def navmap_tp(client: Client, xyz: XYZ = None, leader_client: Client = None,
+                    _walk_first_try: bool = True) -> bool:
     """wizAi patch: this now RETURNS whether the teleport landed.
 
     Upstream every `return` here is bare, including the `if not await
@@ -477,6 +585,14 @@ async def navmap_tp(client: Client, xyz: XYZ = None, leader_client: Client = Non
 
     if check_sigma(starting_xyz, target_xyz):
         return _tp_result(True, "already there", starting_zone, client)
+
+    if _walk_first_try and walk_nav.walking():
+        # wizAi walk-only mode: the hop goes on foot first. `_walk_first`
+        # returns None when walking could not deliver -- then the teleport
+        # machinery below runs as the fallback, exactly as before.
+        out = await _walk_first(client, target_xyz, starting_zone)
+        if out is not None:
+            return out
 
     await client.teleport(target_xyz)
     if await finished_tp():
@@ -943,6 +1059,17 @@ async def collision_tp(client: Client, xyz: XYZ = None, leader_client: Client = 
     if calc_Distance(starting_xyz, target_xyz) <= 5.0:
         return _tp_result(True, "already there", zone_name, client)
 
+    walked = False
+    if walk_nav.walking():
+        # wizAi walk-only mode: try the whole hop on foot before any of
+        # the teleport machinery. On a settled walk this is the answer;
+        # otherwise fall through -- and remember, so the navmap fallback
+        # at the bottom does not attempt the same failed walk twice.
+        out = await _walk_first(client, target_xyz, zone_name)
+        if out is not None:
+            return out
+        walked = True
+
     safe_xyz = None
     reason = "unavailable"
     try:
@@ -1068,7 +1195,7 @@ async def collision_tp(client: Client, xyz: XYZ = None, leader_client: Client = 
 
     else:
         logger.debug(f"[collision_tp] {client.title}: no collision solution ({reason}); falling back to navmap TP")
-    return await navmap_tp(client, xyz, leader_client)
+    return await navmap_tp(client, xyz, leader_client, _walk_first_try=not walked)
 
 
 

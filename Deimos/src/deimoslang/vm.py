@@ -10,6 +10,8 @@ from wizwalker.extensions.wizsprinter.wiz_sprinter import Coroutine, upgrade_cli
 from wizwalker.extensions.wizsprinter.wiz_navigator import toZone
 from wizwalker.extensions.scripting.deck_builder import DeckBuilder
 from src.teleport_math import navmap_tp, collision_tp, calc_Distance
+from src.teleport_math import nav_teleport
+from src import walk_nav
 from src.deck_encoder import DeckEncoderDecoder
 
 from wizwalker.extensions.scripting.utils import _maybe_get_named_window, _cycle_to_online_friends, _click_on_friend, _friend_list_entry
@@ -1501,7 +1503,11 @@ class VM:
                         case TeleportKind.position:
                             for client in clients:
                                 pos = await eval_arg(args[1], client)
-                                tg.create_task(client.teleport(pos))
+                                # nav_teleport: the raw teleport while the
+                                # walk-only mode is off, a walk when it is
+                                # on (off-mesh bump coordinates still
+                                # teleport raw -- see its docstring).
+                                tg.create_task(nav_teleport(client, pos))
                         case TeleportKind.plusteleport:
                             for client in clients:
                                 pluspos = await eval_arg(args[1], client)
@@ -1529,6 +1535,11 @@ class VM:
                                         pos = await entity.location()
                                         if use_navmap:
                                             await collision_tp(client, pos)
+                                        elif walk_nav.walking():
+                                            # walk-only mode: an entity hop
+                                            # is navigation, so route it
+                                            # through the walk-first tp.
+                                            await collision_tp(client, xyz=pos)
                                         else:
                                             await client.teleport(pos)
                                 tg.create_task(tp_to_entity(client))
@@ -1547,12 +1558,26 @@ class VM:
                                         pos = await entity.location()
                                         if use_navmap:
                                             await collision_tp(client, pos)
+                                        elif walk_nav.walking():
+                                            # walk-only mode: as above.
+                                            await collision_tp(client, xyz=pos)
                                         else:
                                             await client.teleport(pos)
                                 tg.create_task(tp_to_vague_entity(client))
                         case TeleportKind.mob:
+                            async def go_to_mob(client):
+                                if walk_nav.walking():
+                                    # walk-only mode: approach the mob on
+                                    # foot. Same None-tolerance as
+                                    # tp_to_closest_mob: no mob, no move.
+                                    mob = await client.find_closest_mob()
+                                    if mob is not None:
+                                        await collision_tp(
+                                            client, xyz=await mob.location())
+                                    return
+                                await client.tp_to_closest_mob()
                             for client in clients:
-                                tg.create_task(client.tp_to_closest_mob())
+                                tg.create_task(go_to_mob(client))
                         case TeleportKind.quest:
                             # TODO: "quest" could instead be treated as an XYZ expression or something
                             #
@@ -1594,7 +1619,13 @@ class VM:
                             target_client = self.player_by_num(num)
                             target_pos = await target_client.body.position()
                             for client in clients:
-                                tg.create_task(client.teleport(target_pos))
+                                if walk_nav.walking():
+                                    # walk-only mode: another wizard's feet
+                                    # are walkable ground -- walk there.
+                                    tg.create_task(
+                                        collision_tp(client, xyz=target_pos))
+                                else:
+                                    tg.create_task(client.teleport(target_pos))
                         case _:
                             raise VMError(f"Unimplemented teleport kind: {instruction}")
             case "goto":
