@@ -157,6 +157,14 @@ REPLAN_HARD_CAP = 8
 #: would end hundreds of units short.
 GOAL_SNAP_MAX = 250.0
 
+#: Same floor or not -- `collision_math.FLOOR_MATCH_TOL`'s value,
+#: duplicated for the no-game import rule. The walk grid is single-level
+#: by construction (`walk_z` is the LOWEST mesh surface at a node), so a
+#: target on a balcony over walkable ground planes to the ground floor's
+#: XY: arrival and planning both have to compare z, or the wizard "arrives"
+#: a storey below the objective and the caller loops there forever.
+FLOOR_TOL = 300.0
+
 #: Route sanity: a path this many times longer than the straight-line
 #: gap, or longer than this many units outright, is the A* finding a
 #: technically-connected route no player would take.
@@ -168,10 +176,12 @@ MAX_WALK_UNITS = 60_000.0
 #: cancellation (combat started, stage cap) waits on the current leg.
 SMOOTH_LEG_MAX = 600.0
 
-#: Per-call wall-clock ceiling, deliberately under the bridge's 90s
-#: quest-step stage cap: a longer route ends as WALK_PARTIAL and the
-#: next tick continues from where the wizard stands.
-WALK_BUDGET_CAP = 75.0
+#: Per-call wall-clock ceiling, deliberately under the bridge's 60s
+#: "quest step" stage limit (`STAGE_LIMITS` in live.py -- the 90s
+#: default does NOT apply to quest steps): a longer route ends as
+#: WALK_PARTIAL and the next tick continues from where the wizard
+#: stands, instead of the stage cap cancelling the walk mid-leg.
+WALK_BUDGET_CAP = 45.0
 
 #: Per-leg goto timeout bounds. `goto` computes its own duration from
 #: distance and the speed multiplier; the timeout only exists to turn a
@@ -236,6 +246,38 @@ def truncate_at_solids(path, target_xy, contains):
     return kept, len(kept) == len(path)
 
 
+# ---------------------------------------------------- remembering failures
+
+#: How long a target that walking could not deliver stays remembered.
+#: Scripts and the quester retry the same hop in tight loops; without
+#: this, every retry burns a full walk budget re-proving the same
+#: failure before the fallback teleport gets its turn.
+WALK_FAILURE_TTL = 120.0
+
+_failed_walks: dict = {}
+
+
+def _failure_key(zone: str, xyz):
+    # ~100u buckets: the same objective read twice rarely lands on the
+    # exact same floats.
+    return (zone or "", int(xyz.x // 100), int(xyz.y // 100))
+
+
+def note_walk_failure(zone: str, xyz) -> None:
+    now = time.monotonic()
+    _failed_walks[_failure_key(zone, xyz)] = now
+    if len(_failed_walks) > 256:
+        cut = now - WALK_FAILURE_TTL
+        for k, at in list(_failed_walks.items()):
+            if at < cut:
+                del _failed_walks[k]
+
+
+def recently_failed(zone: str, xyz) -> bool:
+    at = _failed_walks.get(_failure_key(zone, xyz))
+    return at is not None and time.monotonic() - at < WALK_FAILURE_TTL
+
+
 # ------------------------------------------------------------- the planner
 
 #: One build per zone at a time: the grid build costs ~1.5s of CPU and
@@ -291,7 +333,8 @@ async def _default_planner(client, start_pos, target_xyz, avoid):
             # onto a pad/boat/water the mesh says cannot be stood on.
             refine = True
             gq = grid.to_hex(target_xyz.x, target_xyz.y)
-            if grid.walk_z(*gq) is None:
+            goal_z = grid.walk_z(*gq)
+            if goal_z is None:
                 refine = False
                 snapped = grid._nearest_walk_node(*gq)
                 if snapped is None:
@@ -299,6 +342,17 @@ async def _default_planner(client, start_pos, target_xyz, avoid):
                 gx, gy = grid.to_world(*snapped)
                 if _dist(gx, gy, target_xyz.x, target_xyz.y) > GOAL_SNAP_MAX:
                     return None, True, DETAIL_OFF_MESH
+                goal_z = grid.walk_z(*snapped)
+            # The floor gate. `walk_z` is single-level -- the LOWEST mesh
+            # surface at that XY -- so a balcony target over walkable
+            # ground planes to the alley below it: the walk would "arrive"
+            # a storey under the objective and the caller would loop there
+            # forever. The teleport machinery is floor-aware; hand over.
+            tz = getattr(target_xyz, "z", None)
+            if (tz is not None and goal_z is not None
+                    and abs(goal_z - tz) > FLOOR_TOL):
+                return None, True, (
+                    f"wrong floor (mesh z {goal_z:.0f}, target z {tz:.0f})")
             path = grid.find_walk_path(start_pos, target_xyz)
             if not path:
                 return None, True, "no path"
@@ -324,16 +378,22 @@ async def _default_planner(client, start_pos, target_xyz, avoid):
                 if not path:
                     return None, True, "walled off by the bouncing solid"
 
-            class _P:                       # straight_path_walkable wants .x/.y
-                __slots__ = ("x", "y")
+            if not avoid:
+                # No smoothing over a truncated path: the merge predicate
+                # knows the navmesh but not the `avoid` footprints, so a
+                # straightened leg could cut the corner back through the
+                # very solid the truncation stopped at. `avoid` walks are
+                # rare (post-bounce only) and short; raw nodes are fine.
+                class _P:                   # straight_path_walkable wants .x/.y
+                    __slots__ = ("x", "y")
 
-                def __init__(self, p):
-                    self.x, self.y = p[0], p[1]
+                    def __init__(self, p):
+                        self.x, self.y = p[0], p[1]
 
-            path = smooth(
-                path,
-                lambda a, b: straight_path_walkable(
-                    world, zone, _P(a), _P(b), static_shapes=extra))
+                path = smooth(
+                    path,
+                    lambda a, b: straight_path_walkable(
+                        world, zone, _P(a), _P(b), static_shapes=extra))
             return path, refine, ""
 
         return await asyncio.to_thread(_plan)
@@ -370,12 +430,20 @@ async def walk_to(client, xyz, *, avoid=None, planner=None, is_free=None,
     plan_route = planner or _default_planner
     free = is_free or _default_is_free
 
+    def on_floor(p):
+        # Arrival is 3D: the walk grid is single-level, so a balcony
+        # target's XY is reachable on the alley floor below it, and an
+        # XY-only test would call that standing on the objective.
+        tz = getattr(xyz, "z", None)
+        pz = getattr(p, "z", None)
+        return tz is None or pz is None or abs(pz - tz) <= FLOOR_TOL
+
     try:
         pos = await client.body.position()
     except Exception as e:
         return WALK_ERROR, f"position unreadable ({e!r})"
     gap0 = _dist(pos.x, pos.y, xyz.x, xyz.y)
-    if gap0 <= ARRIVE_TOL:
+    if gap0 <= ARRIVE_TOL and on_floor(pos):
         return WALK_ARRIVED, "already there"
 
     try:
@@ -383,9 +451,11 @@ async def walk_to(client, xyz, *, avoid=None, planner=None, is_free=None,
         mult = max(0.25, (raw / 100) + 1)
     except Exception:
         mult = 1.0
-    if budget is None:
+    auto_budget = budget is None
+    if auto_budget:
         budget = min(gap0 / (WIZARD_SPEED * mult) * 3 + 15.0, WALK_BUDGET_CAP)
-    deadline = time.monotonic() + budget
+    started = time.monotonic()
+    deadline = started + budget
 
     try:
         zone0 = await client.zone_name()
@@ -395,17 +465,28 @@ async def walk_to(client, xyz, *, avoid=None, planner=None, is_free=None,
     path, refine, detail = await plan_route(client, pos, xyz, avoid)
     if path is None:
         return WALK_UNREACHABLE, detail
+    if auto_budget and len(path) > 1:
+        # The straight-line guess above undershoots a detour route; now
+        # that the path is known, budget for its REAL length -- still
+        # capped under the quest-step stage limit, so a very long route
+        # ends as a clean PARTIAL resume rather than a stage timeout.
+        length = _dist(pos.x, pos.y, path[0][0], path[0][1]) + sum(
+            _dist(a[0], a[1], b[0], b[1]) for a, b in zip(path, path[1:]))
+        budget = min(max(budget, length / (WIZARD_SPEED * mult) * 2 + 10.0),
+                     WALK_BUDGET_CAP)
+        deadline = started + budget
 
     stalls = 0
     replans = 0
     dry_replans = 0                 # re-plans since the gap last shrank
     best_gap = gap0
+    walked_units = 0.0              # ground actually covered, leg by leg
     idx = 0
     exact = False                   # walking the final exact-target leg
 
     while True:
         gap = _dist(pos.x, pos.y, xyz.x, xyz.y)
-        if gap <= ARRIVE_TOL:
+        if gap <= ARRIVE_TOL and on_floor(pos):
             return WALK_ARRIVED, "on the target"
 
         if idx >= len(path):
@@ -419,6 +500,10 @@ async def walk_to(client, xyz, *, avoid=None, planner=None, is_free=None,
                 exact = True
                 idx = 0
                 continue
+            if not on_floor(pos):
+                # The planner's floor gate should have refused this
+                # route; standing under the objective is not arriving.
+                return WALK_UNREACHABLE, "wrong floor at the path's end"
             return WALK_ARRIVED, f"path end, {gap:.0f}u out"
 
         wx, wy = path[idx][0], path[idx][1]
@@ -443,9 +528,14 @@ async def walk_to(client, xyz, *, avoid=None, planner=None, is_free=None,
             return WALK_INTERRUPTED, "client stopped answering"
 
         if time.monotonic() > deadline:
-            if best_gap < gap0 - MIN_PROGRESS or gap < gap0 - MIN_PROGRESS:
+            # Progress is ground COVERED, not gap closed: a legitimate
+            # detour route walks away from the target first, and a
+            # gap-only test would call that going nowhere and hand a
+            # working walk to the teleport fallback.
+            if (walked_units >= 2 * MIN_PROGRESS
+                    or gap < gap0 - MIN_PROGRESS):
                 return WALK_PARTIAL, (
-                    f"budget spent, {gap0 - gap:.0f}u covered")
+                    f"budget spent, {walked_units:.0f}u covered")
             return WALK_STUCK, "budget spent going nowhere"
 
         timeout = min(max(leg / (WIZARD_SPEED * mult) + 2.0,
@@ -465,6 +555,7 @@ async def walk_to(client, xyz, *, avoid=None, planner=None, is_free=None,
         except Exception:
             return WALK_INTERRUPTED, "client stopped answering"
 
+        walked_units += _dist(before_x, before_y, pos.x, pos.y)
         now = _dist(pos.x, pos.y, wx, wy)
         if now <= near_enough:
             idx += 1

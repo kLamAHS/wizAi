@@ -3362,12 +3362,22 @@ class LiveWorker(QThread):
         broken import twice a second.
         """
         want = bool(self.walk_to_objectives)
-        if want == self._walk_mode_pushed:
+        was = self._walk_mode_pushed
+        if want == was:
             return
         try:
             from ..deimos_path import ensure_path
             ensure_path()
             from src import walk_nav
+            if want:
+                # The probe that actually decides "can this install
+                # walk". walk_nav itself is stdlib-only and imports
+                # anywhere; the walking is done by teleport_math's
+                # collision stack, and on a light install (no loguru/
+                # wizwalker extras) THAT import is what fails --
+                # without this line the toggle would announce walking
+                # while every hop quietly kept teleporting.
+                from src import teleport_math  # noqa: F401
         except Exception:
             if want:
                 self._say(self.seats[0],
@@ -3384,7 +3394,11 @@ class LiveWorker(QThread):
                       "walking to objectives — quest navigation goes on "
                       "foot, and a teleport now means the walk failed "
                       "and says so in the log")
-        else:
+        elif was is not None:
+            # Only a real flip is news. The first push of a run that
+            # started with the box unticked is normalization, and
+            # announcing it made every ordinary run open with a line
+            # about a feature nobody turned on.
             self._say(self.seats[0], "teleporting to objectives again")
 
     def _note_script_log(self, text):
@@ -4810,6 +4824,7 @@ class LiveWorker(QThread):
             goal = await questing.read_quest_goal(seat.client)
         except Exception:
             goal = ""
+        self._prewarm_walk_zone(seat)
         if goal and goal != seat.goal:
             # A CHANGE is confirmed before it is believed. This read
             # resolves a window path whose fifth element is an UNNAMED
@@ -5793,14 +5808,13 @@ class LiveWorker(QThread):
         """
         if self._waitfor_hooked:
             return
-        if self.seats[0].runner is None and not (
-                self.walk_to_objectives
-                or any(s.quester is not None for s in self.seats)):
-            # No script and no Deimos quester and no walk mode: nothing
-            # below would ever fire. But the teleport hooks are NOT
-            # script-only anymore -- a walk-mode auto-quest run lands and
-            # falls back through the same `on_teleport_*` hooks, and
-            # without them every "walk fallback" would be invisible.
+        if self.seats[0].runner is None and not self.walk_to_objectives:
+            # No script and no walk mode: exactly the runs that hooked
+            # nothing before, kept that way -- a walk-OFF quester run
+            # must not suddenly grow scripted-teleport logging. Walk
+            # mode hooks regardless of a runner, because its landings
+            # and "walk fallback" notes travel the same `on_teleport_*`
+            # hooks and would otherwise be invisible.
             return
         self._waitfor_hooked = True
         from .. import scripts
@@ -9136,15 +9150,25 @@ class LiveWorker(QThread):
         self._prewarm_walk_zone(seat)
 
     def _prewarm_walk_zone(self, seat):
-        """Build the new zone's walk grid in the background, walk mode on.
+        """Build the current zone's walk grid in the background, walk mode on.
 
-        `teleport_math.prewarm_zone` is idempotent per zone and swallows
-        its own errors; done here, on the zone-change stamp, the ~1.5s
-        grid build runs during the arrival bustle instead of inside the
-        first hop's plan. The first caller this function has ever had.
+        `teleport_math.prewarm_zone` reads the zone itself, is idempotent
+        per zone and swallows its own errors; kicked here the ~1.5s grid
+        build runs during the arrival bustle instead of inside the first
+        hop's plan. The first caller this function has ever had. Called
+        from the zone-change stamp AND from every goal poll -- the stamp
+        lives in `_check_together`, which a single-wizard run never
+        enters -- so a light per-seat rate limit stands in for "only on
+        change".
         """
         if not self.walk_to_objectives or seat.client is None:
             return
+        import time
+
+        now = time.monotonic()
+        if now - getattr(seat, "prewarm_kicked", 0.0) < 10.0:
+            return
+        seat.prewarm_kicked = now
         try:
             from ..deimos_path import ensure_path
             ensure_path()

@@ -1835,9 +1835,21 @@ def test_the_zone_gates_walk_up_before_pressing_x():
     # entry -- so the waits that directly follow a move must anchor on
     # the zone read BEFORE it, or they hang on a change that already
     # happened.
-    assert gate.count("await p.wait_for_zone_change(zone_before)") == 4, \
+    assert gate.count("await p.wait_for_zone_change(zone_before)") == 6, \
         "a proximity gate's wait lost its pre-move zone anchor"
     assert "zone_before = await _nav_move(p, XYZ(" in gate
+    # And the move itself GUARANTEES delivery: the gate sequences run
+    # once, with unbounded waits and nothing re-issuing navigation, so a
+    # walk that stopped short (budget, a fight on the road, an off-mesh
+    # trigger) retries and finally teleports rather than stranding the
+    # wizard mid-zone in front of a wait that never ends.
+    move = src.split("async def _nav_move", 1)[1].split("\nasync def ", 1)[0]
+    assert "for _ in range(3):" in move, \
+        "_nav_move no longer verifies the wizard reached the gate"
+    assert "while not await is_free(p):" in move, \
+        "_nav_move no longer waits out a fight on the road"
+    assert move.count("await p.teleport(xyz, **teleport_kwargs)") == 2, \
+        "_nav_move lost its walking-could-not-deliver teleport"
 
 
 def test_walk_nav_stays_importable_without_the_game():
@@ -1879,3 +1891,44 @@ def test_the_wisp_hops_walk_in_walk_mode():
     hop = src.split("async def _wisp_hop", 1)[1].split("\nasync def ", 1)[0]
     assert "walk_nav.walking()" in hop and "asyncio.wait_for" in hop, \
         "the wisp walk lost its mode gate or its bound"
+
+
+def test_a_failed_walk_is_remembered_not_reproven():
+    """Scripts and the quester retry the same hop in tight loops; each
+    retry re-walking a route that just failed burns a full walk budget
+    per round before the fallback teleport runs. Both walk-first entry
+    points consult the memo and both record into it."""
+    src = _source(TP)
+    walk_first = src.split("async def _walk_first", 1)[1]
+    walk_first = walk_first.split("\nasync def ", 1)[0]
+    assert "walk_nav.recently_failed(" in walk_first, \
+        "_walk_first re-proves known failures every retry"
+    assert "walk_nav.note_walk_failure(" in walk_first, \
+        "_walk_first never records a failure for the memo"
+    nav_tp = src.split("async def nav_teleport", 1)[1]
+    nav_tp = nav_tp.split("\nasync def ", 1)[0]
+    assert "walk_nav.recently_failed(" in nav_tp
+    assert "walk_nav.note_walk_failure(" in nav_tp
+
+
+def test_the_walk_budget_fits_under_the_quest_step_stage_cap():
+    """The bridge cancels a quest step at STAGE_LIMITS['quest step']
+    seconds; a walk budget at or over that line means the stage cap cuts
+    the walk mid-leg (a cancellation) instead of the walk ending as a
+    clean WALK_PARTIAL resume. Cross-file on purpose: either side moving
+    alone is the bug."""
+    import ast
+    import re
+
+    m = re.search(r"^WALK_BUDGET_CAP = ([0-9.]+)", _source(WALK_NAV),
+                  re.MULTILINE)
+    assert m, "walk_nav lost its budget cap"
+    cap = float(m.group(1))
+
+    live = _source("deimos_bridge/gui/live.py")
+    limits_src = "{" + live.split("STAGE_LIMITS = {", 1)[1].split("}", 1)[0] + "}"
+    limits = ast.literal_eval(re.sub(r"#[^\n]*", "", limits_src))
+    assert cap < limits["quest step"], \
+        (f"WALK_BUDGET_CAP ({cap}) must stay under the quest-step stage "
+         f"limit ({limits['quest step']}) or every long walk dies as a "
+         f"stage timeout instead of resuming")

@@ -309,3 +309,59 @@ def test_suspension_is_task_local_not_party_wide(nav):
 
     asyncio.run(run())
     assert seen == {"scanner": False, "walker": True}
+
+
+# ---------------------------------------------------------- the review round
+
+def test_arrival_is_three_dimensional(nav):
+    """The walk grid is single-level -- `walk_z` is the LOWEST mesh
+    surface -- so a balcony objective's XY is reachable on the alley
+    floor below it. Standing under the target is not arriving: the
+    answer is unreachable, which hands the hop to the floor-aware
+    teleport fallback instead of looping 'arrived' a storey short."""
+    client = _FakeClient()
+    plan = _planner_of([(100, 0, 0), (200, 0, 0), (300, 0, 0)])
+    outcome, detail = _walk(nav, client, _P(300, 0, 1200.0), plan)
+    assert outcome == nav.WALK_UNREACHABLE, (outcome, detail)
+    assert "wrong floor" in detail
+
+
+def test_a_detour_that_walks_away_is_partial_not_stuck(nav):
+    """Progress at the deadline is ground covered, not gap closed: a
+    legitimate route can spend its whole budget walking AWAY from the
+    target (around a canyon), and a gap-only test hands that working
+    walk to the teleport fallback as 'going nowhere'."""
+    client = _FakeClient()
+    real_goto = client.goto
+
+    async def slow_goto(x, y):
+        await asyncio.sleep(0.2)
+        await real_goto(x, y)
+
+    client.goto = slow_goto
+    # Away first: the gap to (100, 0) GROWS over these first legs.
+    plan = _planner_of([(0, 300, 0), (0, 600, 0), (100, 600, 0),
+                        (100, 0, 0)])
+    outcome, detail = _walk(nav, client, _P(100, 0), plan, budget=0.3)
+    assert outcome == nav.WALK_PARTIAL, (outcome, detail)
+    assert "covered" in detail
+
+
+def test_walk_failures_are_remembered_briefly(nav):
+    class _T:
+        def __init__(self, x, y):
+            self.x, self.y = x, y
+
+    zone = "WizardCity/WC_Streets"
+    spot = _T(1234.0, -560.0)
+    assert not nav.recently_failed(zone, spot)
+    nav.note_walk_failure(zone, spot)
+    assert nav.recently_failed(zone, spot)
+    # Same ~100u bucket counts; a different zone does not.
+    assert nav.recently_failed(zone, _T(1260.0, -530.0))
+    assert not nav.recently_failed("GrizzleheimA/Somewhere", spot)
+    # And it forgets: rewind the stamp past the TTL.
+    key = nav._failure_key(zone, spot)
+    nav._failed_walks[key] -= nav.WALK_FAILURE_TTL + 1
+    assert not nav.recently_failed(zone, spot)
+

@@ -439,10 +439,19 @@ async def _walk_first(client: Client, target_xyz: XYZ, zone_name: str):
     """Try the hop on foot. Returns the final bool when walking settled
     it, or None when the caller should run its teleport machinery -- the
     fallback having already been spoken through `_tp_note`, except for
-    an off-mesh target (script bumps aim there on purpose)."""
+    an off-mesh target (script bumps aim there on purpose).
+
+    A target walking failed at moments ago is not re-walked: scripts and
+    the quester retry the same hop in tight loops, and re-proving the
+    same failure for a full walk budget each round starves the teleport
+    that actually gets them there. The first failure already spoke.
+    """
+    if walk_nav.recently_failed(zone_name, target_xyz):
+        return None
     outcome, detail = await walk_nav.walk_to(client, target_xyz)
     if outcome in _WALK_SETTLED:
         return _walk_result(outcome, detail, zone_name, client)
+    walk_nav.note_walk_failure(zone_name, target_xyz)
     if walk_nav.fallback() == walk_nav.FALLBACK_NEVER:
         return _tp_result(False, f"walk-only: {outcome} ({detail})",
                           zone_name, client)
@@ -475,9 +484,17 @@ async def nav_teleport(client: Client, xyz: XYZ) -> bool:
             zone_name = await client.zone_name()
         except Exception:
             zone_name = ""
+        if walk_nav.recently_failed(zone_name, xyz):
+            # Walking already failed at this spot moments ago (script
+            # retry loops re-issue the same tp); go straight to the raw
+            # teleport the script asked for. The first failure spoke.
+            await client.teleport(xyz)
+            return _tp_result(True, "direct (walk fallback)",
+                              zone_name, client)
         outcome, detail = await walk_nav.walk_to(client, xyz)
         if outcome in _WALK_SETTLED:
             return _walk_result(outcome, detail, zone_name, client)
+        walk_nav.note_walk_failure(zone_name, xyz)
         if (outcome == walk_nav.WALK_UNREACHABLE
                 and detail == walk_nav.DETAIL_OFF_MESH):
             await client.teleport(xyz)

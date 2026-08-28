@@ -27516,13 +27516,18 @@ def test_play_live_carries_the_walk_choice(qapp, monkeypatch):
 def test_the_walk_flag_is_pushed_into_deimos_once_per_change(qapp):
     """The worker pushes the checkbox into Deimos's `walk_nav` module —
     once per change, not once per tick, because the push speaks a
-    status line and twice a second would drown the bar. The module is
-    the real vendored one: its top level is stdlib-only precisely so
-    this test can flip it here."""
+    status line and twice a second would drown the bar. walk_nav is the
+    real vendored one (stdlib-only top level, precisely so this test can
+    flip it); teleport_math — the light-install probe — is faked, since
+    it needs the game."""
+    import sys
+    import types
+
     from deimos_bridge.deimos_path import ensure_path
     from deimos_bridge.gui.live import LiveWorker
 
     ensure_path()
+    import src as src_pkg
     from src import walk_nav
 
     pushes = []
@@ -27533,6 +27538,11 @@ def test_the_walk_flag_is_pushed_into_deimos_once_per_change(qapp):
         return real(mode)
 
     walk_nav.set_nav_mode = recording
+    fake_tm = types.ModuleType("src.teleport_math")
+    saved_tm = sys.modules.get("src.teleport_math")
+    saved_attr = getattr(src_pkg, "teleport_math", None)
+    sys.modules["src.teleport_math"] = fake_tm
+    src_pkg.teleport_math = fake_tm
     try:
         w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1,
                        walk_to_objectives=True)
@@ -27549,24 +27559,88 @@ def test_the_walk_flag_is_pushed_into_deimos_once_per_change(qapp):
         w.walk_to_objectives = False
         w._push_walk_mode()
         assert pushes == [walk_nav.NAV_WALK, walk_nav.NAV_TELEPORT]
+        assert any("teleporting to objectives again" in m
+                   for m in said), said
+
+        # A run that STARTS with the box unticked normalizes the mode
+        # silently: announcing "teleporting to objectives again" on
+        # every ordinary run start is noise about a feature nobody
+        # turned on.
+        w_off = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
+        off_said = []
+        w_off.status = type(
+            "S", (), {"emit": staticmethod(off_said.append)})()
+        w_off.seat_status = type(
+            "S", (), {"emit": staticmethod(lambda *a: None)})()
+        w_off._push_walk_mode()
+        assert pushes[-1] == walk_nav.NAV_TELEPORT
+        assert off_said == [], off_said
     finally:
         walk_nav.set_nav_mode = real
         real(walk_nav.NAV_TELEPORT)     # leave the module as it shipped
+        if saved_tm is not None:
+            sys.modules["src.teleport_math"] = saved_tm
+        else:
+            sys.modules.pop("src.teleport_math", None)
+        if saved_attr is not None:
+            src_pkg.teleport_math = saved_attr
+        else:
+            try:
+                del src_pkg.teleport_math
+            except AttributeError:
+                pass
+
+
+def test_the_walk_announcement_probes_the_machinery_not_the_switch(qapp):
+    """`walk_nav` imports anywhere — it is stdlib-only by design — so an
+    import test on IT can never detect a light install. The probe has to
+    be `src.teleport_math`, the module that does the walking: on this
+    box it does not import (no game), which stands in nicely for a
+    light install, and the toggle must say walking is unavailable
+    rather than announce a mode nothing will honour."""
+    from deimos_bridge.deimos_path import ensure_path
+    from deimos_bridge.gui.live import LiveWorker
+
+    ensure_path()
+    from src import walk_nav
+
+    before = walk_nav.nav_mode()
+    w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1,
+                   walk_to_objectives=True)
+    said = []
+    w.status = type("S", (), {"emit": staticmethod(said.append)})()
+    w.seat_status = type("S", (), {"emit": staticmethod(lambda *a: None)})()
+    try:
+        w._push_walk_mode()
+        assert walk_nav.nav_mode() == before, \
+            "the mode flipped although the walking machinery is absent"
+        assert any("not importable" in m for m in said), said
+        said.clear()
+        w._push_walk_mode()             # pinned: said once, not per tick
+        assert said == []
+    finally:
+        walk_nav.set_nav_mode(walk_nav.NAV_TELEPORT)
 
 
 def test_quest_only_runs_still_install_the_teleport_hooks(qapp):
-    """The teleport hooks were installed only when a script runner
-    existed, which was right while scripts were the only thing that
-    teleported through them — a walk-mode auto-quest run lands and
-    falls back through the same hooks, and without them every 'walk
-    fallback' would be invisible."""
+    """The teleport hooks were script-only; walk mode's landings and
+    'walk fallback' notes travel the same `on_teleport_*` hooks, so a
+    walk-mode run must hook with or without a runner. A walk-OFF run —
+    quester or not — must keep hooking NOTHING: the box unticked means
+    the code that shipped, and a quester run suddenly logging scripted
+    teleports would not be that."""
+    from deimos_bridge import scripts
     from deimos_bridge.gui.live import LiveWorker
 
     quiet = type("S", (), {"emit": staticmethod(lambda *a: None)})()
 
-    # No script, no quester, walk mode OFF: nothing to hook, as before.
+    # No script, walk mode OFF: nothing to hook, as before — even with
+    # a Deimos quester driving the wizard.
     w = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
     w.status = w.seat_status = quiet
+    w._watch_waitfor(w.seats[0])
+    assert w._waitfor_hooked is False
+    w.seats[0].quester = object()
     w._watch_waitfor(w.seats[0])
     assert w._waitfor_hooked is False
 
@@ -27574,12 +27648,18 @@ def test_quest_only_runs_still_install_the_teleport_hooks(qapp):
     w2 = LiveWorker(Telemetry(), "ice", [], "school-aware", 1,
                     walk_to_objectives=True)
     w2.status = w2.seat_status = quiet
-    w2._watch_waitfor(w2.seats[0])
-    assert w2._waitfor_hooked is True
-
-    # And a Deimos quester without a script hooks too.
-    w3 = LiveWorker(Telemetry(), "ice", [], "school-aware", 1)
-    w3.status = w3.seat_status = quiet
-    w3.seats[0].quester = object()
-    w3._watch_waitfor(w3.seats[0])
-    assert w3._waitfor_hooked is True
+    try:
+        w2._watch_waitfor(w2.seats[0])
+        assert w2._waitfor_hooked is True
+    finally:
+        # Best-effort: pull this worker's closures back out of the
+        # vendored module globals, where installed. On this box the
+        # installs fail (no game) and these are no-ops.
+        for installer in (scripts.on_waitfor_timeout,
+                          scripts.on_teleport_result,
+                          scripts.on_teleport_note,
+                          scripts.on_party_task_failed):
+            try:
+                installer(None)
+            except Exception:
+                pass

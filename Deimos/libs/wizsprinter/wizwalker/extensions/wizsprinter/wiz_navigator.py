@@ -53,8 +53,31 @@ async def _nav_move(p, xyz, **teleport_kwargs):
     except ImportError:
         pass
     if walk:
+        # Unlike the questing loops, the gate sequences after this call
+        # run ONCE -- an unbounded zone-wait or an is_in_npc_range spin
+        # with nothing re-issuing navigation. So a walk that stopped
+        # short (budget spent, a fight on the road, a trigger whose hex
+        # node is off the mesh) cannot be left where it stood: verify
+        # the wizard actually reached the gate, resume after a duel,
+        # and when walking cannot deliver, teleport -- the caller's
+        # whole branch depends on standing at these coordinates.
         from src.teleport_math import collision_tp
-        await collision_tp(p, xyz)
+        from src.utils import is_free
+        for _ in range(3):
+            await collision_tp(p, xyz)
+            try:
+                if zone_before is not None and \
+                        await p.zone_name() != zone_before:
+                    return zone_before      # the move fired the transition
+                pos = await p.body.position()
+                if (math.hypot(pos.x - xyz.x, pos.y - xyz.y) <= 120.0
+                        and abs(pos.z - xyz.z) <= 300.0):
+                    return zone_before      # standing at the gate
+                while not await is_free(p):
+                    await asyncio.sleep(1.0)    # a fight on the road; resume
+            except Exception:
+                return zone_before          # unreadable: mid-load already
+        await p.teleport(xyz, **teleport_kwargs)
         return zone_before
     await p.teleport(xyz, **teleport_kwargs)
     return zone_before
@@ -484,14 +507,14 @@ async def gateTypeDifferentiation(x, y, z, p, zoneAccessType):
 
         await p.wait_for_zone_change()
         # teleport to second zone door
-        await _nav_move(p, XYZ(1647.79248046875, 29.44374656677246, 6.103515625e-05))
-        await p.wait_for_zone_change()
+        zone_before = await _nav_move(p, XYZ(1647.79248046875, 29.44374656677246, 6.103515625e-05))
+        await p.wait_for_zone_change(zone_before)
         await asyncio.sleep(2)
 
 
     elif zoneAccessType == 'khrysSerpentIsland':
-        await _nav_move(p, XYZ(float(x), float(y), float(z)))
-        await p.wait_for_zone_change()
+        zone_before = await _nav_move(p, XYZ(float(x), float(y), float(z)))
+        await p.wait_for_zone_change(zone_before)
         await asyncio.sleep(2)
 
         await _nav_move(p, XYZ(1647.79248046875, 29.44374656677246, 6.103515625e-05))
